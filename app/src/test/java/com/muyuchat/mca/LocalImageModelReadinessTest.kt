@@ -291,7 +291,7 @@ class LocalImageModelReadinessTest {
             val elite = resolveInstalledQnnRuntimeProfile(root, bundle, preferredHtpArch = 79)
             val unknownFuture = resolveInstalledQnnRuntimeProfile(root, bundle, preferredHtpArch = 83)
 
-            assertEquals(79, elite.requiredRuntimeProfile?.htpArch)
+            assertEquals(68, elite.requiredRuntimeProfile?.htpArch)
             assertEquals(68, unknownFuture.requiredRuntimeProfile?.htpArch)
         } finally {
             root.deleteRecursively()

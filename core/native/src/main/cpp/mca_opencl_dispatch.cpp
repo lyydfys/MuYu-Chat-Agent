@@ -17,10 +17,105 @@
 
 #include <dlfcn.h>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <cstdio>
+#include <unordered_map>
+#include "mca_opencl_driver.hpp"
 
 namespace {
+
+class OpenClExecutionEvidence {
+public:
+    struct Checkpoint {
+        std::uint64_t scope = 0;
+        std::uint64_t submitted = 0;
+        std::uint64_t queue_generation = 0;
+    };
+
+    std::uint64_t begin_scope() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (scope_ == std::numeric_limits<std::uint64_t>::max()) return 0;
+        ++scope_;
+        queues_.clear();
+        queue_generation_ = 0;
+        submitted_ = completed_ = 0;
+        valid_ = true;
+        return scope_;
+    }
+
+    Checkpoint checkpoint(cl_command_queue queue) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = queues_.find(queue);
+        return {scope_, found == queues_.end() ? 0 : found->second.submitted,
+                found == queues_.end() ? 0 : found->second.generation};
+    }
+
+    void record_submission(cl_command_queue queue, std::uint64_t scope, bool succeeded) {
+        if (!succeeded) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (scope == 0 || scope != scope_ || !valid_) return;
+        if (submitted_ == std::numeric_limits<std::uint64_t>::max()) {
+            valid_ = false;
+            return;
+        }
+        try {
+            auto found = queues_.find(queue);
+            if (found == queues_.end()) {
+                if (queue_generation_ == std::numeric_limits<std::uint64_t>::max()) {
+                    valid_ = false;
+                    return;
+                }
+                found = queues_.emplace(queue, QueueProgress{++queue_generation_, 0, 0}).first;
+            }
+            ++found->second.submitted;
+            ++submitted_;
+        } catch (...) {
+            valid_ = false;
+        }
+    }
+
+    void record_completion(cl_command_queue queue, Checkpoint checkpoint, bool succeeded) {
+        if (!succeeded) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (checkpoint.scope == 0 || checkpoint.scope != scope_ || !valid_) return;
+        const auto found = queues_.find(queue);
+        if (found == queues_.end() || checkpoint.queue_generation != found->second.generation ||
+            checkpoint.submitted > found->second.submitted ||
+            checkpoint.submitted <= found->second.completed) return;
+        completed_ += checkpoint.submitted - found->second.completed;
+        found->second.completed = checkpoint.submitted;
+    }
+
+    void forget_queue(cl_command_queue queue) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queues_.erase(queue);
+    }
+
+    bool snapshot(std::uint64_t scope, std::uint64_t * submitted, std::uint64_t * completed) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (scope == 0 || scope != scope_ || !valid_ || submitted == nullptr || completed == nullptr) return false;
+        *submitted = submitted_;
+        *completed = completed_;
+        return true;
+    }
+
+private:
+    struct QueueProgress {
+        std::uint64_t generation = 0;
+        std::uint64_t submitted = 0;
+        std::uint64_t completed = 0;
+    };
+    std::mutex mutex_;
+    std::unordered_map<cl_command_queue, QueueProgress> queues_;
+    std::uint64_t scope_ = 0;
+    std::uint64_t queue_generation_ = 0;
+    std::uint64_t submitted_ = 0;
+    std::uint64_t completed_ = 0;
+    bool valid_ = false;
+};
+
+OpenClExecutionEvidence execution_evidence;
 
 void * opencl_handle() {
     static void * handle = nullptr;
@@ -29,14 +124,16 @@ void * opencl_handle() {
         // The bare soname is required for Android's permitted native-library
         // namespace.  Absolute vendor paths cover devices whose vendor
         // linker namespace does not add the soname to the default search.
-        constexpr const char * candidates[] = {
-                "libOpenCL.so",
-                "/vendor/lib64/libOpenCL.so",
-                "/system/vendor/lib64/libOpenCL.so",
-        };
-        for (const char * candidate : candidates) {
+        for (const char * candidate : mca::opencl::driver_paths) {
             handle = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
             if (handle != nullptr) {
+                const char * missing = mca::opencl::missing_required_symbol(handle);
+                if (missing != nullptr) {
+                    std::fprintf(stderr, "mca_opencl_dispatch: %s missing driver symbol %s\n", candidate, missing);
+                    dlclose(handle);
+                    handle = nullptr;
+                    continue;
+                }
                 return;
             }
         }
@@ -53,10 +150,19 @@ Fn opencl_symbol(const char * name) {
     if (handle == nullptr) {
         return nullptr;
     }
-    return reinterpret_cast<Fn>(dlsym(handle, name));
+    return reinterpret_cast<Fn>(mca::opencl::driver_symbol(handle, name));
 }
 
 } // namespace
+
+extern "C" __attribute__((visibility("default"))) std::uint64_t mca_opencl_begin_execution_scope() {
+    return execution_evidence.begin_scope();
+}
+
+extern "C" __attribute__((visibility("default"))) int mca_opencl_execution_snapshot(
+        std::uint64_t scope, std::uint64_t * submitted, std::uint64_t * completed) {
+    return execution_evidence.snapshot(scope, submitted, completed) ? 1 : 0;
+}
 
 extern "C" cl_int clGetPlatformIDs(cl_uint n, cl_platform_id * p, cl_uint * np) {
     using Fn = cl_int (*)(cl_uint, cl_platform_id *, cl_uint *);
@@ -103,6 +209,15 @@ extern "C" cl_command_queue clCreateCommandQueue(cl_context c, cl_device_id d, c
     static Fn fn = opencl_symbol<Fn>("clCreateCommandQueue");
     if (fn == nullptr) { if (e) *e = CL_INVALID_OPERATION; return nullptr; }
     return fn(c, d, p, e);
+}
+
+extern "C" cl_int clReleaseCommandQueue(cl_command_queue q) {
+    using Fn = cl_int (*)(cl_command_queue);
+    static Fn fn = opencl_symbol<Fn>("clReleaseCommandQueue");
+    if (fn == nullptr) return CL_INVALID_OPERATION;
+    const cl_int status = fn(q);
+    if (status == CL_SUCCESS) execution_evidence.forget_queue(q);
+    return status;
 }
 
 extern "C" cl_mem clCreateBuffer(cl_context c, cl_mem_flags f, size_t s, void * h, cl_int * e) {
@@ -231,7 +346,13 @@ extern "C" cl_int clFlush(cl_command_queue q) {
 
 extern "C" cl_int clFinish(cl_command_queue q) {
     using Fn = cl_int (*)(cl_command_queue); static Fn fn = opencl_symbol<Fn>("clFinish");
-    return fn == nullptr ? CL_INVALID_OPERATION : fn(q);
+    if (fn == nullptr) return CL_INVALID_OPERATION;
+    // Only kernels already submitted when this synchronization began can be
+    // credited. No evidence lock is held while the driver waits for the queue.
+    const auto checkpoint = execution_evidence.checkpoint(q);
+    const cl_int status = fn(q);
+    execution_evidence.record_completion(q, checkpoint, status == CL_SUCCESS);
+    return status;
 }
 
 extern "C" cl_int clEnqueueBarrierWithWaitList(cl_command_queue q, cl_uint n, const cl_event * e, cl_event * out) {
@@ -266,7 +387,12 @@ extern "C" cl_int clEnqueueReadBuffer(cl_command_queue q, cl_mem b, cl_bool bloc
 
 extern "C" cl_int clEnqueueNDRangeKernel(cl_command_queue q, cl_kernel k, cl_uint dim, const size_t * go, const size_t * gs, const size_t * ls, cl_uint ne, const cl_event * e, cl_event * out) {
     using Fn = cl_int (*)(cl_command_queue, cl_kernel, cl_uint, const size_t *, const size_t *, const size_t *, cl_uint, const cl_event *, cl_event *);
-    static Fn fn = opencl_symbol<Fn>("clEnqueueNDRangeKernel"); return fn == nullptr ? CL_INVALID_OPERATION : fn(q, k, dim, go, gs, ls, ne, e, out);
+    static Fn fn = opencl_symbol<Fn>("clEnqueueNDRangeKernel");
+    if (fn == nullptr) return CL_INVALID_OPERATION;
+    const auto checkpoint = execution_evidence.checkpoint(q);
+    const cl_int status = fn(q, k, dim, go, gs, ls, ne, e, out);
+    execution_evidence.record_submission(q, checkpoint.scope, status == CL_SUCCESS);
+    return status;
 }
 
 extern "C" void * clEnqueueMapBuffer(cl_command_queue q, cl_mem b, cl_bool block, cl_map_flags f, size_t off, size_t n, cl_uint ne, const cl_event * e, cl_event * out, cl_int * err) {

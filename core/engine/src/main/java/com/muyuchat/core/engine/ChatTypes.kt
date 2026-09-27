@@ -73,6 +73,8 @@ data class ChatGeneratedImageRequest(
     val modelFingerprint: String? = null,
     /** Secret-free, versioned image generation parameters used by retry. */
     val generationOptionsJson: String? = null,
+    /** Original prompt, branch provenance and protected syntax at the send boundary. */
+    val promptEnvelopeJson: String? = null,
     val toolCallId: String? = null,
     val toolArgumentsJson: String? = null,
     val toolOutputJson: String? = null,
@@ -105,6 +107,7 @@ data class ChatGeneratedImageRequest(
             modelName?.let { put("modelName", it) }
             modelFingerprint?.let { put("modelFingerprint", it) }
             generationOptionsJson?.let { put("generationOptionsJson", it) }
+            promptEnvelopeJson?.let { put("promptEnvelopeJson", it) }
             toolCallId?.let { put("toolCallId", it) }
             toolArgumentsJson?.let { put("toolArgumentsJson", it) }
             toolOutputJson?.let { put("toolOutputJson", it) }
@@ -142,6 +145,7 @@ data class ChatGeneratedImageRequest(
                     modelName = json.optString("modelName").takeIf(String::isNotBlank),
                     modelFingerprint = json.optString("modelFingerprint").takeIf(String::isNotBlank),
                     generationOptionsJson = json.optString("generationOptionsJson").takeIf(String::isNotBlank),
+                    promptEnvelopeJson = json.optString("promptEnvelopeJson").takeIf(String::isNotBlank),
                     toolCallId = json.optString("toolCallId").takeIf(String::isNotBlank),
                     toolArgumentsJson = json.optString("toolArgumentsJson").takeIf(String::isNotBlank),
                     toolOutputJson = json.optString("toolOutputJson").takeIf(String::isNotBlank),
@@ -192,7 +196,11 @@ data class ChatMessage(
     val sourceReferences: List<ChatSourceReference> = emptyList(),
     val webSearchTrace: ChatWebSearchTrace? = null,
     val generationMetrics: ChatGenerationMetrics? = null,
-    val generatedImageRequest: ChatGeneratedImageRequest? = null
+    val generatedImageRequest: ChatGeneratedImageRequest? = null,
+    val pinned: Boolean = false,
+    /** Exact local retrieval snapshot used for this message; absent in legacy records. */
+    val contextAssemblyTraceJson: String? = null,
+    val id: String = java.util.UUID.randomUUID().toString()
 )
 
 data class ChatSourceReference(
@@ -268,6 +276,11 @@ data class ChatImageAttachment(
     }
 }
 
+enum class LocalBackendFallbackPolicy(val wireName: String) {
+    ALLOW_CPU("allow_cpu"),
+    REQUIRE_REQUESTED_BACKEND("require_requested_backend")
+}
+
 data class LoadParams(
     val nCtx: Int = 8192,
     val nThreads: Int = Runtime.getRuntime().availableProcessors().coerceAtLeast(2) - 1,
@@ -275,7 +288,8 @@ data class LoadParams(
     val mlock: Boolean = false,
     val visionProjectorPath: String? = null,
     val geniexComputeUnit: String? = null,
-    val advancedJson: String = "{}"
+    val advancedJson: String = "{}",
+    val fallbackPolicy: LocalBackendFallbackPolicy? = null
 ) {
     companion object {
         fun fromJson(json: String, defaults: LoadParams = LoadParams()): LoadParams {
@@ -285,6 +299,11 @@ data class LoadParams(
                 nThreads = root.optInt("n_threads", defaults.nThreads),
                 mmap = root.optBoolean("mmap", defaults.mmap),
                 mlock = root.optBoolean("mlock", defaults.mlock),
+                fallbackPolicy = root.optString("fallback_policy").takeIf { it.isNotBlank() }?.let { value ->
+                    requireNotNull(LocalBackendFallbackPolicy.entries.firstOrNull { it.wireName == value }) {
+                        "Unsupported fallback_policy: $value"
+                    }
+                } ?: defaults.fallbackPolicy,
                 visionProjectorPath = root.optString("mmproj_path", defaults.visionProjectorPath.orEmpty())
                     .takeIf { it.isNotBlank() },
                 geniexComputeUnit = root.optString(
@@ -306,6 +325,7 @@ data class LoadParams(
             .put("n_threads", nThreads)
             .put("mmap", mmap)
             .put("mlock", mlock)
+            .put("fallback_policy", fallbackPolicy?.wireName)
             .apply {
                 // Valid advanced canonical values override the LoadParams defaults.
                 advanced.putCanonicalFields(this)
@@ -457,6 +477,8 @@ data class GenerationParams(
 data class ChatRequest(
     val messages: List<ChatMessage>,
     val params: GenerationParams = GenerationParams(),
+    /** Stable IDs whose original content must survive context admission. */
+    val protectedMessageIds: Set<String> = emptySet(),
     /** Request-scoped authoritative context; never persisted into assistants or chat history. */
     val runtimeSystemContext: String = "",
     /**
@@ -472,7 +494,9 @@ data class ChatRequest(
     /** Only structured-capable providers serialize this allowlisted tool schema. */
     val tools: List<ChatToolDefinition> = emptyList(),
     /** Tool transcript appended to this request using the provider's native message format. */
-    val toolExchanges: List<ChatToolExchange> = emptyList()
+    val toolExchanges: List<ChatToolExchange> = emptyList(),
+    /** Changes when edits, summary changes or explicit invalidation replace native history. */
+    val conversationContextRevision: String? = null
 ) {
     /**
      * Returns only the stable configured persona prefix. Request-scoped system
@@ -497,6 +521,7 @@ data class ChatRequest(
             array.put(
                 JSONObject()
                     .put("role", message.role.name.lowercase())
+                    .put("id", message.id)
                     .put("content", message.toJsonContent(multimodal, contentEncoding))
                     .put("created_at", message.createdAt)
             )
@@ -656,6 +681,8 @@ data class RuntimeStats(
     val cacheReuseReason: String? = null,
     val cacheReuseHits: Long = 0,
     val cacheReuseMisses: Long = 0,
+    /** Adapter submission evidence; native acknowledgement remains explicitly unknown when unavailable. */
+    val generationParameterApplicationJson: String = "{}",
     /** Disk-backed fixed-system-prefix cache remains separately attributable. */
     val persistentPrefixCacheHit: Boolean = false,
     val persistentPrefixCacheTokens: Int = 0,

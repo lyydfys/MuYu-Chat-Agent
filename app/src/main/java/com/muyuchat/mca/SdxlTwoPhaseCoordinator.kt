@@ -1981,6 +1981,10 @@ internal fun mergeSdxlPhaseNativeResults(
     require(unetProof.nativeGenerationSequence == unetResult.nativeGenerationSequence) {
         "UNet protocol sequence mismatch."
     }
+    val nativeStartedAt = unetNative.opt("nativeStartedAtMonotonicMs")
+    require((nativeStartedAt is Int || nativeStartedAt is Long) &&
+        (nativeStartedAt as Number).toLong() > 0L
+    ) { "UNet native monotonic start evidence is missing or invalid." }
     require(unetProof.nativeStageMask == unetResult.nativeStageMask &&
         unetProof.nativeDetailStageMask == unetResult.nativeDetailStageMask
     ) { "UNet protocol stage proof mismatch." }
@@ -1993,6 +1997,9 @@ internal fun mergeSdxlPhaseNativeResults(
     val nativeOutput = File(vaeNative.getString("outputPath")).canonicalFile
     require(nativeOutput == outputFile.canonicalFile) { "VAE output path proof mismatch." }
     require(vaeNative.getLong("outputBytes") == outputFile.length()) { "VAE output byte proof mismatch." }
+    require(vaeNative.opt("outputAtomicCommit") == true) {
+        "VAE output is missing native atomic publication proof."
+    }
     val outputSha256 = vaeNative.getString("outputSha256").lowercase()
     require(outputSha256 == sdxlArtifactSha256(outputFile)) { "VAE output SHA-256 proof mismatch." }
     val mimeType = vaeNative.getString("mimeType")
@@ -2347,6 +2354,7 @@ internal fun mergeSdxlPhaseNativeResults(
             vaeProof.nativeDetailStageMask.toFixedUInt64Hex()
         )
         .put("nativeGenerationSequence", unetProof.nativeGenerationSequence)
+        .put("nativeStartedAtMonotonicMs", (nativeStartedAt as Number).toLong())
         .put(
             "nativeStageMask",
             unetProof.nativeStageMask or vaeProof.nativeStageMask or
@@ -2384,6 +2392,7 @@ internal fun mergeSdxlPhaseNativeResults(
         .put("mimeType", mimeType)
         .put("outputBytes", outputFile.length())
         .put("outputSha256", outputSha256)
+        .put("outputAtomicCommit", vaeNative.getBoolean("outputAtomicCommit"))
         .put("latentSha256", metadata.sha256)
         .put("stageTrace", JSONArray(stageTrace))
 

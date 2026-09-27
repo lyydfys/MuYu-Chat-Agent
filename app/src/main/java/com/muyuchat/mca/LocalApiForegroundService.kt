@@ -14,8 +14,15 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import com.muyuchat.mca.R
+import com.muyuchat.api.local.McaLoopbackServer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 class LocalApiForegroundService : Service() {
+    private val listenerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     override fun onCreate() {
         super.onCreate()
         // Android starts the foreground-service timeout as soon as
@@ -38,6 +45,7 @@ class LocalApiForegroundService : Service() {
             synchronized(stateLock) {
                 serviceCreated = true
                 serviceForeground = false
+                requestedRunning = false
             }
             stopSelf()
         }
@@ -63,14 +71,36 @@ class LocalApiForegroundService : Service() {
                 serviceCreated = true
                 serviceForeground = true
             }
-            if (intent == null || !isRequested()) {
+            val preferences = getSharedPreferences("mca_api", Context.MODE_PRIVATE)
+            val persistedEnabled = preferences.getBoolean("api_enabled", false)
+            if (intent == null && persistedEnabled) {
+                synchronized(stateLock) { requestedRunning = true }
+            }
+            if (!persistedEnabled || !isRequested()) {
                 stopSelf(startId)
+            } else {
+                val bindHost = if (openPort) "0.0.0.0" else "127.0.0.1"
+                listenerScope.launch {
+                    runCatching {
+                        val key = preferences.getString("api_key", null)
+                            ?.takeIf(String::isNotBlank)
+                            ?: error("Local API key is missing")
+                        ensureListener(bindHost, key)
+                    }.onFailure { error ->
+                        Log.e(TAG, "Unable to start local API listener", error)
+                        synchronized(stateLock) { requestedRunning = false }
+                        stopSelf(startId)
+                    }
+                }
             }
         }.onFailure { error ->
             // Android may reject promotion independently of the start request.
             // Keep that platform failure out of the main thread's uncaught path.
             Log.e(TAG, "Unable to promote local API to foreground", error)
-            synchronized(stateLock) { serviceForeground = false }
+            synchronized(stateLock) {
+                serviceForeground = false
+                requestedRunning = false
+            }
             stopSelf(startId)
         }
         return START_NOT_STICKY
@@ -79,6 +109,8 @@ class LocalApiForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        listenerScope.cancel()
+        stopListener()
         val restartAfterDestroy = synchronized(stateLock) {
             val wasForeground = serviceForeground
             serviceCreated = false
@@ -154,13 +186,45 @@ class LocalApiForegroundService : Service() {
         @Volatile private var startRequested = false
         @Volatile private var serviceCreated = false
         @Volatile private var serviceForeground = false
+        private val listenerLock = Any()
+        private var listener: McaLoopbackServer? = null
+        private var listenerHost: String? = null
+        private var listenerKey: String? = null
+
+        fun ensureListener(bindHost: String, apiKey: String) = synchronized(listenerLock) {
+            check(isForegroundReady()) { "Local API foreground service is not ready" }
+            if (listener?.isRunning == true && listenerHost == bindHost && listenerKey == apiKey) {
+                return@synchronized
+            }
+            listener?.shutdown()
+            listener = null
+            listenerHost = null
+            listenerKey = null
+            val next = McaLoopbackServer(port = 11435, bindHost = bindHost, apiKey = apiKey)
+            next.start()
+            listener = next
+            listenerHost = bindHost
+            listenerKey = apiKey
+        }
+
+        fun isListenerRunning(bindHost: String): Boolean = synchronized(listenerLock) {
+            listener?.isRunning == true && listenerHost == bindHost
+        }
+
+        fun stopListener() = synchronized(listenerLock) {
+            runCatching { listener?.shutdown() }
+            listener = null
+            listenerHost = null
+            listenerKey = null
+        }
 
         fun start(context: Context, openPort: Boolean): Boolean =
             runCatching {
                 val shouldStart = synchronized(stateLock) {
+                    val modeChanged = requestedOpenPort != openPort
                     requestedRunning = true
                     requestedOpenPort = openPort
-                    if (startRequested) {
+                    if (startRequested && !modeChanged) {
                         false
                     } else {
                         startRequested = true

@@ -43,7 +43,7 @@ add_test(NAME mnn_sampler_source_contract COMMAND mnn_sampler_source_contract
     "${REPO}/core/native/src/main/cpp/mnn_native_engine.cpp"
     "${MNN_ROOT}/transformers/llm/engine/src/sampler.cpp")
 
-foreach(test_name IN ITEMS mnn_prompt_history mnn_stream_protocol_filter)
+foreach(test_name IN ITEMS mnn_prompt_history mnn_stream_protocol_filter mnn_visual_stream_queue mnn_runtime_capability_policy)
     add_executable(${test_name}_test "../${test_name}_test.cpp")
     target_compile_features(${test_name}_test PRIVATE cxx_std_17)
     if(MSVC)

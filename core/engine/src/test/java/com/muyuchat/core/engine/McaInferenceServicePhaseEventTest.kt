@@ -9,6 +9,7 @@ import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.onEach
@@ -23,6 +24,41 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class McaInferenceServicePhaseEventTest {
+    @Test
+    fun loadAndGenerationMetricsUseInjectedMonotonicTime() = runBlocking {
+        val elapsed = AtomicLong(0L)
+        val clock = RuntimeMonotonicClock { elapsed.get() }
+        val chunkDelays = ArrayDeque(listOf(30L, 70L))
+        val runner = PhaseRunner().apply {
+            onLoad = { elapsed.addAndGet(40L) }
+            onBegin = { elapsed.addAndGet(100L) }
+            onChunk = { elapsed.addAndGet(chunkDelays.removeFirst()) }
+            enqueue("one", "two")
+        }
+        val service = loadedService(runner, clock = clock)
+        assertEquals(40L, service.stats.value.loadMs)
+
+        val done = service.streamChat(request()).toList().last() as GenerateEvent.Done
+        assertEquals(130L, done.stats.ttftMs)
+        assertEquals(70L, done.stats.decodeMs)
+        assertEquals(10.0, done.stats.e2eTps, 0.001)
+    }
+
+    @Test
+    fun firstTokenAtMonotonicZeroIsNotReplacedByTheNextToken() = runBlocking {
+        val elapsed = AtomicLong(0L)
+        val chunkTimes = ArrayDeque(listOf(0L, 25L))
+        val runner = PhaseRunner().apply {
+            onChunk = { elapsed.set(chunkTimes.removeFirst()) }
+            enqueue("one", "two")
+        }
+        val service = loadedService(runner, clock = RuntimeMonotonicClock { elapsed.get() })
+        val done = service.streamChat(request()).toList().last() as GenerateEvent.Done
+
+        assertEquals(0L, done.stats.ttftMs)
+        assertEquals(25L, done.stats.decodeMs)
+    }
+
     @Test
     fun finalMetricsDistinguishNativeCountsFromRuntimeEstimates() = runBlocking {
         for (estimated in listOf(false, true)) {
@@ -81,7 +117,7 @@ class McaInferenceServicePhaseEventTest {
         assertTrue(chunkIndex < persistIndex)
         assertTrue(persistIndex < doneIndex)
         assertTrue(runner.timeline.indexOf("phase:TOKENIZE") < runner.timeline.indexOf("begin"))
-        assertTrue(runner.timeline.indexOf("begin") < runner.timeline.indexOf("phase:PREFILL"))
+        assertTrue(runner.timeline.indexOf("phase:PREFILL") < runner.timeline.indexOf("begin"))
     }
 
     @Test
@@ -97,7 +133,7 @@ class McaInferenceServicePhaseEventTest {
             .filter { it.phase == GenerationPhase.PREFILL }
 
         assertEquals(listOf(TokenProgress(12, 12)), exactPrefill.mapNotNull { it.tokenProgress })
-        assertFalse(exactPrefill.any { it.tokenProgress == null })
+        assertNull(exactPrefill.first().tokenProgress)
         val prefillIndex = events.indexOfFirst {
             it is GenerateEvent.Phase && it.phase == GenerationPhase.PREFILL
         }
@@ -187,13 +223,62 @@ class McaInferenceServicePhaseEventTest {
         val events = service.streamChat(request()).toList()
 
         assertEquals(
-            listOf(GenerationPhase.TOKENIZE),
+            listOf(GenerationPhase.TOKENIZE, GenerationPhase.PREFILL),
             events.filterIsInstance<GenerateEvent.Phase>().map(GenerateEvent.Phase::phase)
         )
         assertTrue(events.last() is GenerateEvent.Error)
         assertFalse(events.any { it is GenerateEvent.Phase && it.phase == GenerationPhase.DECODE })
         assertFalse(events.any { it is GenerateEvent.Phase && it.phase == GenerationPhase.PERSIST })
         assertEquals(0, runner.generateCalls)
+    }
+
+    @Test
+    fun asynchronousBeginStaysInPrefillUntilTheFirstRawDelta() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        runner.blockNextGenerate(entered, release, "\n")
+        val observed = Collections.synchronizedList(mutableListOf<GenerateEvent>())
+        val generation = async(Dispatchers.Default) {
+            service.streamChat(request()).onEach { observed += it }.toList()
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val waitingPhases = synchronized(observed) {
+                observed.filterIsInstance<GenerateEvent.Phase>().map(GenerateEvent.Phase::phase)
+            }
+            assertEquals(listOf(GenerationPhase.TOKENIZE, GenerationPhase.PREFILL), waitingPhases)
+        } finally {
+            release.countDown()
+        }
+        val completed = generation.await()
+        val decodeIndex = completed.indexOfFirst {
+            it is GenerateEvent.Phase && it.phase == GenerationPhase.DECODE
+        }
+        val chunkIndex = completed.indexOfFirst { it is GenerateEvent.Chunk }
+        assertTrue(decodeIndex in 0 until chunkIndex)
+        assertEquals("\n", completed.filterIsInstance<GenerateEvent.Chunk>().joinToString("") { it.text })
+    }
+
+    @Test
+    fun cancellationBeforeFirstDeltaNeverEntersDecode() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        runner.blockNextGenerate(entered, release, "unpublished")
+        val generation = async(Dispatchers.Default) { service.streamChat(request()).toList() }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertTrue(service.stopGenerationIfActive(requireNotNull(service.activeGenerationStopToken())))
+        } finally {
+            release.countDown()
+        }
+        val events = generation.await()
+        assertTrue(events.last() is GenerateEvent.Error)
+        assertFalse(events.any { it is GenerateEvent.Phase && it.phase == GenerationPhase.DECODE })
+        assertFalse(events.any { it is GenerateEvent.Chunk })
     }
 
     @Test
@@ -317,12 +402,14 @@ class McaInferenceServicePhaseEventTest {
 
     private suspend fun loadedService(
         runner: PhaseRunner,
-        prefillProgressPollIntervalMs: Long = 5L
+        prefillProgressPollIntervalMs: Long = 5L,
+        clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
     ): McaInferenceService {
         val service = McaInferenceService(
             context = FakeContext(),
             runners = mapOf(LocalChatRuntime.MNN_CPU to runner),
-            prefillProgressPollIntervalMs = prefillProgressPollIntervalMs
+            prefillProgressPollIntervalMs = prefillProgressPollIntervalMs,
+            clock = clock
         )
         service.loadModel(
             modelPath = "/models/phase/config.json",
@@ -349,6 +436,9 @@ class McaInferenceServicePhaseEventTest {
 
         var beginReturnCode = 0
         var beginFailure: Throwable? = null
+        var onLoad: (() -> Unit)? = null
+        var onBegin: (() -> Unit)? = null
+        var onChunk: (() -> Unit)? = null
         @Volatile
         var prefillProgress: TokenProgress? = null
         var prefillStepsDuringBegin: List<TokenProgress> = emptyList()
@@ -380,6 +470,7 @@ class McaInferenceServicePhaseEventTest {
         override fun initBackends(nativeLibDir: String) = Unit
 
         override fun loadModel(modelPath: String, paramsJson: String): Int {
+            onLoad?.invoke()
             statsJson = loadedStatsJson(paramsJson)
             return 0
         }
@@ -390,6 +481,7 @@ class McaInferenceServicePhaseEventTest {
             timeline += "begin"
             stopRequested = false
             beginFailure?.let { throw it }
+            onBegin?.invoke()
             prefillStepsDuringBegin.forEach { progress ->
                 prefillProgress = progress
                 Thread.sleep(PREFILL_STEP_PAUSE_MS)
@@ -426,7 +518,7 @@ class McaInferenceServicePhaseEventTest {
                 if (stopRequested) return null
                 return chunk
             }
-            return if (chunks.isEmpty()) null else chunks.removeFirst()
+            return if (chunks.isEmpty()) null else chunks.removeFirst().also { onChunk?.invoke() }
         }
 
         override fun invalidateConversationContext() {

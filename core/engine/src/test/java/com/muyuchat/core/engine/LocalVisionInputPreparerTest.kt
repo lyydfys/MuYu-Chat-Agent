@@ -73,7 +73,7 @@ class LocalVisionInputPreparerTest {
     @Test
     fun existingLocalImagePathIsPreserved() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
-        val localImage = File(cacheDir, "photo.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val localImage = File(cacheDir, "photo.png").apply { writeBytes(pngHeader(320, 240)) }
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(
@@ -81,9 +81,9 @@ class LocalVisionInputPreparerTest {
                     content = "Describe this image",
                     imageAttachments = listOf(
                         ChatImageAttachment(
-                            name = "photo.jpg",
+                            name = "photo.png",
                             uriString = localImage.absolutePath,
-                            mimeType = "image/jpeg"
+                            mimeType = "image/png"
                         )
                     )
                 )
@@ -99,20 +99,43 @@ class LocalVisionInputPreparerTest {
         val attachment = prepared.messages.single().imageAttachments.single()
 
         assertEquals(localImage.absolutePath, attachment.uriString)
-        assertEquals(3L, attachment.sizeBytes)
+        assertEquals(localImage.length(), attachment.sizeBytes)
         assertFalse(File(cacheDir, "engine_vision_inputs").exists())
         val details = diagnostics.single().second
         assertEquals("file", details.getString("sourceType"))
-        assertEquals("unknown", details.getString("detectedFormat"))
-        assertEquals("photo.jpg", details.getString("nativeReadablePath"))
-        assertEquals(3L, details.getLong("inputBytes"))
+        assertEquals("png", details.getString("detectedFormat"))
+        assertEquals("photo.png", details.getString("nativeReadablePath"))
+        assertEquals(localImage.length(), details.getLong("inputBytes"))
         assertFalse(details.toString().contains(localImage.absolutePath))
+    }
+
+    @Test
+    fun jpegHeaderDiagnosticsPreserveNonSquareWidthAndHeight() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val localImage = File(cacheDir, "landscape.jpg").apply {
+            writeBytes(byteArrayOf(
+                0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0xc0.toByte(),
+                0x00, 0x11, 0x08, 0x00, 0x3c, 0x00, 0x64, 0x03,
+                0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+                0xff.toByte(), 0xd9.toByte()
+            ))
+        }
+        val diagnostics = mutableListOf<JSONObject>()
+
+        LocalVisionInputPreparer.prepare(
+            localImageRequest(localImage),
+            cacheDir,
+            diagnosticSink = { _, details -> diagnostics += details }
+        )
+
+        assertEquals(100, diagnostics.single().getInt("originalWidth"))
+        assertEquals(60, diagnostics.single().getInt("originalHeight"))
     }
 
     @Test
     fun fileUrlIsNormalizedToNativeReadableAbsolutePath() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
-        val localImage = File(cacheDir, "photo.png").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+        val localImage = File(cacheDir, "photo.png").apply { writeBytes(pngHeader(320, 240)) }
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(
@@ -133,13 +156,13 @@ class LocalVisionInputPreparerTest {
         val attachment = prepared.messages.single().imageAttachments.single()
 
         assertEquals(localImage.absolutePath, attachment.uriString)
-        assertEquals(3L, attachment.sizeBytes)
+        assertEquals(localImage.length(), attachment.sizeBytes)
     }
 
     @Test
     fun remoteImageUrlIsDownloadedAsNativeReadableImageFile() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
-        val imageBytes = byteArrayOf('R'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), 'F'.code.toByte())
+        val imageBytes = pngHeader(320, 240)
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(
@@ -147,8 +170,8 @@ class LocalVisionInputPreparerTest {
                     content = "Describe this image",
                     imageAttachments = listOf(
                         ChatImageAttachment(
-                            name = "remote.webp",
-                            uriString = "https://example.test/image.webp",
+                            name = "remote.png",
+                            uriString = "https://example.test/image.png",
                             mimeType = "image/jpeg"
                         )
                     )
@@ -163,8 +186,8 @@ class LocalVisionInputPreparerTest {
             nowMillis = { 5678L },
             idSuffix = { "remote" },
             remoteImageFetcher = { url ->
-                assertEquals("https://example.test/image.webp", url)
-                LocalVisionInputPreparer.RemoteImage(imageBytes, "image/webp")
+                assertEquals("https://example.test/image.png", url)
+                LocalVisionInputPreparer.RemoteImage(imageBytes, "image/png")
             },
             diagnosticSink = { stage, details -> diagnostics += stage to details }
         )
@@ -172,17 +195,17 @@ class LocalVisionInputPreparerTest {
         val outputFile = File(attachment.uriString)
 
         assertTrue(outputFile.exists())
-        assertTrue(outputFile.absolutePath.endsWith("engine_vision_inputs${File.separator}vision-5678-remote.webp"))
+        assertTrue(outputFile.absolutePath.endsWith("engine_vision_inputs${File.separator}vision-5678-remote.png"))
         assertArrayEquals(imageBytes, outputFile.readBytes())
-        assertEquals("image/webp", attachment.mimeType)
+        assertEquals("image/png", attachment.mimeType)
         assertEquals("", attachment.dataBase64)
         assertEquals(imageBytes.size.toLong(), attachment.sizeBytes)
         val details = diagnostics.single().second
         assertEquals("http", details.getString("sourceType"))
-        assertEquals("image/webp", details.getString("declaredFormat"))
+        assertEquals("image/png", details.getString("declaredFormat"))
         assertEquals("image/jpeg", details.getString("requestedFormat"))
-        assertEquals("unknown", details.getString("detectedFormat"))
-        assertEquals("vision-5678-remote.webp", details.getString("nativeReadablePath"))
+        assertEquals("png", details.getString("detectedFormat"))
+        assertEquals("vision-5678-remote.png", details.getString("nativeReadablePath"))
         assertFalse(details.toString().contains("https://example.test"))
     }
 
@@ -313,6 +336,161 @@ class LocalVisionInputPreparerTest {
     }
 
     @Test
+    fun unknownImageSignatureIsRejectedBeforeNativeDecode() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val image = File(cacheDir, "unknown.png").apply { writeBytes(ByteArray(64) { 0x42 }) }
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(localImageRequest(image), cacheDir)
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_FORMAT_UNSUPPORTED, error.failureCode)
+    }
+
+    @Test
+    fun rejectedInlineImageLeavesNoTemporaryFile() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val request = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Describe this image",
+            imageAttachments = listOf(ChatImageAttachment(
+                name = "broken.png",
+                mimeType = "image/png",
+                dataBase64 = Base64.getEncoder().encodeToString(ByteArray(64) { 0x42 })
+            ))
+        )))
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(request, cacheDir, nowMillis = { 1234L }, idSuffix = { "broken" })
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_FORMAT_UNSUPPORTED, error.failureCode)
+        assertFalse(File(cacheDir, "engine_vision_inputs/vision-1234-broken.png").exists())
+    }
+
+    @Test
+    fun preparedImageNeverOverwritesAnExistingCacheFile() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val inputDir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
+        val existing = File(inputDir, "vision-1234-fixed.png").apply { writeBytes(pngHeader(321, 240)) }
+        val existingBytes = existing.readBytes()
+        val request = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Describe",
+            imageAttachments = listOf(ChatImageAttachment(
+                mimeType = "image/png",
+                dataBase64 = Base64.getEncoder().encodeToString(pngHeader(320, 240))
+            ))
+        )))
+
+        assertThrows(IllegalStateException::class.java) {
+            LocalVisionInputPreparer.prepare(
+                request, cacheDir, nowMillis = { 1234L }, idSuffix = { "fixed" }
+            )
+        }
+        assertArrayEquals(existingBytes, existing.readBytes())
+    }
+
+    @Test
+    fun aggregatePixelBudgetRejectsRequestAndCleansPreparedFiles() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val attachments = (0..2).map { index ->
+            ChatImageAttachment(
+                name = "image-$index.png",
+                mimeType = "image/png",
+                dataBase64 = Base64.getEncoder().encodeToString(pngHeader(4000 + index, 4000))
+            )
+        }
+        val request = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Compare these images",
+            imageAttachments = attachments
+        )))
+        var nextId = 0
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(
+                request,
+                cacheDir,
+                nowMillis = { 1234L },
+                idSuffix = { "${nextId++}" }
+            )
+        }
+
+        assertEquals(LocalVisionInputFailureCode.IMAGE_RESOLUTION_TOO_LARGE, error.failureCode)
+        assertTrue(File(cacheDir, "engine_vision_inputs").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun imageCountLimitIsCheckedBeforeMaterializingInlineData() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val attachments = (0..8).map { index ->
+            ChatImageAttachment(
+                name = "image-$index.png",
+                mimeType = "image/png",
+                dataBase64 = Base64.getEncoder().encodeToString(pngHeader(320 + index, 240))
+            )
+        }
+        val request = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Compare",
+            imageAttachments = attachments
+        )))
+
+        val error = assertThrows(LocalVisionInputException::class.java) {
+            LocalVisionInputPreparer.prepare(request, cacheDir)
+        }
+
+        assertEquals(LocalVisionInputFailureCode.TOO_MANY_IMAGES, error.failureCode)
+        assertFalse(File(cacheDir, "engine_vision_inputs").exists())
+    }
+
+    @Test
+    fun releaseDeletesOnlyFilesCreatedForPreparedRequest() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val existing = File(cacheDir, "existing.png").apply { writeBytes(pngHeader(320, 240)) }
+        val original = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Compare",
+            imageAttachments = listOf(
+                ChatImageAttachment(uriString = existing.absolutePath, mimeType = "image/png"),
+                ChatImageAttachment(
+                    mimeType = "image/png",
+                    dataBase64 = Base64.getEncoder().encodeToString(pngHeader(321, 240))
+                )
+            )
+        )))
+        val prepared = LocalVisionInputPreparer.prepare(original, cacheDir)
+        val generated = File(prepared.messages.single().imageAttachments.last().uriString)
+        assertTrue(generated.isFile)
+
+        LocalVisionInputPreparer.releasePreparedInputs(original, prepared, cacheDir)
+
+        assertFalse(generated.exists())
+        assertTrue(existing.isFile)
+    }
+
+    @Test
+    fun releasePreservesOriginalFileUrlInsidePreparationDirectory() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val inputDir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
+        val originalFile = File(inputDir, "vision-existing.png").apply { writeBytes(pngHeader(320, 240)) }
+        val original = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Describe",
+            imageAttachments = listOf(ChatImageAttachment(
+                uriString = originalFile.toURI().toString(),
+                mimeType = "image/png"
+            ))
+        )))
+
+        val prepared = LocalVisionInputPreparer.prepare(original, cacheDir)
+        LocalVisionInputPreparer.releasePreparedInputs(original, prepared, cacheDir)
+
+        assertTrue(originalFile.isFile)
+    }
+
+    @Test
     fun requestWithoutImagesIsUnchangedAndEmitsNoDiagnostics() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
         val request = ChatRequest(messages = listOf(ChatMessage(Role.USER, "Hello")))
@@ -332,13 +510,13 @@ class LocalVisionInputPreparerTest {
     @Test
     fun diagnosticSinkFailureDoesNotChangePreparedRequestSemantics() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
-        val localImage = File(cacheDir, "photo.jpg").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val localImage = File(cacheDir, "photo.png").apply { writeBytes(pngHeader(320, 240)) }
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(
                     role = Role.USER,
                     content = "Describe this image",
-                    imageAttachments = listOf(ChatImageAttachment(uriString = localImage.absolutePath))
+                    imageAttachments = listOf(ChatImageAttachment(uriString = localImage.absolutePath, mimeType = "image/png"))
                 )
             )
         )

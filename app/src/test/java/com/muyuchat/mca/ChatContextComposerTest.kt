@@ -6,11 +6,32 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.Role
 import java.io.File
 import org.json.JSONArray
+import org.json.JSONObject
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatContextComposerTest {
+    @Test
+    fun storedTraceBoundsLargeSkippedSourcesAndRetainsFullExcerptHash() {
+        val excerpt = "quoted \"line\"\n".repeat(2_000)
+        val sources = List(200) { index ->
+            WorldBookSource("book-$index", "entry-$index", WorldBookScope.GLOBAL, excerpt, 12_000, "budget")
+        }
+        val trace = ContextAssemblyTrace("a".repeat(64), emptyList(), sources, emptyList(), emptyList(), 256, "b".repeat(64))
+        val raw = trace.toJsonString()
+        val json = JSONObject(raw)
+        val stored = json.getJSONArray("skippedWorldBookSources")
+
+        assertTrue(raw.toByteArray(Charsets.UTF_8).size <= 128 * 1024)
+        assertTrue(stored.length() in 1..64)
+        assertEquals(200 - stored.length(), json.getInt("omittedSourceCount"))
+        assertTrue(stored.getJSONObject(0).getBoolean("excerptTruncated"))
+        assertEquals(excerpt.length, stored.getJSONObject(0).getInt("excerptLength"))
+        assertEquals(contextSummaryDigest(excerpt), stored.getJSONObject(0).getString("excerptSha256"))
+    }
+
     @Test
     fun composerBoundsAndCombinesWorldBookBeforeKnowledgeContext() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatContextComposer.kt")
@@ -121,7 +142,7 @@ class ChatContextComposerTest {
         val request = sendPreparedMessage.indexOf("val preflightRequest = ChatRequest(")
         val initialAdmission = sendPreparedMessage.indexOf("val initialAdmission = localContextWindowAdmission(", request)
         val compression = sendPreparedMessage.indexOf("val preflightCompression = compressChatRequestContext(", initialAdmission)
-        val rebuiltContext = sendPreparedMessage.indexOf("val rebuiltPreflightContext = chatContextComposer.compose(", compression)
+        val rebuiltContext = sendPreparedMessage.indexOf("chatContextComposer.compose(", compression)
         val finalRequest = sendPreparedMessage.indexOf("val finalPreflightRequest = preflightCompression.request.copy(", rebuiltContext)
         val finalAdmission = sendPreparedMessage.indexOf("val admission = localContextWindowAdmission(finalPreflightRequest)", finalRequest)
         val persistedMessages = sendPreparedMessage.indexOf("val messages = it.messages + user + assistant", finalAdmission)

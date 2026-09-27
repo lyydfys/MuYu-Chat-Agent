@@ -1,7 +1,9 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.Role
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -20,6 +22,7 @@ data class AssistantRecord(
     /** Original imported character-card JSON, retained as inert data for lossless re-export. */
     val characterCardJson: String? = null,
     val memoryEnabled: Boolean = false,
+    val memorySummaryInterval: Int = DEFAULT_MEMORY_SUMMARY_INTERVAL,
     val webSearchEnabled: Boolean = false,
     val fileContextEnabled: Boolean = true,
     /** Optional role-card background; copied into app-private storage by the UI. */
@@ -40,6 +43,7 @@ data class AssistantRecord(
         .put("paramsJson", paramsJson)
         .apply { characterCardJson?.let { put("characterCardJson", it) } }
         .put("memoryEnabled", memoryEnabled)
+        .put("memorySummaryInterval", memorySummaryInterval.coerceIn(MIN_MEMORY_SUMMARY_INTERVAL, MAX_MEMORY_SUMMARY_INTERVAL))
         .put("webSearchEnabled", webSearchEnabled)
         .put("fileContextEnabled", fileContextEnabled)
         .put("appearance", appearance.toJson())
@@ -51,6 +55,9 @@ data class AssistantRecord(
         /** Maximum persisted/manual system-prompt length shared by import and editor paths. */
         const val MAX_SYSTEM_PROMPT_CHARS = 12_000
         const val MAX_ASSISTANT_PROMPT_CHARS = MAX_SYSTEM_PROMPT_CHARS
+        const val DEFAULT_MEMORY_SUMMARY_INTERVAL = 12
+        const val MIN_MEMORY_SUMMARY_INTERVAL = 2
+        const val MAX_MEMORY_SUMMARY_INTERVAL = 100
 
         fun default(systemPrompt: String = GenerationParams().systemPrompt, params: GenerationParams = GenerationParams()): AssistantRecord =
             AssistantRecord(
@@ -107,6 +114,8 @@ data class AssistantRecord(
                 ),
                 characterCardJson = json.rawAssistantString("characterCardJson", "character_card_json"),
                 memoryEnabled = json.optBoolean("memoryEnabled", defaults.memoryEnabled),
+                memorySummaryInterval = json.optInt("memorySummaryInterval", defaults.memorySummaryInterval)
+                    .coerceIn(MIN_MEMORY_SUMMARY_INTERVAL, MAX_MEMORY_SUMMARY_INTERVAL),
                 webSearchEnabled = json.optBoolean("webSearchEnabled", defaults.webSearchEnabled),
                 fileContextEnabled = json.optBoolean("fileContextEnabled", defaults.fileContextEnabled),
                 appearance = ChatAppearance.fromJsonOrNull(
@@ -130,13 +139,13 @@ data class AssistantRecord(
             val cardData = cardRoot.optJSONObject("data") ?: cardRoot
             val systemPrompt = listOf(
                 card.systemPrompt,
-                cardData.toCharacterCardPrompt(),
+                cardData.toCharacterCardPrompt(includeGreeting = false),
                 card.postHistoryInstructions
             )
                 .filter { it.isNotBlank() }
                 .distinct()
                 .joinToString("\n\n")
-                .ifBlank { imported.systemPrompt }
+                .ifBlank { defaults.systemPrompt }
                 .take(MAX_SYSTEM_PROMPT_CHARS)
             val defaultParams = assistantGenerationParamsFromJson(
                 defaults.paramsJson,
@@ -164,12 +173,12 @@ data class AssistantRecord(
                 (opt(key) as? String)?.takeIf { it.isNotEmpty() }
             }
 
-        private fun JSONObject.toCharacterCardPrompt(): String {
+        private fun JSONObject.toCharacterCardPrompt(includeGreeting: Boolean = true): String {
             val sections = listOf(
                 "角色描述" to cleanAssistantString("description", "desc", "char_persona"),
                 "性格" to cleanAssistantString("personality"),
                 "场景" to cleanAssistantString("scenario", "world_scenario"),
-                "开场白" to cleanAssistantString("first_mes", "firstMessage", "greeting", "char_greeting"),
+                "开场白" to if (includeGreeting) cleanAssistantString("first_mes", "firstMessage", "greeting", "char_greeting") else "",
                 "示例对话" to cleanAssistantString("mes_example", "example_dialogue")
             ).filter { (_, value) -> value.isNotBlank() }
             if (sections.isEmpty()) return ""
@@ -177,6 +186,33 @@ data class AssistantRecord(
         }
 
     }
+}
+
+internal fun AssistantRecord.initialGreetingMessage(): ChatMessage? {
+    val rawCard = characterCardJson ?: return null
+    val card = (CharacterCardCodec.parseJson(rawCard) as? CharacterCardParseResult.Success)?.card
+        ?: return null
+    return card.firstMessage.takeIf(String::isNotBlank)?.let { greeting ->
+        ChatMessage(role = Role.ASSISTANT, content = greeting)
+    }
+}
+
+internal fun AssistantRecord.initialGreetingSession(
+    modelMode: String?,
+    modelId: String?,
+    sessionId: String = UUID.randomUUID().toString(),
+    capturedAt: Long = System.currentTimeMillis()
+): ChatSessionRecord? = initialGreetingMessage()?.let { greeting ->
+    ChatSessionRecord(
+        id = sessionId,
+        title = "新对话",
+        messages = listOf(greeting),
+        updatedAt = capturedAt,
+        assistantId = id,
+        assistantSnapshot = toConversationSnapshot(capturedAt),
+        modelMode = modelMode,
+        modelId = modelId
+    )
 }
 
 /**

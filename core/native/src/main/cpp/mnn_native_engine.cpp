@@ -28,6 +28,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
@@ -48,6 +49,7 @@
 #include "mnn_runtime_capability_policy.hpp"
 #include "mnn_sampling_config.hpp"
 #include "mnn_stream_protocol_filter.hpp"
+#include "mnn_visual_stream_queue.hpp"
 #include "textual_inversion_conditioning.hpp"
 #include "mnn_vision_path_policy.hpp"
 #include "execution_asset_binding.hpp"
@@ -116,6 +118,7 @@ public:
 };
 
 std::mutex g_mnn_mutex;
+std::mutex g_mnn_lifecycle_mutex;
 bool g_loaded = false;
 bool g_generation_active = false;
 bool g_stop_requested = false;
@@ -123,6 +126,49 @@ bool g_stop_requested = false;
 // hold that mutex for a long time; the UI cancellation path must still be able
 // to signal the in-flight call without waiting behind the same mutex.
 std::atomic_bool g_stop_signal{false};
+
+#if MCA_WITH_MNN_LLM
+struct VisualStreamState {
+    mca::mnn::VisualStreamQueue queue;
+    std::mutex consumer_mutex;
+    mca::mnn::StreamProtocolFilterState filter;
+    std::string utf8_tail;
+};
+
+std::shared_ptr<VisualStreamState> g_visual_stream;
+std::thread g_visual_producer;
+std::atomic_bool g_visual_producer_running{false};
+std::mutex g_visual_stats_mutex;
+std::string g_visual_stats_json;
+
+void update_visual_stats_locked();
+
+bool join_visual_producer(JNIEnv* env) {
+    if (!g_visual_producer.joinable()) return true;
+    const auto stream = std::atomic_load(&g_visual_stream);
+    if (stream != nullptr && !stream->queue.finished()) {
+        g_stop_signal.store(true, std::memory_order_release);
+        stream->queue.cancel();
+    }
+    const bool finished = stream != nullptr
+            ? stream->queue.waitFinished(std::chrono::seconds(3))
+            : !g_visual_producer_running.load(std::memory_order_acquire);
+    if (!finished) {
+        jclass exception_class = env->FindClass("java/lang/IllegalStateException");
+        if (exception_class != nullptr) {
+            env->ThrowNew(exception_class,
+                    "MNN visual generation has not stopped; isolated worker recovery is required.");
+            env->DeleteLocalRef(exception_class);
+        }
+        return false;
+    }
+    // Never wait for the producer while holding g_mnn_mutex. A native stall is
+    // recovered by the isolated worker watchdog; its model stays alive here.
+    g_visual_producer.join();
+    std::atomic_store(&g_visual_stream, std::shared_ptr<VisualStreamState>{});
+    return true;
+}
+#endif
 bool g_runner_ready =
 #if MCA_WITH_MNN_LLM
         true;
@@ -281,14 +327,30 @@ void capture_mnn_debug_prompt(const std::string& prompt) {
 
 class MnnStreamBuffer : public std::streambuf {
 public:
+    explicit MnnStreamBuffer(std::shared_ptr<VisualStreamState> visual = {}) : visual_(std::move(visual)) {}
+
     std::streamsize xsputn(const char* s, std::streamsize n) override {
         if (s != nullptr && n > 0) {
-            g_pending_chunk.append(s, static_cast<size_t>(n));
+            if (visual_) {
+                if (!visual_->queue.write(s, static_cast<size_t>(n))) {
+                    // The SDK owns a mutable context but exposes a const view.
+                    // As in the text stepping adapter, mutate it only on the
+                    // same thread that is executing MNN's generation loop.
+                    if (g_llm != nullptr && g_llm->getContext() != nullptr) {
+                        auto* context = const_cast<MNN::Transformer::LlmContext*>(g_llm->getContext());
+                        context->status = MNN::Transformer::LlmStatus::USER_CANCEL;
+                    }
+                    return n;
+                }
+            } else {
+                g_pending_chunk.append(s, static_cast<size_t>(n));
+            }
             append_mnn_debug_raw_output(s, static_cast<size_t>(n));
             g_streamed_bytes += static_cast<size_t>(n);
             if (g_first_chunk_at_ms == 0) {
                 g_first_chunk_at_ms = now_ms();
             }
+            if (visual_) update_visual_stats_locked();
         }
         return n;
     }
@@ -296,17 +358,14 @@ public:
     int overflow(int ch) override {
         if (ch != EOF) {
             char c = static_cast<char>(ch);
-            g_pending_chunk.append(&c, 1);
-            append_mnn_debug_raw_output(&c, 1);
-            g_streamed_bytes += 1;
-            if (g_first_chunk_at_ms == 0) {
-                g_first_chunk_at_ms = now_ms();
-            }
+            if (xsputn(&c, 1) != 1) return traits_type::eof();
         }
         return ch;
     }
 
 private:
+    std::shared_ptr<VisualStreamState> visual_;
+
     static int64_t now_ms() {
         using namespace std::chrono;
         return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
@@ -8306,16 +8365,7 @@ std::string local_mnn_image_path(const std::string& rawPath) {
     return rawPath;
 }
 
-bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
-    if (!parsed.hasMediaInputs()) {
-        g_multimodal_system_prompt_suppressed = false;
-        g_multimodal_history_suppressed = false;
-        const auto formatted_prompt = g_llm->apply_chat_template(parsed.messages);
-        capture_mnn_debug_prompt(formatted_prompt);
-        g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
-        g_llm->response(parsed.messages, g_output_stream.get(), "<eop>", 0);
-        return false;
-    }
+MNN::Transformer::ChatMessages prepare_mnn_visual_response(const ParsedMnnChatMessages& parsed) {
     if (parsed.rawMediaTags.malformed) {
         throw std::runtime_error(
                 "MNN local multimodal input contains an unterminated raw media tag.");
@@ -8339,26 +8389,12 @@ bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
     // and normalizing paths. Reimplementing template -> tokenize -> embedding
     // here diverges from MNNChat and can lose the visual effect before decode.
     auto promptMessages = parsed.messages;
-    // MNN 3.5's Qwen3.5 visual ChatMessages path is system-turn sensitive.
-    // Apply the measured user-only compatibility path narrowly; Gemma and any
-    // future model types retain the caller's explicit system message.
+    // Preserve caller roles. The continuous ChatMessages response owns visual
+    // prefill and decode for historical requests, just as the single-turn path does.
     g_multimodal_system_prompt_suppressed = false;
-    if (mca::mnn::shouldSuppressMnnMultimodalSystemPrompt(g_mnn_model_type)) {
-        const auto messageCountBeforeSystemFilter = promptMessages.size();
-        promptMessages.erase(
-                std::remove_if(
-                        promptMessages.begin(),
-                        promptMessages.end(),
-                        [](const MNN::Transformer::ChatMessage& message) {
-                            return message.first == "system";
-                        }),
-                promptMessages.end());
-        g_multimodal_system_prompt_suppressed =
-                promptMessages.size() != messageCountBeforeSystemFilter;
-    }
     if (promptMessages.empty()) {
         throw std::runtime_error(
-                "MNN local multimodal input has no user message after applying the system-turn compatibility policy.");
+                "MNN local multimodal input has no messages.");
     }
     const auto checkedImagePath = [](const std::string& rawPath) {
         const auto imagePath = local_mnn_image_path(rawPath);
@@ -8418,28 +8454,38 @@ bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
         throw std::runtime_error(
                 "MNN local multimodal input has no user message after normalization.");
     }
-    if (latestUserMessage->second.find("<img>") == std::string::npos) {
-        throw std::runtime_error(
-                "MNN local multimodal history contains an earlier image, but the latest user turn has no image. "
-                "Attach the image again for a follow-up question; silent visual-history reuse is disabled.");
-    }
-    // The official llm_demo success path uses response(string), which renders
-    // one image-first user turn and performs prefill+decode in a single native
-    // call. Both response(ChatMessages) and Android's repeated generate(1)
-    // stepping produced different, image-insensitive answers with the same
-    // model, image and sampler. Use the proven path for visual requests. A
-    // future asynchronous native worker can restore token-by-token delivery
-    // without splitting MNN's generation lifecycle again.
-    g_multimodal_history_suppressed = promptMessages.size() != 1;
-    const auto& imageUserContent = latestUserMessage->second;
-    const auto formatted_prompt = g_llm->apply_chat_template(imageUserContent);
+    g_multimodal_history_suppressed = false;
+    const bool singleUserTurn = mca::mnn::useMnnSingleUserVisualResponse(promptMessages);
+    const auto formatted_prompt = singleUserTurn
+            ? g_llm->apply_chat_template(promptMessages.front().second)
+            : g_llm->apply_chat_template(promptMessages);
     capture_mnn_debug_prompt(formatted_prompt);
     g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
-    g_llm->response(
-            imageUserContent,
-            g_output_stream.get(),
-            "<eop>",
-            g_max_new_tokens);
+    return promptMessages;
+#endif
+}
+
+bool begin_mnn_response(
+        const ParsedMnnChatMessages& parsed,
+        const MNN::Transformer::ChatMessages* preparedVisualContent = nullptr) {
+    if (!parsed.hasMediaInputs()) {
+        g_multimodal_system_prompt_suppressed = false;
+        g_multimodal_history_suppressed = false;
+        const auto formatted_prompt = g_llm->apply_chat_template(parsed.messages);
+        capture_mnn_debug_prompt(formatted_prompt);
+        g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
+        g_llm->response(parsed.messages, g_output_stream.get(), "<eop>", 0);
+        return false;
+    }
+    const auto visualMessages = preparedVisualContent == nullptr
+            ? prepare_mnn_visual_response(parsed) : *preparedVisualContent;
+    // Both overloads run a continuous native response. Repeated generate(1)
+    // stepping is reserved for text; it must not discard Omni's visual prefill.
+    if (mca::mnn::useMnnSingleUserVisualResponse(visualMessages)) {
+        g_llm->response(visualMessages.front().second, g_output_stream.get(), "<eop>", g_max_new_tokens);
+    } else {
+        g_llm->response(visualMessages, g_output_stream.get(), "<eop>", g_max_new_tokens);
+    }
     const auto* context = g_llm->getContext();
     if (context == nullptr || context->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR) {
         // The visual component exists on disk, but this request proved that it
@@ -8452,7 +8498,6 @@ bool begin_mnn_response(const ParsedMnnChatMessages& parsed) {
     g_generated_steps = std::max(0, context->gen_seq_len);
     g_generation_active = false;
     return true;
-#endif
 }
 
 json build_mnn_config(const std::string& config_path, const std::string& params_json, bool for_load) {
@@ -8578,12 +8623,6 @@ json build_mnn_config(const std::string& config_path, const std::string& params_
         // package that carries a validated visual graph.
         config["use_mmap"] = false;
         config["kvcache_mmap"] = false;
-        if (!for_load && mca::mnn::shouldSuppressMnnMultimodalSystemPrompt(g_mnn_model_type)) {
-            // response(string) consults LlmConfig::system_prompt even after the
-            // explicit ChatMessages system turn was removed. Keep the measured
-            // Qwen3.5 visual path genuinely user-only for the active request.
-            config["system_prompt"] = "";
-        }
     }
     config["max_all_tokens"] = std::max(1, opt_int(config, "max_all_tokens", n_ctx));
     config["n_ctx"] = std::max(1, opt_int(config, "n_ctx", config.value("max_all_tokens", n_ctx)));
@@ -8926,6 +8965,13 @@ std::string stats_json_locked() {
     return out.str();
 }
 
+#if MCA_WITH_MNN_LLM
+void update_visual_stats_locked() {
+    std::lock_guard<std::mutex> stats_lock(g_visual_stats_mutex);
+    g_visual_stats_json = stats_json_locked();
+}
+#endif
+
 constexpr jint kMnnRunnerUnavailable = -200;
 constexpr jint kMnnInvalidState = -201;
 constexpr jint kMnnLoadFailed = -202;
@@ -9004,7 +9050,6 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends(
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isRunnerReady(JNIEnv*, jobject) {
-    std::lock_guard<std::mutex> lock(g_mnn_mutex);
     return g_runner_ready ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -9014,6 +9059,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
         jobject,
         jstring configPath,
         jstring paramsJson) {
+    std::lock_guard<std::mutex> lifecycle_lock(g_mnn_lifecycle_mutex);
+#if MCA_WITH_MNN_LLM
+    if (!join_visual_producer(env)) return kMnnInvalidState;
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     g_loaded = false;
     configure_mnn_debug_trace_locked(json::object());
@@ -9117,7 +9166,11 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel(
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_muyuchat_core_nativebridge_NativeMnnBridge_unloadModel(JNIEnv*, jobject) {
+Java_com_muyuchat_core_nativebridge_NativeMnnBridge_unloadModel(JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lifecycle_lock(g_mnn_lifecycle_mutex);
+#if MCA_WITH_MNN_LLM
+    if (!join_visual_producer(env)) return;
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     g_loaded = false;
     configure_mnn_debug_trace_locked(json::object());
@@ -9140,6 +9193,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         jobject,
         jstring messagesJson,
         jstring paramsJson) {
+    std::lock_guard<std::mutex> lifecycle_lock(g_mnn_lifecycle_mutex);
+#if MCA_WITH_MNN_LLM
+    if (!join_visual_producer(env)) return kMnnInvalidState;
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     // A new request owns a fresh decoder boundary even if validation or setup
     // fails before MNN starts producing tokens.
@@ -9213,7 +9270,9 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
         g_generation_started_at_ms = now_ms();
         g_first_chunk_at_ms = 0;
         g_sync_stepping = true;
-        g_stream_buffer = std::make_unique<MnnStreamBuffer>();
+        const auto visualStream = textOnlyRequest ? std::shared_ptr<VisualStreamState>{}
+                : std::make_shared<VisualStreamState>();
+        g_stream_buffer = std::make_unique<MnnStreamBuffer>(visualStream);
         g_output_stream = std::make_unique<std::ostream>(g_stream_buffer.get());
         // response()/generate_init() owns context cleanup. The product bridge
         // must not call Llm::reset() here: a controlled MNN 3.5 differential
@@ -9230,6 +9289,87 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
                     "multimodal_request_requires_fresh_visual_prefill");
         }
         g_llm->set_config(g_last_config_json);
+        if (!textOnlyRequest) {
+            auto visualContent = prepare_mnn_visual_response(parsed);
+            set_error("");
+            g_sync_stepping = false;
+            {
+                auto snapshot = json::parse(stats_json_locked());
+                for (const auto* key : {"promptTokens", "prefillTokens", "completionTokens",
+                        "prefillMs", "decodeMs", "ttftMs", "prefillTps", "effectivePromptTps", "decodeTps"}) {
+                    snapshot.erase(key);
+                }
+                snapshot["generationSequence"] = g_generation_sequence + 1;
+                snapshot["runtimeStatsDeferred"] = true;
+                std::lock_guard<std::mutex> stats_lock(g_visual_stats_mutex);
+                g_visual_stats_json = snapshot.dump();
+            }
+            visualStream->filter.reset(g_active_stop_markers);
+            std::atomic_store(&g_visual_stream, visualStream);
+            g_visual_producer_running.store(true, std::memory_order_release);
+            try {
+                g_visual_producer = std::thread([
+                        parsed = std::move(parsed), visualContent = std::move(visualContent), visualStream]() mutable {
+                    std::string producerError;
+                    {
+                        std::lock_guard<std::mutex> model_lock(g_mnn_mutex);
+                        try {
+                            if (!g_stop_signal.load(std::memory_order_acquire)) {
+                                begin_mnn_response(parsed, &visualContent);
+                            } else {
+                                visualStream->queue.cancel();
+                            }
+                            g_generation_active = false;
+                            g_stop_requested = g_stop_signal.load(std::memory_order_acquire);
+                            g_generation_stop_reason = g_stop_requested
+                                    ? "stop_requested"
+                                    : visualStream->queue.stoppedAfterMarker()
+                                            ? "stop_marker"
+                                            : generation_stop_reason_locked();
+                            mark_mnn_prompt_cache_disabled_locked(
+                                    true, "multimodal_completed_cache_cleared");
+                            if (!g_stop_requested && !visualStream->queue.stoppedAfterMarker() &&
+                                (g_generation_stop_reason == "mnn_internal_error" ||
+                                 g_generation_stop_reason == "mnn_timeout" ||
+                                 g_generation_stop_reason == "mnn_user_cancel" ||
+                                 g_generation_stop_reason == "mnn_not_loaded")) {
+                                producerError = "MNN visual decode failed: " + g_generation_stop_reason;
+                            }
+                        } catch (const std::exception& e) {
+                            g_generation_active = false;
+                            g_stop_requested = g_stop_signal.load(std::memory_order_acquire);
+                            if (g_stop_requested || visualStream->queue.stoppedAfterMarker()) {
+                                g_generation_stop_reason = g_stop_requested ? "stop_requested" : "stop_marker";
+                            } else {
+                                producerError = std::string("MNN visual generation failed: ") + e.what();
+                                g_generation_stop_reason = "generate_failed";
+                            }
+                            mark_mnn_prompt_cache_disabled_locked(true, "multimodal_begin_failed");
+                        } catch (...) {
+                            g_generation_active = false;
+                            g_stop_requested = g_stop_signal.load(std::memory_order_acquire);
+                            if (g_stop_requested || visualStream->queue.stoppedAfterMarker()) {
+                                g_generation_stop_reason = g_stop_requested ? "stop_requested" : "stop_marker";
+                            } else {
+                                producerError = "MNN visual generation failed: unknown native error";
+                                g_generation_stop_reason = "generate_failed";
+                            }
+                            mark_mnn_prompt_cache_disabled_locked(true, "multimodal_begin_failed");
+                        }
+                        if (!producerError.empty()) set_error(producerError);
+                        update_visual_stats_locked();
+                    }
+                    g_visual_producer_running.store(false, std::memory_order_release);
+                    visualStream->queue.finish(std::move(producerError));
+                });
+            } catch (...) {
+                g_visual_producer_running.store(false, std::memory_order_release);
+                std::atomic_store(&g_visual_stream, std::shared_ptr<VisualStreamState>{});
+                throw;
+            }
+            ++g_generation_sequence;
+            return 0;
+        }
         bool completedSynchronously = false;
         try {
             completedSynchronously = begin_mnn_response(parsed);
@@ -9331,6 +9471,46 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk(JNIEnv* env, jobject) {
+#if MCA_WITH_MNN_LLM
+    if (const auto stream = std::atomic_load(&g_visual_stream)) {
+        std::lock_guard<std::mutex> stream_lock(stream->consumer_mutex);
+        while (true) {
+            auto result = stream->queue.read();
+            if (result.kind == mca::mnn::VisualStreamQueue::ReadKind::Cancelled) {
+                jclass exception_class = env->FindClass("java/lang/IllegalStateException");
+                if (exception_class != nullptr) {
+                    env->ThrowNew(exception_class, "MNN visual generation was cancelled.");
+                    env->DeleteLocalRef(exception_class);
+                }
+                return nullptr;
+            }
+            if (result.kind == mca::mnn::VisualStreamQueue::ReadKind::Failed) {
+                jclass exception_class = env->FindClass("java/lang/IllegalStateException");
+                if (exception_class != nullptr) {
+                    env->ThrowNew(exception_class, result.text.c_str());
+                    env->DeleteLocalRef(exception_class);
+                }
+                return nullptr;
+            }
+            const bool flush = result.kind == mca::mnn::VisualStreamQueue::ReadKind::Finished;
+            auto filtered = mca::mnn::filter_stream_protocol(
+                    stream->filter, std::move(result.text), flush);
+            if (filtered.stopped) {
+                stream->queue.stopAfterMarker();
+            }
+            std::string bytes = std::move(stream->utf8_tail);
+            bytes += filtered.visible;
+            auto decoded = mca::utf8::decode_to_utf16(bytes, !flush);
+            stream->utf8_tail = std::move(decoded.incomplete_tail);
+            if (!decoded.utf16.empty()) {
+                auto* result = utf16_to_jstring(env, decoded.utf16);
+                if (result != nullptr || env->ExceptionCheck()) return result;
+            }
+            if (!flush) continue;
+            return nullptr;
+        }
+    }
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
 #if MCA_WITH_MNN_LLM
     // requestStop() publishes g_stop_signal without taking g_mnn_mutex. Consume
@@ -9436,10 +9616,21 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStop(JNIEnv*, jobject
     // MNN is executing a long native step. The owning thread consumes this
     // signal and performs the cache/protocol rollback at a safe boundary.
     g_stop_signal.store(true, std::memory_order_release);
+#if MCA_WITH_MNN_LLM
+    if (const auto stream = std::atomic_load(&g_visual_stream)) stream->queue.cancel();
+#endif
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive(JNIEnv*, jobject) {
+#if MCA_WITH_MNN_LLM
+    if (const auto stream = std::atomic_load(&g_visual_stream)) {
+        if (!g_visual_producer_running.load(std::memory_order_acquire)) return JNI_FALSE;
+        g_stop_signal.store(true, std::memory_order_release);
+        stream->queue.cancel();
+        return JNI_TRUE;
+    }
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
 #if MCA_WITH_MNN_LLM
     // A final visible chunk can be returned before generateNextChunk() reaches
@@ -9462,8 +9653,27 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive(JNIEnv*,
     return JNI_TRUE;
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isGenerationRunning(JNIEnv*, jobject) {
+#if MCA_WITH_MNN_LLM
+    return g_visual_producer_running.load(std::memory_order_acquire) ? JNI_TRUE : JNI_FALSE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson(JNIEnv* env, jobject) {
+#if MCA_WITH_MNN_LLM
+    if (g_visual_producer_running.load(std::memory_order_acquire)) {
+        std::unique_lock<std::mutex> model_lock(g_mnn_mutex, std::try_to_lock);
+        if (!model_lock.owns_lock()) {
+            std::lock_guard<std::mutex> stats_lock(g_visual_stats_mutex);
+            return utf8_to_jstring(env, g_visual_stats_json);
+        }
+        return utf8_to_jstring(env, stats_json_locked());
+    }
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     const auto stats = stats_json_locked();
     return utf8_to_jstring(env, stats);
@@ -9493,7 +9703,11 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress(JNIEnv*
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown(JNIEnv*, jobject) {
+Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown(JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lifecycle_lock(g_mnn_lifecycle_mutex);
+#if MCA_WITH_MNN_LLM
+    if (!join_visual_producer(env)) return;
+#endif
     std::lock_guard<std::mutex> lock(g_mnn_mutex);
     g_loaded = false;
     configure_mnn_debug_trace_locked(json::object());

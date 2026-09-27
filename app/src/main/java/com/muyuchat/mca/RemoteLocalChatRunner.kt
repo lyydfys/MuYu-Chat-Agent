@@ -23,10 +23,12 @@ import org.json.JSONObject
 /** Main-process proxy for [LocalChatWorkerService]. */
 internal class RemoteLocalChatRunner(
     context: Context,
-    override val runtime: LocalChatRuntime
+    override val runtime: LocalChatRuntime,
+    private val isolatedServiceClass: Class<out LocalChatWorkerService>? = null,
+    private val journalScope: String? = null
 ) : LocalChatRunner, AutoCloseable {
     private val appContext = context.applicationContext
-    private val stageJournal = LocalChatWorkerStageJournal.forContext(appContext)
+    private val stageJournal = LocalChatWorkerStageJournal.forContext(appContext, journalScope)
     private val stateLock = Any()
     private var activeBinding: BindingAttempt? = null
     private var connection: ServiceConnection? = null
@@ -35,6 +37,7 @@ internal class RemoteLocalChatRunner(
     private var nativeLibDir: String = ""
     private var modelLoadedInWorker = false
     private var workerSessionLost = false
+    private var confirmedWorkerDeath = false
     /** Changes whenever a load attempt or Binder identity invalidates an in-flight readback. */
     private var workerSessionEpoch = 0L
     private var closed = false
@@ -221,6 +224,27 @@ internal class RemoteLocalChatRunner(
         workerSessionLost || (modelLoadedInWorker && remote == null)
     }
 
+    override fun canReleasePreparedInputs(): Boolean {
+        val snapshot = synchronized(stateLock) { remote?.let { it to workerSessionEpoch } }
+            ?: return synchronized(stateLock) { confirmedWorkerDeath }
+        val (service, epoch) = snapshot
+        return try {
+            val releasable = service.canReleasePreparedInputs()
+            synchronized(stateLock) { releasable && remote === service && workerSessionEpoch == epoch }
+        } catch (error: DeadObjectException) {
+            val died = synchronized(stateLock) {
+                (remote === service && workerSessionEpoch == epoch).also {
+                    if (it) confirmedWorkerDeath = true
+                }
+            }
+            handleRemoteFailure(service, disconnectedFailure("crashed or was reclaimed", error))
+            died
+        } catch (error: Throwable) {
+            handleRemoteFailure(service, disconnectedFailure("disconnected", error))
+            false
+        }
+    }
+
     override fun sessionRecoveryPolicy(): LocalChatSessionRecoveryPolicy = synchronized(stateLock) {
         if (requiresExplicitAcceleratorReload(workerFailureCodeLocked())) {
             LocalChatSessionRecoveryPolicy.EXPLICIT_RELOAD_REQUIRED
@@ -265,7 +289,7 @@ internal class RemoteLocalChatRunner(
                     "worker stats received; expectedLoaded=$expectedLoaded " +
                         "reportsLoaded=$reportsLoaded"
                 )
-                if (expectedLoaded && !reportsLoaded) {
+                if (workerStatsConfirmLoadedModelLoss(expectedLoaded, stats)) {
                     val error = workerFailure("no longer has the loaded model.")
                     handleRemoteFailure(snapshot.service, error)
                     return synchronized(stateLock) { workerUnavailableStatsLocked() }
@@ -386,6 +410,9 @@ internal class RemoteLocalChatRunner(
             override fun onServiceConnected(name: ComponentName, service: IBinder) {
                 val endpoint = ILocalChatWorker.Stub.asInterface(service)
                 val deathRecipient = IBinder.DeathRecipient {
+                    synchronized(stateLock) {
+                        if (activeBinding === attempt) confirmedWorkerDeath = true
+                    }
                     invalidateBinding(
                         attempt,
                         workerFailure("process exited unexpectedly.")
@@ -408,6 +435,7 @@ internal class RemoteLocalChatRunner(
                         attempt.binder = service
                         attempt.deathRecipient = deathRecipient
                         remote = endpoint
+                        confirmedWorkerDeath = false
                         workerSessionEpoch += 1L
                         if (!workerSessionLost) failure = null
                         true
@@ -491,7 +519,7 @@ internal class RemoteLocalChatRunner(
      * All other runtimes continue to use the shared worker implementation.
      */
     private fun workerServiceClass(): Class<out LocalChatWorkerService> =
-        if (runtime == LocalChatRuntime.LITERT_LM) {
+        isolatedServiceClass ?: if (runtime == LocalChatRuntime.LITERT_LM) {
             LiteRtChatWorkerService::class.java
         } else {
             LocalChatWorkerService::class.java
@@ -671,6 +699,12 @@ internal class RemoteLocalChatRunner(
         internal const val WORKER_SESSION_LOST_FIELD = "workerSessionLost"
         internal const val WORKER_STAGE_JOURNAL_FIELD = "workerStageJournal"
     }
+}
+
+internal fun workerStatsConfirmLoadedModelLoss(expectedLoaded: Boolean, statsJson: String): Boolean {
+    if (!expectedLoaded) return false
+    val stats = runCatching { JSONObject(statsJson) }.getOrNull() ?: return true
+    return !stats.optBoolean("loaded", false) && !stats.optBoolean("runtimeStatsDeferred", false)
 }
 
 internal enum class WorkerLoadResultDisposition {

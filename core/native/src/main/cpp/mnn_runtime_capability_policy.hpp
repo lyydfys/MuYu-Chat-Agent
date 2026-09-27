@@ -111,14 +111,11 @@ inline std::string composeMnnImageFirstPromptContent(
     return content;
 }
 
-// MNN 3.5's Qwen3.5 ChatMessages visual path is not system-turn safe.  A
-// controlled same-runtime A/B on the same bundle produces the correct red
-// circle / blue square answer with a user-only image prompt, while adding
-// either MCA's smoke system prompt or the generic "helpful assistant" system
-// turn makes the answer image-independent or semantically wrong.  Text-only
-// requests and non-Qwen3.5 multimodal models keep their system messages.
-inline bool shouldSuppressMnnMultimodalSystemPrompt(const std::string& modelType) {
-    return modelType == "qwen3_5" || modelType == "qwen3_5_moe";
+// Use the single-turn overload only when it can represent the complete request.
+// Every explicit role and historical turn otherwise goes to ChatMessages.
+template <typename Messages>
+inline bool useMnnSingleUserVisualResponse(const Messages& messages) {
+    return messages.size() == 1 && messages.front().first == "user";
 }
 
 // MNN's language chunker cannot preserve one atomic visual embedding across a

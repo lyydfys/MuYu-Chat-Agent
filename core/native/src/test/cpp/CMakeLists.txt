@@ -83,6 +83,16 @@ add_test(
         "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca_opencl_dispatch.cpp"
 )
 
+if(UNIX OR ANDROID)
+    add_executable(mca_opencl_execution_evidence_test opencl_execution_evidence_test.cpp)
+    target_compile_features(mca_opencl_execution_evidence_test PRIVATE cxx_std_17)
+    target_compile_options(mca_opencl_execution_evidence_test PRIVATE -UNDEBUG)
+    target_include_directories(mca_opencl_execution_evidence_test PRIVATE
+        "${MCA_REPOSITORY_ROOT}/third_party/MNN/3rd_party/OpenCLHeaders")
+    target_link_libraries(mca_opencl_execution_evidence_test PRIVATE ${CMAKE_DL_LIBS})
+    add_test(NAME mca_opencl_execution_evidence COMMAND mca_opencl_execution_evidence_test)
+endif()
+
 add_executable(
     mca_mnn_diffusion_batch_policy_test
     mnn_diffusion_batch_policy_test.cpp

@@ -19,6 +19,7 @@ enum class ContextCompressionTrigger {
 enum class ContextSummarySource {
     DETERMINISTIC,
     LOCAL_MODEL,
+    CLOUD_MODEL,
     HOST_IMPLEMENTATION
 }
 
@@ -58,6 +59,7 @@ data class ContextCompressionSettings(
     val minimumMessagesToCompress: Int = 2,
     val summaryMaxChars: Int = 2_400,
     val protectedMessageIndices: Set<Int> = emptySet(),
+    val protectedMessageIds: Set<String> = emptySet(),
     /** Old image turns are retained until a vision-aware summariser exists. */
     val preserveMultimodalMessages: Boolean = true,
     /** A caller must label an injected local/host summariser explicitly. */
@@ -91,7 +93,14 @@ data class ContextCompressionResult(
     val failureReason: String? = null,
     val summarySource: ContextSummarySource = ContextSummarySource.DETERMINISTIC,
     /** Original message indices retained because they carry system or durable user context. */
-    val protectedMessageIndices: Set<Int> = emptySet()
+    val protectedMessageIndices: Set<Int> = emptySet(),
+    val protectedMessageIds: Set<String> = emptySet(),
+    /** IDs of original turns included in this summary, excluding admission-trimmed turns. */
+    val summarySourceMessageIds: List<String> = emptyList(),
+    val structuredSummary: StructuredContextSummary = StructuredContextSummary(),
+    val summaryModelIdentity: String? = null,
+    val summaryRuntimeIdentity: String? = null,
+    val summaryDiagnostic: String? = null
 ) {
     val didCompress: Boolean
         get() = status == ContextCompressionStatus.COMPRESSED
@@ -103,8 +112,31 @@ const val CONTEXT_COMPRESSION_SUMMARY_MARKER: String = "[MCA_CONTEXT_SUMMARY v1]
 /** Explicit marker available to importers and editors for durable user memory. */
 const val CONTEXT_MEMORY_KEEP_MARKER: String = "[MCA_KEEP_MEMORY]"
 
+enum class ContextSummaryKind { FACT, TIMELINE, RELATIONSHIP, PREFERENCE, OPEN_TASK }
+
+/** An exact source excerpt, not a model-inferred fact. */
+data class ContextSummaryEvidence(
+    val kind: ContextSummaryKind,
+    val text: String,
+    val sourceMessageIds: List<String>,
+    val sourceCreatedAt: Long,
+    val sourceOffset: Int,
+    val sourceLength: Int,
+    val userPinned: Boolean,
+    val supersedesEvidenceId: String? = null
+)
+
+data class StructuredContextSummary(
+    val evidence: List<ContextSummaryEvidence> = emptyList(),
+    val sourceMessageCount: Int = 0,
+    val candidateExcerptCount: Int = 0,
+    val omittedExcerptCount: Int = 0,
+    val omittedCharacterCount: Int = 0,
+    val coverageLimited: Boolean = false
+)
+
 private val CONTEXT_MEMORY_LABEL_PATTERN = Regex(
-    """(?is)^(?:[-*]\s*)?(?:$CONTEXT_MEMORY_KEEP_MARKER|【(?:长期记忆|记忆|关键事实|重要事实|人物关系|关系|事件时间|时间线|未完成事项|待办)】|\[(?:memory|key facts?|important facts?|relationships?|timeline|unfinished|todo)\]|(?:长期记忆|记忆|关键事实|重要事实|人物关系|关系|事件时间|时间线|未完成事项|待办|memory|key facts?|important facts?|relationships?|timeline|unfinished|todo)\s*[:：])"""
+    """(?is)^(?:[-*]\s*)?(?:${Regex.escape(CONTEXT_MEMORY_KEEP_MARKER)}|【(?:长期记忆|记忆|关键事实|重要事实|人物关系|关系|事件时间|时间线|未完成事项|待办)】|\[(?:memory|key facts?|important facts?|relationships?|timeline|unfinished|todo)\]|(?:长期记忆|记忆|关键事实|重要事实|人物关系|关系|事件时间|时间线|未完成事项|待办|memory|key facts?|important facts?|relationships?|timeline|unfinished|todo)\s*[:：])"""
 )
 
 /**
@@ -117,37 +149,110 @@ internal fun isContextMemoryMessage(message: ChatMessage): Boolean =
 /** Default bounded summariser used when no local summary model is available. */
 object DeterministicContextSummarizer : ContextSummarizer {
     override fun summarize(input: ContextSummaryInput): String {
+        val structured = deterministicContextEvidence(input)
         val builder = StringBuilder(CONTEXT_COMPRESSION_SUMMARY_MARKER)
-            .append("\n以下是较早对话的压缩摘要，用于保持上下文连续性；如需逐字内容，请关闭压缩或提高上下文窗口。")
+            .append("\n较早对话的来源摘录；未列出的内容不代表已完整保留。")
 
         input.previousSummary
             ?.let(::summaryBodyWithoutMarker)
             ?.takeIf { it.isNotBlank() }
             ?.let { previous ->
-                builder.append("\n已有摘要：").append(previous.take(MAX_PREVIOUS_SUMMARY_CHARS))
+                val allowance = (input.maxChars / 4).coerceAtMost(MAX_PREVIOUS_SUMMARY_CHARS)
+                builder.append("\n已有摘要摘录：").append(previous.take(allowance))
+                if (previous.length > allowance) builder.append(" [已有摘要截断]")
             }
-
-        for ((ordinal, index) in input.historicalMessageIndices.withIndex()) {
-            val message = input.messages.getOrNull(index) ?: continue
-            val role = when (message.role) {
-                Role.USER -> "用户"
-                Role.ASSISTANT -> "助手"
-                Role.SYSTEM -> "系统"
-            }
-            val oneLine = message.content
-                .replace(Regex("\\s+"), " ")
-                .trim()
-                .let(::summaryBodyWithoutMarker)
-                .take(MAX_HISTORICAL_MESSAGE_CHARS)
-            if (oneLine.isNotBlank()) {
-                builder.append("\n").append(ordinal + 1).append(". ")
-                    .append(role).append("：").append(oneLine)
-            }
-            if (builder.length >= input.maxChars) break
+        for (evidence in structured.evidence) {
+            val line = "\n${evidence.kind.name} [${evidence.sourceMessageIds.single()}] ${evidence.text}"
+            if (builder.length + line.length + SUMMARY_COVERAGE_NOTE.length > input.maxChars) break
+            builder.append(line)
+        }
+        if (structured.coverageLimited || structured.evidence.any { it.text !in builder }) {
+            builder.append(SUMMARY_COVERAGE_NOTE.take((input.maxChars - builder.length).coerceAtLeast(0)))
         }
         return normalizeContextSummary(builder.toString(), input.maxChars)
     }
 }
+
+/** Selects bounded exact excerpts across the whole scanned source, including late facts. */
+fun deterministicContextEvidence(input: ContextSummaryInput): StructuredContextSummary {
+    val candidates = mutableListOf<ContextSummaryEvidence>()
+    var omittedCharacters = 0
+    for (index in input.historicalMessageIndices) {
+        val message = input.messages.getOrNull(index) ?: continue
+        val content = message.content
+        val scanLength = content.length.coerceAtMost(MAX_SOURCE_SCAN_CHARS)
+        omittedCharacters += content.length - scanLength
+        val source = content.substring(0, scanLength)
+        for (match in SUMMARY_SENTENCE_PATTERN.findAll(source)) {
+            val raw = match.value
+            var offset = 0
+            while (offset < raw.length) {
+                val end = (offset + MAX_EVIDENCE_CHARS).coerceAtMost(raw.length)
+                val piece = raw.substring(offset, end).trim()
+                if (piece.isNotEmpty()) {
+                    val leading = raw.substring(offset, end).indexOfFirst { !it.isWhitespace() }
+                    candidates += ContextSummaryEvidence(
+                        kind = classifyContextEvidence(piece),
+                        text = piece,
+                        sourceMessageIds = listOf(message.id),
+                        sourceCreatedAt = message.createdAt,
+                        sourceOffset = match.range.first + offset + leading,
+                        sourceLength = piece.length,
+                        userPinned = message.pinned
+                    )
+                }
+                offset = end
+            }
+        }
+    }
+    val evidenceBudget = (input.maxChars - SUMMARY_FIXED_OVERHEAD_CHARS).coerceAtLeast(0)
+    val selected = mutableListOf<ContextSummaryEvidence>()
+    var used = 0
+    // Relevant evidence gets priority, with source position as a stable tie breaker.
+    val ranked = candidates.withIndex().sortedWith(
+        compareByDescending<IndexedValue<ContextSummaryEvidence>> { evidencePriority(it.value) }
+            .thenBy { it.index }
+    )
+    for ((_, item) in ranked) {
+        val cost = item.text.length + item.sourceMessageIds.single().length + 32
+        if (selected.size >= MAX_SUMMARY_EVIDENCE || used + cost > evidenceBudget) continue
+        selected += item
+        used += cost
+    }
+    val ordered = selected.sortedWith(compareBy({ it.sourceCreatedAt }, { it.sourceMessageIds.single() }, { it.sourceOffset }))
+    return StructuredContextSummary(
+        evidence = ordered,
+        sourceMessageCount = input.historicalMessageIndices.size,
+        candidateExcerptCount = candidates.size,
+        omittedExcerptCount = candidates.size - ordered.size,
+        omittedCharacterCount = omittedCharacters,
+        coverageLimited = omittedCharacters > 0 || ordered.size < candidates.size
+    )
+}
+
+private fun classifyContextEvidence(text: String): ContextSummaryKind = when {
+    SUMMARY_OPEN_TASK_PATTERN.containsMatchIn(text) &&
+        !SUMMARY_TASK_COMPLETED_PATTERN.containsMatchIn(text) -> ContextSummaryKind.OPEN_TASK
+    SUMMARY_PREFERENCE_PATTERN.containsMatchIn(text) -> ContextSummaryKind.PREFERENCE
+    SUMMARY_RELATIONSHIP_PATTERN.containsMatchIn(text) -> ContextSummaryKind.RELATIONSHIP
+    SUMMARY_DATE_PATTERN.containsMatchIn(text) -> ContextSummaryKind.TIMELINE
+    else -> ContextSummaryKind.FACT
+}
+
+private fun evidencePriority(item: ContextSummaryEvidence): Int = when (item.kind) {
+    ContextSummaryKind.OPEN_TASK -> 5
+    ContextSummaryKind.TIMELINE -> 4
+    ContextSummaryKind.RELATIONSHIP -> 4
+    ContextSummaryKind.PREFERENCE -> 4
+    ContextSummaryKind.FACT -> 1
+}
+
+private val SUMMARY_SENTENCE_PATTERN = Regex("[^。！？!?;；.\\n]+[。！？!?;；.]?")
+private val SUMMARY_DATE_PATTERN = Regex("(?:\\b\\d{4}[-/]\\d{1,2}(?:[-/]\\d{1,2})?\\b|\\d{4}年\\d{1,2}月|昨天|今天|明天|上周|下周)")
+private val SUMMARY_RELATIONSHIP_PATTERN = Regex("(?i)(关系|父亲|母亲|妻子|丈夫|伴侣|朋友|姐姐|妹妹|哥哥|弟弟|father|mother|wife|husband|partner|friend|sister|brother)")
+private val SUMMARY_PREFERENCE_PATTERN = Regex("(?i)(偏好|喜欢|不喜欢|讨厌|请用|习惯|prefer|preference|like|dislike|avoid)")
+private val SUMMARY_OPEN_TASK_PATTERN = Regex("(?i)(待办|未完成|还没|计划|需要|待处理|todo|pending|need to|plan to)")
+private val SUMMARY_TASK_COMPLETED_PATTERN = Regex("(?i)(已完成|完成了|已解决|done|completed|resolved)")
 
 /**
  * Conservative token estimate for the complete logical request. This is only a
@@ -191,13 +296,19 @@ fun compressChatRequestContext(
     fallbackAdmission: (ChatRequest) -> ContextWindowAdmission = ::localContextWindowAdmission
 ): ContextCompressionResult {
     val thresholdPercent = settings.threshold.percent
+    val incomingRequest = request
+    val protectedIds = incomingRequest.protectedMessageIds + settings.protectedMessageIds +
+        settings.protectedMessageIndices.mapNotNull { incomingRequest.messages.getOrNull(it)?.id }
+    val request = if (protectedIds == incomingRequest.protectedMessageIds) incomingRequest else
+        incomingRequest.copy(protectedMessageIds = protectedIds)
     if (!shouldCompressContext(request, estimatedTokens, settings, trigger)) {
         return ContextCompressionResult(
             status = ContextCompressionStatus.NOT_NEEDED,
             request = request,
             trigger = trigger,
             estimatedTokensBefore = estimatedTokens,
-            thresholdPercent = thresholdPercent
+            thresholdPercent = thresholdPercent,
+            protectedMessageIds = request.protectedMessageIds
         )
     }
 
@@ -208,6 +319,8 @@ fun compressChatRequestContext(
         val protected = request.messages.mapIndexedNotNull { index, message ->
             if (message.role == Role.SYSTEM ||
                 index in settings.protectedMessageIndices ||
+                message.id in request.protectedMessageIds ||
+                message.pinned ||
                 (settings.preserveMultimodalMessages && message.imageAttachments.isNotEmpty()) ||
                 index in existingSummaryIndices ||
                 isContextMemoryMessage(message)
@@ -223,7 +336,9 @@ fun compressChatRequestContext(
                 request = request,
                 trigger = trigger,
                 estimatedTokensBefore = estimatedTokens,
-                thresholdPercent = thresholdPercent
+                thresholdPercent = thresholdPercent,
+                protectedMessageIndices = protected,
+                protectedMessageIds = request.protectedMessageIds
             )
         }
 
@@ -239,6 +354,7 @@ fun compressChatRequestContext(
             previousSummary = previousSummary,
             maxChars = settings.summaryMaxChars
         )
+        val deterministicEvidence = deterministicContextEvidence(summaryInput)
         val builtSummary = buildContextSummary(
             summarizer = settings.summarizer,
             input = summaryInput,
@@ -325,7 +441,8 @@ fun compressChatRequestContext(
                     fallbackAdmission = safeFallback,
                     failureReason = "压缩结果未通过上下文预算，已使用安全保留策略。",
                     summarySource = builtSummary.source,
-                    protectedMessageIndices = protected
+                    protectedMessageIndices = protected,
+                    protectedMessageIds = request.protectedMessageIds
                 )
             }
             val rejectedAdmission = compressedAdmissionResult ?: originalAdmission
@@ -343,9 +460,20 @@ fun compressChatRequestContext(
                 failureReason = rejectedAdmission?.userMessage
                     ?: "上下文压缩和保留策略都无法满足当前窗口预算。",
                 summarySource = builtSummary.source,
-                protectedMessageIndices = protected
+                protectedMessageIndices = protected,
+                protectedMessageIds = request.protectedMessageIds
             )
         }
+        val finalSummaryText = compressedAdmissionRequest.messages
+            .firstOrNull { it.content.startsWith(CONTEXT_COMPRESSION_SUMMARY_MARKER) }
+            ?.content.orEmpty()
+        val survivingEvidence = deterministicEvidence.evidence.filter { it.text in finalSummaryText }
+        val coveredEvidence = deterministicEvidence.copy(
+            evidence = survivingEvidence,
+            omittedExcerptCount = deterministicEvidence.candidateExcerptCount - survivingEvidence.size,
+            coverageLimited = deterministicEvidence.coverageLimited ||
+                survivingEvidence.size < deterministicEvidence.evidence.size
+        )
         ContextCompressionResult(
             status = ContextCompressionStatus.COMPRESSED,
             request = compressedAdmissionRequest,
@@ -358,9 +486,13 @@ fun compressChatRequestContext(
             thresholdPercent = thresholdPercent,
             fallbackAdmission = compressedAdmissionResult,
             summarySource = builtSummary.source,
-            protectedMessageIndices = protected
+            protectedMessageIndices = protected,
+            protectedMessageIds = request.protectedMessageIds,
+            summarySourceMessageIds = historical.map { request.messages[it].id },
+            structuredSummary = coveredEvidence
         )
     }.getOrElse { error ->
+        if (error is java.util.concurrent.CancellationException) throw error
         val admission = runCatching { fallbackAdmission(request) }.getOrNull()
         ContextCompressionResult(
             status = ContextCompressionStatus.FAILED,
@@ -370,7 +502,8 @@ fun compressChatRequestContext(
             thresholdPercent = thresholdPercent,
             fallbackAdmission = admission,
             failureReason = error.message?.take(240) ?: error::class.java.simpleName,
-            summarySource = ContextSummarySource.DETERMINISTIC
+            summarySource = ContextSummarySource.DETERMINISTIC,
+            protectedMessageIds = request.protectedMessageIds
         )
     }
 }
@@ -386,6 +519,7 @@ private fun buildContextSummary(
     declaredSource: ContextSummarySource
 ): BuiltContextSummary {
     val generated = runCatching { summarizer.summarize(input) }
+        .onFailure { if (it is java.util.concurrent.CancellationException) throw it }
         .getOrNull()
         ?.takeIf { it.isNotBlank() }
     return BuiltContextSummary(
@@ -411,7 +545,11 @@ private fun summaryBodyWithoutMarker(summary: String): String =
         .trim()
 
 private const val MAX_PREVIOUS_SUMMARY_CHARS = 1_200
-private const val MAX_HISTORICAL_MESSAGE_CHARS = 420
+private const val MAX_EVIDENCE_CHARS = 320
+private const val MAX_SOURCE_SCAN_CHARS = 32_000
+private const val MAX_SUMMARY_EVIDENCE = 20
+private const val SUMMARY_FIXED_OVERHEAD_CHARS = 260
+private const val SUMMARY_COVERAGE_NOTE = "\n[覆盖有限：未列出的来源片段仍需查看原始消息。]"
 private const val MAX_SUMMARY_ADMISSION_RETRIES = 6
 private const val MIN_COMPACT_SUMMARY_BODY_CHARS = 64
 

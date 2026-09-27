@@ -37,19 +37,30 @@ internal object InternalBrowserUrlPolicy {
     fun allowedHost(rawUrl: String): String? =
         parseHttpsUrl(rawUrl)?.host?.normalizedHost()
 
+    fun allowedOrigin(rawUrl: String): String? = parseHttpsUrl(rawUrl)?.let { uri ->
+        val host = uri.host.lowercase().trimEnd('.')
+        "https://$host" + if (effectivePort(uri) == 443) "" else ":${effectivePort(uri)}"
+    }
+
     fun allowsNavigation(
         initialUrl: String,
         candidateUrl: String,
-        additionalAllowedHosts: Set<String> = emptySet()
+        additionalAllowedHosts: Set<String> = emptySet(),
+        additionalApprovedOrigins: Set<String> = emptySet()
     ): Boolean {
-        val initialHost = allowedHost(initialUrl) ?: return false
+        val initial = parseHttpsUrl(initialUrl) ?: return false
+        val initialHost = initial.host.normalizedHost()
         val candidate = parseHttpsUrl(candidateUrl) ?: return false
         val candidateHost = candidate.host.normalizedHost()
         val normalizedAdditionalHosts = additionalAllowedHosts
             .mapNotNull { parseHost(it) }
-        return candidateHost == initialHost ||
-            candidateHost.endsWith(".$initialHost") ||
-            normalizedAdditionalHosts.any { candidateHost == it || candidateHost.endsWith(".$it") }
+        val sourceAllowed = effectivePort(candidate) == effectivePort(initial) &&
+            (candidateHost == initialHost || candidateHost.endsWith(".$initialHost"))
+        val legacyHostAllowed = effectivePort(candidate) == 443 && normalizedAdditionalHosts.any {
+            candidateHost == it || candidateHost.endsWith(".$it")
+        }
+        val approvedOrigin = allowedOrigin(candidateUrl)
+        return sourceAllowed || legacyHostAllowed || approvedOrigin in additionalApprovedOrigins
     }
 
     private fun parseHost(rawHost: String): String? {
@@ -61,13 +72,16 @@ internal object InternalBrowserUrlPolicy {
     private fun parseHttpsUrl(rawUrl: String): URI? {
         val trimmed = rawUrl.trim()
         if (trimmed.length > 4096 || trimmed.isBlank()) return null
+        if (trimmed.any { it <= ' ' || it == '\u007f' }) return null
         val uri = runCatching { URI(trimmed) }.getOrNull() ?: return null
         if (!uri.scheme.equals("https", ignoreCase = true)) return null
         if (uri.userInfo != null || uri.host.isNullOrBlank()) return null
-        if (uri.fragment?.contains("\n") == true) return null
+        if (uri.port !in -1..65535 || uri.port == 0) return null
         return uri
     }
 
+    private fun effectivePort(uri: URI): Int = if (uri.port == -1) 443 else uri.port
+
     private fun String.normalizedHost(): String =
-        trimEnd('.').removePrefix("www.").lowercase()
+        trimEnd('.').lowercase().removePrefix("www.")
 }

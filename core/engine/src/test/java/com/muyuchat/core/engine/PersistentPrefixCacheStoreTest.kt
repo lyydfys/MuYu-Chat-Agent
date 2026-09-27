@@ -83,6 +83,27 @@ class PersistentPrefixCacheStoreTest {
     }
 
     @Test
+    fun clearingSessionFingerprintRemovesEveryModelVariantButPreservesOtherSessions() = withRoot { root ->
+        val store = PersistentPrefixCacheStore(root, maxBytes = 16_384L)
+        val deletedFingerprint = digest("full-session-prefix-v1\ndeleted-session")
+        val retainedFingerprint = digest("full-session-prefix-v1\nretained-session")
+        val first = key("deleted-one").copy(prefixFingerprint = deletedFingerprint)
+        val second = key("deleted-two").copy(prefixFingerprint = deletedFingerprint)
+        val retained = key("retained").copy(prefixFingerprint = retainedFingerprint)
+        val fixedPrefix = key("fixed-prefix")
+        listOf(first, second, retained, fixedPrefix).forEach { cacheKey ->
+            assertNotNull(store.save(cacheKey, "state-${cacheKey.cacheId}".toByteArray()))
+        }
+
+        assertTrue(store.clearPrefixFingerprints(setOf(deletedFingerprint)))
+        assertNull(store.load(first))
+        assertNull(store.load(second))
+        assertNotNull(store.load(retained))
+        assertNotNull(store.load(fixedPrefix))
+        assertEquals(2, store.entries().size)
+    }
+
+    @Test
     fun nativeStagingCommitSyncsStateBeforePublishingIt() = withRoot { root ->
         val events = mutableListOf<String>()
         val key = key("native-sync")

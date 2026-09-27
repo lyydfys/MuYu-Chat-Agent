@@ -40,6 +40,26 @@ private const val MAX_KNOWLEDGE_BASE_IDS_PER_ROOM_OPERATION = 32
 private const val MAX_KNOWLEDGE_CHUNKS_PER_ROOM_PAGE = 256
 private const val MAX_PERSISTED_VISION_HASH_BYTES = 64L * 1024L * 1024L
 private const val DEFAULT_HASH_BUFFER_BYTES = 32 * 1024
+private const val MAX_MEMORY_RECORD_CONTENT_CHARS = 12_000
+private const val MAX_MEMORY_ID_CHARS = 128
+internal const val DELETE_CONSUMED_MEMORY_TURNS_SQL =
+    "DELETE FROM assistant_memory_turns WHERE assistantId = :assistantId " +
+        "AND isSummarized = 0 AND id IN (:ids)"
+internal const val DELETE_MEMORY_TURNS_FOR_SESSIONS_SQL =
+    "DELETE FROM assistant_memory_turns WHERE sessionId IN (:sessionIds)"
+internal const val MEMORY_SESSION_OWNER_EXISTS_SQL =
+    "SELECT COUNT(*) > 0 FROM chat_sessions WHERE id = :chatSessionId AND assistantId = :assistantId"
+internal const val MEMORY_ASSISTANT_REPLY_EXISTS_SQL =
+    "SELECT COUNT(*) > 0 FROM chat_messages WHERE sessionId = :chatSessionId " +
+        "AND messageId = :messageId AND role = 'ASSISTANT'"
+internal const val DELETE_STALE_PENDING_MEMORY_TURNS_SQL =
+    "DELETE FROM assistant_memory_turns WHERE isSummarized = 0 AND NOT EXISTS (" +
+        "SELECT 1 FROM chat_messages INNER JOIN chat_sessions " +
+        "ON chat_sessions.id = chat_messages.sessionId " +
+        "WHERE chat_messages.sessionId = assistant_memory_turns.sessionId " +
+        "AND chat_messages.messageId = assistant_memory_turns.id " +
+        "AND chat_messages.role = 'ASSISTANT' " +
+        "AND chat_sessions.assistantId = assistant_memory_turns.assistantId)"
 
 /** Hard caps for persisted chat history, independent of the live conversation buffer. */
 internal data class ChatHistoryPersistenceLimits(
@@ -186,7 +206,8 @@ class ChatSessionStore(context: Context) {
      */
     fun save(
         sessions: List<ChatSessionRecord>,
-        knowledgeBindings: Map<String, Set<String>>
+        knowledgeBindings: Map<String, Set<String>>,
+        deletedSessionIds: Set<String> = emptySet()
     ) = runBlocking(Dispatchers.IO) {
         val boundedSessions = ChatHistoryPersistenceBounds.bound(sessions)
         database.chatSessionDao().replaceAllWithKnowledgeBindings(
@@ -199,7 +220,8 @@ class ChatSessionStore(context: Context) {
                         knowledgeBaseId = knowledgeBaseId
                     )
                 }
-            }
+            },
+            deletedSessionIds = deletedSessionIds.toList()
         )
     }
 
@@ -279,7 +301,55 @@ class ChatSessionStore(context: Context) {
     }
 
     fun saveMemories(memories: List<MemoryRecord>) = runBlocking(Dispatchers.IO) {
-        database.chatSessionDao().replaceMemories(memories)
+        val bounded = memories.map { record ->
+            requireNotNull(record.boundedForPersistence()) { "Invalid memory record." }
+        }
+        bounded.groupBy { it.assistantId }.forEach { (assistantId, records) ->
+            check(database.chatSessionDao().replaceMemoriesForAssistant(assistantId, records)) {
+                "Memory IDs must belong to their assistant."
+            }
+        }
+    }
+
+    fun saveMemories(assistantId: String, memories: List<MemoryRecord>): Boolean =
+        runBlocking(Dispatchers.IO) {
+            val bounded = memories.map { it.boundedForPersistence() ?: return@runBlocking false }
+            database.chatSessionDao().replaceMemoriesForAssistant(assistantId, bounded)
+        }
+
+    fun loadMemoryTurns(assistantId: String): List<AssistantMemoryTurnRecord> =
+        runBlocking(Dispatchers.IO) {
+            database.chatSessionDao().pendingMemoryTurns(
+                assistantId,
+                AssistantMemoryTurnRecord.MAX_PENDING_FETCH
+            ).map { it.toRecord() }
+        }
+
+    fun appendMemoryTurn(turn: AssistantMemoryTurnRecord): Boolean = runBlocking(Dispatchers.IO) {
+        val bounded = turn.boundedForPersistence() ?: return@runBlocking false
+        database.chatSessionDao().appendMemoryTurnForExistingSession(bounded.toEntity())
+    }
+
+    fun commitMemorySummary(
+        assistantId: String,
+        consumedTurnIds: List<String>,
+        summary: MemoryRecord
+    ): Boolean = runBlocking(Dispatchers.IO) {
+        val bounded = summary.boundedForPersistence() ?: return@runBlocking false
+        database.chatSessionDao().commitMemorySummary(assistantId, consumedTurnIds, bounded)
+    }
+
+    fun upsertMemory(record: MemoryRecord): Boolean = runBlocking(Dispatchers.IO) {
+        val bounded = record.boundedForPersistence() ?: return@runBlocking false
+        database.chatSessionDao().upsertMemoryRecord(bounded)
+    }
+
+    fun deleteMemory(id: String, assistantId: String): Boolean = runBlocking(Dispatchers.IO) {
+        database.chatSessionDao().deleteMemoryForAssistant(id, assistantId) > 0
+    }
+
+    fun deleteAssistantMemoryData(assistantId: String) = runBlocking(Dispatchers.IO) {
+        database.chatSessionDao().deleteAssistantMemoryData(assistantId)
     }
 
     private suspend fun migrateLegacyJsonIfNeeded(): List<ChatSessionRecord> {
@@ -384,7 +454,7 @@ class ChatSessionStore(context: Context) {
         ChatSessionRecord(
             id = optString("id"),
             title = optString("title", "新对话"),
-            messages = optJSONArray("messages").toChatMessages(),
+            messages = optJSONArray("messages").toChatMessages(optString("id")),
             pinned = optBoolean("pinned", false),
             manualTitle = optBoolean("manualTitle", false),
             updatedAt = optLong("updatedAt", System.currentTimeMillis()),
@@ -396,17 +466,20 @@ class ChatSessionStore(context: Context) {
             ),
             modelMode = optString("modelMode").takeIf { it.isNotBlank() },
             modelId = optString("modelId").takeIf { it.isNotBlank() },
+            contextSummaries = contextSummariesFromJson(optString("contextSummariesJson")),
             appearanceOverride = ChatAppearance.fromJsonOrNull(
                 optJSONObject("appearanceOverride")?.toString()
                     ?: optString("appearanceOverrideJson").takeIf { it.isNotBlank() }
             )
         )
 
-    private fun JSONArray?.toChatMessages(): List<ChatMessage> {
+    private fun JSONArray?.toChatMessages(sessionId: String): List<ChatMessage> {
         if (this == null) return emptyList()
         return List(length()) { index ->
             val json = getJSONObject(index)
             ChatMessage(
+                id = json.optString("id").takeIf { it.isNotBlank() }
+                    ?: "$sessionId:$index:${json.optLong("createdAt")}",
                 role = json.optRole(),
                 content = json.optString("content"),
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
@@ -419,7 +492,10 @@ class ChatSessionStore(context: Context) {
                 generationMetrics = ChatGenerationMetrics.fromJson(json.optJSONObject("generationMetrics")),
                 generatedImageRequest = ChatGeneratedImageRequest.fromJsonOrNull(
                     json.optJSONObject("generatedImageRequest")
-                )
+                ),
+                pinned = json.optBoolean("pinned", false),
+                contextAssemblyTraceJson = json.optJSONObject("contextAssemblyTrace")?.toString()
+                    ?: json.optString("contextAssemblyTraceJson").takeIf { it.isNotBlank() }
             )
         }
     }
@@ -436,13 +512,14 @@ class ChatSessionStore(context: Context) {
         ImageAssetEntity::class,
         FileAssetEntity::class,
         MemoryEntity::class,
+        AssistantMemoryTurnEntity::class,
         AssistantEntity::class,
         KnowledgeBaseEntity::class,
         KnowledgeDocumentEntity::class,
         KnowledgeChunkEntity::class,
         ChatKnowledgeBaseBindingEntity::class
     ],
-    version = 23,
+    version = 26,
     exportSchema = false
 )
 abstract class McaRoomDatabase : RoomDatabase() {
@@ -474,7 +551,10 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         MIGRATION_19_20,
                         MIGRATION_20_21,
                         MIGRATION_21_22,
-                        MIGRATION_22_23
+                        MIGRATION_22_23,
+                        MIGRATION_23_24,
+                        MIGRATION_24_25,
+                        MIGRATION_25_26
                     )
                     .build()
                     .also { instance = it }
@@ -648,6 +728,46 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     found
                 }
                 if (!exists) db.execSQL("ALTER TABLE chat_messages ADD COLUMN generatedImageJson TEXT")
+            }
+        }
+
+        internal val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_sessions ADD COLUMN contextSummariesJson TEXT")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN messageId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("UPDATE chat_messages SET messageId = sessionId || ':' || position || ':' || createdAt WHERE messageId = ''")
+            }
+        }
+
+        internal val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE chat_messages ADD COLUMN contextAssemblyTraceJson TEXT")
+            }
+        }
+
+        internal val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE assistants ADD COLUMN memorySummaryInterval INTEGER NOT NULL DEFAULT 12"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS assistant_memory_turns (
+                        id TEXT NOT NULL PRIMARY KEY,
+                        assistantId TEXT NOT NULL,
+                        sessionId TEXT NOT NULL,
+                        userText TEXT NOT NULL,
+                        assistantText TEXT NOT NULL,
+                        createdAt INTEGER NOT NULL,
+                        isSummarized INTEGER NOT NULL DEFAULT 0
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_assistant_memory_turns_assistantId_isSummarized_createdAt " +
+                        "ON assistant_memory_turns(assistantId, isSummarized, createdAt)"
+                )
             }
         }
 
@@ -1235,6 +1355,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     sourceReferencesJson TEXT NOT NULL DEFAULT '[]',
                     webSearchTraceJson TEXT NOT NULL DEFAULT '{}',
                     generationMetricsJson TEXT,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    contextAssemblyTraceJson TEXT,
                     PRIMARY KEY(sessionId, position)
                 )
                 """.trimIndent()
@@ -1244,7 +1366,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 INSERT OR REPLACE INTO chat_messages_new (
                     sessionId, position, role, content, createdAt, tokenCount,
                     reasoningContent, reasoningDurationMs, imageAttachmentsJson, sourceReferencesJson, webSearchTraceJson,
-                    generationMetricsJson
+                    generationMetricsJson, pinned, contextAssemblyTraceJson
                 )
                 SELECT
                     ${legacyColumnOrDefault(columns, "sessionId", "''")},
@@ -1258,7 +1380,9 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     ${legacyColumnOrDefault(columns, "imageAttachmentsJson", "'[]'")},
                     ${legacyColumnOrDefault(columns, "sourceReferencesJson", "'[]'")},
                     ${legacyColumnOrDefault(columns, "webSearchTraceJson", "'{}'")},
-                    ${legacyNullableColumn(columns, "generationMetricsJson")}
+                    ${legacyNullableColumn(columns, "generationMetricsJson")},
+                    ${legacyColumnOrDefault(columns, "pinned", "0")},
+                    ${legacyNullableColumn(columns, "contextAssemblyTraceJson")}
                 FROM chat_messages
                 """.trimIndent()
             )
@@ -1297,6 +1421,9 @@ abstract class McaRoomDatabase : RoomDatabase() {
 interface ChatSessionDao {
     @Query("SELECT * FROM chat_sessions ORDER BY pinned DESC, updatedAt DESC")
     suspend fun sessions(): List<ChatSessionEntity>
+
+    @Query("UPDATE chat_sessions SET modelId = :newModelId WHERE modelId = :oldModelId")
+    suspend fun migrateSessionModelId(oldModelId: String, newModelId: String): Int
 
     @Query("SELECT * FROM chat_messages WHERE sessionId = :sessionId ORDER BY position ASC")
     suspend fun messages(sessionId: String): List<ChatMessageEntity>
@@ -1355,11 +1482,56 @@ interface ChatSessionDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMemories(memories: List<MemoryEntity>)
 
-    @Query("DELETE FROM memories")
-    suspend fun clearMemories()
+    @Query("SELECT * FROM memories WHERE id = :id LIMIT 1")
+    suspend fun memoryById(id: String): MemoryEntity?
+
+    @Query("SELECT id FROM memories WHERE assistantId != :assistantId AND id IN (:ids)")
+    suspend fun memoryIdsOwnedByOtherAssistant(assistantId: String, ids: List<String>): List<String>
+
+    @Query("DELETE FROM memories WHERE assistantId = :assistantId")
+    suspend fun clearMemoriesForAssistant(assistantId: String)
+
+    @Query("DELETE FROM assistant_memory_turns WHERE assistantId = :assistantId")
+    suspend fun clearMemoryTurnsForAssistant(assistantId: String)
+
+    @Query("DELETE FROM memories WHERE assistantId = :assistantId AND source IN ('automatic', 'auto')")
+    suspend fun clearAutomaticMemoriesForAssistant(assistantId: String)
+
+    @Query("DELETE FROM memories WHERE id = :id AND assistantId = :assistantId")
+    suspend fun deleteMemoryForAssistant(id: String, assistantId: String): Int
+
+    @Query(
+        "SELECT * FROM assistant_memory_turns WHERE assistantId = :assistantId " +
+            "AND isSummarized = 0 ORDER BY createdAt ASC, id ASC LIMIT :limit"
+    )
+    suspend fun pendingMemoryTurns(assistantId: String, limit: Int): List<AssistantMemoryTurnEntity>
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertMemoryTurn(turn: AssistantMemoryTurnEntity): Long
+
+    @Query(
+        "SELECT id FROM assistant_memory_turns WHERE assistantId = :assistantId " +
+            "AND isSummarized = 0 AND id IN (:ids)"
+    )
+    suspend fun pendingMemoryTurnIds(assistantId: String, ids: List<String>): List<String>
+
+    @Query(DELETE_CONSUMED_MEMORY_TURNS_SQL)
+    suspend fun deleteConsumedMemoryTurns(assistantId: String, ids: List<String>): Int
+
+    @Query(DELETE_MEMORY_TURNS_FOR_SESSIONS_SQL)
+    suspend fun deleteMemoryTurnsForSessions(sessionIds: List<String>): Int
+
+    @Query(DELETE_STALE_PENDING_MEMORY_TURNS_SQL)
+    suspend fun deleteStalePendingMemoryTurns(): Int
+
+    @Query("DELETE FROM assistant_memory_turns WHERE assistantId = :assistantId AND isSummarized = 1")
+    suspend fun deleteLegacySummarizedMemoryTurns(assistantId: String): Int
 
     @Query("SELECT * FROM assistants ORDER BY updatedAt DESC")
     suspend fun assistants(): List<AssistantEntity>
+
+    @Query("UPDATE assistants SET defaultModelId = :newModelId WHERE defaultModelId = :oldModelId")
+    suspend fun migrateAssistantDefaultModelId(oldModelId: String, newModelId: String): Int
 
     @Query("UPDATE chat_sessions SET appearanceJson = :appearanceJson WHERE id = :sessionId")
     suspend fun setSessionAppearance(sessionId: String, appearanceJson: String?): Int
@@ -1480,6 +1652,12 @@ interface ChatSessionDao {
     @Query("SELECT COUNT(*) > 0 FROM chat_sessions WHERE id = :chatSessionId")
     suspend fun chatSessionExists(chatSessionId: String): Boolean
 
+    @Query(MEMORY_SESSION_OWNER_EXISTS_SQL)
+    suspend fun memorySessionOwnedByAssistant(chatSessionId: String, assistantId: String): Boolean
+
+    @Query(MEMORY_ASSISTANT_REPLY_EXISTS_SQL)
+    suspend fun assistantMessageExists(chatSessionId: String, messageId: String): Boolean
+
     @Query("SELECT id FROM knowledge_bases WHERE id IN (:knowledgeBaseIds)")
     suspend fun existingKnowledgeBaseIds(knowledgeBaseIds: List<String>): List<String>
 
@@ -1513,7 +1691,8 @@ interface ChatSessionDao {
                 ),
                 modelMode = session.modelMode,
                 modelId = session.modelId,
-                appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson)
+                appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson),
+                contextSummaries = contextSummariesFromJson(session.contextSummariesJson)
             )
         }
 
@@ -1529,6 +1708,7 @@ interface ChatSessionDao {
             clearMessages()
             clearKnowledgeBindings()
             clearSessions()
+            deleteStalePendingMemoryTurns()
             return
         }
 
@@ -1559,6 +1739,7 @@ interface ChatSessionDao {
         pruneMessages(liveSessionIds)
         pruneKnowledgeBindings(liveSessionIds)
         pruneSessions(liveSessionIds)
+        deleteStalePendingMemoryTurns()
     }
 
     /** Keeps the chat's asset reference and image-library row in the same commit. */
@@ -1576,13 +1757,16 @@ interface ChatSessionDao {
     suspend fun replaceAllWithKnowledgeBindings(
         records: List<ChatSessionRecord>,
         bindingSessionIds: List<String>,
-        bindings: List<ChatKnowledgeBaseBindingEntity>
+        bindings: List<ChatKnowledgeBaseBindingEntity>,
+        deletedSessionIds: List<String> = emptyList()
     ) {
         val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
         reconcileSnapshot(boundedRecords)
+        val liveSessionIds = boundedRecords.mapTo(hashSetOf()) { it.id }
+        val removedIds = deletedSessionIds.distinct().filter { it !in liveSessionIds }
+        if (removedIds.isNotEmpty()) deleteMemoryTurnsForSessions(removedIds)
         if (boundedRecords.isEmpty() || bindingSessionIds.isEmpty()) return
 
-        val liveSessionIds = boundedRecords.mapTo(hashSetOf()) { it.id }
         val bindingsBySession = bindings.groupBy { it.chatSessionId }
         bindingSessionIds
             .asSequence()
@@ -1625,10 +1809,61 @@ interface ChatSessionDao {
         memories(assistantId).map { it.toMemoryRecord() }
 
     @Transaction
-    suspend fun replaceMemories(records: List<MemoryRecord>) {
-        clearMemories()
-        if (records.isEmpty()) return
+    suspend fun replaceMemoriesForAssistant(assistantId: String, records: List<MemoryRecord>): Boolean {
+        if (assistantId.isBlank() || records.any { it.assistantId != assistantId }) return false
+        val ids = records.map { it.id }
+        if (ids.distinct().size != ids.size) return false
+        if (ids.isNotEmpty() && memoryIdsOwnedByOtherAssistant(assistantId, ids).isNotEmpty()) return false
+        clearMemoriesForAssistant(assistantId)
         insertMemories(records.map { it.toEntity() })
+        return true
+    }
+
+    @Transaction
+    suspend fun deleteAssistantMemoryData(assistantId: String) {
+        clearMemoriesForAssistant(assistantId)
+        clearMemoryTurnsForAssistant(assistantId)
+    }
+
+    @Transaction
+    suspend fun appendMemoryTurnForExistingSession(turn: AssistantMemoryTurnEntity): Boolean {
+        if (!memorySessionOwnedByAssistant(turn.sessionId, turn.assistantId) ||
+            !assistantMessageExists(turn.sessionId, turn.id)) return false
+        return insertMemoryTurn(turn) != -1L
+    }
+
+    @Transaction
+    suspend fun upsertMemoryRecord(record: MemoryRecord): Boolean {
+        val existing = memoryById(record.id)
+        if (existing != null && existing.assistantId != record.assistantId) return false
+        if (existing?.source == "manual" && record.source == "automatic") return false
+        insertMemories(listOf(record.toEntity()))
+        return true
+    }
+
+    @Transaction
+    suspend fun commitMemorySummary(
+        assistantId: String,
+        consumedTurnIds: List<String>,
+        summary: MemoryRecord
+    ): Boolean {
+        val ids = consumedTurnIds.distinct()
+        if (assistantId.isBlank() || summary.assistantId != assistantId ||
+            summary.source != "automatic" || ids.isEmpty() ||
+            ids.size != consumedTurnIds.size || ids.size > AssistantMemoryTurnRecord.MAX_PENDING_FETCH
+        ) return false
+        if (pendingMemoryTurnIds(assistantId, ids).toSet() != ids.toSet()) return false
+        val existing = memoryById(summary.id)
+        if (existing != null && (existing.assistantId != assistantId || existing.source != "automatic")) {
+            return false
+        }
+        check(deleteConsumedMemoryTurns(assistantId, ids) == ids.size) {
+            "Pending memory turns changed during summary commit."
+        }
+        deleteLegacySummarizedMemoryTurns(assistantId)
+        clearAutomaticMemoriesForAssistant(assistantId)
+        insertMemories(listOf(summary.toEntity()))
+        return true
     }
 
     @Transaction
@@ -1767,7 +2002,8 @@ data class ChatSessionEntity(
     val assistantSnapshotJson: String? = null,
     val modelMode: String? = null,
     val modelId: String? = null,
-    val appearanceJson: String? = null
+    val appearanceJson: String? = null,
+    val contextSummariesJson: String? = null
 )
 
 @Entity(
@@ -1824,6 +2060,20 @@ data class MemoryEntity(
 )
 
 @Entity(
+    tableName = "assistant_memory_turns",
+    indices = [Index(value = ["assistantId", "isSummarized", "createdAt"])]
+)
+data class AssistantMemoryTurnEntity(
+    @PrimaryKey val id: String,
+    val assistantId: String,
+    val sessionId: String,
+    val userText: String,
+    val assistantText: String,
+    val createdAt: Long,
+    @ColumnInfo(defaultValue = "0") val isSummarized: Boolean = false
+)
+
+@Entity(
     tableName = "assistants",
     indices = [Index("updatedAt")]
 )
@@ -1839,6 +2089,8 @@ data class AssistantEntity(
     val paramsJson: String,
     val characterCardJson: String?,
     val memoryEnabled: Boolean,
+    @ColumnInfo(defaultValue = "12") val memorySummaryInterval: Int =
+        AssistantRecord.DEFAULT_MEMORY_SUMMARY_INTERVAL,
     val webSearchEnabled: Boolean,
     val fileContextEnabled: Boolean,
     val appearanceJson: String? = null,
@@ -1959,7 +2211,12 @@ data class ChatMessageEntity(
     @ColumnInfo(defaultValue = "{}")
     val webSearchTraceJson: String = "{}",
     val generationMetricsJson: String? = null,
-    val generatedImageJson: String? = null
+    val generatedImageJson: String? = null,
+    @ColumnInfo(defaultValue = "0")
+    val pinned: Boolean = false,
+    val contextAssemblyTraceJson: String? = null,
+    @ColumnInfo(defaultValue = "''")
+    val messageId: String = ""
 )
 
 private const val SERIALIZED_ROW_OVERHEAD_BYTES = 16L
@@ -1984,12 +2241,14 @@ private fun ChatSessionEntity.serializedByteCount(): Long =
         .saturatingAdd(modelMode.nullableSerializedFieldByteCount())
         .saturatingAdd(modelId.nullableSerializedFieldByteCount())
         .saturatingAdd(appearanceJson.nullableSerializedFieldByteCount())
+        .saturatingAdd(contextSummariesJson.nullableSerializedFieldByteCount())
 
 private fun ChatMessageEntity.serializedByteCount(): Long =
     SERIALIZED_ROW_OVERHEAD_BYTES
         .saturatingAdd(sessionId.serializedFieldByteCount())
         .saturatingAdd(4L) // position
         .saturatingAdd(role.serializedFieldByteCount())
+        .saturatingAdd(messageId.serializedFieldByteCount())
         .saturatingAdd(content.serializedFieldByteCount())
         .saturatingAdd(8L) // createdAt
         .saturatingAdd(if (tokenCount == null) SERIALIZED_NULL_FIELD_BYTES else 5L)
@@ -2000,6 +2259,8 @@ private fun ChatMessageEntity.serializedByteCount(): Long =
         .saturatingAdd(webSearchTraceJson.serializedFieldByteCount())
         .saturatingAdd(generationMetricsJson.nullableSerializedFieldByteCount())
         .saturatingAdd(generatedImageJson.nullableSerializedFieldByteCount())
+        .saturatingAdd(1L)
+        .saturatingAdd(contextAssemblyTraceJson.nullableSerializedFieldByteCount())
 
 private fun String.serializedFieldByteCount(): Long =
     SERIALIZED_STRING_LENGTH_BYTES.saturatingAdd(serializedUtf8ByteCount())
@@ -2046,7 +2307,8 @@ private fun ChatSessionRecord.toEntity(): ChatSessionEntity =
         assistantSnapshotJson = assistantSnapshot?.toJsonString(),
         modelMode = modelMode,
         modelId = modelId,
-        appearanceJson = appearanceOverride?.toJsonString()
+        appearanceJson = appearanceOverride?.toJsonString(),
+        contextSummariesJson = contextSummariesToJson(contextSummaries)
     )
 
 private fun ImageAssetRecord.toEntity(): ImageAssetEntity =
@@ -2091,6 +2353,37 @@ private fun MemoryRecord.toEntity(): MemoryEntity =
         createdAt = createdAt
     )
 
+internal fun MemoryRecord.boundedForPersistence(): MemoryRecord? {
+    if (id.isBlank() || id.length > MAX_MEMORY_ID_CHARS ||
+        assistantId.isBlank() || assistantId.length > MAX_MEMORY_ID_CHARS ||
+        scope.isBlank() || scope.length > 64 || source.isBlank() || source.length > 32 ||
+        content.isBlank() || createdAt < 0L
+    ) return null
+    return copy(content = content.trim().take(MAX_MEMORY_RECORD_CONTENT_CHARS))
+}
+
+internal fun AssistantMemoryTurnRecord.boundedForPersistence(): AssistantMemoryTurnRecord? {
+    if (id.isBlank() || id.length > MAX_MEMORY_ID_CHARS ||
+        assistantId.isBlank() || assistantId.length > MAX_MEMORY_ID_CHARS ||
+        sessionId.isBlank() || sessionId.length > MAX_MEMORY_ID_CHARS ||
+        (userText.isBlank() && assistantText.isBlank()) || createdAt < 0L
+    ) return null
+    return copy(
+        userText = userText.trim().take(AssistantMemoryTurnRecord.MAX_TEXT_CHARS),
+        assistantText = assistantText.trim().take(AssistantMemoryTurnRecord.MAX_TEXT_CHARS)
+    )
+}
+
+private fun AssistantMemoryTurnRecord.toEntity(): AssistantMemoryTurnEntity =
+    AssistantMemoryTurnEntity(
+        id = id,
+        assistantId = assistantId,
+        sessionId = sessionId,
+        userText = userText,
+        assistantText = assistantText,
+        createdAt = createdAt
+    )
+
 private fun AssistantRecord.toEntity(): AssistantEntity =
     AssistantEntity(
         id = id,
@@ -2103,6 +2396,10 @@ private fun AssistantRecord.toEntity(): AssistantEntity =
         paramsJson = paramsJson,
         characterCardJson = characterCardJson,
         memoryEnabled = memoryEnabled,
+        memorySummaryInterval = memorySummaryInterval.coerceIn(
+            AssistantRecord.MIN_MEMORY_SUMMARY_INTERVAL,
+            AssistantRecord.MAX_MEMORY_SUMMARY_INTERVAL
+        ),
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
         appearanceJson = appearance.takeUnless { it.isDefault }?.toJsonString(),
@@ -2112,6 +2409,7 @@ private fun AssistantRecord.toEntity(): AssistantEntity =
 
 internal fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessageEntity =
     ChatMessageEntity(
+        messageId = id,
         sessionId = sessionId,
         position = position,
         role = role.name,
@@ -2126,11 +2424,14 @@ internal fun ChatMessage.toEntity(sessionId: String, position: Int): ChatMessage
         sourceReferencesJson = sourceReferences.toJsonArrayString(),
         webSearchTraceJson = webSearchTrace.toJsonString(),
         generationMetricsJson = generationMetrics?.toJson()?.toString(),
-        generatedImageJson = generatedImageRequest?.toJson()?.toString()
+        generatedImageJson = generatedImageRequest?.toJson()?.toString(),
+        pinned = pinned,
+        contextAssemblyTraceJson = contextAssemblyTraceJson
     )
 
 internal fun ChatMessageEntity.toChatMessage(): ChatMessage =
     ChatMessage(
+        id = messageId.ifBlank { "$sessionId:$position:$createdAt" },
         role = runCatching { Role.valueOf(role) }.getOrDefault(Role.USER),
         content = content,
         createdAt = createdAt,
@@ -2149,7 +2450,9 @@ internal fun ChatMessageEntity.toChatMessage(): ChatMessage =
         }.getOrNull(),
         generatedImageRequest = runCatching {
             generatedImageJson?.let { ChatGeneratedImageRequest.fromJsonOrNull(JSONObject(it)) }
-        }.getOrNull()
+        }.getOrNull(),
+        pinned = pinned,
+        contextAssemblyTraceJson = contextAssemblyTraceJson
     )
 
 private fun ImageAssetEntity.toImageAssetRecord(): ImageAssetRecord =
@@ -2194,6 +2497,16 @@ private fun MemoryEntity.toMemoryRecord(): MemoryRecord =
         createdAt = createdAt
     )
 
+private fun AssistantMemoryTurnEntity.toRecord(): AssistantMemoryTurnRecord =
+    AssistantMemoryTurnRecord(
+        id = id,
+        assistantId = assistantId,
+        sessionId = sessionId,
+        userText = userText,
+        assistantText = assistantText,
+        createdAt = createdAt
+    )
+
 private fun AssistantEntity.toAssistantRecord(): AssistantRecord =
     AssistantRecord(
         id = id,
@@ -2206,6 +2519,10 @@ private fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         paramsJson = paramsJson,
         characterCardJson = characterCardJson,
         memoryEnabled = memoryEnabled,
+        memorySummaryInterval = memorySummaryInterval.coerceIn(
+            AssistantRecord.MIN_MEMORY_SUMMARY_INTERVAL,
+            AssistantRecord.MAX_MEMORY_SUMMARY_INTERVAL
+        ),
         webSearchEnabled = webSearchEnabled,
         fileContextEnabled = fileContextEnabled,
         appearance = ChatAppearance.fromJsonOrNull(appearanceJson) ?: ChatAppearance(),

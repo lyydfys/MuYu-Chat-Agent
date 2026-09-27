@@ -22,6 +22,7 @@ $buildRecord = [ordered]@{
     qnnRuntimeArchiveSha256 = $null
     sourceRevision = $null
     sourceTreeStatus = $null
+    sourceProvenance = $null
     previousPassingBuildRunId = $null
     previousApkSha256 = $null
     addedNativeEntriesSincePrevious = @()
@@ -36,8 +37,10 @@ $buildRecord = [ordered]@{
     assetEntries = @()
     missingEntries = @()
     validationErrors = @()
+    validationDiagnostics = @()
     abiLibraryCounts = @{}
     nativeLibraryEntriesByAbi = @{}
+    nativeArtifactManifest = @()
     apkPath = $null
     apkBytes = $null
     apkLastWriteTimeUtc = $null
@@ -57,6 +60,7 @@ function Stop-Build {
     Save-BuildRecord
     throw $Message
 }
+. (Join-Path $PSScriptRoot "BuildProvenance.ps1")
 Save-BuildRecord
 
 try {
@@ -176,6 +180,7 @@ if ($LASTEXITCODE -eq 0) {
     $buildRecord.sourceRevision = "unavailable: git rev-parse failed"
     $buildRecord.sourceTreeStatus = "unavailable: repository metadata could not be read"
 }
+$buildRecord.sourceProvenance = Get-McaSourceProvenance $projectRoot
 
 $javaVersion = $null
 if (Get-Command java -ErrorAction SilentlyContinue) {
@@ -288,6 +293,12 @@ try {
 if ($exitCode -ne 0) {
     Stop-Build "Gradle APK build failed with exit code $exitCode."
 }
+$sourceAfterBuild = Get-McaSourceProvenance $projectRoot
+if ($sourceAfterBuild.worktreeSha256 -ne $buildRecord.sourceProvenance.worktreeSha256 -or
+    ($sourceAfterBuild.submodules | ConvertTo-Json -Depth 6 -Compress) -ne
+    ($buildRecord.sourceProvenance.submodules | ConvertTo-Json -Depth 6 -Compress)) {
+    Stop-Build "Source or submodule inputs changed during this APK build; rerun from a stable worktree."
+}
 
 $apkPath = Join-Path $projectRoot "app\build\outputs\apk\debug\app-debug.apk"
 if (-not (Test-Path -LiteralPath $apkPath)) {
@@ -380,23 +391,29 @@ try {
     }
 
     $qnnNativeEntry = $zip.GetEntry("lib/arm64-v8a/libmca_qnn_native.so")
-    $qnnNativeStream = $qnnNativeEntry.Open()
-    $qnnNativeBuffer = [System.IO.MemoryStream]::new()
-    try {
-        $qnnNativeStream.CopyTo($qnnNativeBuffer)
-        $qnnNativeText = [System.Text.Encoding]::GetEncoding(28591).GetString($qnnNativeBuffer.ToArray())
-    } finally {
-        $qnnNativeStream.Dispose()
-        $qnnNativeBuffer.Dispose()
+    if ($null -eq $qnnNativeEntry) {
+        $buildRecord.missingEntries += "lib/arm64-v8a/libmca_qnn_native.so (QNN diagnostic unavailable because the entry is missing)"
+        $buildRecord.qnnTypedBindingsStubMarkerAbsent = $false
+        $buildRecord.qnnTypedBindingsEvidence = "not_run_missing_entry"
+    } else {
+        $qnnNativeStream = $qnnNativeEntry.Open()
+        $qnnNativeBuffer = [System.IO.MemoryStream]::new()
+        try {
+            $qnnNativeStream.CopyTo($qnnNativeBuffer)
+            $qnnNativeText = [System.Text.Encoding]::GetEncoding(28591).GetString($qnnNativeBuffer.ToArray())
+        } finally {
+            $qnnNativeStream.Dispose()
+            $qnnNativeBuffer.Dispose()
+        }
+        if ($qnnNativeText.Contains("QNN typed graph bindings are unavailable in this APK") -or
+            $qnnNativeText.Contains("QNN SDK headers were not available at build time.")) {
+            $buildRecord.validationErrors += "libmca_qnn_native.so is the headerless QNN stub, not the typed graph runner."
+        }
+        $buildRecord.qnnTypedBindingsStubMarkerAbsent =
+            -not $qnnNativeText.Contains("QNN typed graph bindings are unavailable in this APK") -and
+            -not $qnnNativeText.Contains("QNN SDK headers were not available at build time.")
+        $buildRecord.qnnTypedBindingsEvidence = "Gradle verifyMcaQnnSdkHeaders passed; QNN headerless-stub marker absent from packaged JNI library (static heuristic, not a device runtime test)."
     }
-    if ($qnnNativeText.Contains("QNN typed graph bindings are unavailable in this APK") -or
-        $qnnNativeText.Contains("QNN SDK headers were not available at build time.")) {
-        $buildRecord.validationErrors += "libmca_qnn_native.so is the headerless QNN stub, not the typed graph runner."
-    }
-    $buildRecord.qnnTypedBindingsStubMarkerAbsent =
-        -not $qnnNativeText.Contains("QNN typed graph bindings are unavailable in this APK") -and
-        -not $qnnNativeText.Contains("QNN SDK headers were not available at build time.")
-    $buildRecord.qnnTypedBindingsEvidence = "Gradle verifyMcaQnnSdkHeaders passed; QNN headerless-stub marker absent from packaged JNI library (static heuristic, not a device runtime test)."
 
     $arm64Count = @($entryNames | Where-Object { $_ -like "lib/arm64-v8a/*" }).Count
     $x86Count = @($entryNames | Where-Object { $_ -like "lib/x86_64/*" }).Count
@@ -405,6 +422,73 @@ try {
         "arm64-v8a" = @($entryNames | Where-Object { $_ -like "lib/arm64-v8a/*" } | Sort-Object)
         "x86_64" = @($entryNames | Where-Object { $_ -like "lib/x86_64/*" } | Sort-Object)
     }
+    $readElf = $null
+    foreach ($candidate in @('llvm-readelf', 'readelf')) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($command) { $readElf = $command.Source; break }
+    }
+    if (-not $readElf -and $ndkRoot) {
+        $ndkReadElfCandidates = @(
+            (Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf.exe'),
+            (Join-Path $ndkRoot 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-readelf')
+        )
+        $readElf = $ndkReadElfCandidates |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+    }
+    $buildRecord.nativeArtifactManifest = @(Get-McaApkNativeManifest $zip $readElf)
+    $androidSystemLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    @(
+        'libc.so', 'libdl.so', 'libm.so', 'liblog.so', 'libandroid.so',
+        'libjnigraphics.so', 'libz.so', 'libEGL.so', 'libGLESv2.so',
+        'libGLESv3.so', 'libvulkan.so', 'libOpenSLES.so', 'libaaudio.so',
+        'libmediandk.so', 'libnativewindow.so', 'libcamera2ndk.so',
+        'libbinder_ndk.so', 'libneuralnetworks.so', 'libatomic.so'
+    ) | ForEach-Object { [void]$androidSystemLibraries.Add($_) }
+    $dspRuntimeLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    @('libc.so', 'libgcc.so', 'libc++.so.1', 'libc++abi.so.1') |
+        ForEach-Object { [void]$dspRuntimeLibraries.Add($_) }
+    $vendorDeviceLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    @('libcdsprpc.so', 'libOpenCL.so') |
+        ForEach-Object { [void]$vendorDeviceLibraries.Add($_) }
+    foreach ($artifact in $buildRecord.nativeArtifactManifest) {
+        if ($artifact.path -match '/(arm64-v8a|x86_64)/') {
+            $isDsp = Test-McaDspArtifactPath $artifact.path
+            if (-not $artifact.elf) {
+                $buildRecord.validationErrors += "$($artifact.path) is not an ELF library."
+            } elseif ($artifact.machine -ne $artifact.expectedMachine) {
+                $buildRecord.validationErrors += "$($artifact.path) has ELF machine $($artifact.machine), expected $($artifact.expectedMachine)."
+            }
+            if ($artifact.dependencyStatus -ne 'read') {
+                $buildRecord.validationErrors += "$($artifact.path) ELF dependency inspection did not succeed ($($artifact.dependencyStatus))."
+                continue
+            }
+            $abi = if ($artifact.path.Contains('/arm64-v8a/')) { 'arm64-v8a' } else { 'x86_64' }
+            $directory = $artifact.path.Substring(0, $artifact.path.LastIndexOf('/'))
+            $available = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            foreach ($candidate in $buildRecord.nativeArtifactManifest) {
+                $candidateDirectory = $candidate.path.Substring(0, $candidate.path.LastIndexOf('/'))
+                if ($candidateDirectory -eq $directory -or $candidateDirectory -eq "lib/$abi") {
+                    [void]$available.Add(($candidate.path -split '/')[-1])
+                    if ($candidate.soname) { [void]$available.Add([string]$candidate.soname) }
+                }
+            }
+            foreach ($needed in $artifact.needed) {
+                if ($available.Contains([string]$needed)) { continue }
+                if ($isDsp -and $dspRuntimeLibraries.Contains([string]$needed)) {
+                    $buildRecord.validationDiagnostics += "$($artifact.path) requires device DSP runtime library $needed."
+                    continue
+                }
+                if (-not $isDsp -and $androidSystemLibraries.Contains([string]$needed)) { continue }
+                if (-not $isDsp -and $abi -eq 'arm64-v8a' -and
+                    $vendorDeviceLibraries.Contains([string]$needed)) {
+                    $buildRecord.validationDiagnostics += "$($artifact.path) requires device vendor library $needed."
+                    continue
+                }
+                $buildRecord.validationErrors += "$($artifact.path) requires $needed, absent from its packaged ABI/asset directory and declared platform runtime set."
+            }
+        }
+    }
     $buildRecord.assetEntries = @($entryNames | Where-Object { $_ -like "assets/litert-qualcomm/*" -or $_ -like "assets/qwen-image-2.1/*" } | Sort-Object)
     if ($previousPassingRecord -and $previousPassingRecord.nativeLibraryEntriesByAbi) {
         $previousLibs = @($previousPassingRecord.nativeLibraryEntriesByAbi.'arm64-v8a') + @($previousPassingRecord.nativeLibraryEntriesByAbi.x86_64)
@@ -412,8 +496,12 @@ try {
         $buildRecord.addedNativeEntriesSincePrevious = @($currentLibs | Where-Object { $_ -notin $previousLibs } | Sort-Object -Unique)
         $buildRecord.removedNativeEntriesSincePrevious = @($previousLibs | Where-Object { $_ -notin $currentLibs } | Sort-Object -Unique)
     }
-    if ($arm64Count -lt 94) { $buildRecord.validationErrors += "arm64-v8a library count is below the complete-package baseline (actual=$arm64Count, minimum=94)." }
-    if ($x86Count -lt 26) { $buildRecord.validationErrors += "x86_64 library count is below the complete-package baseline (actual=$x86Count, minimum=26)." }
+    if ($arm64Count -lt 94) {
+        $buildRecord.validationDiagnostics += "arm64-v8a library count is below the historical package baseline (actual=$arm64Count, baseline=94); required-entry and ELF checks remain authoritative."
+    }
+    if ($x86Count -lt 26) {
+        $buildRecord.validationDiagnostics += "x86_64 library count is below the historical package baseline (actual=$x86Count, baseline=26); required-entry and ELF checks remain authoritative."
+    }
 } finally {
     $zip.Dispose()
 }

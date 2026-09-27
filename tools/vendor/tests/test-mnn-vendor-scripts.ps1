@@ -92,7 +92,8 @@ try {
     Write-Utf8NoBom -Path (Join-Path $seed 'sample.txt') -Text "patched`n"
     $patchPath = Join-Path $manifestDir 'fixture.patch'
     Invoke-TestGit @(
-        '-c', 'core.safecrlf=false', '-C', $seed, 'diff', '--binary', '--full-index',
+        '-c', 'core.safecrlf=false', '-c', 'diff.suppressBlankEmpty=true',
+        '-C', $seed, 'diff', '--binary', '--full-index',
         '--no-ext-diff', '--no-color', "--output=$patchPath", 'HEAD', '--'
     ) | Out-Null
     $patchSha = Get-NormalizedSha256 -Path $patchPath

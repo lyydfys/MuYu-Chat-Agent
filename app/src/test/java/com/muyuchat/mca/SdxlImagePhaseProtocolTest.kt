@@ -1329,6 +1329,7 @@ class SdxlImagePhaseProtocolTest {
             .put("latentDtype", "float32-le")
             .putAll(unetPhaseEvidence())
             .put("nativeGenerationSequence", 51L)
+            .put("nativeStartedAtMonotonicMs", 5100L)
             .put("nativeStageMask", 127L)
             .put("nativeDetailStageMaskHex", "00000000000001ff")
             .withSdxlPreviewDisabled()
@@ -1352,6 +1353,7 @@ class SdxlImagePhaseProtocolTest {
             .put("outputPath", output.canonicalPath)
             .put("outputBytes", output.length())
             .put("outputSha256", sdxlArtifactSha256(output))
+            .put("outputAtomicCommit", true)
             .put("nativeGenerationSequence", 52L)
             .put("nativeStageMask", 255L)
             .put("nativeDetailStageMaskHex", "00000000000003ff")
@@ -1401,6 +1403,7 @@ class SdxlImagePhaseProtocolTest {
         assertEquals(30, merged.getInt("steps"))
         assertEquals(60, merged.getInt("unetExecutionCount"))
         assertEquals(51L, merged.getLong("nativeGenerationSequence"))
+        assertEquals(5100L, merged.getLong("nativeStartedAtMonotonicMs"))
         assertEquals(52L, merged.getLong("vaeNativeGenerationSequence"))
         assertEquals(9, merged.getInt("vaeExecutionCount"))
         assertEquals(9, merged.getInt("vaeTileCount"))
@@ -1455,6 +1458,7 @@ class SdxlImagePhaseProtocolTest {
         )
         assertEquals(1024L * 1024L * 3L, merged.getLong("pixelRangeValueCount"))
         assertEquals(sdxlArtifactSha256(output), merged.getString("outputSha256"))
+        assertTrue(merged.getBoolean("outputAtomicCommit"))
         assertEquals(
             sdxlArtifactSha256(output),
             persistedPhaseProof.getString("outputSha256")
@@ -1462,6 +1466,29 @@ class SdxlImagePhaseProtocolTest {
         validateSdxlFlatNativeEffective(merged)
         val conflictingFlat = JSONObject(merged.toString()).put("steps", 29)
         assertTrue(runCatching { validateSdxlFlatNativeEffective(conflictingFlat) }.isFailure)
+
+        val uncommittedVae = JSONObject(vaeNative.toString()).apply {
+            remove("outputAtomicCommit")
+        }
+        assertTrue(runCatching {
+            mergeSdxlPhaseNativeResults(
+                contract = contract,
+                unetResult = unetResult,
+                unetNative = unetNative,
+                vaeResult = vaeResult,
+                vaeNative = uncommittedVae,
+                metadata = committed,
+                unetRuntimeProfile = runtimeProfile(79),
+                vaeRuntimeProfile = runtimeProfile(73),
+                unetTransportHtpArch = 79,
+                vaeTransportHtpArch = 73,
+                outputFile = output,
+                stageTrace = listOf(
+                    "unet[pid=8101,profile=V79]:process_exit_confirmed",
+                    "vae[pid=8101,profile=V73]:process_exit_confirmed"
+                )
+            )
+        }.isFailure)
 
         val changedMetadataEvidence = JSONObject(committed.nativeEffectiveJson)
             .put("promptWeightFingerprint", "e".repeat(64))
@@ -1587,6 +1614,7 @@ class SdxlImagePhaseProtocolTest {
             .put("latentDtype", "float32-le")
             .put("encoderLatentSha256", encoderMetadata.sha256)
             .put("nativeGenerationSequence", 72L)
+            .put("nativeStartedAtMonotonicMs", 7200L)
             .put("nativeStageMask", 127L)
             .put("nativeDetailStageMaskHex", "00000000000001ff")
             .withSdxlPreviewDisabled()
@@ -1612,6 +1640,7 @@ class SdxlImagePhaseProtocolTest {
             .put("outputPath", output.canonicalPath)
             .put("outputBytes", output.length())
             .put("outputSha256", sdxlArtifactSha256(output))
+            .put("outputAtomicCommit", true)
             .put("nativeGenerationSequence", 73L)
             .put("nativeStageMask", 255L)
             .put("nativeDetailStageMaskHex", "00000000000003ff")

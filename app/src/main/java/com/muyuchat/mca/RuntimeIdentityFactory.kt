@@ -63,10 +63,7 @@ internal object RuntimeIdentityFactory {
         val nativeLibraries: List<String>
     )
 
-    /**
-     * Public app entry point.  The manifest SHA is trusted when it is a full
-     * SHA-256; otherwise the selected file/bundle is content-hashed below.
-     */
+    /** Hash current file components so a same-size replacement changes the load identity. */
     fun create(
         context: Context,
         model: ModelManifest,
@@ -170,9 +167,9 @@ internal object RuntimeIdentityFactory {
         val session = HashSession()
         val bundleFiles = if (root.isDirectory) safeFilesUnder(root, runtime) else emptyList()
         val manifestArtifactSha = normalizedSha(model.sha256)
-        val artifactFingerprint = manifestArtifactSha ?: when {
+        val artifactFingerprint = when {
             root.isFile -> session.fileSha256(root)
-            root.isDirectory -> directoryMerkle(root, session, bundleFiles)
+            root.isDirectory -> manifestArtifactSha ?: directoryMerkle(root, session, bundleFiles)
             else -> error("Model manifest path is neither a file nor a directory: $modelPath")
         }
         // MNN and QAIRT manifests already persist a bundle SHA.  Preserve it
@@ -184,8 +181,10 @@ internal object RuntimeIdentityFactory {
         }
 
         val projectorFile = resolveProjector(root, model.visionProjectorPath)
-        val projectorFingerprint = normalizedSha(model.visionProjectorSha256)
-            ?: projectorFile?.takeIf(File::isFile)?.let(session::fileSha256).orEmpty()
+        require(model.visionProjectorPath.isNullOrBlank() || projectorFile != null) {
+            "Bound vision projector is missing or unreadable: ${model.visionProjectorPath}"
+        }
+        val projectorFingerprint = projectorFile?.let(session::fileSha256).orEmpty()
 
         val tokenizerFiles = componentFiles(root, ComponentKind.TOKENIZER, bundleFiles)
         val templateFiles = componentFiles(root, ComponentKind.TEMPLATE, bundleFiles)
@@ -693,7 +692,12 @@ internal object RuntimeIdentityFactory {
                     "Unable to hash runtime identity component: ${canonical.absolutePath}"
                 }
                 val digest = MessageDigest.getInstance("SHA-256")
+                val sizeBefore = canonical.length()
+                val modifiedBefore = canonical.lastModified()
                 canonical.inputStream().buffered().use { input -> digestStream(digest, input) }
+                require(canonical.length() == sizeBefore && canonical.lastModified() == modifiedBefore) {
+                    "Runtime identity component changed while hashing: ${canonical.absolutePath}"
+                }
                 digestHex(digest.digest())
             }
         }

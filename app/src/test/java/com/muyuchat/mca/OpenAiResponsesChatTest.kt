@@ -76,6 +76,20 @@ class OpenAiResponsesChatTest {
             assertEquals("OK", visible(events)); assertTrue(events.last() is GenerateEvent.Done)
             assertTrue((events.last() as GenerateEvent.Done).stats.promptTokensEstimated)
             assertTrue((events.last() as GenerateEvent.Done).stats.completionTokensEstimated)
+            assertEquals("unknown", (events.last() as GenerateEvent.Done).stats.cacheReuseReason)
+        }
+    }
+
+    @Test fun providerCacheUsageDistinguishesReportedZeroFromUnknown() = runBlocking {
+        for (cachedTokens in listOf(0, 17)) {
+            val body = JSONObject(completed).put("usage", JSONObject()
+                .put("input_tokens", 42).put("output_tokens", 9)
+                .put("input_tokens_details", JSONObject().put("cached_tokens", cachedTokens)))
+            val events = OpenAiCompatibleChatProvider(client(body.toString())).streamChat(config, request).toList()
+            val stats = (events.last() as GenerateEvent.Done).stats
+            assertEquals(cachedTokens, stats.cacheReusedTokens)
+            assertEquals(cachedTokens > 0, stats.cacheReuseHit)
+            assertEquals("provider_prompt_cache", stats.cacheReuseReason)
         }
     }
 
@@ -218,7 +232,9 @@ class OpenAiResponsesChatTest {
     }
 
     @Test fun cancellingBeforeHeadersOrDuringIdleStreamClosesTheActualSocket() = runBlocking {
-        for (sendHeaders in listOf(false, true)) {
+        for ((format, sendHeaders) in CloudApiFormat.entries.flatMap { format ->
+            listOf(false, true).map { sendHeaders -> format to sendHeaders }
+        }) {
             ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { server ->
                 val entered = CountDownLatch(1)
                 val closed = CountDownLatch(1)
@@ -238,11 +254,12 @@ class OpenAiResponsesChatTest {
                 }
                 val events = java.util.Collections.synchronizedList(mutableListOf<GenerateEvent>())
                 val provider = OpenAiCompatibleChatProvider()
-                val job = launch { provider.streamChat(config.copy(baseUrl = "http://127.0.0.1:${server.localPort}/v1"), request).collect { events.add(it) } }
+                val job = launch { provider.streamChat(config.copy(apiFormat = format,
+                    baseUrl = "http://127.0.0.1:${server.localPort}/v1"), request).collect { events.add(it) } }
                 try {
                     assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
                     withTimeout(2500) { job.cancelAndJoin() }
-                    assertTrue("HTTP socket must close on stop", withContext(Dispatchers.IO) { closed.await(2, TimeUnit.SECONDS) })
+                    assertTrue("$format HTTP socket must close on stop", withContext(Dispatchers.IO) { closed.await(2, TimeUnit.SECONDS) })
                     assertFalse(events.any { it is GenerateEvent.Done || it is GenerateEvent.Error })
                 } finally { job.cancelAndJoin(); serving.join(5500) }
             }

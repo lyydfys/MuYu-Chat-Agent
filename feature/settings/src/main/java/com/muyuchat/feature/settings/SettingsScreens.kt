@@ -227,6 +227,10 @@ fun SettingsHubScreen(
     onClearFileLibrary: () -> Unit,
     onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
     onClearPersistentPrefixCache: () -> Unit,
+    offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalling: Boolean = false,
+    onImportOfflineTranslation: () -> Unit = {},
+    onCancelOfflineTranslationImport: () -> Unit = {},
     onSaveWebSearchSettings: (WebSearchSettingsDraft) -> Unit,
     onPreflightWebSearch: (WebSearchSettingsDraft) -> Unit,
     onTestWebSearch: (String, WebSearchSettingsDraft) -> Unit,
@@ -287,6 +291,10 @@ fun SettingsHubScreen(
         when (section) {
             SettingsSection.RUNTIME -> RuntimeScreen(
                 state = state,
+                offlineTranslationStatus = offlineTranslationStatus,
+                offlineTranslationInstalling = offlineTranslationInstalling,
+                onImportOfflineTranslation = onImportOfflineTranslation,
+                onCancelOfflineTranslationImport = onCancelOfflineTranslationImport,
                 onCheckUpdate = onCheckUpdate,
                 onDownloadUpdate = onDownloadUpdate,
                 onInstallUpdate = onInstallUpdate,
@@ -332,6 +340,10 @@ fun SettingsHubScreen(
 fun RuntimeScreen(
     state: SettingsUiState,
     modifier: Modifier = Modifier,
+    offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalling: Boolean = false,
+    onImportOfflineTranslation: () -> Unit = {},
+    onCancelOfflineTranslationImport: () -> Unit = {},
     onCheckUpdate: () -> Unit = {},
     onDownloadUpdate: () -> Unit = {},
     onInstallUpdate: () -> Unit = {},
@@ -356,6 +368,15 @@ fun RuntimeScreen(
     ) {
         item { Text("运行状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("离线图片提示词翻译", fontWeight = FontWeight.SemiBold)
+                Text(offlineTranslationStatus, style = MaterialTheme.typography.bodySmall)
+                TextButton(
+                    onClick = if (offlineTranslationInstalling) onCancelOfflineTranslationImport else onImportOfflineTranslation
+                ) { Text(if (offlineTranslationInstalling) "取消导入" else "导入 Hy-MT2 包") }
+            }
+        }
+        item {
             AppUpdateCard(
                 state = state.appUpdate,
                 onCheckUpdate = onCheckUpdate,
@@ -369,7 +390,25 @@ fun RuntimeScreen(
             InfoCard(
                 "当前模型",
                 state.stats.modelPath?.substringAfterLast('/') ?: "未加载",
-                if (state.stats.loaded) "模型已就绪，使用本机 CPU 推理。" else "请先在模型页加载模型。"
+                if (state.stats.loaded) buildString {
+                    append("模型已加载。")
+                    val components = runCatching {
+                        JSONObject(state.nativeStatsJson).optJSONObject("componentBackends")
+                    }.getOrNull()
+                    for ((componentId, label) in listOf("llm" to "LLM", "vision" to "视觉", "audio" to "音频")) {
+                        val component = components?.optJSONObject(componentId) ?: continue
+                        val selected = (component.opt("selected") as? String)
+                            ?.takeIf { it.isNotBlank() } ?: when (component.optString("selectionSource")) {
+                                "sdk_model_default" -> "SDK/模型默认"
+                                "not_submitted" -> "未提交"
+                                else -> "未知"
+                            }
+                        val actual = (component.opt("actual") as? String)
+                            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) } ?: "未知"
+                        append('\n').append(label).append("：选择 ").append(selected)
+                            .append("；实际 ").append(actual)
+                    }
+                } else "请先在模型页加载模型。"
             )
         }
         item {

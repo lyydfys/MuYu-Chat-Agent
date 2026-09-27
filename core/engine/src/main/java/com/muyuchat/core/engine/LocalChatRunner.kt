@@ -54,6 +54,50 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
 
+internal class StreamingChunkQueue(capacity: Int = 64) {
+    private val chunks = LinkedBlockingQueue<String>(capacity)
+    @Volatile private var finished = false
+    @Volatile private var cancelled = false
+    @Volatile private var error: String? = null
+
+    fun reset() {
+        chunks.clear()
+        error = null
+        cancelled = false
+        finished = false
+    }
+
+    fun put(chunk: String) {
+        while (!cancelled && !finished) {
+            if (chunks.offer(chunk, 100, TimeUnit.MILLISECONDS)) return
+        }
+    }
+
+    fun finish(failure: String? = null) {
+        error = failure
+        finished = true
+    }
+
+    fun cancel() {
+        cancelled = true
+        chunks.clear()
+        finished = true
+    }
+
+    fun next(): String? {
+        while (true) {
+            if (cancelled) return null
+            val chunk = chunks.poll(100, TimeUnit.MILLISECONDS)
+            if (cancelled) return null
+            if (chunk != null) return chunk
+            if (finished) {
+                error?.let { throw IllegalStateException(it) }
+                return null
+            }
+        }
+    }
+}
+
 enum class LocalChatRuntime(val backendId: String, val label: String) {
     MNN_CPU("mnn_cpu", "MNN 高速引擎"),
     LLAMA_CPP("llama_cpp", "GGUF 兼容引擎"),
@@ -651,6 +695,8 @@ interface LocalChatRunner {
     fun requestStopIfActive(): Boolean = false
     /** Java-only lifecycle evidence for an isolated worker's cancellation watchdog. */
     fun isGenerationRunning(): Boolean? = null
+    /** False while a native owner may still read request-scoped media files. */
+    fun canReleasePreparedInputs(): Boolean = true
     /** Non-blocking process/session loss evidence; implementations must not perform Binder or JNI IO. */
     fun isSessionKnownLost(): Boolean = false
     /**
@@ -680,6 +726,7 @@ object LocalChatRunnerDebug {
 internal class LlamaCppChatRunner(
     private val bridge: NativeLlamaBridge = NativeLlamaBridge()
 ) : LocalChatRunner {
+    @Volatile private var submittedGenerationJson: String? = null
     override val runtime: LocalChatRuntime = LocalChatRuntime.LLAMA_CPP
     override val isAvailable: Boolean
         get() = NativeLlamaBridge.isAvailable
@@ -687,25 +734,37 @@ internal class LlamaCppChatRunner(
         get() = NativeLlamaBridge.loadError
 
     override fun initBackends(nativeLibDir: String) = bridge.initBackends(nativeLibDir)
-    override fun loadModel(modelPath: String, paramsJson: String): Int = bridge.loadModel(modelPath, paramsJson)
-    override fun unloadModel() = bridge.unloadModel()
-    override fun beginCompletion(messagesJson: String, paramsJson: String): Int =
-        bridge.beginCompletion(messagesJson, paramsJson)
+    override fun loadModel(modelPath: String, paramsJson: String): Int {
+        submittedGenerationJson = null
+        return bridge.loadModel(modelPath, paramsJson)
+    }
+    override fun unloadModel() {
+        submittedGenerationJson = null
+        bridge.unloadModel()
+    }
+    override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
+        submittedGenerationJson = null
+        GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
+        return bridge.beginCompletion(messagesJson, paramsJson).also { rc ->
+            if (rc == 0) submittedGenerationJson = paramsJson
+        }
+    }
     override fun beginCompletionWithPrefixCache(
         messagesJson: String,
         paramsJson: String,
         prefixCache: PersistentPrefixCacheRequest?
-    ): Int = if (prefixCache == null) {
-        bridge.beginCompletion(messagesJson, paramsJson)
-    } else {
-        bridge.beginCompletionWithPrefixCache(
+    ): Int {
+        if (prefixCache == null) return beginCompletion(messagesJson, paramsJson)
+        submittedGenerationJson = null
+        GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
+        return bridge.beginCompletionWithPrefixCache(
             messagesJson = messagesJson,
             paramsJson = paramsJson,
             restoreStatePath = prefixCache.restoreStatePath,
             writeStatePath = prefixCache.writeStatePath,
             fixedSystemPrompt = prefixCache.fixedSystemPrompt,
             fullSessionState = prefixCache.fullSessionState
-        )
+        ).also { rc -> if (rc == 0) submittedGenerationJson = paramsJson }
     }
     override fun prefillProgress(): TokenProgress? = runCatching {
         val root = JSONObject(bridge.getPrefillProgressJson())
@@ -731,7 +790,13 @@ internal class LlamaCppChatRunner(
     override fun invalidateConversationContext() = bridge.invalidateTextContext()
     override fun requestStop() = bridge.requestStop()
     override fun requestStopIfActive(): Boolean = bridge.requestStopIfActive()
-    override fun getRuntimeStatsJson(): String = bridge.getRuntimeStatsJson()
+    override fun getRuntimeStatsJson(): String {
+        val stats = JSONObject(bridge.getRuntimeStatsJson())
+        submittedGenerationJson?.let { request ->
+            stats.put("parameterApplication", nativeGenerationParameterApplication(runtime, request, stats))
+        }
+        return stats.toString()
+    }
     override fun shutdown() = bridge.shutdown()
 }
 
@@ -946,6 +1011,7 @@ internal fun genieXLlamaCppCpuFallbackRequested(paramsJson: String): Boolean {
 internal class MnnCpuChatRunner(
     private val bridge: NativeMnnBridge = NativeMnnBridge()
 ) : LocalChatRunner {
+    @Volatile private var submittedGenerationJson: String? = null
     override val runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
     override val isAvailable: Boolean
         get() = NativeMnnBridge.runnerReady
@@ -961,15 +1027,23 @@ internal class MnnCpuChatRunner(
         if (isAvailable) bridge.initBackends(nativeLibDir)
     }
 
-    override fun loadModel(modelPath: String, paramsJson: String): Int =
-        if (isAvailable) bridge.loadModel(modelPath, paramsJson) else UNAVAILABLE_RC
+    override fun loadModel(modelPath: String, paramsJson: String): Int {
+        submittedGenerationJson = null
+        return if (isAvailable) bridge.loadModel(modelPath, paramsJson) else UNAVAILABLE_RC
+    }
 
     override fun unloadModel() {
+        submittedGenerationJson = null
         if (isAvailable) bridge.unloadModel()
     }
 
-    override fun beginCompletion(messagesJson: String, paramsJson: String): Int =
-        if (isAvailable) bridge.beginCompletion(messagesJson, paramsJson) else UNAVAILABLE_RC
+    override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
+        submittedGenerationJson = null
+        GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
+        return if (isAvailable) bridge.beginCompletion(messagesJson, paramsJson).also { rc ->
+            if (rc == 0) submittedGenerationJson = paramsJson
+        } else UNAVAILABLE_RC
+    }
 
     override fun generateNextChunk(): String? =
         if (isAvailable) bridge.generateNextChunk() else null
@@ -980,6 +1054,12 @@ internal class MnnCpuChatRunner(
 
     override fun requestStopIfActive(): Boolean =
         isAvailable && bridge.requestStopIfActive()
+
+    override fun isGenerationRunning(): Boolean =
+        isAvailable && bridge.isGenerationRunning()
+
+    override fun canReleasePreparedInputs(): Boolean =
+        !isAvailable || !bridge.isGenerationRunning()
 
     override fun prefillProgress(): TokenProgress? = runCatching {
         val root = JSONObject(bridge.getPrefillProgressJson())
@@ -998,7 +1078,11 @@ internal class MnnCpuChatRunner(
 
     override fun getRuntimeStatsJson(): String =
         if (isAvailable) {
-            bridge.getRuntimeStatsJson()
+            JSONObject(bridge.getRuntimeStatsJson()).apply {
+                submittedGenerationJson?.let { request ->
+                    put("parameterApplication", nativeGenerationParameterApplication(runtime, request, this))
+                }
+            }.toString()
         } else {
             unavailableStats(runtime, loadError).toString()
         }
@@ -1018,7 +1102,10 @@ internal class MnnCpuChatRunner(
  * the supplied prefix matches the history already held by the Conversation.
  */
 @OptIn(ExperimentalApi::class)
-internal class LiteRtLmChatRunner : LocalChatRunner {
+internal class LiteRtLmChatRunner(
+    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock,
+    private val wallClockMs: () -> Long = System::currentTimeMillis
+) : LocalChatRunner {
     override val runtime: LocalChatRuntime = LocalChatRuntime.LITERT_LM
 
     override val isAvailable: Boolean
@@ -1040,9 +1127,10 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
 
     private val lifecycleLock = Any()
     private val stopRequested = AtomicBoolean(false)
-    private val queue = LinkedBlockingQueue<String>()
+    @Volatile private var queue = StreamingChunkQueue()
     @Volatile private var nativeLibDir: String = ""
     @Volatile private var engine: Engine? = null
+    @Volatile private var submittedEngineConfig: EngineConfig? = null
     @Volatile private var conversation: Conversation? = null
     @Volatile private var generationThread: Thread? = null
     @Volatile private var generationRunning = false
@@ -1062,12 +1150,12 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         nThreads = 4
     )
     @Volatile private var loadMs: Long = 0L
-    @Volatile private var startedAt: Long = 0L
-    @Volatile private var firstTokenAt: Long = 0L
-    @Volatile private var completedAt: Long = 0L
+    private val generationTiming = GenerationElapsedTiming(clock)
     @Volatile private var promptTokens: Int = 0
     @Volatile private var completionTokens: Int = 0
     @Volatile private var conversationHistory: List<LiteRtMessageSpec> = emptyList()
+    @Volatile private var conversationOwnerId: String? = null
+    @Volatile private var conversationContextRevision: String? = null
     /** Sampler settings are immutable per LiteRT conversation. */
     @Volatile private var conversationSamplerValues: LiteRtSamplerValues? = null
     /** Only a normally completed turn may leave a Conversation reusable. */
@@ -1083,6 +1171,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         val ttftMs: Long
     )
     @Volatile private var completedMetrics: CompletedMetrics? = null
+    @Volatile private var parameterApplicationJson: String = "{}"
     private val cancellationGate = NativeCancellationGate()
     @Volatile private var cancellationRecoveryRequired = false
 
@@ -1154,7 +1243,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         } else {
             VisionBindingState.UNBOUND
         }
-        val started = System.currentTimeMillis()
+        val started = clock.nowMs()
         return@synchronized runCatching {
             if (config.backend.equals("npu", ignoreCase = true)) {
                 // LiteRT's Qualcomm dispatch loads libQnnHtp.so by SONAME after
@@ -1176,7 +1265,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             // flag is read only when Engine is constructed.
             ExperimentalFlags.enableBenchmark = true
             fun createInitializedEngine() = initializeOwnedNativeResource(
-                create = { Engine(engineConfig) },
+                create = { Engine(engineConfig).also { submittedEngineConfig = it.engineConfig } },
                 initialize = { it.initialize() },
                 // LiteRT 0.16.1 close() rejects an engine without a published native handle.
                 // A failed nativeCreateEngine has no Java-owned handle to release.
@@ -1227,7 +1316,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             }
             loadFailure = null
             lastError = ""
-            loadMs = System.currentTimeMillis() - started
+            loadMs = (clock.nowMs() - started).coerceAtLeast(0L)
             conversationHistory = emptyList()
             LocalChatRunnerDebug.emit(
                 "litert_lm_load_ok",
@@ -1333,15 +1422,17 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             val oldEngine = engine
             conversation = null
             engine = null
+            submittedEngineConfig = null
             loaded = false
             visionModelKnownTextOnly = false
             visionModelVisualComponentsPresent = false
             visionBindingState = VisionBindingState.UNBOUND
             conversationHistory = emptyList()
+            conversationOwnerId = null
             conversationSamplerValues = null
             conversationReusable = false
             completedMetrics = null
-            queue.clear()
+            queue.cancel()
             val conversationClosed = runCatching { oldConversation?.close() }.isSuccess
             val engineClosed = conversationClosed && runCatching { oldEngine?.close() }.isSuccess
             if (!engineClosed) {
@@ -1389,12 +1480,24 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             return@synchronized -8
         }
         val generationParams = GenerationParams.fromJson(paramsJson)
-        val requestedSamplerValues = liteRtSamplerValuesFor(
-            generationParams,
-            activeConfig.backend
-        )
+        parameterApplicationJson = "{}"
+        val generationConfig = runCatching {
+            liteRtGenerationConfiguration(generationParams, activeConfig.backend)
+        }.getOrElse { error ->
+            lastError = "LiteRT-LM generation parameters are invalid: ${error.message}"
+            return@synchronized -6
+        }
+        val requestedOwnerId = JSONObject(paramsJson).optString("conversationOwnerId")
+            .takeIf(String::isNotBlank)
+        val requestedContextRevision = JSONObject(paramsJson).optString("conversationContextRevision")
+            .takeIf(String::isNotBlank)
+        val requestedSamplerValues = generationConfig.sampler
         val currentConversation = if (
             conversationHistory == prefix &&
+            liteRtConversationScopeMatches(
+                conversationOwnerId, conversationContextRevision,
+                requestedOwnerId, requestedContextRevision
+            ) &&
             conversationSamplerValues == requestedSamplerValues &&
             conversationReusable &&
             conversation != null
@@ -1406,6 +1509,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             val oldConversation = conversation
             if (oldConversation != null && !closeConversationSafely(oldConversation)) return@synchronized -7
             conversationHistory = emptyList()
+            conversationOwnerId = null
             conversationSamplerValues = null
             conversationReusable = false
             runCatching {
@@ -1417,6 +1521,8 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 ) ?: error("LiteRT-LM engine is not initialized.")
                 conversation = created
                 conversationHistory = prefix
+                conversationOwnerId = requestedOwnerId
+                conversationContextRevision = requestedContextRevision
                 conversationSamplerValues = requestedSamplerValues
                 conversationReusable = false
                 created
@@ -1432,11 +1538,9 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             return@synchronized -7
         }
 
-        queue.clear()
+        val outputQueue = StreamingChunkQueue().also { queue = it }
         lastError = ""
-        startedAt = System.currentTimeMillis()
-        firstTokenAt = 0L
-        completedAt = 0L
+        generationTiming.start()
         promptTokens = (prefix + latest).sumOf { estimateTokens(it.content) }
         completionTokens = 0
         completedMetrics = null
@@ -1452,28 +1556,15 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             var failedCompiledCache: File? = null
             val generationResult = runCatching {
                 check(!stopRequested.get()) { "LiteRT-LM generation was cancelled before execution." }
-                val repetitionPenalty = RepetitionPenaltyConfig(
-                    repetitionPenalty = generationParams.repeatPenalty.coerceAtLeast(1.0f),
-                    presencePenalty = generationParams.presencePenalty,
-                    frequencyPenalty = generationParams.frequencyPenalty
-                )
-                val thinking = generationParams.reasoningMode
-                    .takeIf { it != ReasoningMode.OFF }
-                    ?.let {
-                        ThinkingConfig(
-                            enableThinking = true,
-                            thinkingTokenBudget = generationParams.effectiveThinkingBudget()
-                        )
-                    }
                 val completed = CountDownLatch(1)
                 val callback = object : LiteRtMessageCallback {
                     override fun onMessage(message: LiteRtMessage) {
                         val chunk = message.toString()
                         if (chunk.isNotEmpty()) {
-                            if (firstTokenAt == 0L) firstTokenAt = System.currentTimeMillis()
+                            generationTiming.markFirstToken()
                             completionTokens += estimateTokens(chunk).coerceAtLeast(1)
                             output.append(chunk)
-                            queue.put(chunk)
+                            outputQueue.put(chunk)
                         }
                     }
 
@@ -1486,12 +1577,15 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                         completed.countDown()
                     }
                 }
+                parameterApplicationJson = liteRtGenerationParameterApplication(
+                    paramsJson, activeConfig.backend, generationConfig
+                ).toString()
                 currentConversation.sendMessageAsync(
                     latest.toLiteRtContents(),
                     callback,
-                    repetitionPenaltyConfig = repetitionPenalty,
-                    maxOutputToken = generationParams.effectiveNPredict(),
-                    thinkingConfig = thinking
+                    repetitionPenaltyConfig = generationConfig.repetitionPenalty,
+                    maxOutputToken = generationConfig.maxOutputTokens,
+                    thinkingConfig = generationConfig.thinking
                 )
                 while (!completed.await(250L, TimeUnit.MILLISECONDS)) {
                     if (stopRequested.get()) {
@@ -1513,6 +1607,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                         // recreate the engine cleanly on the next request.
                         failedCompiledCache = File(compiledCacheDir)
                         conversationHistory = emptyList()
+                        conversationOwnerId = null
                         conversationSamplerValues = null
                         conversationReusable = false
                         lastError = "LiteRT-LM GPU compiled model cache was invalidated; reload required: ${describe(error)}"
@@ -1526,10 +1621,11 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                     } else {
                         lastError = describe(error)
                     }
-                    queue.put(ERROR_PREFIX + lastError)
+                    generationTiming.complete()
+                    outputQueue.finish(lastError)
                 }
             }
-            completedAt = System.currentTimeMillis()
+            generationTiming.complete()
             val completedNormally = liteRtConversationReusableAfterTurn(
                 generationResult = generationResult,
                 stopRequested = stopRequested.get(),
@@ -1570,6 +1666,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 // A cancelled or failed stream is not a valid KV boundary.
                 // Invalidate it before a same-prefix retry can reuse it.
                 conversationHistory = emptyList()
+                conversationOwnerId = null
                 conversationSamplerValues = null
                 conversationReusable = false
                 val closed = closeConversationSafely(currentConversation)
@@ -1585,26 +1682,13 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
                 }
             }
             generationRunning = false
-            queue.put(DONE)
+            outputQueue.finish(if (generationResult.isFailure && !stopRequested.get()) lastError else null)
         }
         0
     }
 
     override fun generateNextChunk(): String? {
-        while (true) {
-            val item = queue.poll(250, TimeUnit.MILLISECONDS)
-            if (item == null) {
-                if (!generationRunning && queue.isEmpty()) return null
-                continue
-            }
-            if (item == DONE) return null
-            if (item.startsWith(ERROR_PREFIX)) {
-                throw IllegalStateException(item.removePrefix(ERROR_PREFIX).ifBlank {
-                    "LiteRT-LM generation failed without a diagnostic."
-                })
-            }
-            return item
-        }
+        return queue.next()
     }
 
     override fun requestStop() {
@@ -1612,6 +1696,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
         // Conversation creation can block while cancellation must still reach
         // the isolated worker independently.
         stopRequested.set(true)
+        queue.cancel()
         cancellationGate.request { conversation?.let { current -> { current.cancelProcess() } } }
     }
 
@@ -1623,12 +1708,22 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
 
     override fun isGenerationRunning(): Boolean = generationRunning || cancellationGate.isPending() || cancellationRecoveryRequired
 
+    override fun canReleasePreparedInputs(): Boolean =
+        generationThread?.isAlive != true && !generationRunning &&
+            !cancellationGate.isPending() && !cancellationRecoveryRequired
+
     override fun invalidateConversationContext() {
         synchronized(lifecycleLock) {
-            if (!stopAndJoinGenerationLocked()) return@synchronized
-            conversation?.let { if (!closeConversationSafely(it)) return@synchronized }
+            if (!stopAndJoinGenerationLocked()) {
+                throw IllegalStateException(lastError.ifBlank { "LiteRT-LM generation could not stop for context invalidation." })
+            }
+            conversation?.let {
+                if (!closeConversationSafely(it)) {
+                    throw IllegalStateException(lastError.ifBlank { "LiteRT-LM conversation could not close for context invalidation." })
+                }
+            }
             conversationHistory = emptyList()
-            successfulImageTurn = false
+            conversationOwnerId = null
             conversationSamplerValues = null
             conversationReusable = false
             completedMetrics = null
@@ -1638,19 +1733,12 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
     override fun getRuntimeStatsJson(): String {
         val benchmark = completedMetrics
         val conversationTokenCount = benchmark?.tokenCount ?: 0
-        val now = System.currentTimeMillis()
-        val decodeMs = if (completedAt > 0L && firstTokenAt > 0L) {
-            (completedAt - firstTokenAt).coerceAtLeast(1L)
-        } else {
-            0L
-        }
-        val ttftMs = if (startedAt > 0L && firstTokenAt > 0L) {
-            (firstTokenAt - startedAt).coerceAtLeast(0L)
-        } else {
-            0L
-        }
+        val now = wallClockMs()
+        val timing = generationTiming.snapshot()
+        val decodeMs = timing.decodeMs
+        val ttftMs = timing.ttftMs
         val effectiveDecodeTps = benchmark?.decodeTps ?:
-            if (decodeMs > 0L) completionTokens * 1000.0 / decodeMs else 0.0
+            timing.decodeTokensPerSecond(completionTokens)
         val effectivePrefillTps = benchmark?.prefillTps ?: 0.0
         return JSONObject()
             .put("backend", runtime.backendId)
@@ -1662,6 +1750,7 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             .put("requestedBackend", activeConfig.backend)
             .put("selectedBackend", activeConfig.backend)
             .put("actualBackend", "unknown")
+            .put("componentBackends", liteRtComponentBackends(submittedEngineConfig))
             .put("executionEvidence", JSONObject()
                 .put("available", false)
                 .put("source", "sdk_backend_telemetry_unavailable")
@@ -1701,16 +1790,17 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
             .put("ttftMs", benchmark?.ttftMs ?: ttftMs)
             .put("prefillTps", effectivePrefillTps)
             .put("decodeTps", effectiveDecodeTps)
-            .put("prefillMs", if (effectivePrefillTps > 0.0 && promptTokens > 0) promptTokens * 1000.0 / effectivePrefillTps else 0.0)
-            .put("decodeMs", decodeMs)
-            .put("e2eTps", if (completedAt > 0L && startedAt > 0L && completionTokens > 0) {
-                completionTokens * 1000.0 / (completedAt - startedAt).coerceAtLeast(1L)
+            .put("prefillMs", if (effectivePrefillTps > 0.0 && benchmark != null && benchmark.prefillTokens > 0) {
+                benchmark.prefillTokens * 1000.0 / effectivePrefillTps
             } else 0.0)
+            .put("decodeMs", decodeMs)
+            .put("e2eTps", timing.endToEndTokensPerSecond(completionTokens, requireCompleted = true))
             .put("effectiveConfig", JSONObject()
                 .put("backend", activeConfig.backend)
                 .put("max_num_tokens", activeConfig.maxNumTokens)
                 .put("n_threads", activeConfig.nThreads)
                 .apply { activeConfig.cacheDir?.let { put("cache_dir", it) } })
+            .put("parameterApplication", JSONObject(parameterApplicationJson))
             .put("benchmarkEnabled", benchmark != null)
             .put("runtimeStatsDeferred", generationRunning)
             .put("runtimeStatsSource", if (benchmark == null) "java_estimate" else "completed_native_snapshot")
@@ -1843,9 +1933,27 @@ internal class LiteRtLmChatRunner : LocalChatRunner {
 
     companion object {
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L
-        private const val DONE = "\u0000MCA_LITERT_DONE"
-        private const val ERROR_PREFIX = "\u0000MCA_LITERT_ERROR:"
     }
+}
+
+/** Constructor selections are submission evidence; null delegates stay SDK/model defaults. */
+internal fun liteRtComponentBackends(engineConfig: EngineConfig?): JSONObject {
+    fun component(backend: LiteRtBackend?): JSONObject {
+        val submitted = backend?.name?.lowercase()
+        return JSONObject()
+            .put("requested", submitted ?: JSONObject.NULL)
+            .put("selected", submitted ?: JSONObject.NULL)
+            .put("selectionSource", when {
+                engineConfig == null -> "not_submitted"
+                backend == null -> "sdk_model_default"
+                else -> "engine_config_submission"
+            })
+            .put("actual", "unknown")
+    }
+    return JSONObject()
+        .put("llm", component(engineConfig?.backend))
+        .put("vision", component(engineConfig?.visionBackend))
+        .put("audio", component(engineConfig?.audioBackend))
 }
 
 /**
@@ -1858,6 +1966,14 @@ internal fun liteRtConversationReusableAfterTurn(
     stopRequested: Boolean,
     output: CharSequence
 ): Boolean = generationResult.isSuccess && !stopRequested && output.isNotBlank()
+
+internal fun liteRtConversationScopeMatches(
+    storedOwnerId: String?,
+    storedContextRevision: String?,
+    requestedOwnerId: String?,
+    requestedContextRevision: String?
+): Boolean = !requestedOwnerId.isNullOrBlank() && storedOwnerId == requestedOwnerId &&
+    storedContextRevision == requestedContextRevision
 
 /**
  * Returns the role spelling used by LiteRT-LM for a Local API chat role.
@@ -1896,24 +2012,82 @@ internal fun liteRtSamplerValuesFor(
     params: GenerationParams,
     backend: String
 ): LiteRtSamplerValues? {
+    params.requireFiniteSamplerValues()
     val normalizedBackend = backend.trim().lowercase().replace('-', '_')
     if (normalizedBackend == "npu" || normalizedBackend == "google_tensor") return null
 
-    val topP = params.topP
-        .takeIf { it.isFinite() }
-        ?.toDouble()
-        ?.coerceIn(0.0, 1.0)
-        ?: 0.95
-    val temperature = params.temperature
-        .takeIf { it.isFinite() }
-        ?.toDouble()
-        ?.coerceAtLeast(0.0)
-        ?: 0.6
     return LiteRtSamplerValues(
         topK = params.topK.coerceAtLeast(1),
-        topP = topP,
-        temperature = temperature,
+        topP = params.topP.toDouble().coerceIn(0.0, 1.0),
+        temperature = params.temperature.toDouble().coerceAtLeast(0.0),
         seed = params.seed ?: 0
+    )
+}
+
+internal data class LiteRtGenerationConfiguration(
+    val sampler: LiteRtSamplerValues?,
+    val repetitionPenalty: RepetitionPenaltyConfig,
+    val thinking: ThinkingConfig,
+    val maxOutputTokens: Int
+)
+
+internal fun liteRtGenerationConfiguration(
+    params: GenerationParams,
+    backend: String
+): LiteRtGenerationConfiguration {
+    params.requireFiniteSamplerValues()
+    val enableThinking = params.reasoningMode != ReasoningMode.OFF && !params.hideReasoning
+    return LiteRtGenerationConfiguration(
+        sampler = liteRtSamplerValuesFor(params, backend),
+        repetitionPenalty = RepetitionPenaltyConfig(
+            repetitionPenalty = params.repeatPenalty.coerceAtLeast(1.0f),
+            presencePenalty = params.presencePenalty,
+            frequencyPenalty = params.frequencyPenalty
+        ),
+        thinking = ThinkingConfig(
+            enableThinking = enableThinking,
+            thinkingTokenBudget = if (enableThinking) params.effectiveThinkingBudget() else 0
+        ),
+        maxOutputTokens = params.effectiveNPredict()
+    )
+}
+
+internal fun liteRtGenerationParameterApplication(
+    requestedJson: String,
+    backend: String,
+    config: LiteRtGenerationConfiguration
+): JSONObject {
+    val ignored = mutableMapOf("min_p" to "litertlm-0.16.1_has_no_min_p_configuration")
+    val submitted = JSONObject()
+        .put("n_predict", config.maxOutputTokens)
+        .put("repeat_penalty", config.repetitionPenalty.repetitionPenalty)
+        .put("presence_penalty", config.repetitionPenalty.presencePenalty)
+        .put("frequency_penalty", config.repetitionPenalty.frequencyPenalty)
+        .put("enable_thinking", config.thinking.enableThinking)
+        .put("thinking_budget", config.thinking.thinkingTokenBudget)
+    config.sampler?.let { sampler ->
+        submitted.put("temperature", sampler.temperature)
+            .put("top_k", sampler.topK)
+            .put("top_p", sampler.topP)
+            .put("seed", sampler.seed)
+    } ?: listOf("temperature", "top_k", "top_p", "seed").forEach { field ->
+        ignored[field] = "litertlm-0.16.1_${backend}_delegate_uses_engine_sampler_defaults"
+    }
+    return generationParameterApplication(
+        runtime = LocalChatRuntime.LITERT_LM,
+        backend = backend,
+        requestedJson = requestedJson,
+        submitted = submitted,
+        ignored = ignored,
+        source = "litertlm-0.16.1:ConversationConfig+sendMessageAsync",
+        normalizedReasons = mapOf(
+            "top_k" to "litertlm_requires_positive_top_k",
+            "top_p" to "litertlm_top_p_range_0_to_1",
+            "temperature" to "litertlm_requires_nonnegative_temperature",
+            "repeat_penalty" to "litertlm_requires_repetition_penalty_at_least_1",
+            "seed" to "null_seed_uses_litertlm_default_zero",
+            "thinking_budget" to "reasoning_mode_resolves_thinking_budget"
+        )
     )
 }
 
@@ -1942,7 +2116,8 @@ internal class GenieXChatRunner(
     private val requestedRuntimeId: String,
     private val defaultComputeUnit: String,
     private val defaultBackendDevices: String,
-    private val appContext: Context? = null
+    private val appContext: Context? = null,
+    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
 ) : LocalChatRunner {
     override val isAvailable: Boolean
         get() = appContext != null && classesPresent && sdkInitError == null
@@ -1984,17 +2159,16 @@ internal class GenieXChatRunner(
     @Volatile private var lastPromptEndsInsideReasoning = false
     private val lifecycleLock = Any()
     private val stopRequested = AtomicBoolean(false)
-    private val queue = LinkedBlockingQueue<String>()
+    @Volatile private var queue = StreamingChunkQueue()
     private var params: GenerationParams = GenerationParams()
     private var loadParams: LoadParams = LoadParams()
     private var completionTokens = 0
     private var promptTokens = 0
     @Volatile private var prefillTotalTokens = 0
     private var loadMs = 0L
-    private var startedAt = 0L
-    private var firstTokenAt = 0L
-    private var completedAt = 0L
+    private val generationTiming = GenerationElapsedTiming(clock)
     private var nativeProfileJson = JSONObject()
+    @Volatile private var parameterApplicationJson: String = "{}"
     private val isQairtRuntime: Boolean
         get() = requestedRuntimeId == RuntimeIdValue.QAIRT.value
     private val stagePrefix: String
@@ -2101,7 +2275,7 @@ internal class GenieXChatRunner(
         } else {
             VisionBindingState.BOUND_PENDING_RELOAD
         }
-        val started = System.currentTimeMillis()
+        val started = clock.nowMs()
         LocalChatRunnerDebug.emit(
             "${stagePrefix}_load_start",
             JSONObject()
@@ -2265,7 +2439,7 @@ internal class GenieXChatRunner(
                 VisionBindingState.LOAD_FAILED
             }
             lastError = null
-            loadMs = System.currentTimeMillis() - started
+            loadMs = (clock.nowMs() - started).coerceAtLeast(0L)
             LocalChatRunnerDebug.emit(
                 "${stagePrefix}_load_ok",
                 JSONObject()
@@ -2632,7 +2806,7 @@ internal class GenieXChatRunner(
                 )
             }
         }
-        queue.clear()
+        queue.cancel()
     }
 
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int = synchronized(lifecycleLock) {
@@ -2648,19 +2822,20 @@ internal class GenieXChatRunner(
             return -5
         }
         if (!stopAndJoinGenerationLocked()) return -7
-        queue.clear()
+        val outputQueue = StreamingChunkQueue().also { queue = it }
         lastError = ""
         stopRequested.set(false)
         params = GenerationParams.fromJson(paramsJson)
+        params.requireFiniteSamplerValues()
+        parameterApplicationJson = "{}"
         completionTokens = 0
         promptTokens = 0
         nativeProfileJson = JSONObject()
-        startedAt = System.currentTimeMillis()
-        firstTokenAt = 0L
-        completedAt = 0L
+        generationTiming.start()
         lastPromptEndsInsideReasoning = false
 
         val generationConfig = params.toGenieXGenerationConfig()
+        val templateEnableThinking = params.reasoningMode != ReasoningMode.OFF && !params.hideReasoning
         // Last user turn text, used only to classify a tiny prompt-fragment echo
         // (e.g. echoing "介绍自己。" back from "用一句话介绍自己。") as collapsed.
         var rescueEchoReference = ""
@@ -2691,7 +2866,7 @@ internal class GenieXChatRunner(
                     nativeHandle,
                     messages,
                     null,
-                    params.reasoningMode != ReasoningMode.OFF
+                    templateEnableThinking
                 )
                 formattedTemplateText(requireNotNull(out) { "GenieX VLM returned no chat template output." })
             }.getOrElse { error ->
@@ -2731,7 +2906,7 @@ internal class GenieXChatRunner(
                     nativeHandle,
                     messages,
                     null,
-                    params.reasoningMode != ReasoningMode.OFF,
+                    templateEnableThinking,
                     true
                 )
                 val rendered = requireNonBlankGenieXTemplate(
@@ -2793,7 +2968,7 @@ internal class GenieXChatRunner(
                         if (live) return
                         live = true
                         if (headBuffer.isNotEmpty()) {
-                            queue.put(headBuffer.toString())
+                            outputQueue.put(headBuffer.toString())
                             headBuffer.setLength(0)
                         }
                     }
@@ -2802,7 +2977,7 @@ internal class GenieXChatRunner(
                         if (chunk.isEmpty()) return
                         completionTokens += estimateTokens(chunk).coerceAtLeast(1)
                         if (live) {
-                            queue.put(chunk)
+                            outputQueue.put(chunk)
                         } else {
                             headBuffer.append(chunk)
                             if (completionTokens > GENIEX_RESCUE_PROBE_TOKENS) releaseHeadToLive()
@@ -2820,7 +2995,7 @@ internal class GenieXChatRunner(
 
                     val callback = object : LLMTokenCallback {
                         override fun onToken(token: String): Boolean {
-                            if (firstTokenAt == 0L) firstTokenAt = System.currentTimeMillis()
+                            generationTiming.markFirstToken()
                             textAssembler.append(token)
                                 .takeIf { it.isNotEmpty() }
                                 ?.let {
@@ -2838,9 +3013,13 @@ internal class GenieXChatRunner(
                                     ingestVisibleChunk(stripGenieXPromptEcho(raw, prompt))
                                 }
                             }
-                            completedAt = System.currentTimeMillis()
+                            generationTiming.complete()
                         }
                     }
+                    parameterApplicationJson = genieXGenerationParameterApplication(
+                        paramsJson, config, templateEnableThinking, runtime,
+                        attempt = if (isRescueAttempt) 2 else 1
+                    ).toString()
                     val returned = generate.invoke(current, nativeHandle, prompt, config, callback)
                     if (!sawCallbackChunk) {
                         extractGenieXResultText(returned)?.let { raw ->
@@ -2848,14 +3027,14 @@ internal class GenieXChatRunner(
                         }
                     }
                     flushTextAssembler()
-                    completedAt = System.currentTimeMillis()
+                    generationTiming.complete()
                     lastProfile?.let { nativeProfileJson = it.toJson() }
 
                     // Already streaming a normal-sized answer: nothing to rescue.
                     if (live) return false
                     // User actively stopped: never auto-retry.
                     if (stopRequested.get()) {
-                        if (headBuffer.isNotEmpty()) queue.put(headBuffer.toString())
+                        if (headBuffer.isNotEmpty()) outputQueue.put(headBuffer.toString())
                         return false
                     }
 
@@ -2876,10 +3055,10 @@ internal class GenieXChatRunner(
                         // delivered stats describe the rescue output only.
                         headBuffer.setLength(0)
                         completionTokens = 0
-                        firstTokenAt = 0L
+                        generationTiming.resetDecodeAttempt()
                         return true
                     }
-                    if (visible.isNotBlank()) queue.put(visible)
+                    if (visible.isNotEmpty()) outputQueue.put(visible)
                     return false
                 }
 
@@ -2900,30 +3079,24 @@ internal class GenieXChatRunner(
                     val rescueConfig = params.toGenieXGenerationConfig(softenGreedy = true)
                     runAttempt(rescueConfig, isRescueAttempt = true)
                 }
-                completedAt = System.currentTimeMillis()
             }.onFailure { error ->
                 lastError = error.describeForUser()
-                queue.put(ERROR_PREFIX + lastError)
+                generationTiming.complete()
+                outputQueue.finish(lastError)
             }
-            queue.put(DONE)
+            generationTiming.complete()
+            outputQueue.finish(if (lastError.isNullOrBlank() || stopRequested.get()) null else lastError)
         }
         return 0
     }
 
     override fun generateNextChunk(): String? {
-        while (true) {
-            val item = queue.poll(250, TimeUnit.MILLISECONDS) ?: continue
-            if (item == DONE) return null
-            if (item.startsWith(ERROR_PREFIX)) {
-                throw IllegalStateException(item.removePrefix(ERROR_PREFIX).ifBlank {
-                    "GenieX generation failed without a diagnostic."
-                })
-            }
-            return item
-        }
+        return queue.next()
     }
 
     override fun requestStop() {
+        stopRequested.set(true)
+        queue.cancel()
         synchronized(lifecycleLock) {
             requestStopLocked()
         }
@@ -2936,7 +3109,11 @@ internal class GenieXChatRunner(
             lastError = "GenieX generation cannot unload itself while its native call is active."
             return false
         }
-        runningThread.join()
+        runningThread.join(2_000L)
+        if (runningThread.isAlive) {
+            lastError = "GenieX generation did not stop within the cancellation grace period; worker recovery required."
+            return false
+        }
         if (generateThread === runningThread) {
             generateThread = null
         }
@@ -2945,6 +3122,7 @@ internal class GenieXChatRunner(
 
     private fun requestStopLocked() {
         stopRequested.set(true)
+        queue.cancel()
         val current = engine
         val nativeHandle = handle
         if (current != null && nativeHandle != 0L) {
@@ -2961,11 +3139,13 @@ internal class GenieXChatRunner(
         // total when the first generated token arrives.
         val total = prefillTotalTokens
         if (total <= 0) return null
-        val completed = if (firstTokenAt > 0L) total else 0
+        val completed = if (generationTiming.hasFirstToken()) total else 0
         return TokenProgress(completedTokens = completed, totalTokens = total)
     }
 
-    override fun getRuntimeStatsJson(): String = JSONObject()
+    override fun getRuntimeStatsJson(): String {
+        val timing = generationTiming.snapshot()
+        return JSONObject()
         .put("backend", runtime.backendId)
         .put("loaded", loaded)
         .put("runnerReady", isAvailable)
@@ -3034,17 +3214,18 @@ internal class GenieXChatRunner(
         .put("completionTokens", completionTokens)
         .put("promptTokensEstimated", true)
         .put("completionTokensEstimated", true)
-        .put("ttftMs", if (firstTokenAt > 0L) firstTokenAt - startedAt else 0L)
+        .put("ttftMs", timing.ttftMs)
         .put("prefillMs", nativeProfileJson.optDouble("promptTimeMs", 0.0))
-        .put("decodeMs", nativeProfileJson.optDouble("decodeTimeMs", decodeElapsedMs().toDouble()))
-        .put("decodeTps", nativeProfileJson.optDouble("decodingSpeed", decodeTps()))
-        .put("e2eTps", e2eTps())
+        .put("decodeMs", nativeProfileJson.optDouble("decodeTimeMs", timing.decodeMs.toDouble()))
+        .put("decodeTps", nativeProfileJson.optDouble("decodingSpeed", timing.decodeTokensPerSecond(completionTokens)))
+        .put("e2eTps", timing.endToEndTokensPerSecond(completionTokens))
         .put("backendDevices", activeBackendDevices)
         .put(
             "chatRoleMode",
             if (activeModelType == ModelType.LLM) "native_roles_geniex_0_3_12_mca1" else "native_roles"
         )
         .put("nativeProfile", nativeProfileJson)
+        .put("parameterApplication", JSONObject(parameterApplicationJson))
         .put(
             "qairtBundleReadiness",
             lastQairtBundleReadiness?.let { readiness ->
@@ -3060,6 +3241,7 @@ internal class GenieXChatRunner(
         )
         .put("lastError", lastError)
         .toString()
+    }
 
     override fun shutdown() {
         unloadModel()
@@ -3199,20 +3381,6 @@ internal class GenieXChatRunner(
         .put("decodingSpeed", decodingSpeed)
         .put("stopReason", stopReason)
 
-    private fun decodeElapsedMs(): Long =
-        if (completedAt > 0L && firstTokenAt > 0L) (completedAt - firstTokenAt).coerceAtLeast(1L) else 0L
-
-    private fun decodeTps(): Double {
-        val elapsed = decodeElapsedMs()
-        return if (elapsed > 0L) completionTokens * 1000.0 / elapsed else 0.0
-    }
-
-    private fun e2eTps(): Double {
-        val end = completedAt.takeIf { it > 0L } ?: System.currentTimeMillis()
-        val elapsed = (end - startedAt).coerceAtLeast(1L)
-        return completionTokens * 1000.0 / elapsed
-    }
-
     private fun estimateTokens(text: String): Int =
         (text.length / 3).coerceAtLeast(if (text.isBlank()) 0 else 1)
 
@@ -3232,8 +3400,6 @@ internal class GenieXChatRunner(
 
     companion object {
         private const val GENIEX_BOUNDARY_TAG = "MCA-GENIEX-BOUNDARY"
-        private const val DONE = "\u0000MCA_GENIEX_DONE"
-        private const val ERROR_PREFIX = "\u0000MCA_GENIEX_ERROR:"
         private const val GENIEX_ERROR_ALREADY_INITIALIZED = -100008
 
         // Buffer the head of a generation until it grows past this many

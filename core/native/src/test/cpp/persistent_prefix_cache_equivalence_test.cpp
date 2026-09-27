@@ -1,4 +1,5 @@
 #include <llama.h>
+#include "../../main/cpp/llama_prefix_cache_policy.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -222,10 +223,10 @@ int main(int argc, char ** argv) {
             restored_tokens.data(),
             restored_tokens.size(),
             &restored_count);
-    std::filesystem::remove(state_path);
     if (loaded == 0 || restored_count != prefix_count ||
         !std::equal(restored_tokens.begin(), restored_tokens.end(), prompt_tokens.begin())) {
         std::fprintf(stderr, "Restored prefix tokens do not match the cold prefix.\n");
+        std::filesystem::remove(state_path);
         return 1;
     }
     if (!decode_tokens(restored_context.get(), prompt_tokens, prefix_count, prompt_tokens.size())) {
@@ -235,12 +236,73 @@ int main(int argc, char ** argv) {
             restored_context.get(), vocab, static_cast<int>(prompt_tokens.size()));
 
     const bool equivalent = !cold_output.empty() && cold_output == restored_output;
+    if (!equivalent) {
+        std::filesystem::remove(state_path);
+        std::fprintf(stderr, "Fixed-prefix state changed greedy output.\n");
+        return 1;
+    }
+
+    std::vector<llama_token> session_tokens = prompt_tokens;
+    for (const llama_token token : cold_output) {
+        if (llama_vocab_is_eog(vocab, token)) break;
+        session_tokens.push_back(token);
+    }
+    if (llama_state_seq_save_file(cold_context.get(), state_path.string().c_str(),
+                                  0, session_tokens.data(), session_tokens.size()) == 0) {
+        std::filesystem::remove(state_path);
+        std::fprintf(stderr, "Unable to save the completed-turn state.\n");
+        return 1;
+    }
+
+    auto same_output_after_session_restore = [&](const std::vector<llama_token> & next_prompt) {
+        Context fresh(llama_init_from_model(model.get(), context_params));
+        Context resumed(llama_init_from_model(model.get(), context_params));
+        if (!fresh || !resumed || !decode_tokens(fresh.get(), next_prompt, 0, next_prompt.size())) {
+            return false;
+        }
+        std::vector<llama_token> saved_tokens(session_tokens.size());
+        std::size_t saved_count = 0;
+        const std::size_t read = llama_state_seq_load_file(resumed.get(), state_path.string().c_str(),
+                                                            0, saved_tokens.data(), saved_tokens.size(),
+                                                            &saved_count);
+        if (read == 0 || saved_count != session_tokens.size() || saved_tokens != session_tokens) {
+            return false;
+        }
+        const std::size_t reused = mca::llama::reusableSessionTokenPrefix(next_prompt, saved_tokens);
+        if (reused == 0 ||
+            (reused < saved_count && !llama_memory_seq_rm(llama_get_memory(resumed.get()),
+                                                           0, static_cast<llama_pos>(reused), -1)) ||
+            !decode_tokens(resumed.get(), next_prompt, reused, next_prompt.size())) {
+            return false;
+        }
+        return generate_greedy(fresh.get(), vocab, static_cast<int>(next_prompt.size())) ==
+               generate_greedy(resumed.get(), vocab, static_cast<int>(next_prompt.size()));
+    };
+
+    auto appended_prompt = session_tokens;
+    appended_prompt.push_back(prompt_tokens.back());
+    const bool appended_equivalent = same_output_after_session_restore(appended_prompt);
+    const bool exact_equivalent = same_output_after_session_restore(session_tokens);
+    auto changed_prompt = session_tokens;
+    const auto different = std::find_if(prompt_tokens.begin(), prompt_tokens.end(),
+            [&](llama_token token) { return token != changed_prompt.back(); });
+    if (different == prompt_tokens.end()) {
+        std::filesystem::remove(state_path);
+        return 1;
+    }
+    changed_prompt.back() = *different;
+    const bool changed_equivalent = same_output_after_session_restore(changed_prompt);
+    std::filesystem::remove(state_path);
     std::fprintf(
             stderr,
-            "persistent-prefix native equivalence: %s (saved=%zu restored=%zu generated=%zu)\n",
+            "persistent state equivalence: fixed=%s append=%s exact=%s changed=%s "
+            "(saved=%zu restored=%zu generated=%zu)\n",
             equivalent ? "PASS" : "FAIL",
+            appended_equivalent ? "PASS" : "FAIL",
+            exact_equivalent ? "PASS" : "FAIL",
+            changed_equivalent ? "PASS" : "FAIL",
             saved,
             restored_count,
             cold_output.size());
-    return equivalent ? 0 : 1;
+    return appended_equivalent && exact_equivalent && changed_equivalent ? 0 : 1;
 }

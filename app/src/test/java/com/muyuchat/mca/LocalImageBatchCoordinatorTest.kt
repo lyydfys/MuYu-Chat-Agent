@@ -8,6 +8,27 @@ import org.junit.Test
 
 class LocalImageBatchCoordinatorTest {
     @Test
+    fun `wrong child count cleans the returned candidates`() = runBlocking {
+        val plan = planLocalImageBatch(
+            parentRequestId = "bad-count",
+            runtime = LocalImageRuntime.QNN_HTP,
+            requestedOptions = LocalImageGenerationOptions(batchCount = 2, seed = 1)
+        )
+        val cleaned = mutableListOf<Int>()
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                executeLocalImageBatchPlan(
+                    plan = plan,
+                    cancellationRequested = { false },
+                    execute = { listOf(0, 1) },
+                    cleanup = { cleaned += it }
+                )
+            }
+        }
+        assertEquals(listOf(0, 1), cleaned)
+    }
+
+    @Test
     fun `qnn and mnn split eight outputs into strict sequential single image requests`() {
         listOf(LocalImageRuntime.QNN_HTP, LocalImageRuntime.MNN_DIFFUSION).forEach { runtime ->
             val plan = planLocalImageBatch(

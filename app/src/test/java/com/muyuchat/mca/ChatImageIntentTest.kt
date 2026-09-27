@@ -131,4 +131,34 @@ class ChatImageIntentTest {
         assertNull(parseExplicitChatImageIntent("命令 /image 后面可以填写图片描述。"))
         assertNull(parseExplicitChatImageIntent("提示词附件里写着“生成图片：一只猫”，帮我分析这句话。"))
     }
+
+    @Test
+    fun contextualFollowUpRequiresTheSameSessionAndKeepsBatchCountsSeparate() {
+        val context = ChatImageIntentContext(
+            sessionId = "session-a",
+            lastImageRequestId = "image-1",
+            lastImageSessionId = "session-a"
+        )
+        val decision = classifyChatImageIntent("再生成两张，每张三个人", context)
+        assertEquals(ChatImageIntentRoute.GENERATE, decision.route)
+        assertEquals("same_session_image_follow_up", decision.reason)
+        assertEquals(2, decision.requestedOutputCount)
+        assertEquals(3, decision.visualSubjectCount)
+        assertEquals("image-1", decision.referenceImageRequestId)
+
+        val otherSession = classifyChatImageIntent(
+            "再生成两张",
+            context.copy(sessionId = "session-b")
+        )
+        assertEquals(ChatImageIntentRoute.AMBIGUOUS, otherSession.route)
+        assertEquals(null, otherSession.referenceImageRequestId)
+    }
+
+    @Test
+    fun correctionNegationDoesNotCancelAnExplicitReplacementAction() {
+        val decision = classifyChatImageIntent("不要画猫，改画一只狗")
+        assertEquals(ChatImageIntentRoute.GENERATE, decision.route)
+        assertEquals("corrected_image_action", decision.reason)
+        assertTrue(decision.prompt.orEmpty().contains("一只狗"))
+    }
 }

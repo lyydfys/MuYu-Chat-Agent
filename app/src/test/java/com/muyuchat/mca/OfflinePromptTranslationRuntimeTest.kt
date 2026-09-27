@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.io.File
+import java.nio.file.Files
 
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CancellationException
@@ -116,7 +117,7 @@ class OfflinePromptTranslationRuntimeTest {
     }
 
     @Test
-    fun `translated output restores lora and weight tokens and preserves negative text`() = runBlocking {
+    fun `invalid translated output falls back and preserves original prompts`() = runBlocking {
         val bundle = verifiedBundle()
         val request = OfflinePromptTranslationRequest(
             sourceText = "一位女孩 <lora:portrait:0.8> (masterpiece:1.2)",
@@ -137,13 +138,11 @@ class OfflinePromptTranslationRuntimeTest {
 
         val result = service.translate(bundle, request)
 
-        assertTrue(result is OfflinePromptTranslationResolution.Translated)
-        val translated = result as OfflinePromptTranslationResolution.Translated
-        assertTrue(translated.translatedPrompt.contains("<lora:portrait:0.8>"))
-        assertTrue(translated.translatedPrompt.contains("(masterpiece:1.2)"))
-        assertEquals(request.sourceText, translated.originalPrompt)
-        assertEquals(request.negativePrompt, translated.originalNegativePrompt)
-        assertEquals(request.negativePrompt, translated.effectiveNegativePrompt)
+        assertTrue(result is OfflinePromptTranslationResolution.Fallback)
+        val fallback = result as OfflinePromptTranslationResolution.Fallback
+        assertEquals(OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST, fallback.reason)
+        assertEquals(request.sourceText, fallback.originalPrompt)
+        assertEquals(request.negativePrompt, fallback.originalNegativePrompt)
     }
 
     @Test
@@ -194,6 +193,34 @@ class OfflinePromptTranslationRuntimeTest {
         job.cancelAndJoin()
 
         assertTrue(job.isCancelled)
+    }
+
+    @Test
+    fun `hy-mt2 manifest fixture is pinned and incomplete bytes are rejected`() {
+        val root = Files.createTempDirectory("mca-hymt2-fixture").toFile()
+        try {
+            val translation = File(root, OfflinePromptTranslationContract.TRANSLATION_DIRECTORY)
+            assertTrue(translation.mkdirs())
+            val manifest = requireNotNull(javaClass.classLoader?.getResourceAsStream(
+                "offline_translation/hy-mt2/translation_manifest.json"
+            ))
+            File(translation, OfflinePromptTranslationContract.MANIFEST_FILE_NAME).outputStream().use {
+                manifest.copyTo(it)
+            }
+            manifest.close()
+            File(translation, HyMt2PromptTranslationContract.MODEL_FILE).writeBytes(byteArrayOf(0))
+            File(translation, HyMt2PromptTranslationContract.MODEL_NOTICE).writeBytes(byteArrayOf(0))
+            File(translation, HyMt2PromptTranslationContract.RUNTIME_NOTICE).writeBytes(byteArrayOf(0))
+
+            val verification = OfflinePromptTranslationBundleVerifier.verify(root)
+            assertTrue(verification is OfflinePromptTranslationBundleVerification.Rejected)
+            assertEquals(
+                OfflinePromptTranslationBundleRejectionCode.INTEGRITY_MISMATCH,
+                (verification as OfflinePromptTranslationBundleVerification.Rejected).code
+            )
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     private fun verifiedBundle(): VerifiedOfflinePromptTranslationBundle {

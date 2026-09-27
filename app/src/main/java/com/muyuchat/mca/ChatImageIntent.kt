@@ -24,11 +24,30 @@ internal enum class ChatImageIntentRoute {
     AMBIGUOUS
 }
 
+/** Only same-session evidence may resolve an elliptical follow-up such as "again, two". */
+internal data class ChatImageIntentContext(
+    val sessionId: String? = null,
+    val conversationRevision: String? = null,
+    val lastImageRequestId: String? = null,
+    val lastImageSessionId: String? = null,
+    val recentText: List<String> = emptyList(),
+    val characterName: String? = null,
+    val imageSkillSelected: Boolean = false
+) {
+    val sameSessionImageRequestId: String?
+        get() = lastImageRequestId?.takeIf {
+            it.isNotBlank() && !sessionId.isNullOrBlank() && sessionId == lastImageSessionId
+        }
+}
+
 internal data class ChatImageIntentDecision(
     val route: ChatImageIntentRoute,
     val sourceText: String,
     val prompt: String? = null,
-    val reason: String
+    val reason: String,
+    val requestedOutputCount: Int? = null,
+    val visualSubjectCount: Int? = null,
+    val referenceImageRequestId: String? = null
 ) {
     val intent: ChatImageIntent?
         get() {
@@ -118,6 +137,44 @@ private val imagePromptNegativePrefix = Regex(
     """(?is)^(?:不要|别|无需|不需要|拒绝|禁止)\s*(?:生成|制作|创作|绘制|画|生图|出图)"""
 )
 
+private val negatedActionCorrection = Regex(
+    """(?is)^(?:不要|别|无需|不需要|拒绝|禁止).+?[，,；;。]\s*(?:但|但是|而是)?\s*(?:改画|改绘制|改生成|改成画|请画|请生成|画|绘制|生成)\s*(.+)$"""
+)
+
+private val nonImageOutputNoun = Regex(
+    """(?is)^(?:(?:一|两|二|三|四|五|六|七|八|九|十|\d+)\s*(?:段|个|篇|首|份|张)?\s*)?(?:代码|程序|脚本|函数|算法|九九乘法表|乘法表|表格|公式|作文|故事|句子|翻译|解释|总结|清单|列表|视频|音频|音乐|录音|语音|声音|文案|字幕|json|markdown)(?:\b|[，,。\s]|$)"""
+)
+
+private val quotedOrConditionalImageDiscussion = Regex(
+    """(?is)^(?:如果|假如|假设|当|关于|讨论|分析|解释|翻译|总结|教我|告诉我|["“'`]).*"""
+)
+
+private val followUpImageAction = Regex(
+    """(?is)^(?:再来|再画|再生成|继续画|继续生成|换个姿势|换一个姿势|换个角度|换一个角度)\s*(?:([1-8]|一|两|二|三|四|五|六|七|八)\s*张)?\s*(?:[,，]\s*每张\s*(?:[1-9]\d*|一|两|二|三|四|五|六|七|八|九|十)\s*(?:个|位|名|只)?\s*(?:人|女孩|男孩|人物|猫|狗|主体))?\s*[。.!！]?\s*$"""
+)
+
+private val outputCountPattern = Regex(
+    """(?:生成|制作|创作|绘制|画|来|出图)\s*(?:一组\s*)?([1-9]\d*|一|两|二|三|四|五|六|七|八|九|十)\s*张"""
+)
+
+private val visualSubjectCountPattern = Regex(
+    """每张\s*([1-9]\d*|一|两|二|三|四|五|六|七|八|九|十)\s*(?:个|位|名|只)?\s*(?:人|女孩|男孩|人物|猫|狗|主体)"""
+)
+
+private fun imageCount(value: String?): Int? = when (value) {
+    "一" -> 1
+    "二", "两" -> 2
+    "三" -> 3
+    "四" -> 4
+    "五" -> 5
+    "六" -> 6
+    "七" -> 7
+    "八" -> 8
+    "九" -> 9
+    "十" -> 10
+    else -> value?.toIntOrNull()
+}
+
 private fun cleanImagePromptCandidate(value: String?): String? = value
     ?.replace(Regex("""^[\s:：,，、-]+|[\s。！？!?]+$"""), "")
     ?.trim()
@@ -140,12 +197,6 @@ private fun shouldKeepAutomaticImageIntent(prompt: String): Boolean {
     if (candidate.isBlank() || imagePromptQuestionPrefix.containsMatchIn(candidate) ||
         imagePromptNegativePrefix.containsMatchIn(candidate)
     ) return false
-    if (NON_IMAGE_REQUEST_MARKERS.any { marker -> candidate.contains(marker, ignoreCase = true) }) {
-        // A structured image prompt may legitimately contain words such as “翻译” or “模型”;
-        // those are safe only when the user has explicitly selected the image skill.
-        return structuredImagePrompt.containsMatchIn(candidate) &&
-            !imagePromptQuestionPrefix.containsMatchIn(candidate)
-    }
     return true
 }
 
@@ -153,6 +204,7 @@ private fun parseImageIntentInternal(input: String): ChatImageIntent? {
     val value = input.trim()
     if (value.isBlank()) return null
     val explicitSlashPrompt = explicitImageSlashCommand.matchEntire(value)?.groupValues?.getOrNull(1)
+    if (explicitSlashPrompt == null && quotedOrConditionalImageDiscussion.containsMatchIn(value)) return null
     // A slash command is an explicit skill selection.  Do not apply the automatic intent safety
     // filter to its payload: JSON, negative prompts, LoRA tags, or prose are all valid model input.
     val prompt = explicitSlashPrompt?.let(::cleanImagePromptCandidate) ?: sequenceOf(
@@ -200,7 +252,9 @@ private fun parseImageIntentInternal(input: String): ChatImageIntent? {
     }
     // Avoid stealing ordinary text/code requests.  A slash command bypasses this guard because it
     // is an explicit skill selection; all other forms must look like an action, not a discussion.
-    if (explicitSlashPrompt == null && !shouldKeepAutomaticImageIntent(value)) {
+    if (explicitSlashPrompt == null &&
+        (!shouldKeepAutomaticImageIntent(value) || nonImageOutputNoun.containsMatchIn(prompt))
+    ) {
         return null
     }
     val sourceText = if (explicitSlashPrompt != null) {
@@ -222,7 +276,10 @@ private fun parseImageIntentInternal(input: String): ChatImageIntent? {
  * choice so the UI can keep the draft and ask for clarification instead of silently doing both
  * a chat turn and an image job.
  */
-internal fun classifyChatImageIntent(input: String): ChatImageIntentDecision {
+internal fun classifyChatImageIntent(
+    input: String,
+    context: ChatImageIntentContext = ChatImageIntentContext()
+): ChatImageIntentDecision {
     val value = input.trim()
     if (value.isBlank()) {
         return ChatImageIntentDecision(
@@ -231,12 +288,50 @@ internal fun classifyChatImageIntent(input: String): ChatImageIntentDecision {
             reason = "blank_input"
         )
     }
+    if (context.imageSkillSelected && !hasExplicitChatImageCommand(value)) {
+        return ChatImageIntentDecision(
+            route = ChatImageIntentRoute.GENERATE,
+            sourceText = value,
+            prompt = value,
+            reason = "selected_image_skill",
+            requestedOutputCount = imageCount(outputCountPattern.find(value)?.groupValues?.get(1)),
+            visualSubjectCount = imageCount(visualSubjectCountPattern.find(value)?.groupValues?.get(1)),
+            referenceImageRequestId = context.sameSessionImageRequestId
+        )
+    }
+    negatedActionCorrection.matchEntire(value)?.let { correction ->
+        val corrected = parseImageIntentInternal("画 " + correction.groupValues[1])
+        if (corrected != null) {
+            return ChatImageIntentDecision(
+                route = ChatImageIntentRoute.GENERATE,
+                sourceText = value,
+                prompt = corrected.prompt,
+                reason = "corrected_image_action",
+                requestedOutputCount = imageCount(outputCountPattern.find(value)?.groupValues?.get(1)),
+                visualSubjectCount = imageCount(visualSubjectCountPattern.find(value)?.groupValues?.get(1))
+            )
+        }
+    }
+    if (followUpImageAction.matches(value)) {
+        val referenced = context.sameSessionImageRequestId
+        return ChatImageIntentDecision(
+            route = if (referenced == null) ChatImageIntentRoute.AMBIGUOUS else ChatImageIntentRoute.GENERATE,
+            sourceText = value,
+            prompt = value.takeIf { referenced != null },
+            reason = if (referenced == null) "image_follow_up_needs_reference" else "same_session_image_follow_up",
+            requestedOutputCount = imageCount(followUpImageAction.matchEntire(value)?.groupValues?.get(1)),
+            visualSubjectCount = imageCount(visualSubjectCountPattern.find(value)?.groupValues?.get(1)),
+            referenceImageRequestId = referenced
+        )
+    }
     parseImageIntentInternal(value)?.let { intent ->
         return ChatImageIntentDecision(
             route = ChatImageIntentRoute.GENERATE,
             sourceText = intent.sourceText,
             prompt = intent.prompt,
-            reason = if (hasExplicitChatImageCommand(value)) "explicit_image_skill" else "image_action"
+            reason = if (hasExplicitChatImageCommand(value)) "explicit_image_skill" else "image_action",
+            requestedOutputCount = imageCount(outputCountPattern.find(value)?.groupValues?.get(1)),
+            visualSubjectCount = imageCount(visualSubjectCountPattern.find(value)?.groupValues?.get(1))
         )
     }
     if (hasExplicitChatImageCommand(value)) {
@@ -272,10 +367,3 @@ internal fun parseExplicitChatImageIntent(input: String): ChatImageIntent? =
 /** Name used by new call sites; the old function remains source-compatible for existing tests. */
 internal fun parseChatImageIntent(input: String): ChatImageIntent? =
     parseExplicitChatImageIntent(input)
-
-private val NON_IMAGE_REQUEST_MARKERS = listOf(
-    "代码", "程序", "脚本", "函数", "算法", "九九乘法表", "乘法表", "表格", "公式",
-    "诗", "作文", "故事", "句子", "翻译", "解释", "总结", "清单", "列表", "模型",
-    "视频", "音频", "音乐", "录音", "语音", "声音", "文字", "文案", "字幕",
-    "json", "markdown"
-)

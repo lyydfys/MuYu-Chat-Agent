@@ -36,6 +36,8 @@ class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters)
                             setProgress(workDataOf("file" to progress.downloadFileName,
                                 "bytes" to progress.downloadedBytes, "total" to progress.downloadTotalBytes,
                                 "speed" to progress.downloadSpeedBytesPerSecond, "message" to progress.statusMessage,
+                                "phase" to progress.phase.name,
+                                "failureSource" to progress.failureSource?.name,
                                 "integrityStatus" to progress.integrityStatus,
                                 "integrityMessage" to progress.integrityMessage,
                                 "executionStatus" to progress.executionStatus,
@@ -47,6 +49,7 @@ class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters)
                 }
                 Result.success(workDataOf("modelId" to installed.modelId, "imageId" to installed.imageId,
                     "projector" to installed.projector, "message" to installed.message,
+                    "phase" to com.muyuchat.feature.modelhub.ModelHubDownloadPhase.COMPLETED.name,
                     "integrityStatus" to installed.integrityStatus,
                     "integrityMessage" to installed.integrityMessage,
                     "executionStatus" to installed.executionStatus,
@@ -63,6 +66,8 @@ class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters)
             val progress = installer?.progress?.value
             Result.failure(workDataOf(
                 "error" to "下载或导入未完成：${error.message.orEmpty().take(900)}。已保留可恢复进度，请检查网络和存储空间后重试。",
+                "phase" to progress?.phase?.name,
+                "failureSource" to progress?.failureSource?.name,
                 "integrityStatus" to (progress?.integrityStatus ?: "FAILED"),
                 "integrityMessage" to (progress?.integrityMessage ?: error.message.orEmpty()),
                 "executionStatus" to (progress?.executionStatus ?: "FAILED"),

@@ -3,13 +3,8 @@
 package com.muyuchat.mca
 
 import android.os.Bundle
-import android.os.SystemClock
 import android.content.Context
-import android.graphics.Rect
-import android.view.inputmethod.InputMethodManager
 import android.view.WindowManager
-import android.view.View
-import android.view.ViewTreeObserver
 import java.io.File
 import androidx.activity.BackEventCompat
 import androidx.activity.ComponentActivity
@@ -19,8 +14,6 @@ import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.Animatable
@@ -41,7 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.AlertDialog
+import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -72,8 +65,10 @@ import com.muyuchat.feature.agent.BenchmarkHistoryItem
 import com.muyuchat.feature.agent.AgentUiState
 import com.muyuchat.feature.agent.TuningTrialItem
 import com.muyuchat.feature.chat.ChatScreen
+import com.muyuchat.feature.chat.ConsumeImeBackHandler
 import com.muyuchat.feature.chat.InternalBrowserDialog
 import com.muyuchat.feature.chat.AssistantEditorDraft
+import com.muyuchat.feature.chat.AssistantMemoryUiItem
 import com.muyuchat.feature.chat.AssistantUiItem
 import com.muyuchat.feature.chat.ChatHistoryItem
 import com.muyuchat.feature.chat.ChatBackgroundScope
@@ -99,6 +94,8 @@ import com.muyuchat.feature.chat.npuAvailabilityForChatBackend
 import com.muyuchat.feature.chat.selectedChatBackendId
 import com.muyuchat.feature.chat.withChatBackend
 import com.muyuchat.feature.chat.ChatUiState
+import com.muyuchat.feature.chat.ContextSummaryUiItem
+import com.muyuchat.feature.chat.ContextSummaryModelOption
 import com.muyuchat.feature.chat.KnowledgeBaseUiItem
 import com.muyuchat.feature.chat.WorldBookImportScope
 import com.muyuchat.feature.chat.WorldBookUiItem
@@ -178,69 +175,21 @@ class MainActivity : ComponentActivity() {
     private var pendingChatExportSessionId: String? = null
     private var pendingVisionProjectorModelId: String? = null
     private var pendingKnowledgeBaseId: String? = null
+    private var pendingKnowledgeDocumentOwner: ContentImportOwner? = null
     private var pendingWorldBookImportScope: WorldBookScope = WorldBookScope.GLOBAL
+    private var pendingAssistantCardOwner: ContentImportOwner? = null
+    private var pendingWorldBookOwner: ContentImportOwner? = null
     private var pendingModelImportTextOnly: Boolean = false
-    /**
-     * MIUI can dispatch a gesture-back in the small window between hiding the
-     * IME and publishing the next WindowInsets snapshot.  Keep a short-lived
-     * edge-triggered observation so that this first gesture is still consumed
-     * by the keyboard instead of moving the task to the background.
-     */
-    @Volatile
-    private var imeLastVisibleAtMillis: Long = 0L
-    private var imeLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Keep the chat header in the resized viewport while the IME is open.
         // Some MIUI builds otherwise pan the whole activity upward, which hides
         // the model selector and makes the top bar impossible to operate.
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
-        val imeRoot = window.decorView
-        // Capture the platform insets before Compose observes them.  Returning
-        // the original object keeps this listener transparent to Compose.
-        ViewCompat.setOnApplyWindowInsetsListener(imeRoot) { _, insets ->
-            if (insets.isVisible(WindowInsetsCompat.Type.ime())) {
-                imeLastVisibleAtMillis = SystemClock.uptimeMillis()
-            }
-            insets
-        }
-        imeLayoutListener = ViewTreeObserver.OnGlobalLayoutListener {
-            if (isImeVisibleFromDisplayFrame(imeRoot)) {
-                imeLastVisibleAtMillis = SystemClock.uptimeMillis()
-            }
-        }
-        imeRoot.viewTreeObserver.addOnGlobalLayoutListener(imeLayoutListener)
         onBackPressedDispatcher.addCallback(
             this,
             object : OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
-                    val root = window.decorView
-                    val imeVisible = ViewCompat.getRootWindowInsets(root)
-                        ?.isVisible(WindowInsetsCompat.Type.ime()) == true
-                    val frameImeVisible = isImeVisibleFromDisplayFrame(root)
-                    val focusedView = currentFocus
-                    val imeManager = getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                    val now = SystemClock.uptimeMillis()
-                    val imeRecentlyVisible = now - imeLastVisibleAtMillis in 0L..800L
-                    // MIUI gesture-back can dispatch before the insets tree has
-                    // reported the IME. In that short window the focused
-                    // Compose text field is still active, so use both signals
-                    // before allowing the activity-level back action.
-                    val imeActive = imeVisible || frameImeVisible ||
-                        imeRecentlyVisible ||
-                        (focusedView != null && imeManager?.isActive(focusedView) == true)
-                    if (imeActive) {
-                        ViewCompat.getWindowInsetsController(root)
-                            ?.hide(WindowInsetsCompat.Type.ime())
-                        imeManager?.hideSoftInputFromWindow(
-                            focusedView?.windowToken,
-                            InputMethodManager.HIDE_NOT_ALWAYS
-                        )
-                        focusedView?.clearFocus()
-                        imeLastVisibleAtMillis = 0L
-                        return
-                    }
                     moveTaskToBack(true)
                 }
             }
@@ -249,6 +198,9 @@ class MainActivity : ComponentActivity() {
             savedInstanceState?.getString(PENDING_WORLD_BOOK_SCOPE_KEY)
         )
         pendingModelImportTextOnly = savedInstanceState?.getBoolean("pending_model_import_text_only") ?: false
+        pendingAssistantCardOwner = ContentImportOwner.fromJsonOrNull(savedInstanceState?.getString("pending_assistant_card_owner"))
+        pendingWorldBookOwner = ContentImportOwner.fromJsonOrNull(savedInstanceState?.getString("pending_world_book_owner"))
+        pendingKnowledgeDocumentOwner = ContentImportOwner.fromJsonOrNull(savedInstanceState?.getString("pending_knowledge_document_owner"))
         val importLauncher = registerForActivityResult(OpenModelDocumentsContract()) { uris ->
             val textOnly = pendingModelImportTextOnly
             val persistent = persistModelImportAccess(uris)
@@ -261,22 +213,34 @@ class MainActivity : ComponentActivity() {
                 startup.whenReady { it.importModelDirectory(uri, textOnly, persistent) }
             }
         }
+        val offlineTranslationImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) {
+                persistModelImportAccess(listOf(uri))
+                startup.whenReady { it.importOfflinePromptTranslationBundle(uri) }
+            }
+        }
         val localImageModelImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             if (uri != null) startup.whenReady { it.importLocalImageModel(uri) }
         }
         val assistantCardImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
-            if (uri != null) startup.whenReady { it.importAssistantCardFile(uri.toString()) }
+            val owner = pendingAssistantCardOwner
+            pendingAssistantCardOwner = null
+            if (uri != null) startup.whenReady { it.importAssistantCardFile(uri.toString(), owner) }
         }
         val worldBookImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             val scope = pendingWorldBookImportScope
+            val owner = pendingWorldBookOwner
             pendingWorldBookImportScope = WorldBookScope.GLOBAL
-            if (uri != null) startup.whenReady { it.importWorldBookFile(uri.toString(), scope) }
+            pendingWorldBookOwner = null
+            if (uri != null) startup.whenReady { it.importWorldBookFile(uri.toString(), scope, owner) }
         }
         val knowledgeDocumentImportLauncher = registerForActivityResult(OpenAnyDocumentContract()) { uri ->
             val knowledgeBaseId = pendingKnowledgeBaseId
+            val owner = pendingKnowledgeDocumentOwner
             pendingKnowledgeBaseId = null
+            pendingKnowledgeDocumentOwner = null
             if (uri != null && knowledgeBaseId != null) {
-                startup.whenReady { it.importKnowledgeDocument(knowledgeBaseId, uri.toString()) }
+                startup.whenReady { it.importKnowledgeDocument(knowledgeBaseId, uri.toString(), owner) }
             }
         }
         val visionProjectorImportLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -333,10 +297,13 @@ class MainActivity : ComponentActivity() {
                             )
                         )
                     },
+                    onImportOfflineTranslation = { offlineTranslationImportLauncher.launch(null) },
                     onImportAssistantCardFile = {
+                        pendingAssistantCardOwner = viewModel.captureContentImportOwner()
                         assistantCardImportLauncher.launch(Unit)
                     },
                     onImportWorldBookFile = { scope ->
+                        pendingWorldBookOwner = viewModel.captureContentImportOwner()
                         pendingWorldBookImportScope = when (scope) {
                             WorldBookImportScope.GLOBAL -> WorldBookScope.GLOBAL
                             WorldBookImportScope.ASSISTANT -> WorldBookScope.ASSISTANT
@@ -346,6 +313,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onImportKnowledgeDocument = { knowledgeBaseId ->
                         pendingKnowledgeBaseId = knowledgeBaseId
+                        pendingKnowledgeDocumentOwner = viewModel.captureContentImportOwner()
                         knowledgeDocumentImportLauncher.launch(Unit)
                     },
                     onAttachVisionProjector = { modelId ->
@@ -370,20 +338,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        val root = window.decorView
-        ViewCompat.setOnApplyWindowInsetsListener(root, null)
-        imeLayoutListener?.let { listener ->
-            if (root.viewTreeObserver.isAlive) {
-                root.viewTreeObserver.removeOnGlobalLayoutListener(listener)
-            }
-        }
-        imeLayoutListener = null
-        super.onDestroy()
-    }
-
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString(PENDING_WORLD_BOOK_SCOPE_KEY, pendingWorldBookImportScope.wireName)
+        outState.putString("pending_assistant_card_owner", pendingAssistantCardOwner?.toJsonString())
+        outState.putString("pending_world_book_owner", pendingWorldBookOwner?.toJsonString())
+        outState.putString("pending_knowledge_document_owner", pendingKnowledgeDocumentOwner?.toJsonString())
         outState.putBoolean("pending_model_import_text_only", pendingModelImportTextOnly)
         super.onSaveInstanceState(outState)
     }
@@ -406,6 +365,7 @@ private fun McaApp(
     onImport: (Boolean) -> Unit,
     onImportModelDirectory: (Boolean) -> Unit,
     onImportLocalImageModel: () -> Unit,
+    onImportOfflineTranslation: () -> Unit,
     onImportAssistantCardFile: () -> Unit,
     onImportWorldBookFile: (WorldBookImportScope) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
@@ -414,6 +374,14 @@ private fun McaApp(
     onExportChatSession: (String) -> Unit,
     viewModel: MainViewModel
 ) {
+    state.contentImportPreview?.let { preview ->
+        ContentImportPreviewDialog(
+            preview = preview,
+            committing = state.contentImportCommitting,
+            onConfirm = { viewModel.confirmContentImportPreview(preview.id) },
+            onCancel = { viewModel.cancelContentImportPreview(preview.id) }
+        )
+    }
     var modelImportDialogOpen by rememberSaveable { mutableStateOf(false) }
     var modelImportTextOnly by rememberSaveable { mutableStateOf(false) }
     val requestModelImport = { modelImportDialogOpen = true }
@@ -541,6 +509,9 @@ private fun McaApp(
             }
             ChatScreen(
                 state = ChatUiState(
+                    pendingImageTranslationDraft = state.pendingChatImageTranslationDraft,
+                    pendingImageActionDraft = state.pendingChatImageActionDraft,
+                    browserTask = state.browserTask,
                     modelLoadMessage = state.modelLoadStage.takeIf { state.busy && state.engineLifecycle == com.muyuchat.feature.agent.AgentEngineLifecycle.LOADING },
                     modelReadinessLabel = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         null
@@ -767,10 +738,12 @@ private fun McaApp(
                             nPredict = assistantParams.nPredict,
                             reasoningMode = assistantParams.reasoningMode,
                             memoryEnabled = assistant.memoryEnabled,
+                            memorySummaryInterval = assistant.memorySummaryInterval,
+                            characterCardImported = !assistant.characterCardJson.isNullOrBlank(),
                             webSearchEnabled = assistant.webSearchEnabled,
                             fileContextEnabled = assistant.fileContextEnabled,
                             selected = assistant.id == state.selectedAssistantId,
-                            exportJson = assistant.characterCardJson ?: assistant.toJson().toString(2),
+                            exportJson = assistant.toJson().toString(2),
                             topK = assistantParams.topK,
                             minP = assistantParams.minP,
                             repeatPenalty = assistantParams.repeatPenalty,
@@ -981,6 +954,8 @@ private fun McaApp(
                             chatMessageId = job.spec?.chatMessageId,
                             imageAssetId = job.imageAssetId,
                             imageAssetIds = job.imageAssetIds,
+                            completedProgressCount = job.completedProgressCount,
+                            expectedOutputCount = job.spec?.options?.batchCount ?: 1,
                             previewUriString = job.previewUriString,
                             previewMode = job.previewMode,
                             previewStep = job.previewStep,
@@ -990,7 +965,8 @@ private fun McaApp(
                             failed = job.status.failed,
                             terminal = job.status.terminal,
                             message = job.message,
-                            startedAtMillis = job.startedAtMillis
+                            startedAtMillis = job.startedAtMillis,
+                            startedAtElapsedMs = job.startedAtElapsedMs
                         )
                     },
                     activeConversationId = state.activeChatSessionId,
@@ -1003,6 +979,36 @@ private fun McaApp(
                     promptContextUsage = state.promptContextUsage,
                     contextCompressionThresholdPercent = state.contextCompressionThresholdPercent,
                     contextCompressionPending = state.contextCompressionPending,
+                    contextSummaryModelSelection = state.contextSummaryModelSelection,
+                    contextSummaryModels = buildList {
+                        add(ContextSummaryModelOption("current", "当前聊天模型"))
+                        add(ContextSummaryModelOption("deterministic", "规则整理"))
+                        add(ContextSummaryModelOption("local", "已加载的本地模型"))
+                        state.cloudModels.filter { it.kind == CloudModelKind.CHAT && it.configured }.forEach { model ->
+                            add(ContextSummaryModelOption("cloud:${model.id}", "云端 · ${model.displayName}"))
+                        }
+                    },
+                    contextSummaryHistory = state.chatSessions
+                        .firstOrNull { it.id == state.activeChatSessionId }
+                        ?.contextSummaries.orEmpty().map { summary ->
+                            ContextSummaryUiItem(
+                                version = summary.version,
+                                source = summary.source,
+                                text = summary.text,
+                                sourceMessageIds = summary.sourceMessageIds,
+                                active = summary.active,
+                                createdAt = summary.createdAt,
+                                coverageLimited = summary.structuredSummary.coverageLimited,
+                                evidenceCount = summary.structuredSummary.evidence.size,
+                                omittedExcerptCount = summary.structuredSummary.omittedExcerptCount,
+                                omittedCharacterCount = summary.structuredSummary.omittedCharacterCount,
+                                modelIdentity = summary.summaryModelIdentity,
+                                diagnostic = summary.summaryDiagnostic
+                            )
+                        },
+                    canUndoContextSummary = state.chatSessions
+                        .firstOrNull { it.id == state.activeChatSessionId }
+                        ?.contextSummaries?.any { it.active } == true,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
                     } else {
@@ -1079,10 +1085,23 @@ private fun McaApp(
                 onChatBackgroundImageSelected = { scope, uri ->
                     viewModel.importChatBackground(scope.toAppearanceScope(), uri)
                 },
+                assistantMemories = state.assistantMemories.map { memory ->
+                    AssistantMemoryUiItem(
+                        id = memory.id,
+                        assistantId = memory.assistantId,
+                        scope = memory.scope,
+                        content = memory.content,
+                        source = memory.source,
+                        createdAt = memory.createdAt
+                    )
+                },
                 onInputChange = viewModel::onInputChange,
                 onDismissStatusMessage = viewModel::clearStatusMessage,
                 onSend = viewModel::sendMessage,
                 onSendImagePrompt = viewModel::sendChatImagePrompt,
+                onResolveImageActionDraft = viewModel::resolveChatImageActionDraft,
+                onSearchContextSummarySources = viewModel::contextSummaryEvidenceForQuery,
+                onBrowserTaskEvent = viewModel::onBrowserTaskEvent,
                 onSetAssistantImageToolAutoApproval = viewModel::setAssistantImageToolAutoApproval,
                 onApproveChatImageRequest = viewModel::approveChatImageRequest,
                 onRejectChatImageRequest = viewModel::rejectChatImageRequest,
@@ -1098,6 +1117,7 @@ private fun McaApp(
                 onExportConversation = onExportChatSession,
                 onRegenerate = viewModel::regenerateLastResponse,
                 onDeleteMessage = viewModel::deleteMessageAt,
+                onTogglePinMessage = viewModel::toggleMessagePinned,
                 onDeleteLastTurn = viewModel::deleteLastConversationTurn,
                 onUploadFile = viewModel::attachFile,
                 onUseImageAsset = viewModel::useImageAsset,
@@ -1179,6 +1199,13 @@ private fun McaApp(
                 releaseGenerationImageGrantsIfCoordinatorIdle =
                     viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
                 onSelectImageModel = viewModel::selectImageGenerationModel,
+                onChatImageLoraSelectionChange = { selections ->
+                    viewModel.updateChatImageLoraSelection(
+                        selections?.map { selection -> selection.id to selection.multiplier }
+                    )
+                },
+                onConfirmImageTranslationDraft = viewModel::confirmChatImageTranslationDraft,
+                onCancelImageTranslationDraft = viewModel::cancelChatImageTranslationDraft,
                 onModelBackendChange = { modelId, backendId ->
                     viewModel.updateModelBackendPreference(modelId, backendId)
                 },
@@ -1187,6 +1214,7 @@ private fun McaApp(
                 onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
                 onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
                 onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
+                onOpenBrowserTask = viewModel::startBrowserTask,
                 onLoadModel = viewModel::selectChatModel,
                 onOpenAgent = { onTab(AppTab.AGENT) },
                 onOpenModels = { startModelsInRecommended = false; onTab(AppTab.MODELS) },
@@ -1202,7 +1230,9 @@ private fun McaApp(
                     onTab(AppTab.SETTINGS)
                 },
                 onRequestContextCompression = viewModel::requestContextCompression,
+                onUndoContextSummary = viewModel::undoContextSummary,
                 onSetContextCompressionThreshold = viewModel::setContextCompressionThreshold,
+                onSetContextSummaryModel = viewModel::setContextSummaryModel,
                 onOpenWebSearchSettings = {
                     startSettingsInWebSearch = true
                     onTab(AppTab.SETTINGS)
@@ -1227,10 +1257,13 @@ private fun McaApp(
                         stopWords = draft.stopWords,
                         reasoningMode = draft.reasoningMode,
                         memoryEnabled = draft.memoryEnabled,
+                        memorySummaryInterval = draft.memorySummaryInterval,
                         webSearchEnabled = draft.webSearchEnabled,
                         fileContextEnabled = draft.fileContextEnabled
                     )
                 },
+                onUpsertAssistantMemory = viewModel::upsertAssistantMemory,
+                onDeleteAssistantMemory = viewModel::deleteAssistantMemory,
                 onSelectAssistant = viewModel::selectAssistant,
                 onDeleteAssistant = viewModel::deleteAssistant,
                 onImportAssistantCard = viewModel::importAssistantCard,
@@ -1389,11 +1422,14 @@ private fun McaApp(
                     hubTotalCount = state.hubTotalCount,
                     repoInput = state.repoInput,
                     downloadFileName = state.downloadFileName,
+                    downloadTaskId = state.downloadTaskId,
                     downloadedBytes = state.downloadedBytes,
                     downloadTotalBytes = state.downloadTotalBytes,
                     downloadSpeedBytesPerSecond = state.downloadSpeedBytesPerSecond,
                     downloadRemainingSeconds = state.downloadRemainingSeconds,
                     downloadStatus = state.downloadStatus,
+                    downloadPhase = state.downloadPhase,
+                    downloadFailureSource = state.downloadFailureSource,
                     downloadIntegrityStatus = state.downloadIntegrityStatus,
                     downloadIntegrityMessage = state.downloadIntegrityMessage,
                     downloadExecutionStatus = state.downloadExecutionStatus,
@@ -1481,6 +1517,7 @@ private fun McaApp(
                 onSelectLocalImageModel = viewModel::selectLocalImageModel,
                 onVerifyLocalImageModel = viewModel::verifyLocalImageModel,
                 onDeleteLocalImageModel = viewModel::deleteLocalImageModel,
+                onRemoveLocalImageModelRecord = viewModel::removeLocalImageModelRecord,
                 onCloudEnabledChange = viewModel::updateCloudApiEnabled,
                 onBeginAddCloudModel = viewModel::beginAddCloudModel,
                 onEditCloudModel = viewModel::editCloudModel,
@@ -1542,6 +1579,10 @@ private fun McaApp(
                 onClearFileLibrary = viewModel::clearFileLibrary,
                 onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
                 onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
+                offlineTranslationStatus = state.offlineTranslationStatus,
+                offlineTranslationInstalling = state.offlineTranslationInstalling,
+                onImportOfflineTranslation = onImportOfflineTranslation,
+                onCancelOfflineTranslationImport = viewModel::cancelOfflinePromptTranslationInstall,
                 onSaveWebSearchSettings = { draft: WebSearchSettingsDraft ->
                     viewModel.saveWebSearchConfig(
                         enabled = draft.enabled,
@@ -1616,89 +1657,24 @@ private fun McaApp(
                     onDismiss = { internalBrowserUrl = null }
                 )
             }
+            state.browserTask?.takeIf { task ->
+                task.phase == com.muyuchat.feature.chat.BrowserTaskPhase.QUEUED || task.windowVisible
+            }?.let { task ->
+                InternalBrowserDialog(
+                    task = task,
+                    onTaskEvent = viewModel::onBrowserTaskEvent,
+                    onDismiss = {
+                        viewModel.onBrowserTaskEvent(com.muyuchat.feature.chat.BrowserTaskEvent(
+                            task.taskId, task.navigationId, com.muyuchat.feature.chat.BrowserTaskAction.CANCEL
+                        ))
+                    }
+                )
+            }
         }
     }
 
-    // Register this handler after the page handlers above so a system gesture
-    // is consumed by the IME first.  MIUI can dispatch the gesture before its
-    // WindowInsets tree reports the keyboard, so this also samples the
-    // visible display frame and InputMethodManager state.
+    // Register after page handlers so the IME owns the first back gesture.
     ConsumeImeBackHandler()
-}
-
-internal fun shouldConsumeImeBack(
-    composeImeVisible: Boolean,
-    layoutImeVisible: Boolean,
-    inputMethodActive: Boolean,
-    imeVisibleRecently: Boolean = false
-): Boolean = composeImeVisible || layoutImeVisible || inputMethodActive || imeVisibleRecently
-
-@Composable
-private fun ConsumeImeBackHandler() {
-    val hostView = LocalView.current
-    val rootView = hostView.rootView
-    val context = hostView.context
-    val imeManager = remember(context) {
-        context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-    }
-    var layoutImeVisible by remember { mutableStateOf(false) }
-    var imeLastVisibleAtMillis by remember { mutableStateOf(0L) }
-
-    // The visible display frame remains a useful fallback on MIUI builds that
-    // update the InsetsCompat tree after the back gesture has already fired.
-    LaunchedEffect(rootView) {
-        // Trigger an initial sample after the first composition.  Subsequent
-        // samples come from the global-layout listener below.
-        layoutImeVisible = isImeVisibleFromDisplayFrame(rootView)
-    }
-    androidx.compose.runtime.DisposableEffect(rootView) {
-        val observer = rootView.viewTreeObserver
-        val listener = ViewTreeObserver.OnGlobalLayoutListener {
-            val visible = isImeVisibleFromDisplayFrame(rootView)
-            layoutImeVisible = visible
-            if (visible) imeLastVisibleAtMillis = SystemClock.uptimeMillis()
-        }
-        observer.addOnGlobalLayoutListener(listener)
-        onDispose {
-            if (observer.isAlive) observer.removeOnGlobalLayoutListener(listener)
-        }
-    }
-
-    val focusedView = rootView.findFocus()
-    val inputMethodActive = focusedView != null && imeManager?.isActive(focusedView) == true
-    val composeImeVisible = WindowInsets.isImeVisible
-    val compatImeVisible = androidx.core.view.ViewCompat.getRootWindowInsets(rootView)
-        ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
-    val imeVisibleRecently = imeLastVisibleAtMillis > 0L &&
-        (SystemClock.uptimeMillis() - imeLastVisibleAtMillis) in 0L..800L
-    val consumeBack = shouldConsumeImeBack(
-        composeImeVisible = composeImeVisible || compatImeVisible,
-        layoutImeVisible = layoutImeVisible,
-        inputMethodActive = inputMethodActive,
-        imeVisibleRecently = imeVisibleRecently
-    )
-
-    BackHandler(enabled = consumeBack) {
-        val currentFocus = rootView.findFocus() ?: hostView
-        androidx.core.view.ViewCompat.getWindowInsetsController(rootView)
-            ?.hide(androidx.core.view.WindowInsetsCompat.Type.ime())
-        imeManager?.hideSoftInputFromWindow(
-            currentFocus.windowToken ?: hostView.windowToken,
-            InputMethodManager.HIDE_NOT_ALWAYS
-        )
-        currentFocus.clearFocus()
-        layoutImeVisible = false
-        imeLastVisibleAtMillis = 0L
-    }
-}
-
-private fun isImeVisibleFromDisplayFrame(rootView: View): Boolean {
-    if (!rootView.isAttachedToWindow || rootView.height <= 0) return false
-    val frame = Rect()
-    rootView.getWindowVisibleDisplayFrame(frame)
-    val density = rootView.resources.displayMetrics.density.coerceAtLeast(1f)
-    val keyboardThreshold = (160f * density).toInt()
-    return rootView.height - frame.bottom > keyboardThreshold
 }
 
 @Composable

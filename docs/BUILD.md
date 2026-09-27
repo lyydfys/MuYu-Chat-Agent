@@ -77,7 +77,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ### 每次构建的长期记录
 
-`scripts/build.ps1` 会为每次运行写入 `artifacts/apk-build-records/` 下的 JSON 记录，包含开始/结束时间、状态、SDK 与 runtime 来源、构建参数、APK 路径和 SHA-256、各 ABI 库数、必需文件实际存在情况以及缺失项。构建验证失败时也会留下记录；`missingEntries` 或 `validationErrors` 非空时，该 APK 无效，不安装、不发布。构建后应把遗漏原因和修正方式同步到本节历史，确保后续构建不重犯。
+`scripts/build.ps1` 会为每次运行写入 `artifacts/apk-build-records/` 下的 JSON 记录，包含开始/结束时间、状态、SDK 与 runtime 来源、构建参数、APK 路径和 SHA-256、源码工作树清单与哈希、各 ABI 原生库的 SHA-256/ELF 机器类型/SONAME/依赖、必需文件存在情况以及缺失项。构建前后重新冻结源码与 submodule 身份，变化时构建无效。构建验证失败时也会留下记录；`missingEntries` 或 `validationErrors` 非空时，该 APK 无效，不安装、不发布。库数量低于历史基线只写入 `validationDiagnostics`，不能单独判定 APK 无效。构建后应把遗漏原因和修正方式同步到本节历史，确保后续构建不重犯。
 
 记录应覆盖：
 

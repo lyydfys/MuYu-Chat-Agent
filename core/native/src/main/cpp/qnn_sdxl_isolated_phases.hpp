@@ -2409,6 +2409,7 @@ std::string qnn_sdxl_vae_phase_json(
         << "\"width\":" << width << ",\"height\":" << height << ","
         << "\"outputBytes\":" << file_size_or_zero(output_path) << ","
         << "\"outputSha256\":" << quote(output_sha256) << ","
+        << "\"outputAtomicCommit\":true,"
         << "\"vaeScalingLocation\":" << quote(qnn_vae_scaling_wire_name(execution_contract.vae_scaling_location)) << ","
         << "\"vaeScalingFactor\":" << execution_contract.vae_scaling_factor << ","
         << qnn_pixel_range_evidence_json(

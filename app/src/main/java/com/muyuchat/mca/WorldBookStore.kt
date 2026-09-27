@@ -54,7 +54,8 @@ data class WorldBookRecord(
     val entries: List<WorldBookEntry>,
     val enabled: Boolean = true,
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    val originalJson: String? = null
 ) {
     init {
         require(name.isNotBlank()) { "World book name is required." }
@@ -81,7 +82,18 @@ data class WorldBookSelection(
     val context: String = "",
     val selectedEntryIds: List<String> = emptyList(),
     val skippedEntryIds: List<String> = emptyList(),
-    val estimatedTokens: Int = 0
+    val estimatedTokens: Int = 0,
+    val selectedSources: List<WorldBookSource> = emptyList(),
+    val skippedSources: List<WorldBookSource> = emptyList()
+)
+
+data class WorldBookSource(
+    val bookId: String,
+    val entryId: String,
+    val scope: WorldBookScope,
+    val excerpt: String,
+    val estimatedTokens: Int,
+    val reason: String
 )
 
 object WorldBookCodec {
@@ -99,13 +111,16 @@ object WorldBookCodec {
         require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_BOOK_CHARS) {
             "世界书文件超过 1 MiB。"
         }
+        require(CharacterCardCodec.validateJsonBounds(rawJson) == null) {
+            "世界书 JSON 结构无效或嵌套超过 ${CharacterCardCodec.MAX_JSON_NESTING} 层。"
+        }
         parseDetailed(
             root = parseImportRoot(rawJson),
             scope = scope,
             assistantId = assistantId,
             chatSessionId = chatSessionId,
             fallbackName = fallbackName
-        )
+        ).let { result -> result.copy(book = result.book?.copy(originalJson = rawJson)) }
     }.fold(
         onSuccess = { it },
         onFailure = { error ->
@@ -174,7 +189,8 @@ object WorldBookCodec {
                 scope = scope,
                 assistantId = assistantId?.takeIf { it.isNotBlank() },
                 chatSessionId = chatSessionId?.takeIf { it.isNotBlank() },
-                entries = entries
+                entries = entries,
+                originalJson = root.toString()
             ),
             warnings = warnings
         )
@@ -488,6 +504,7 @@ class WorldBookStore private constructor(
         .put("enabled", enabled)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
+        .put("originalJson", originalJson)
         .put("entries", JSONArray().apply {
             entries.forEach { entry ->
                 put(
@@ -515,6 +532,7 @@ class WorldBookStore private constructor(
         enabled = !has("enabled") || optBoolean("enabled", true),
         createdAt = optLong("createdAt", System.currentTimeMillis()),
         updatedAt = optLong("updatedAt", System.currentTimeMillis()),
+        originalJson = optString("originalJson").takeIf { it.isNotBlank() && it != "null" },
         entries = optJSONArray("entries")?.let { array ->
             List(array.length()) { index ->
                 val entry = array.getJSONObject(index)
@@ -608,14 +626,14 @@ object WorldBookResolver {
             .toList()
         var usedTokens = 0
         val selected = mutableListOf<WorldBookCandidate>()
-        val skipped = mutableListOf<String>()
+        val skipped = mutableListOf<WorldBookCandidate>()
         candidates.forEach { candidate ->
             val entryTokens = estimateTokens(candidate.entry.content)
             if (entryTokens <= tokenBudget - usedTokens) {
                 selected += candidate
                 usedTokens += entryTokens
             } else {
-                skipped += candidate.entry.id
+                skipped += candidate
             }
         }
         val context = selected.takeIf { it.isNotEmpty() }
@@ -625,8 +643,28 @@ object WorldBookResolver {
         return WorldBookSelection(
             context = context,
             selectedEntryIds = selected.map { it.entry.id },
-            skippedEntryIds = skipped,
-            estimatedTokens = usedTokens
+            skippedEntryIds = skipped.map { it.entry.id },
+            estimatedTokens = usedTokens,
+            selectedSources = selected.map { candidate ->
+                WorldBookSource(
+                    bookId = candidate.book.id,
+                    entryId = candidate.entry.id,
+                    scope = candidate.book.scope,
+                    excerpt = candidate.entry.content,
+                    estimatedTokens = estimateTokens(candidate.entry.content),
+                    reason = if (candidate.entry.constant) "constant" else "keyword"
+                )
+            },
+            skippedSources = skipped.map { candidate ->
+                WorldBookSource(
+                    bookId = candidate.book.id,
+                    entryId = candidate.entry.id,
+                    scope = candidate.book.scope,
+                    excerpt = candidate.entry.content,
+                    estimatedTokens = estimateTokens(candidate.entry.content),
+                    reason = "budget"
+                )
+            }
         )
     }
 

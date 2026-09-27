@@ -197,7 +197,8 @@ class McaInferenceService(
     private val deviceClockContextProvider: DeviceClockContextProvider = DeviceClockContextProvider(),
     persistentPrefixCacheStoreOverride: PersistentPrefixCacheStore? = null,
     private val prefillProgressPollIntervalMs: Long = PREFILL_PROGRESS_POLL_INTERVAL_MS,
-    private val nativeLibraryDirOverride: String? = null
+    private val nativeLibraryDirOverride: String? = null,
+    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
 ) {
     init {
         require(prefillProgressPollIntervalMs > 0L) {
@@ -207,6 +208,7 @@ class McaInferenceService(
     private val runners: Map<LocalChatRuntime, LocalChatRunner> =
         runners ?: defaultLocalChatRunners(context.applicationContext)
     private val mutex = Mutex()
+    private val retainedVisionInputs = mutableListOf<Triple<LocalChatRunner, ChatRequest, ChatRequest>>()
     private val generationStopGate = Any()
     private var generationStopEpoch = 0L
     private var activeGenerationStopTarget: ActiveGenerationStopTarget? = null
@@ -279,6 +281,16 @@ class McaInferenceService(
     /** Clears persisted fixed-prefix state. The caller owns any live-context invalidation. */
     suspend fun clearPersistentPrefixCache(): Boolean = withContext(io) {
         runCatching { persistentPrefixCacheStore.clear() }.getOrDefault(false)
+    }
+
+    /** Purges all model/configuration variants of deleted conversations' disk KV states. */
+    suspend fun clearPersistentSessionStates(sessionIds: Collection<String>): Boolean = withContext(io) {
+        val fingerprints = sessionIds.map(String::trim).filter(String::isNotBlank)
+            .mapTo(hashSetOf()) { sessionId ->
+                PrefixCacheKey.sha256Utf8("full-session-prefix-v1\n$sessionId")
+            }
+        runCatching { persistentPrefixCacheStore.clearPrefixFingerprints(fingerprints) }
+            .getOrDefault(false)
     }
 
     /**
@@ -532,7 +544,8 @@ class McaInferenceService(
             // resolved projector on every native load boundary.
             val nativeLoadParamsJson = nativeLoadParamsJson(
                 profile = resolvedExecutionProfile,
-                visionProjectorPath = effectiveLoadParams.visionProjectorPath
+                visionProjectorPath = effectiveLoadParams.visionProjectorPath,
+                fallbackPolicy = effectiveLoadParams.fallbackPolicy
             )
             val admissionMemory = memorySnapshotProvider?.invoke() ?: telemetry.memorySnapshotDetailed()
             val admission = qairtExecutionAdmissionForLoad(
@@ -595,7 +608,7 @@ class McaInferenceService(
                     )
                     error(message)
                 }
-                val started = System.currentTimeMillis()
+                val started = clock.nowMs()
                 val rc = runner.loadModel(modelPath, nativeLoadParamsJson)
                 if (rc != 0) {
                     val nativeStats = nativeStatsJson()
@@ -624,7 +637,7 @@ class McaInferenceService(
                         }
                     )
                 }
-                val loadMs = System.currentTimeMillis() - started
+                val loadMs = (clock.nowMs() - started).coerceAtLeast(0L)
                 val stats = loadedStatsFromNative(modelPath, runtime, effectiveLoadParams, loadMs)
                 if (runtime == LocalChatRuntime.GENIEX_QAIRT &&
                     qairtExecutionPurpose == QairtExecutionPurpose.ISOLATED_DRY_RUN
@@ -987,18 +1000,28 @@ class McaInferenceService(
             val generationStopToken = activateGenerationStopTarget(executionContext.requestId, runner)
             try {
 
-            val started = System.currentTimeMillis()
+            val started = clock.nowMs()
+            _stats.value = _stats.value.copy(
+                cacheReuseHit = false, cacheReusedTokens = 0, cacheReuseHits = 0,
+                cacheReuseMisses = 0, cacheReuseReason = "unknown"
+            )
             val hasImageAttachments = activeRequest.hasImageAttachments()
             val shouldRefreshMnnAfterRequest = activeRuntime == LocalChatRuntime.MNN_CPU
             var activePersistentPrefix: PreparedPersistentPrefix? = null
             var managedPersistentPrefixFailure: ManagedPersistentPrefixFailure? = null
-            var exactPrefillPhaseEmitted = false
             suspend fun emitTokenizePhase() {
                 emit(GenerateEvent.Phase(GenerationPhase.TOKENIZE, _stats.value))
             }
             suspend fun beginNative(paramsJson: String): Result<Int> {
                 var downstreamPrefillEmissionFailed = false
                 return try {
+                    val runtimeParamsJson = JSONObject(paramsJson).apply {
+                        put("conversationOwnerId", activeRequest.persistentSessionId
+                            ?.takeIf(String::isNotBlank) ?: "request:${executionContext.requestId}")
+                        activeRequest.conversationContextRevision?.takeIf(String::isNotBlank)?.let {
+                            put("conversationContextRevision", it)
+                        }
+                    }.toString()
                     activePersistentPrefix?.let { previous ->
                         withContext(NonCancellable + io) {
                             discardPersistentPrefix(previous)
@@ -1021,7 +1044,6 @@ class McaInferenceService(
                             MultimodalContentEncoding.OPENAI_PARTS
                         }
                     )
-                    exactPrefillPhaseEmitted = false
                     var lastPrefillProgress: TokenProgress? = null
                     suspend fun emitExactPrefillProgress(progress: TokenProgress) {
                         try {
@@ -1036,7 +1058,6 @@ class McaInferenceService(
                             downstreamPrefillEmissionFailed = true
                             throw error
                         }
-                        exactPrefillPhaseEmitted = true
                         lastPrefillProgress = progress
                     }
                     suspend fun emitPersistProgress(progress: PersistProgress) {
@@ -1056,13 +1077,19 @@ class McaInferenceService(
                             runCatching {
                                 withContext(io) { runner.resetPrefillProgress() }
                             }
+                            try {
+                                emit(GenerateEvent.Phase(GenerationPhase.PREFILL, _stats.value))
+                            } catch (error: Throwable) {
+                                downstreamPrefillEmissionFailed = true
+                                throw error
+                            }
                             val nativeBegin = async(io) {
                                 if (persistentPrefix == null) {
-                                    runner.beginCompletion(messagesJson, paramsJson)
+                                    runner.beginCompletion(messagesJson, runtimeParamsJson)
                                 } else {
                                     runner.beginCompletionWithPrefixCache(
                                         messagesJson = messagesJson,
-                                        paramsJson = paramsJson,
+                                        paramsJson = runtimeParamsJson,
                                         prefixCache = persistentPrefix.request
                                     )
                                 }
@@ -1103,17 +1130,19 @@ class McaInferenceService(
                             }
                             checkNotNull(nativeResult)
                         }
-                    withContext(NonCancellable + io) {
-                        finishPersistentPrefix(persistentPrefix, resultCode, runner)?.let { failure ->
-                            managedPersistentPrefixFailure = failure
-                            _stats.value = _stats.value.copy(
-                                persistentPrefixCacheHit = false,
-                                persistentPrefixCacheTokens = failure.tokens,
-                                persistentPrefixCacheReason = failure.reason
-                            )
-                        }
-                        if (persistentPrefix != null && activePersistentPrefix === persistentPrefix) {
-                            activePersistentPrefix = null
+                    if (persistentPrefix?.request?.fullSessionState != true || resultCode != 0) {
+                        withContext(NonCancellable + io) {
+                            finishPersistentPrefix(persistentPrefix, resultCode, runner)?.let { failure ->
+                                managedPersistentPrefixFailure = failure
+                                _stats.value = _stats.value.copy(
+                                    persistentPrefixCacheHit = false,
+                                    persistentPrefixCacheTokens = failure.tokens,
+                                    persistentPrefixCacheReason = failure.reason
+                                )
+                            }
+                            if (persistentPrefix != null && activePersistentPrefix === persistentPrefix) {
+                                activePersistentPrefix = null
+                            }
                         }
                     }
                     Result.success(resultCode)
@@ -1232,11 +1261,8 @@ class McaInferenceService(
                 return@lifecycle
             }
 
-            // Native beginCompletion finishes the complete prompt prefill before
-            // decode starts. Publish that terminal prefill evidence immediately;
-            // otherwise the UI cannot show prefillMs/prefillTps until the first
-            // generated token arrives, which is especially misleading for large
-            // GGUF models with a long first-token latency.
+            // Synchronous runners may already expose final prefill metrics here.
+            // Async runners can still be prefilling; begin returning is not decode evidence.
             var promptEndsInsideReasoning = false
             runCatching { JSONObject(nativeStatsJsonOnIo()) }.getOrNull()?.let { nativeStats ->
                 promptEndsInsideReasoning = nativeStats.optBoolean("promptEndsInsideReasoning", false)
@@ -1258,14 +1284,7 @@ class McaInferenceService(
                 _stats.value = prefillStats
             }
 
-            // Runtimes that expose exact batch progress already emitted PREFILL
-            // while native work was in flight. Others remain intentionally
-            // indeterminate, but only after a successful final begin.
-            if (!exactPrefillPhaseEmitted) {
-                emit(GenerateEvent.Phase(GenerationPhase.PREFILL, _stats.value))
-            }
-
-            var firstTokenAt = 0L
+            var firstTokenAt: Long? = null
             var lastTokenAt = started
             var generatedChunks = 0
             var generatedTokens = 0
@@ -1275,9 +1294,10 @@ class McaInferenceService(
             var lastMemorySampleAt = started
             var cachedNativeStats: JSONObject? = null
             val reasoningFilter = ReasoningContentFilter(startsInsideReasoning = promptEndsInsideReasoning)
+            val stopFilter = StreamingStopFilter(activeRequest.params.stopWords)
             val reasoningLoopGuard = ReasoningLoopGuard()
             val hideReasoning = request.params.hideReasoning || request.params.reasoningMode == ReasoningMode.OFF
-            var reasoningStartedAt = 0L
+            var reasoningStartedAt: Long? = null
             var reasoningDurationMs = 0L
             var visibleOutputSeen = false
             var mnnGenerationCompletedNormally = false
@@ -1304,15 +1324,25 @@ class McaInferenceService(
             }
 
             try {
-                emitGenerated(GenerateEvent.Phase(GenerationPhase.DECODE, _stats.value))
+                var decodePhaseEmitted = false
                 while (true) {
-                    val chunk = withContext(io) { runner.generateNextChunk() } ?: break
+                    val rawChunk = withContext(io) { runner.generateNextChunk() } ?: break
+                    if (rawChunk.isEmpty()) continue
+                    if (!decodePhaseEmitted) {
+                        emitGenerated(GenerateEvent.Phase(GenerationPhase.DECODE, _stats.value))
+                        decodePhaseEmitted = true
+                    }
+                    val chunk = stopFilter.accept(rawChunk)
+                    if (stopFilter.stopped) runner.requestStop()
                     // A standalone space/newline is a valid model delta. Do
                     // not drop it here: code indentation, Markdown and word
                     // boundaries are carried by whitespace-only chunks.
-                    if (chunk.isEmpty()) continue
-                    val now = System.currentTimeMillis()
-                    if (firstTokenAt == 0L) firstTokenAt = now
+                    if (chunk.isEmpty()) {
+                        if (stopFilter.stopped) break
+                        continue
+                    }
+                    val now = clock.nowMs()
+                    val firstTokenTime = firstTokenAt ?: now.also { firstTokenAt = it }
                     lastTokenAt = now
                     generatedChunks += 1
                     generatedTokens += estimateTokens(chunk)
@@ -1336,13 +1366,13 @@ class McaInferenceService(
                         null
                     }
                     if (nativeCompletionTokens != null) generatedTokens = nativeCompletionTokens
-                    val ttft = firstTokenAt - started
+                    val ttft = (firstTokenTime - started).coerceAtLeast(0L)
                     val decodeMs = if (shouldSampleStats) {
                         nativeStats?.optLong("decodeMs")?.takeIf { it > 0L }
                     } else {
                         null
                     }
-                        ?: max(1L, lastTokenAt - firstTokenAt)
+                        ?: max(1L, lastTokenAt - firstTokenTime)
                     val totalMs = max(1L, lastTokenAt - started)
                     if (now - lastMemorySampleAt >= MEMORY_SAMPLE_INTERVAL_MS) {
                         latestMemory = telemetry.memorySnapshotDetailed()
@@ -1404,17 +1434,14 @@ class McaInferenceService(
                         gpuOffloadLayersKnown = gpuEvidence.layersKnown,
                         gpuAutoFallbackApplied = gpuEvidence.autoFallbackApplied,
                         gpuAutoFallbackReason = gpuEvidence.autoFallbackReason,
-                        cacheReuseHit = cacheReuse?.optBoolean("hit", _stats.value.cacheReuseHit)
-                            ?: _stats.value.cacheReuseHit,
-                        cacheReusedTokens = cacheReuse?.optInt("reusedTokens", _stats.value.cacheReusedTokens)
-                            ?: _stats.value.cacheReusedTokens,
+                        cacheReuseHit = cacheReuse?.optBoolean("hit", false) ?: false,
+                        cacheReusedTokens = cacheReuse?.optInt("reusedTokens", 0) ?: 0,
                         cacheReuseReason = cacheReuse?.optString("reason")
                             ?.takeIf { it.isNotBlank() }
-                            ?: _stats.value.cacheReuseReason,
-                        cacheReuseHits = cacheReuse?.optLong("hits", _stats.value.cacheReuseHits)
-                            ?: _stats.value.cacheReuseHits,
-                        cacheReuseMisses = cacheReuse?.optLong("misses", _stats.value.cacheReuseMisses)
-                            ?: _stats.value.cacheReuseMisses,
+                            ?: "unknown",
+                        cacheReuseHits = cacheReuse?.optLong("hits", 0) ?: 0,
+                        cacheReuseMisses = cacheReuse?.optLong("misses", 0) ?: 0,
+                        generationParameterApplicationJson = nativeStats?.optJSONObject("parameterApplication")?.toString() ?: "{}",
                         lastError = null
                     ).withMemory(latestMemory)
                     if (shouldSampleStats) {
@@ -1438,8 +1465,8 @@ class McaInferenceService(
                     var stopForReasoningLoop = false
                     if (filtered.reasoning.isNotEmpty() && !hideReasoning) {
                         if (filtered.reasoning.any { !it.isWhitespace() }) {
-                            if (reasoningStartedAt == 0L) reasoningStartedAt = now
-                            reasoningDurationMs = now - reasoningStartedAt
+                            val reasoningStart = reasoningStartedAt ?: now.also { reasoningStartedAt = it }
+                            reasoningDurationMs = (now - reasoningStart).coerceAtLeast(0L)
                             stopForReasoningLoop = reasoningLoopGuard.shouldStop(filtered.reasoning)
                             if (stopForReasoningLoop) {
                                 mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
@@ -1465,7 +1492,13 @@ class McaInferenceService(
                             )
                         )
                     }
-                    if (stopForReasoningLoop) break
+                    if (stopForReasoningLoop || stopFilter.stopped) break
+                }
+                if (synchronized(generationStopGate) { stopRequestedToken == generationStopToken }) {
+                    val cancelled = finalStats.copy(lastError = "Generation cancelled by its request owner.")
+                    _stats.value = cancelled
+                    emitGenerated(GenerateEvent.Error(cancelled.lastError.orEmpty(), cancelled, code = "REQUEST_CANCELLED"))
+                    return@lifecycle
                 }
                 val finalNativeStats = runCatching { JSONObject(nativeStatsJsonOnIo()) }.getOrNull()
                 finalStats = mergeNativeStats(
@@ -1486,11 +1519,21 @@ class McaInferenceService(
                         mnnGenerationWasInterrupted = true
                     }
                 }
+                val stopTail = reasoningFilter.filter(stopFilter.finish())
+                if (stopTail.visible.isNotEmpty() || (!hideReasoning && stopTail.reasoning.isNotEmpty())) {
+                    if (stopTail.visible.any { !it.isWhitespace() }) visibleOutputSeen = true
+                    emitGenerated(GenerateEvent.Chunk(
+                        text = stopTail.visible,
+                        stats = finalStats,
+                        reasoning = if (hideReasoning) "" else stopTail.reasoning,
+                        reasoningDurationMs = reasoningDurationMs
+                    ))
+                }
                 val remaining = reasoningFilter.finish()
                 if (remaining.reasoning.isNotBlank() && !hideReasoning) {
-                    val now = System.currentTimeMillis()
-                    if (reasoningStartedAt == 0L) reasoningStartedAt = now
-                    reasoningDurationMs = now - reasoningStartedAt
+                    val now = clock.nowMs()
+                    val reasoningStart = reasoningStartedAt ?: now.also { reasoningStartedAt = it }
+                    reasoningDurationMs = (now - reasoningStart).coerceAtLeast(0L)
                 }
                 if (remaining.visible.any { !it.isWhitespace() }) {
                     visibleOutputSeen = true
@@ -1520,6 +1563,20 @@ class McaInferenceService(
                     writeLog(errorStats, activeRequest.params, error = message)
                     emitGenerated(GenerateEvent.Error(message, errorStats))
                     return@lifecycle
+                }
+                activePersistentPrefix?.takeIf { it.request.fullSessionState }?.let { pending ->
+                    withContext(io) {
+                        finishPersistentPrefix(pending, 0, runner)?.let { failure ->
+                            managedPersistentPrefixFailure = failure
+                            finalStats = finalStats.copy(
+                                persistentPrefixCacheHit = false,
+                                persistentPrefixCacheTokens = failure.tokens,
+                                persistentPrefixCacheReason = failure.reason
+                            )
+                            _stats.value = finalStats
+                        }
+                        if (activePersistentPrefix === pending) activePersistentPrefix = null
+                    }
                 }
                 emitPersistPhase(finalStats)
                 writeLog(finalStats, activeRequest.params, error = null)
@@ -1591,6 +1648,16 @@ class McaInferenceService(
             }
             } finally {
                 clearGenerationStopTarget(generationStopToken)
+                withContext(NonCancellable + io) {
+                    retainedVisionInputs += Triple(runner, contextSafeRequest, activeRequest)
+                    retainedVisionInputs.removeAll { (consumer, original, prepared) ->
+                        val released = runCatching { consumer.canReleasePreparedInputs() }.getOrDefault(false)
+                        if (released) {
+                            LocalVisionInputPreparer.releasePreparedInputs(original, prepared, appContext.cacheDir)
+                        }
+                        released
+                    }
+                }
             }
             }
         } finally {
@@ -1909,9 +1976,11 @@ class McaInferenceService(
      */
     private fun nativeLoadParamsJson(
         profile: ModelExecutionProfile,
-        visionProjectorPath: String? = null
+        visionProjectorPath: String? = null,
+        fallbackPolicy: LocalBackendFallbackPolicy? = null
     ): String {
         val json = JSONObject(parameterCoordinator.nativeLoadJson(profile))
+        fallbackPolicy?.let { json.put("fallback_policy", it.wireName) }
         // The projector is intentionally hidden from the generation editor and
         // therefore may be absent from a persisted profile created before a
         // user bound mmproj. Never let that stale profile drop a valid binding
@@ -1960,7 +2029,8 @@ class McaInferenceService(
             executionProfile = profile,
             nativeLoadParamsJson = nativeLoadParamsJson(
                 profile = profile,
-                visionProjectorPath = session.params.visionProjectorPath
+                visionProjectorPath = session.params.visionProjectorPath,
+                fallbackPolicy = session.params.fallbackPolicy
             ),
             params = loadParamsForProfile(session.params, profile)
         )
@@ -1978,7 +2048,8 @@ class McaInferenceService(
             executionProfile = profile,
             nativeLoadParamsJson = nativeLoadParamsJson(
                 profile = profile,
-                visionProjectorPath = session.params.visionProjectorPath
+                visionProjectorPath = session.params.visionProjectorPath,
+                fallbackPolicy = session.params.fallbackPolicy
             )
         )
     }
@@ -2088,7 +2159,7 @@ class McaInferenceService(
             return message
         }
 
-        val started = System.currentTimeMillis()
+        val started = clock.nowMs()
         val rc = try {
             withContext(io) { runner.loadModel(session.modelPath, session.nativeLoadParamsJson) }
         } catch (error: Throwable) {
@@ -2151,7 +2222,7 @@ class McaInferenceService(
                 modelPath = session.modelPath,
                 runtime = session.runtime,
                 params = session.params,
-                loadMs = System.currentTimeMillis() - started
+                loadMs = (clock.nowMs() - started).coerceAtLeast(0L)
             )
         }
         return null
@@ -2178,7 +2249,8 @@ class McaInferenceService(
         }
         val nativeLoadJson = nativeLoadParamsJson(
             profile = target,
-            visionProjectorPath = session.params.visionProjectorPath
+            visionProjectorPath = session.params.visionProjectorPath,
+            fallbackPolicy = session.params.fallbackPolicy
         )
         runCatching { runner.requestStop() }
         runCatching { runner.unloadModel() }
@@ -2193,7 +2265,7 @@ class McaInferenceService(
                 ?: session.params.nCtx,
             lastError = "Reloading verified model execution profile."
         )
-        val started = System.currentTimeMillis()
+        val started = clock.nowMs()
         val rc = withContext(io) { runner.loadModel(session.modelPath, nativeLoadJson) }
         if (rc != 0) {
             val nativeError = runCatching {
@@ -2252,7 +2324,7 @@ class McaInferenceService(
             modelPath = session.modelPath,
             runtime = session.runtime,
             params = resolvedParams,
-            loadMs = System.currentTimeMillis() - started
+            loadMs = (clock.nowMs() - started).coerceAtLeast(0L)
         )
         return null
     }
@@ -2459,14 +2531,13 @@ class McaInferenceService(
             gpuOffloadLayersKnown = gpuEvidence.layersKnown,
             gpuAutoFallbackApplied = gpuEvidence.autoFallbackApplied,
             gpuAutoFallbackReason = gpuEvidence.autoFallbackReason,
-            cacheReuseHit = cacheReuse?.optBoolean("hit", base.cacheReuseHit) ?: base.cacheReuseHit,
-            cacheReusedTokens = cacheReuse?.optInt("reusedTokens", base.cacheReusedTokens)
-                ?: base.cacheReusedTokens,
+            cacheReuseHit = cacheReuse?.optBoolean("hit", false) ?: false,
+            cacheReusedTokens = cacheReuse?.optInt("reusedTokens", 0) ?: 0,
             cacheReuseReason = cacheReuse?.optString("reason")?.takeIf { it.isNotBlank() }
-                ?: base.cacheReuseReason,
-            cacheReuseHits = cacheReuse?.optLong("hits", base.cacheReuseHits) ?: base.cacheReuseHits,
-            cacheReuseMisses = cacheReuse?.optLong("misses", base.cacheReuseMisses)
-                ?: base.cacheReuseMisses,
+                ?: "unknown",
+            cacheReuseHits = cacheReuse?.optLong("hits", 0) ?: 0,
+            cacheReuseMisses = cacheReuse?.optLong("misses", 0) ?: 0,
+            generationParameterApplicationJson = nativeStats?.optJSONObject("parameterApplication")?.toString() ?: "{}",
             persistentPrefixCacheHit = if (managedPrefixFailure != null) {
                 false
             } else {
@@ -2720,12 +2791,17 @@ class McaInferenceService(
         } else {
             runCatching { persistentPrefixCacheStore.discard(prepared.pending) }
             val reason = persistent?.optString("reason").orEmpty()
-            if (prepared.existing != null && reason in setOf(
+            if (prepared.existing != null && (reason in setOf(
                     "state_load_failed",
                     "state_restore_failed",
                     "state_token_mismatch",
-                    "state_prefix_mismatch"
-                )
+                    "state_prefix_mismatch",
+                    "session_state_load_failed",
+                    "session_state_token_mismatch",
+                    "session_state_trim_failed"
+                ) || (prepared.request.fullSessionState &&
+                    persistent?.optBoolean("hit", false) != true &&
+                    reason in setOf("session_state_save_failed", "session_state_unavailable")))
             ) {
                 runCatching { persistentPrefixCacheStore.clear(prepared.key) }
             }

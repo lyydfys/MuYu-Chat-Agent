@@ -96,6 +96,31 @@ class ContextWindowAdmissionTest {
         assertSame(latestUser, admission.request.messages.single().content)
     }
 
+    @Test
+    fun stableProtectedIdSurvivesFinalAdmissionAfterAnOlderTurnIsTrimmed() {
+        val protected = ChatMessage(Role.USER, "keep this exact preference", id = "memory")
+        val expendable = ChatMessage(Role.ASSISTANT, "x".repeat(1_200), id = "old")
+        val latest = ChatMessage(Role.USER, "latest", id = "latest")
+        val request = requestOf(protected, expendable, latest)
+            .copy(protectedMessageIds = setOf("memory"))
+
+        val result = localContextWindowAdmission(request)
+
+        assertEquals(ContextWindowAdmissionStatus.TRIMMED, result.status)
+        assertTrue(result.request.messages.any { it.id == "memory" && it.content == protected.content })
+        assertFalse(result.request.messages.any { it.id == "old" })
+    }
+
+    @Test
+    fun pinnedContentOverBudgetIsRejectedWithoutTrimmingIt() {
+        val pinned = ChatMessage(Role.USER, "p".repeat(2_000), pinned = true, id = "pinned")
+        val result = localContextWindowAdmission(requestOf(pinned, ChatMessage(Role.USER, "latest")))
+
+        assertEquals(ContextWindowAdmissionStatus.REJECTED, result.status)
+        assertEquals(ContextWindowRejectionCode.SYSTEM_CONTEXT_TOO_LARGE, result.rejectionCode)
+        assertTrue(result.request.messages.any { it.id == "pinned" && it.content == pinned.content })
+    }
+
     private fun requestOf(vararg messages: ChatMessage): ChatRequest = ChatRequest(
         messages = messages.toList(),
         params = GenerationParams(

@@ -1,6 +1,9 @@
 package com.muyuchat.core.engine
 
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.media.ExifInterface
+import android.os.Build
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
@@ -17,7 +20,10 @@ internal enum class LocalVisionInputFailureCode(val wireCode: String) {
     IMAGE_TOO_LARGE("local_vision_image_too_large"),
     IMAGE_RESOLUTION_TOO_LARGE("local_vision_image_resolution_too_large"),
     INVALID_IMAGE_GEOMETRY("local_vision_image_invalid_geometry"),
-    IMAGE_FORMAT_MISMATCH("local_vision_image_format_mismatch")
+    IMAGE_FORMAT_MISMATCH("local_vision_image_format_mismatch"),
+    IMAGE_FORMAT_UNSUPPORTED("local_vision_image_format_unsupported"),
+    IMAGE_DECODE_FAILED("local_vision_image_decode_failed"),
+    TOO_MANY_IMAGES("local_vision_too_many_images")
 }
 
 internal class LocalVisionInputException(
@@ -27,6 +33,9 @@ internal class LocalVisionInputException(
 
 internal object LocalVisionInputPreparer {
     private const val MAX_IMAGE_BYTES = MAX_LOCAL_VISION_IMAGE_BYTES
+    private const val MAX_REQUEST_IMAGES = 8
+    private const val MAX_REQUEST_IMAGE_BYTES = 40L * 1024L * 1024L
+    private const val MAX_REQUEST_IMAGE_PIXELS = MAX_LOCAL_VISION_IMAGE_PIXELS
 
     data class RemoteImage(
         val bytes: ByteArray,
@@ -40,58 +49,155 @@ internal object LocalVisionInputPreparer {
         idSuffix: () -> String = { UUID.randomUUID().toString().take(8) },
         remoteImageFetcher: (String) -> RemoteImage = ::downloadRemoteImage,
         diagnosticSink: (String, JSONObject) -> Unit = LocalChatRunnerDebug::emit
-    ): ChatRequest =
-        request.copy(
-            messages = request.messages.mapIndexed { messageIndex, message ->
-                if (message.imageAttachments.isEmpty()) {
-                    message
-                } else {
-                    val preparedAttachments = message.imageAttachments
-                        .deduplicateVisionAttachments()
-                        .mapIndexed { attachmentIndex, attachment ->
-                            val sourceType = attachment.sourceType()
-                            try {
-                                val prepared = attachment.withNativeReadableImageFile(
-                                    cacheDir = cacheDir,
-                                    nowMillis = nowMillis,
-                                    idSuffix = idSuffix,
-                                    remoteImageFetcher = remoteImageFetcher
-                                )
-                                emitPreparedDiagnostic(
-                                    original = attachment,
-                                    prepared = prepared,
-                                    sourceType = sourceType,
-                                    messageIndex = messageIndex,
-                                    attachmentIndex = attachmentIndex,
-                                    sink = diagnosticSink
-                                )
-                                prepared
-                            } catch (error: Throwable) {
-                                emitFailureDiagnostic(
-                                    attachment = attachment,
-                                    sourceType = sourceType,
-                                    messageIndex = messageIndex,
-                                    attachmentIndex = attachmentIndex,
-                                    error = error,
-                                    sink = diagnosticSink
-                                )
-                                throw error
+    ): ChatRequest {
+        if (request.messages.sumOf { it.imageAttachments.size } > MAX_REQUEST_IMAGES) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.TOO_MANY_IMAGES,
+                "A local vision request supports at most $MAX_REQUEST_IMAGES images."
+            )
+        }
+        val createdFiles = mutableListOf<File>()
+        val sourceAttachments = mutableListOf<ChatImageAttachment>()
+        return try {
+            val prepared = request.copy(
+                messages = request.messages.mapIndexed { messageIndex, message ->
+                    if (message.imageAttachments.isEmpty()) {
+                        message
+                    } else {
+                        val preparedAttachments = message.imageAttachments
+                            .deduplicateVisionAttachments()
+                            .mapIndexed { attachmentIndex, attachment ->
+                                val sourceType = attachment.sourceType()
+                                try {
+                                    val staged = attachment.withNativeReadableImageFile(
+                                        cacheDir = cacheDir,
+                                        nowMillis = nowMillis,
+                                        idSuffix = idSuffix,
+                                        remoteImageFetcher = remoteImageFetcher
+                                    )
+                                    if (sourceType == "inline" || sourceType == "http") {
+                                        createdFiles += File(staged.uriString)
+                                    }
+                                    sourceAttachments += staged
+                                    validateAttachmentBudget(sourceAttachments)
+                                    val prepared = normalizeJpegExifOrientation(
+                                        staged, cacheDir, nowMillis, idSuffix
+                                    )
+                                    if (prepared.uriString != staged.uriString) {
+                                        createdFiles += File(prepared.uriString)
+                                    }
+                                    emitPreparedDiagnostic(
+                                        original = attachment,
+                                        prepared = prepared,
+                                        preprocessing = if (prepared.uriString != staged.uriString) {
+                                            "exif_orientation_normalized"
+                                        } else {
+                                            "passthrough"
+                                        },
+                                        sourceType = sourceType,
+                                        messageIndex = messageIndex,
+                                        attachmentIndex = attachmentIndex,
+                                        sink = diagnosticSink
+                                    )
+                                    prepared
+                                } catch (error: Throwable) {
+                                    emitFailureDiagnostic(
+                                        attachment = attachment,
+                                        sourceType = sourceType,
+                                        messageIndex = messageIndex,
+                                        attachmentIndex = attachmentIndex,
+                                        error = error,
+                                        sink = diagnosticSink
+                                    )
+                                    throw error
+                                }
                             }
-                        }
-                    // Different client representations of one image (content URI, file URI,
-                    // data URL, or a copied temporary file) become the same native-readable
-                    // file only after preparation. Deduplicate a second time on the materialized
-                    // bytes so a single user image cannot be sent twice to a multimodal runner.
-                    message.copy(
-                        imageAttachments = preparedAttachments.deduplicatePreparedVisionAttachments()
-                    )
+                        // Different client representations of one image (content URI, file URI,
+                        // data URL, or a copied temporary file) become the same native-readable
+                        // file only after preparation. Deduplicate a second time on the materialized
+                        // bytes so a single user image cannot be sent twice to a multimodal runner.
+                        message.copy(imageAttachments = preparedAttachments.deduplicatePreparedVisionAttachments())
+                    }
                 }
+            )
+            validateRequestBudget(prepared)
+            val retained = prepared.messages.flatMap { it.imageAttachments }
+                .mapTo(hashSetOf()) { File(it.uriString).absolutePath }
+            createdFiles.filterNot { it.absolutePath in retained }.forEach { it.delete() }
+            prepared
+        } catch (error: Throwable) {
+            createdFiles.forEach { it.delete() }
+            throw error
+        }
+    }
+
+    /** Call after the native request has stopped consuming prepared images. */
+    fun releasePreparedInputs(original: ChatRequest, prepared: ChatRequest, cacheDir: File) {
+        val root = File(cacheDir, "engine_vision_inputs").canonicalFile
+        val originalPaths = original.messages.flatMap { it.imageAttachments }
+            .mapNotNull { attachment ->
+                attachment.uriString.takeIf(String::isNotBlank)
+                    ?.let { source ->
+                        runCatching {
+                            val file = if (source.startsWith("file:", ignoreCase = true)) {
+                                source.fileFromUri()
+                            } else {
+                                File(source)
+                            }
+                            file.canonicalPath
+                        }.getOrNull()
+                    }
+            }.toSet()
+        prepared.messages.flatMap { it.imageAttachments }.forEach { attachment ->
+            val candidate = runCatching { File(attachment.uriString).canonicalFile }.getOrNull()
+                ?: return@forEach
+            if (candidate.parentFile == root && candidate.name.startsWith("vision-") &&
+                candidate.path !in originalPaths
+            ) {
+                candidate.delete()
             }
-        )
+        }
+    }
+
+    private fun validateRequestBudget(request: ChatRequest) {
+        validateAttachmentBudget(request.messages.flatMap { it.imageAttachments })
+    }
+
+    private fun validateAttachmentBudget(attachments: List<ChatImageAttachment>) {
+        if (attachments.size > MAX_REQUEST_IMAGES) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.TOO_MANY_IMAGES,
+                "A local vision request supports at most $MAX_REQUEST_IMAGES images."
+            )
+        }
+        var totalBytes = 0L
+        var totalPixels = 0L
+        attachments.forEach { attachment ->
+            val file = File(attachment.uriString)
+            val size = file.length()
+            if (size < 0L || size > MAX_REQUEST_IMAGE_BYTES - totalBytes) {
+                throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_TOO_LARGE,
+                    "The combined image data exceeds the 40 MB local vision request limit."
+                )
+            }
+            totalBytes += size
+            val bounds = readAndroidImageBounds(file) ?: readHeaderImageBounds(file)
+            val pixels = bounds.width.toLong() * bounds.height.toLong()
+            if (pixels <= 0L || pixels > MAX_REQUEST_IMAGE_PIXELS - totalPixels) {
+                throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_RESOLUTION_TOO_LARGE,
+                    "The combined image resolution exceeds the local vision request budget."
+                )
+            }
+            totalPixels += pixels
+        }
+    }
 
     private fun emitPreparedDiagnostic(
         original: ChatImageAttachment,
         prepared: ChatImageAttachment,
+        preprocessing: String,
         sourceType: String,
         messageIndex: Int,
         attachmentIndex: Int,
@@ -108,7 +214,7 @@ internal object LocalVisionInputPreparer {
                 .put("status", "prepared")
                 .put("declaredFormat", original.sourceDeclaredFormat(prepared, sourceType))
                 .put("requestedFormat", original.normalizedMimeType())
-                .put("preprocessing", "passthrough")
+                .put("preprocessing", preprocessing)
                 .put("nativeReadablePath", nativeFile.name)
                 .put("nativeReadablePathKind", "file_name")
                 .put("nativeReadableBytes", nativeFile.length())
@@ -303,7 +409,7 @@ internal object LocalVisionInputPreparer {
             val segmentLength = readUShortBigEndian(offset)
             if (segmentLength < 2 || offset + segmentLength > size) break
             if (marker in JPEG_START_OF_FRAME_MARKERS && segmentLength >= 7) {
-                return ImageProbe("jpeg", readUShortBigEndian(offset + 3), readUShortBigEndian(offset + 5))
+                return ImageProbe("jpeg", readUShortBigEndian(offset + 5), readUShortBigEndian(offset + 3))
             }
             offset += segmentLength
         }
@@ -418,6 +524,94 @@ internal object LocalVisionInputPreparer {
         )
     }
 
+    private fun normalizeJpegExifOrientation(
+        attachment: ChatImageAttachment,
+        cacheDir: File,
+        nowMillis: () -> Long,
+        idSuffix: () -> String
+    ): ChatImageAttachment {
+        if (Build.VERSION.SDK_INT <= 0) return attachment
+        val source = File(attachment.uriString)
+        if (readHeaderImageBounds(source).format != "jpeg") return attachment
+        val orientation = try {
+            ExifInterface(source.absolutePath).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL
+            )
+        } catch (error: Exception) {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_FORMAT_UNSUPPORTED,
+                "JPEG EXIF metadata cannot be read: ${error.message ?: error::class.java.simpleName}"
+            )
+        }
+        if (orientation == ExifInterface.ORIENTATION_NORMAL ||
+            orientation == ExifInterface.ORIENTATION_UNDEFINED
+        ) return attachment
+
+        val matrix = Matrix().apply {
+            when (orientation) {
+                ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> postScale(-1f, 1f)
+                ExifInterface.ORIENTATION_ROTATE_180 -> postRotate(180f)
+                ExifInterface.ORIENTATION_FLIP_VERTICAL -> postScale(1f, -1f)
+                ExifInterface.ORIENTATION_TRANSPOSE -> { postRotate(90f); postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_90 -> postRotate(90f)
+                ExifInterface.ORIENTATION_TRANSVERSE -> { postRotate(270f); postScale(-1f, 1f) }
+                ExifInterface.ORIENTATION_ROTATE_270 -> postRotate(270f)
+                else -> throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_FORMAT_UNSUPPORTED,
+                    "Unsupported JPEG EXIF orientation: $orientation"
+                )
+            }
+        }
+        val bounds = readAndroidImageBounds(source) ?: throw LocalVisionInputException(
+            LocalVisionInputFailureCode.IMAGE_DECODE_FAILED,
+            "JPEG dimensions cannot be decoded for EXIF normalization."
+        )
+        var sampleSize = 1
+        val pixels = bounds.width.toLong() * bounds.height.toLong()
+        while (pixels / (sampleSize.toLong() * sampleSize.toLong()) > MAX_VALIDATION_DECODE_PIXELS) {
+            sampleSize *= 2
+        }
+        val bitmap = BitmapFactory.decodeFile(source.absolutePath, BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        }) ?: throw LocalVisionInputException(
+            LocalVisionInputFailureCode.IMAGE_DECODE_FAILED,
+            "JPEG cannot be decoded for EXIF normalization."
+        )
+        val outputDir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
+        val output = File(outputDir, "vision-exif-${nowMillis()}-${idSuffix()}.jpg")
+        var outputCreated = false
+        try {
+            val corrected = android.graphics.Bitmap.createBitmap(
+                bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
+            )
+            try {
+                check(output.createNewFile()) { "Prepared image file already exists; retry this request." }
+                outputCreated = true
+                output.outputStream().buffered().use { stream ->
+                    check(corrected.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, stream)) {
+                        "JPEG EXIF normalization failed."
+                    }
+                }
+                validateNativeReadableImage(output, "image/jpeg")
+                return attachment.copy(
+                    uriString = output.absolutePath,
+                    mimeType = "image/jpeg",
+                    width = corrected.width,
+                    height = corrected.height,
+                    sizeBytes = output.length()
+                )
+            } finally {
+                if (corrected !== bitmap) corrected.recycle()
+            }
+        } catch (error: Throwable) {
+            if (outputCreated) output.delete()
+            throw error
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun List<ChatImageAttachment>.deduplicatePreparedVisionAttachments(): List<ChatImageAttachment> {
         if (size < 2) return this
         val seen = LinkedHashSet<String>(size)
@@ -474,18 +668,23 @@ internal object LocalVisionInputPreparer {
     ): File {
         val dir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
         val file = File(dir, "vision-${nowMillis()}-${idSuffix()}.${imageExtension(mimeType, sourceName)}")
-        file.writeBytes(bytes)
-        validateNativeReadableImage(file, mimeType)
-        return file
+        check(file.createNewFile()) { "Prepared image file already exists; retry this request." }
+        return try {
+            file.writeBytes(bytes)
+            validateNativeReadableImage(file, mimeType)
+            file
+        } catch (error: Throwable) {
+            file.delete()
+            throw error
+        }
     }
 
     /**
      * Validate every local path before handing it to a native VLM decoder.
      * BitmapFactory is called with inJustDecodeBounds, so Android reads image
-     * headers without allocating a full-resolution bitmap. The small header
-     * parser remains as a JVM-test/format fallback when Android cannot identify
-     * a format; unknown formats retain compatibility, while known dimensions
-     * are never allowed to exceed the native decode budget.
+     * headers without allocating a full-resolution bitmap. Reject unknown
+     * signatures and geometry before a sampled decode verifies that the file
+     * can actually be read by Android's image codec.
      */
     private fun validateNativeReadableImage(file: File, declaredMimeType: String = "") {
         val bytes = file.length()
@@ -502,9 +701,15 @@ internal object LocalVisionInputPreparer {
             )
         }
 
-        val bounds = readAndroidImageBounds(file) ?: readHeaderImageBounds(file)
-        validateDeclaredImageFormat(declaredMimeType, bounds.format)
-        if (bounds.width <= 0 && bounds.height <= 0) return
+        val header = readHeaderImageBounds(file)
+        if (header.format == "unknown") {
+            throw LocalVisionInputException(
+                LocalVisionInputFailureCode.IMAGE_FORMAT_UNSUPPORTED,
+                "Image signature is not a supported local vision format. Re-export as PNG, JPEG, WebP, GIF, or BMP."
+            )
+        }
+        val bounds = readAndroidImageBounds(file) ?: header
+        validateDeclaredImageFormat(declaredMimeType, header.format)
         if (bounds.width <= 0 || bounds.height <= 0) {
             throw LocalVisionInputException(
                 LocalVisionInputFailureCode.INVALID_IMAGE_GEOMETRY,
@@ -521,6 +726,23 @@ internal object LocalVisionInputPreparer {
                 "Image resolution is too large for safe local recognition (${bounds.width}×${bounds.height}). " +
                     "Resize the image to at most 16,384 pixels per side and 32 megapixels, then retry."
             )
+        }
+        val androidCodecAvailable = runCatching { Build.VERSION.SDK_INT > 0 }.getOrDefault(false)
+        if (androidCodecAvailable) {
+            var sampleSize = 1
+            while (pixels / (sampleSize.toLong() * sampleSize.toLong()) > MAX_VALIDATION_DECODE_PIXELS) {
+                sampleSize *= 2
+            }
+            val options = BitmapFactory.Options().apply {
+                inSampleSize = sampleSize
+                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+            }
+            val decoded = runCatching { BitmapFactory.decodeFile(file.absolutePath, options) }.getOrNull()
+                ?: throw LocalVisionInputException(
+                    LocalVisionInputFailureCode.IMAGE_DECODE_FAILED,
+                    "Image header is readable, but the image data cannot be decoded. Re-export the image and retry."
+                )
+            decoded.recycle()
         }
     }
 
@@ -656,4 +878,6 @@ internal object LocalVisionInputPreparer {
         0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7,
         0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf
     )
+
+    private const val MAX_VALIDATION_DECODE_PIXELS = 4L * 1024L * 1024L
 }

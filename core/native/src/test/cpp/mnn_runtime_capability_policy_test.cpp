@@ -54,10 +54,15 @@ int main() {
                {"<img>first.png</img>", "<img>second.png</img>"},
                {"Describe both images.", "Answer briefly."}) ==
            "<img>first.png</img><img>second.png</img>Describe both images.\nAnswer briefly.");
-    assert(mca::mnn::shouldSuppressMnnMultimodalSystemPrompt("qwen3_5"));
-    assert(mca::mnn::shouldSuppressMnnMultimodalSystemPrompt("qwen3_5_moe"));
-    assert(!mca::mnn::shouldSuppressMnnMultimodalSystemPrompt("gemma4"));
-    assert(!mca::mnn::shouldSuppressMnnMultimodalSystemPrompt("qwen2_5_vl"));
+    using Messages = std::vector<std::pair<std::string, std::string>>;
+    const Messages single = {{"user", "<img>first.png</img><img>second.png</img>Compare."}};
+    assert(mca::mnn::useMnnSingleUserVisualResponse(single));
+    const Messages withSystem = {{"system", "Keep the requested language."}, single.front()};
+    assert(!mca::mnn::useMnnSingleUserVisualResponse(withSystem));
+    const Messages followUp = {single.front(), {"assistant", "The first image is red."},
+                              {"user", "What about its shape?"}};
+    assert(!mca::mnn::useMnnSingleUserVisualResponse(followUp));
+    assert(!mca::mnn::useMnnSingleUserVisualResponse(Messages{}));
 
     mca::mnn::MnnRequestLifecyclePolicy lifecycle;
     lifecycle.onModelLoaded();

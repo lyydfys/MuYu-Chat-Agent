@@ -213,6 +213,24 @@ object CharacterCardCodec {
                     if (sawIhdr || chunkCount != 0 || dataLength != 13) {
                         return failure(CharacterCardParseErrorCode.INVALID_PNG, "PNG IHDR is missing, duplicated, or malformed.")
                     }
+                    val width = readU32(bytes, dataOffset)
+                    val height = readU32(bytes, dataOffset + 4)
+                    val bitDepth = bytes[dataOffset + 8].toInt() and 0xff
+                    val colorType = bytes[dataOffset + 9].toInt() and 0xff
+                    val allowedDepths = when (colorType) {
+                        0 -> setOf(1, 2, 4, 8, 16)
+                        2, 4, 6 -> setOf(8, 16)
+                        3 -> setOf(1, 2, 4, 8)
+                        else -> emptySet()
+                    }
+                    if (width !in 1..MAX_PNG_DIMENSION || height !in 1..MAX_PNG_DIMENSION ||
+                        width * height > MAX_PNG_PIXELS || bitDepth !in allowedDepths ||
+                        bytes[dataOffset + 10].toInt() != 0 ||
+                        bytes[dataOffset + 11].toInt() != 0 ||
+                        (bytes[dataOffset + 12].toInt() and 0xff) !in 0..1
+                    ) {
+                        return failure(CharacterCardParseErrorCode.INVALID_PNG, "PNG IHDR dimensions or pixel format are invalid.")
+                    }
                     sawIhdr = true
                 }
                 PNG_TYPE_IEND -> {
@@ -331,6 +349,9 @@ object CharacterCardCodec {
         source: CharacterCardSource
     ): CharacterCardParseResult {
         val spec = root.stringValue("spec")
+        if (spec.isNotBlank() && spec != "chara_card_v2" && spec != "chara_card_v3") {
+            return failure(CharacterCardParseErrorCode.UNSUPPORTED_CARD, "spec: unsupported character-card format '$spec'.")
+        }
         val format = when (spec) {
             "chara_card_v2" -> CharacterCardFormat.CC_V2
             "chara_card_v3" -> CharacterCardFormat.CC_V3
@@ -348,6 +369,27 @@ object CharacterCardCodec {
         if (format == CharacterCardFormat.LEGACY_JSON && !looksLikeLegacyCard(root, data)) {
             return failure(CharacterCardParseErrorCode.UNSUPPORTED_CARD, "JSON does not contain a supported character-card shape.")
         }
+
+        val fieldPrefix = if (data === root) "" else "data."
+        val stringFields = listOf("name", "char_name", "title", "description", "desc", "char_persona",
+            "personality", "scenario", "world_scenario", "first_mes", "firstMessage", "greeting", "char_greeting",
+            "mes_example", "example_dialogue", "system_prompt", "systemPrompt", "prompt", "instructions",
+            "post_history_instructions", "postHistoryInstructions", "creator_notes", "creatorNotes", "creator",
+            "character_version", "characterVersion")
+        stringFields.firstOrNull { key -> data.has(key) && !data.isNull(key) && data.opt(key) !is String }?.let { key ->
+            return failure(CharacterCardParseErrorCode.INVALID_JSON, "$fieldPrefix$key: expected a string.")
+        }
+        listOf("alternate_greetings", "alternateGreetings", "group_only_greetings", "groupOnlyGreetings", "tags")
+            .forEach { key ->
+                if (data.has(key) && !data.isNull(key)) {
+                    val array = data.optJSONArray(key) ?: return failure(
+                        CharacterCardParseErrorCode.INVALID_JSON, "$fieldPrefix$key: expected an array of strings."
+                    )
+                    for (index in 0 until array.length()) if (array.opt(index) !is String) return failure(
+                        CharacterCardParseErrorCode.INVALID_JSON, "$fieldPrefix$key[$index]: expected a string."
+                    )
+                }
+            }
 
         val extensionsJson = runCatching { data.optJSONObject("extensions")?.toString() }.getOrNull()
         return CharacterCardParseResult.Success(
@@ -533,7 +575,7 @@ object CharacterCardCodec {
         return index < value.length && value[index] == '{'
     }
 
-    private fun validateJsonBounds(value: String): String? {
+    internal fun validateJsonBounds(value: String): String? {
         var depth = 0
         var inString = false
         var escaped = false
@@ -713,4 +755,6 @@ object CharacterCardCodec {
     private class CardMetadataException(message: String) : IllegalArgumentException(message)
 
     private const val PNG_CHUNK_OVERHEAD = 12L
+    private const val MAX_PNG_DIMENSION = 16_384L
+    private const val MAX_PNG_PIXELS = 64_000_000L
 }

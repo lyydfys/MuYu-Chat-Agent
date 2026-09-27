@@ -456,6 +456,8 @@ class WorldBookStoreTest {
         assertEquals(listOf("medium", "small"), selection.selectedEntryIds)
         assertEquals(listOf("too-large"), selection.skippedEntryIds)
         assertEquals(3, selection.estimatedTokens)
+        assertEquals(listOf("中文", "ok"), selection.selectedSources.map { it.excerpt })
+        assertEquals("budget", selection.skippedSources.single().reason)
         assertTrue(selection.context.contains("中文"))
         assertTrue(selection.context.contains("ok"))
         assertFalse(selection.context.contains("甲乙丙丁"))

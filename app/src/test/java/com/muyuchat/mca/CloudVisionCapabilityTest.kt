@@ -245,7 +245,7 @@ class CloudVisionCapabilityTest {
         val content = messages.getJSONObject(0).getJSONArray("content")
         val source = content.getJSONObject(0).getJSONObject("source")
 
-        assertEquals("系统设定", root.getString("system"))
+        assertTrue(root.getString("system").startsWith("系统设定"))
         assertEquals("claude-3-5-sonnet-latest", root.getString("model"))
         assertEquals("user", messages.getJSONObject(0).getString("role"))
         assertEquals("image", content.getJSONObject(0).getString("type"))
@@ -255,6 +255,29 @@ class CloudVisionCapabilityTest {
         assertEquals("text", content.getJSONObject(1).getString("type"))
         assertEquals("识别这张图片", content.getJSONObject(1).getString("text"))
         assertEquals("enabled", root.getJSONObject("thinking").getString("type"))
+    }
+
+    @Test
+    fun anthropicPayloadIncludesCharacterMemoryContext() {
+        val root = buildAnthropicChatJson(
+            config = CloudApiConfig(
+                enabled = true,
+                apiFormat = CloudApiFormat.ANTHROPIC,
+                baseUrl = "https://api.anthropic.com/v1",
+                apiKey = "secret",
+                chatModel = "claude-3-5-sonnet-latest"
+            ),
+            request = ChatRequest(
+                messages = listOf(ChatMessage(Role.USER, "Continue the story.")),
+                params = GenerationParams(systemPrompt = "Role: Mira", reasoningMode = ReasoningMode.OFF),
+                runtimeSystemContext = "[Character long-term memory] The north gate is locked."
+            )
+        )
+
+        val system = root.getString("system")
+        assertTrue(system.contains("Role: Mira"))
+        assertTrue(system.contains("The north gate is locked."))
+        assertEquals("user", root.getJSONArray("messages").getJSONObject(0).getString("role"))
     }
 
     private fun memoryPreferences(initialValues: Map<String, Any?> = emptyMap()): SharedPreferences {

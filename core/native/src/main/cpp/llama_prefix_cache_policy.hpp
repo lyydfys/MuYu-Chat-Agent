@@ -129,4 +129,13 @@ inline std::size_t longestCommonTokenPrefix(
     return matched;
 }
 
+template <typename PromptTokenContainer, typename SavedTokenContainer>
+inline std::size_t reusableSessionTokenPrefix(
+        const PromptTokenContainer &prompt,
+        const SavedTokenContainer &saved) {
+    std::size_t reusable = longestCommonTokenPrefix(prompt, saved);
+    // A sequence state file stores KV, not the logits for its final token.
+    return reusable == prompt.size() && reusable > 0 ? reusable - 1 : reusable;
+}
+
 }  // namespace mca::llama

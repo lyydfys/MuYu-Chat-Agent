@@ -68,9 +68,9 @@ fun npuAvailabilityForChatBackend(
     if (chipsetCode.isNullOrBlank()) return null
     return when (family) {
         ChatBackendFamily.LITERT_LM ->
-            qnnRuntimeUsableForSmoke == true || packagedLiteRtTransportAvailable
+            if (qnnRuntimeUsableForSmoke == true || packagedLiteRtTransportAvailable) true else null
         ChatBackendFamily.QAIRT,
-        ChatBackendFamily.GENIEX_LLAMA_CPP -> qnnRuntimeUsableForSmoke == true
+        ChatBackendFamily.GENIEX_LLAMA_CPP -> if (qnnRuntimeUsableForSmoke == true) true else null
         else -> null
     }
 }
@@ -118,9 +118,9 @@ fun chatBackendOptionsFor(
         ),
         ChatBackendOption(
             id = "gpu",
-            label = if (gpuAvailable == false) "GPU 不可用" else "GPU（全量）",
+            label = "GPU（全量）",
             detail = "llama.cpp GPU / OpenCL offload",
-            enabled = gpuAvailable != false,
+            enabled = true,
             availabilityNote = when (gpuAvailable) {
                 true -> "llama.cpp GPU 后端可用；生成后仍以实际 offload 证据为准。"
                 false -> "最近一次探测未发现可用的 llama.cpp GPU 后端；仍可尝试加载，最终以原生加载结果为准。"
@@ -158,7 +158,7 @@ fun chatBackendOptionsFor(
             id = "npu",
             label = "NPU / HTP",
             detail = "GenieX llama.cpp Qualcomm HTP",
-            enabled = npuAvailable != false,
+            enabled = true,
             availabilityNote = when (npuAvailable) {
                 true -> "最近的 HTP runtime 探测通过；具体模型仍由加载和生成验证。"
                 false -> "最近的 HTP runtime 探测未通过；仍可尝试加载，最终以原生加载结果为准。"
@@ -180,10 +180,10 @@ fun chatBackendOptionsFor(
             id = "npu",
             label = "NPU",
             detail = "LiteRT-LM Qualcomm NPU",
-            enabled = npuAvailable != false,
+            enabled = true,
             availabilityNote = when (npuAvailable) {
                 true -> "最近的 NPU runtime 探测通过；具体模型仍由加载和生成验证。"
-                false -> "当前设备的 NPU runtime 未就绪"
+                false -> "最近的 NPU runtime 探测未通过；仍可尝试加载，以本次原生加载结果为准。"
                 null -> "NPU runtime 将在加载时检测"
             }
         )
@@ -266,7 +266,7 @@ fun selectedChatBackendId(
         ChatBackendFamily.LITERT_LM -> when {
             observed.contains("npu") || observed.contains("qualcomm") -> return "npu"
             observed.contains("gpu") -> return "gpu"
-            stats.loaded && observed.contains("litert") -> return "cpu"
+            observed.contains("cpu") -> return "cpu"
         }
 
         ChatBackendFamily.GENIEX_LLAMA_CPP -> when {

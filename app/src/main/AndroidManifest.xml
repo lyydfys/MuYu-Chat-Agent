@@ -138,6 +138,17 @@
         </service>
 
         <service
+            android:name=".OfflineTranslationWorkerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":offline_translation"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="offline_prompt_translation" />
+        </service>
+
+        <service
             android:name=".LocalApiForegroundService"
             android:exported="false"
             android:foregroundServiceType="specialUse"

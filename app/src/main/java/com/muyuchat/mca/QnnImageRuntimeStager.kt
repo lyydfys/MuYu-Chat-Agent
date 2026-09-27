@@ -206,10 +206,11 @@ internal class QnnImageRuntimeStager(
                     reused = reusedExistingStage
                 )
             )
-        }.getOrElse {
+        }.getOrElse { error ->
             QnnImageRuntimeStagingResult(
                 error = "无法安装 ${qnnPublicNpuRuntimeName(contextProfile.htpArchVersion)}。" +
-                    "模型包中的 QNN 上下文与设备传输运行库不完整或版本不一致，请重新下载完整模型包。"
+                    "QNN 组件校验失败：${error.message ?: error::class.java.simpleName}。" +
+                    "请修复或重新下载完整模型包。"
             )
         }.also {
             stagingDirectory?.deleteRecursively()

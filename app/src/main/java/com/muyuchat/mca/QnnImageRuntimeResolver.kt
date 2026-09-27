@@ -183,7 +183,8 @@ internal fun qnnRequiredBundleRuntimeResolution(
     val actualArch = metadata.optInt("htpArch", 0)
     if (actualArch != required.htpArch) {
         return QnnRequiredBundleRuntimeResolution(
-            error = "模型包中的 NPU 运行环境与 $publicRuntime 不匹配，请下载适用于该芯片的模型包。"
+            error = "$publicRuntime 的 HTP 组件版本不匹配：context 要求 V${required.htpArch}，" +
+                "运行库清单声明 V${actualArch.takeIf { it > 0 } ?: "未声明"}。请修复或重新下载完整模型包。"
         )
     }
     val hashes = metadata.optJSONObject("files")
@@ -222,8 +223,8 @@ internal fun qnnRequiredBundleRuntimeResolution(
         val actual = file.qnnRuntimeSha256()
         if (actual != declared) {
             return QnnRequiredBundleRuntimeResolution(
-                error = "$publicRuntime 的 QNN 运行库完整性校验失败（SHA-256 不一致）。" +
-                    "请重新下载完整模型包。"
+                error = "$publicRuntime 的 $name 完整性校验失败：expected SHA-256=$declared，" +
+                    "actual SHA-256=$actual。请重新下载完整模型包。"
             )
         }
     }

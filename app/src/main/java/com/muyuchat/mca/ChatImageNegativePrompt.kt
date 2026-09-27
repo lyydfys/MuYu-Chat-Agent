@@ -38,7 +38,7 @@ internal fun mergeChatImageNegativePrompts(vararg values: String?): String? {
     val clauses = values.asSequence()
         .filterNotNull()
         .flatMap { value ->
-            value.split(',', '，', ';', '；', '\n')
+            splitTopLevelPromptClauses(value)
                 .map(String::trim)
                 .filter(String::isNotBlank)
                 .asSequence()
@@ -46,6 +46,50 @@ internal fun mergeChatImageNegativePrompts(vararg values: String?): String? {
         .distinctBy { it.lowercase() }
         .toList()
     return clauses.takeIf { it.isNotEmpty() }?.joinToString(", ")
+}
+
+/** Commas in weights, quoted strings and tags are part of the authored clause. */
+internal fun splitTopLevelPromptClauses(value: String): List<String> {
+    val clauses = mutableListOf<String>()
+    val current = StringBuilder()
+    val closing = ArrayDeque<Char>()
+    var quote: Char? = null
+    var escaped = false
+    value.forEach { char ->
+        when {
+            escaped -> {
+                current.append(char)
+                escaped = false
+            }
+            char == '\\' -> {
+                current.append(char)
+                escaped = true
+            }
+            quote != null -> {
+                current.append(char)
+                if (char == quote) quote = null
+            }
+            char == '"' || char == '\'' -> {
+                quote = char
+                current.append(char)
+            }
+            char == '(' || char == '[' || char == '<' -> {
+                closing.addLast(when (char) { '(' -> ')'; '[' -> ']'; else -> '>' })
+                current.append(char)
+            }
+            closing.isNotEmpty() && char == closing.last() -> {
+                closing.removeLast()
+                current.append(char)
+            }
+            closing.isEmpty() && char in ",，;；\n" -> {
+                clauses += current.toString()
+                current.setLength(0)
+            }
+            else -> current.append(char)
+        }
+    }
+    clauses += current.toString()
+    return clauses
 }
 
 /**

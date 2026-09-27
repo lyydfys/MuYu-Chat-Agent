@@ -355,23 +355,4 @@ internal fun responsesError(root: JSONObject): String {
     return error.text("message").ifBlank { error.text("code") }.ifBlank { "云端 Responses 请求失败，请检查模型权限与服务状态。" }
 }
 
-internal class ResponsesStopFilter(stops: List<String>) {
-    private val markers = stops.filter(String::isNotEmpty).distinct()
-    private var pending = ""
-    var stopped = false
-        private set
-    fun accept(delta: String): String {
-        if (stopped) return ""
-        pending += delta
-        val match = markers.map { pending.indexOf(it) }.filter { it >= 0 }.minOrNull()
-        if (match != null) {
-            stopped = true
-            return pending.substring(0, match).also { pending = "" }
-        }
-        val retained = markers.maxOfOrNull { marker ->
-            (1..minOf(marker.length - 1, pending.length)).lastOrNull { pending.endsWith(marker.take(it)) } ?: 0
-        } ?: 0
-        return pending.dropLast(retained).also { pending = pending.takeLast(retained) }
-    }
-    fun finish(): String = pending.also { pending = "" }
-}
+internal typealias ResponsesStopFilter = com.muyuchat.core.engine.StreamingStopFilter

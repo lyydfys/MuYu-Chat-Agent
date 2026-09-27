@@ -5,9 +5,8 @@ package com.muyuchat.mca
  *
  * The upstream 7B model documents 2K-class sizes.  The Android MNN port used
  * by MCA is a different, memory-bounded conversion: its VAE is dynamic and
- * accepts dimensions aligned to 32 pixels, but its verified UI grid is the
- * three pixel-budget tiers below.  Keeping this grid explicit prevents a
- * user-selected arbitrary aligned size from turning into a phone OOM.
+ * accepts dimensions aligned to 32 pixels. The three pixel-budget tiers below
+ * are UI recommendations, not evidence of execution on this device.
  */
 internal object QwenImage21SizeContract {
     /** Native MNN shape rule observed in the pinned qwen-image21 runtime. */
@@ -19,7 +18,7 @@ internal object QwenImage21SizeContract {
     const val BUNDLE_WIDTH: Int = DEFAULT_WIDTH
     const val BUNDLE_HEIGHT: Int = DEFAULT_HEIGHT
 
-    val SUPPORTED_SIZES: List<Pair<Int, Int>> = listOf(
+    val RECOMMENDED_SIZES: List<Pair<Int, Int>> = listOf(
         // Standard (~512², highest detail)
         512 to 512, 576 to 448, 448 to 576, 640 to 416, 416 to 640,
         672 to 384, 384 to 672,
@@ -31,39 +30,52 @@ internal object QwenImage21SizeContract {
         416 to 256, 256 to 416
     )
 
-    private val supportedSizeSet = SUPPORTED_SIZES.toSet()
+    // Source-compatible alias for the existing preset picker.
+    val SUPPORTED_SIZES: List<Pair<Int, Int>> = RECOMMENDED_SIZES
 
-    val VERIFIED_SIZE_TIERS: Map<String, List<Pair<Int, Int>>> = linkedMapOf(
-        "Standard" to SUPPORTED_SIZES.take(7),
-        "Fast" to SUPPORTED_SIZES.slice(7 until 14),
-        "Tiny" to SUPPORTED_SIZES.drop(14)
+    val RECOMMENDED_SIZE_TIERS: Map<String, List<Pair<Int, Int>>> = linkedMapOf(
+        "Standard" to RECOMMENDED_SIZES.take(7),
+        "Fast" to RECOMMENDED_SIZES.slice(7 until 14),
+        "Tiny" to RECOMMENDED_SIZES.drop(14)
     )
 
-    val VERIFIED_SIZE_TIERS_LABEL: String = VERIFIED_SIZE_TIERS.entries.joinToString("；") { (tier, sizes) ->
+    @Deprecated("Use RECOMMENDED_SIZE_TIERS; the presets are not execution evidence.")
+    val VERIFIED_SIZE_TIERS: Map<String, List<Pair<Int, Int>>> = RECOMMENDED_SIZE_TIERS
+
+    val RECOMMENDED_SIZE_TIERS_LABEL: String = RECOMMENDED_SIZE_TIERS.entries.joinToString("；") { (tier, sizes) ->
         "$tier：${sizes.joinToString("、") { "${it.first}×${it.second}" }}"
     }
 
-    fun isSupported(width: Int, height: Int): Boolean = width to height in supportedSizeSet
+    @Deprecated("Use RECOMMENDED_SIZE_TIERS_LABEL; the presets are not execution evidence.")
+    val VERIFIED_SIZE_TIERS_LABEL: String = RECOMMENDED_SIZE_TIERS_LABEL
+
+    /** Native shape admission, independent of preset or verification evidence. */
+    fun isSupported(width: Int, height: Int): Boolean = isNativeShape(width, height)
+
+    fun isRecommendedPreset(width: Int, height: Int): Boolean =
+        width to height in RECOMMENDED_SIZES
 
     /**
-     * Shape-level admission exposed by the native port. This is deliberately
-     * broader than [isSupported]: native setImageSize accepts any dimensions
-     * at least 256 that are aligned to 32 (rounding down to the nearest 32).
-     * It is not a product guarantee because memory and graph stability still
-     * require a real-device PNG smoke.
+     * Native setImageSize rounds down unaligned dimensions. Reject those inputs
+     * before native so the generated PNG cannot silently differ from the request.
+     * This shape check makes no execution or memory guarantee.
      */
     fun isNativeShape(width: Int, height: Int): Boolean =
         width >= NATIVE_MIN_DIMENSION &&
             height >= NATIVE_MIN_DIMENSION &&
             width % NATIVE_DIMENSION_MULTIPLE == 0 &&
-            height % NATIVE_DIMENSION_MULTIPLE == 0
+            height % NATIVE_DIMENSION_MULTIPLE == 0 &&
+            width.toLong() * height.toLong() <= MAX_ANDROID_BUNDLE_PIXELS
 
-    val SUPPORTED_SIZES_LABEL: String = SUPPORTED_SIZES.joinToString("、") {
+    // Keep pixel products representable in native Int-sized tensor dimensions.
+    private const val MAX_ANDROID_BUNDLE_PIXELS = Int.MAX_VALUE.toLong()
+
+    val SUPPORTED_SIZES_LABEL: String = RECOMMENDED_SIZES.joinToString("、") {
         "${it.first}×${it.second}"
     }
 
     const val MNN_SIZE_LINE: String =
-        "MNN 原生形状规则是宽高至少 256 且为 32 的倍数；MCA 已在真机验证 7 种比例 × 3 档，共 21 个尺寸组合（Standard/Fast/Tiny）。其他原生形状仍需真机 PNG 和内存验证，不能直接视为可用。"
+        "MNN 原生形状规则是宽高至少 256 且为 32 的倍数；以下 7 种比例 × 3 档、共 21 个尺寸组合（Standard/Fast/Tiny）是推荐预设。实际可执行性由当前模型和设备上的生成结果判定。"
 
     /** Official upstream example sizes; they require a separate high-resolution export. */
     val OFFICIAL_EXAMPLE_SIZES: List<Pair<Int, Int>> = listOf(
@@ -81,11 +93,11 @@ internal object QwenImage21SizeContract {
     }
 
     val RECOMMENDATION_SIZE_LINE: String =
-        "$MNN_SIZE_LINE $VERIFIED_SIZE_TIERS_LABEL；官方原始模型还支持 2K 示例尺寸（$OFFICIAL_EXAMPLE_SIZES_LABEL），" +
+        "$MNN_SIZE_LINE $RECOMMENDED_SIZE_TIERS_LABEL；官方原始模型还支持 2K 示例尺寸（$OFFICIAL_EXAMPLE_SIZES_LABEL），" +
             "这些高分辨率尺寸需要对应专用导出，当前 Android MNN 包不宣称支持。"
 
     fun unsupportedSizeMessage(width: Int, height: Int): String =
-        "当前 MCA Qwen-Image-2.1 MNN 包未验证 ${width}×${height}。原生端只接受至少 ${NATIVE_MIN_DIMENSION} 且宽高为 ${NATIVE_DIMENSION_MULTIPLE} 的倍数；" +
-            "请从已验证尺寸中选择：$SUPPORTED_SIZES_LABEL。" +
+        "${width}×${height} 不符合当前 Qwen-Image-2.1 MNN 形状规则：宽高至少 ${NATIVE_MIN_DIMENSION} 且均为 ${NATIVE_DIMENSION_MULTIPLE} 的倍数，像素总量不超过 ${MAX_ANDROID_BUNDLE_PIXELS}。" +
+            "可选择推荐预设：$SUPPORTED_SIZES_LABEL。" +
             "官方原始模型的 2K 示例（$OFFICIAL_EXAMPLE_SIZES_LABEL）需要另一套高分辨率运行包。"
 }

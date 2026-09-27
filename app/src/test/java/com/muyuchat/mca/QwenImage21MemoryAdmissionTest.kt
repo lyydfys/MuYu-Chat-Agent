@@ -13,9 +13,9 @@ class QwenImage21MemoryAdmissionTest {
     }
 
     @Test
-    fun `512 canvas fails before native allocation when reserve is unavailable`() {
+    fun `512 canvas warns but does not block before native allocation`() {
         val result = QwenImage21MemoryAdmissionPolicy.evaluate(5_651, 512, 512)
-        assertFalse(result.allowed)
+        assertTrue(result.allowed)
         assertTrue(result.message.orEmpty().contains("释放聊天模型"))
         assertTrue(result.message.orEmpty().contains("512×512"))
     }
@@ -25,5 +25,13 @@ class QwenImage21MemoryAdmissionTest {
         val standard = QwenImage21MemoryAdmissionPolicy.evaluate(-1, 512, 512).requiredMemoryMb
         val tiny = QwenImage21MemoryAdmissionPolicy.evaluate(-1, 320, 320).requiredMemoryMb
         assertTrue(tiny < standard)
+    }
+
+    @Test
+    fun `large dimensions saturate the estimate instead of wrapping`() {
+        val result = QwenImage21MemoryAdmissionPolicy.evaluate(0, Int.MAX_VALUE, Int.MAX_VALUE)
+        assertTrue(result.allowed)
+        assertTrue(result.requiredMemoryMb > 5_000)
+        assertTrue(result.message != null)
     }
 }

@@ -11,6 +11,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import org.json.JSONObject
+import java.security.MessageDigest
 
 /**
  * Bridges natural-language chat image requests to the ASCII prompt contract expected by
@@ -123,20 +124,98 @@ internal data class PromptEnvelope(
     val original: String,
     val positive: String,
     val negative: String? = null,
+    val originalPositive: String = parseChatImagePromptInput(original).positivePrompt,
+    val originalNegative: String? = parseChatImagePromptInput(original).negativePrompt,
+    val negativeOrigin: ChatImageNegativeOrigin = if (originalNegative.isNullOrBlank())
+        ChatImageNegativeOrigin.NONE else ChatImageNegativeOrigin.USER_AUTHORED,
+    val protectedSpans: List<ProtectedPromptSpan> = protectedPromptSpans(original),
     val protectedSyntax: List<String> = extractProtectedPromptTokens(original),
     val loras: List<String> = protectedSyntax.filter { token ->
         Regex("(?i)(?:<)?(?:lora|lyco|lycoris|embedding):").containsMatchIn(token)
-    }
+    },
+    val recovery: ChatImagePromptRecovery? = null,
+    val warnings: List<String> = emptyList()
 ) {
     init {
         require(positive.isNotBlank()) { "Prompt envelope positive text must not be blank." }
-        require(protectedSyntax.distinct().size == protectedSyntax.size) {
-            "Prompt envelope protected syntax must be unique."
-        }
         require(loras.all { it in protectedSyntax }) {
             "Prompt envelope LoRA syntax must be a protected token subset."
         }
     }
+}
+
+internal fun PromptEnvelope.toAuditJsonString(): String = JSONObject()
+    .put("schemaVersion", 1)
+    .put("original", original)
+    .put("originalPositive", originalPositive)
+    .put("originalNegative", originalNegative)
+    .put("positive", positive)
+    .put("negative", negative)
+    .put("negativeOrigin", negativeOrigin.name)
+    .put("protectedSpans", org.json.JSONArray().apply {
+        protectedSpans.forEach { span ->
+            put(JSONObject()
+                .put("branch", span.branch.name)
+                .put("kind", span.kind.name)
+                .put("originalOffset", span.originalOffset)
+                .put("rawText", span.rawText)
+                .put("digest", span.digest))
+        }
+    })
+    .put("warnings", org.json.JSONArray(warnings))
+    .toString()
+
+internal enum class ChatImageNegativeOrigin { NONE, MODEL_DEFAULT, USER_AUTHORED }
+internal enum class ProtectedPromptBranch { POSITIVE, NEGATIVE }
+internal enum class ProtectedPromptKind { LORA_OR_EMBEDDING, WEIGHT }
+
+internal data class ProtectedPromptSpan(
+    val branch: ProtectedPromptBranch,
+    val kind: ProtectedPromptKind,
+    val originalOffset: Int,
+    val rawText: String,
+    val digest: String
+)
+
+internal enum class ChatImagePromptRecoveryAction { USE_ORIGINAL, TRANSLATE, EDIT, RETRY }
+
+internal data class ChatImagePromptRecovery(
+    val originalPositive: String,
+    val originalNegative: String?,
+    val canUseOriginal: Boolean,
+    val actions: List<ChatImagePromptRecoveryAction>
+)
+
+/** A failed model pass never implies that raw text is safe for the chosen encoder. */
+internal fun chatImagePromptRecovery(
+    original: String,
+    nativeMultilingual: Boolean
+): ChatImagePromptRecovery {
+    val parts = parseChatImagePromptInput(original)
+    val positive = parts.positivePrompt.trim()
+    val negative = parts.negativePrompt?.trim()?.takeIf(String::isNotBlank)
+    val structuredWrapper = original.trimStart().let {
+        it.startsWith('{') || it.startsWith('[') || it.startsWith("```")
+    }
+    val fits = positive.isNotBlank() &&
+        positive.length <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS &&
+        (negative?.length ?: 0) <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS
+    val syntaxCompatible = positive.isSafeAsciiDiffusionPrompt() &&
+        (negative == null || negative.isSafeAsciiDiffusionPrompt())
+    val languageCompatible = nativeMultilingual ||
+        (!positive.containsHanScript() && negative?.containsHanScript() != true)
+    val canUseOriginal = fits && syntaxCompatible && languageCompatible && !structuredWrapper
+    return ChatImagePromptRecovery(
+        originalPositive = positive,
+        originalNegative = negative,
+        canUseOriginal = canUseOriginal,
+        actions = buildList {
+            if (canUseOriginal) add(ChatImagePromptRecoveryAction.USE_ORIGINAL)
+            if (!languageCompatible) add(ChatImagePromptRecoveryAction.TRANSLATE)
+            add(ChatImagePromptRecoveryAction.EDIT)
+            add(ChatImagePromptRecoveryAction.RETRY)
+        }
+    )
 }
 
 internal sealed interface Result {
@@ -155,7 +234,8 @@ internal sealed interface Result {
 
     data class Failed(
         val code: Code,
-        val message: String
+        val message: String,
+        val recovery: ChatImagePromptRecovery? = null
     ) : Result
 }
 
@@ -191,6 +271,11 @@ internal fun chatImagePromptBridgeHandoff(
     allowNegativePrompt: Boolean = true
 ): ChatImagePromptBridgeHandoff {
     if (!allowNegativePrompt) {
+        val authoredNegative = parseChatImagePromptInput(result.originalPrompt).negativePrompt
+            ?.takeUnless(::isEmptyNegativePromptPlaceholder)
+        require(authoredNegative.isNullOrBlank()) {
+            "The selected image backend has no negative branch; an authored negative prompt requires an explicit edit or omit decision."
+        }
         return ChatImagePromptBridgeHandoff(
             prompt = result.effectivePrompt,
             options = baseOptions.copy(negativePrompt = null),
@@ -343,15 +428,15 @@ internal fun parseChatImagePromptInput(prompt: String): ChatImagePromptInputPart
     // before section parsing keeps the negative branch out of the positive encoder even when a
     // user did not paste each section on its own line.
     val inputLines = prompt.lines().flatMap { rawLine ->
-        val inlineNegative = CHAT_IMAGE_INLINE_NEGATIVE_SECTION.matchEntire(rawLine.trim())
-        if (inlineNegative != null && inlineNegative.groupValues[1].isNotBlank()) {
+        val inlineNegative = topLevelInlineNegative(rawLine)
+        if (inlineNegative != null && inlineNegative.first.isNotBlank()) {
             listOf(
                 // The separator may be matched as whitespace rather than the comma itself.
                 // Strip punctuation left on the positive branch so an inline negative label
                 // never changes the authored prompt (`a cat, negative_prompt: blurry` ->
                 // `a cat`, not `a cat,`).
-                inlineNegative.groupValues[1].trim().trimEnd(',', '，', ';', '；').trim(),
-                "负面提示词：${inlineNegative.groupValues[2].trim()}"
+                inlineNegative.first.trim().trimEnd(',', '，', ';', '；').trim(),
+                "负面提示词：${inlineNegative.second.trim()}"
             )
         } else {
             listOf(rawLine)
@@ -440,14 +525,37 @@ internal fun parseChatImagePromptInput(prompt: String): ChatImagePromptInputPart
     )
 }
 
+private fun topLevelInlineNegative(value: String): Pair<String, String>? {
+    val closing = ArrayDeque<Char>()
+    var quote: Char? = null
+    var escaped = false
+    value.forEachIndexed { index, char ->
+        when {
+            escaped -> escaped = false
+            char == '\\' -> escaped = true
+            quote != null -> if (char == quote) quote = null
+            char == '"' || char == '\'' -> quote = char
+            char == '(' || char == '[' || char == '<' ->
+                closing.addLast(when (char) { '(' -> ')'; '[' -> ']'; else -> '>' })
+            closing.isNotEmpty() && char == closing.last() -> closing.removeLast()
+            closing.isEmpty() && (char.isWhitespace() || char in ",，;；") -> {
+                val remainder = value.substring(index).trimStart(',', '，', ';', '；', ' ', '\t')
+                val label = CHAT_IMAGE_INLINE_NEGATIVE_LABEL.matchEntire(remainder)
+                if (label != null) return value.substring(0, index) to label.groupValues[1]
+            }
+        }
+    }
+    return null
+}
+
 private val CHAT_IMAGE_ENGLISH_SECTION = Regex(
     "(?i)^\\s*((?:english[\\s_-]+)?(?:positive|negative)(?:[\\s_-]+prompt)?)(?:\\s*[:：=]\\s*(.*))?\\s*$"
 )
 private val CHAT_IMAGE_CHINESE_SECTION = Regex(
     "^\\s*(中文正向|中文正面|英文正向|英文正面|英文负向|英文负面|正向|正面|负向|负面)(?:提示词)?(?:\\s*[:：]\\s*(.*))?\\s*$"
 )
-private val CHAT_IMAGE_INLINE_NEGATIVE_SECTION = Regex(
-    "(?is)^(.+?)(?:,|，|;|；|\\s+)(?:negative(?:[\\s_-]+prompt)?|负面提示词|负向|负面)\\s*[:：=]\\s*(.+)$"
+private val CHAT_IMAGE_INLINE_NEGATIVE_LABEL = Regex(
+    "(?is)^(?:negative(?:[\\s_-]+prompt)?|负面提示词|负向|负面)\\s*[:：=]\\s*(.+)$"
 )
 private val CHAT_IMAGE_PROMPT_LABEL_ANNOTATION = Regex(
     "(?i)\\s*[（(][^）)]*(?:token(?:s)?|令牌|推荐)[^）)]*[）)]"
@@ -479,6 +587,12 @@ suspend fun translateChatImagePrompt(
         )
     }
     val inputParts = parseChatImagePromptInput(original)
+    val recovery = chatImagePromptRecovery(original, nativeMultilingual = false)
+    fun failed(code: Code, message: String): Result.Failed = Result.Failed(
+        code = code,
+        message = message,
+        recovery = recovery
+    )
     // Once the image skill has been selected, the chat model is the canonical prompt
     // normalizer.  Do not let the convenience parser decide which lines are "positive",
     // "negative", English, JSON, Markdown, or metadata before that pass: users may paste any
@@ -487,7 +601,7 @@ suspend fun translateChatImagePrompt(
     // preservation of an explicitly authored ASCII negative branch below.
     val translationSource = if (requireModelSummary) original else inputParts.translationSource()
     if (translationSource.isBlank()) {
-        return Result.Failed(Code.INVALID_INPUT, "没有找到可用于生图的正向描述。")
+        return failed(Code.INVALID_INPUT, "没有找到可用于生图的正向描述。")
     }
     if (!requireModelSummary && !shouldBridgeChatImagePrompt(translationSource)) {
         val positive = inputParts.englishPositivePrompt ?: inputParts.positivePrompt
@@ -495,7 +609,7 @@ suspend fun translateChatImagePrompt(
         if (positive.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS ||
             negative?.length?.let { it > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS } == true
         ) {
-            return Result.Failed(
+            return failed(
                 Code.UNSAFE_OUTPUT,
                 "图片描述或负面提示词超过 ${LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS} 字符上限。"
             )
@@ -541,33 +655,51 @@ suspend fun translateChatImagePrompt(
             }
         }
     } catch (error: kotlinx.coroutines.TimeoutCancellationException) {
-        return Result.Failed(Code.TIMEOUT, "聊天模型翻译图片描述超时，请重试或直接输入英文提示词。")
+        return failed(Code.TIMEOUT, "聊天模型翻译图片描述超时，请重试或直接输入英文提示词。")
     } catch (error: CancellationException) {
         throw error
     } catch (error: ChatImagePromptBridgeException) {
-        return Result.Failed(
+        return failed(
             error.code,
             error.message ?: "聊天模型无法完成图片描述转换。请重试或直接输入英文提示词。"
         )
     } catch (error: Throwable) {
-        return Result.Failed(
+        return failed(
             Code.MODEL_ERROR,
             "聊天模型无法完成图片描述转换：${error.message.orEmpty().ifBlank { "未知错误" }}"
         )
     }
 
     val normalizedParts = normalizeChatImagePromptResponse(output.toString())
-        ?: return Result.Failed(Code.EMPTY_OUTPUT, "聊天模型没有返回可用的英文图片描述，请重试。")
+        ?: return failed(Code.EMPTY_OUTPUT, "聊天模型没有返回可用的英文图片描述，请重试。")
     var normalized = normalizedParts.positive
     var normalizedNegative = normalizedParts.negative
     if (normalized.containsHanScript() || normalizedNegative?.containsHanScript() == true) {
-        return Result.Failed(Code.NON_ASCII_OUTPUT, "聊天模型返回了中文，未直接提交给英文图像模型。请重试。")
+        return failed(Code.NON_ASCII_OUTPUT, "聊天模型返回了中文，未直接提交给英文图像模型。请重试。")
     }
     // Every protected marker stands for semantics that cannot be reconstructed safely after
     // translation (counts, ordinals, LoRA/embedding tags, or explicit weights). Require each
     // marker exactly once across the positive and negative branches. This prevents both silent
     // loss and a model duplicating an image count while summarizing the sentence.
     val emitted = normalized + "\n" + normalizedNegative.orEmpty()
+    val branchViolations = protected.markerBranches.mapNotNull { (marker, branch) ->
+        val expected = if (branch == ProtectedPromptBranch.POSITIVE) normalized else normalizedNegative.orEmpty()
+        val other = if (branch == ProtectedPromptBranch.POSITIVE) normalizedNegative.orEmpty() else normalized
+        val expectedCount = Regex(Regex.escape(marker)).findAll(expected).count()
+        val otherCount = Regex(Regex.escape(marker)).findAll(other).count()
+        val semanticNumber = marker.startsWith("MCA_KEEP_NUMBER_") &&
+            !protectNumericLiterals && expectedCount == 0 &&
+            semanticNumberReplacementPreserved(protected.replacements.getValue(marker), expected)
+        if (marker.startsWith("MCA_KEEP_TOKEN_") &&
+            !((expectedCount == 1 || semanticNumber) && otherCount == 0)
+        ) protected.replacements.getValue(marker) else null
+    }.distinct()
+    if (branchViolations.isNotEmpty()) {
+        return failed(
+            Code.PROTECTED_SYNTAX_LOST,
+            "聊天模型移动了正负向分支中的 LoRA 或权重标记，未启动生图。请重试。"
+        )
+    }
     val missingOrDuplicated = protected.replacements.filter { (marker, original) ->
         val markerCount = Regex(Regex.escape(marker)).findAll(emitted).count()
         // Structured image-skill payloads deliberately leave transport metadata numbers
@@ -583,7 +715,7 @@ suspend fun translateChatImagePrompt(
         markerCount != 1 && !semanticEquivalent
     }.map { it.key }
     if (missingOrDuplicated.isNotEmpty()) {
-        return Result.Failed(
+        return failed(
             Code.PROTECTED_SYNTAX_LOST,
             "聊天模型没有完整保留图片数量、序号、LoRA 或权重信息，未启动生图。请重试。"
         )
@@ -591,7 +723,7 @@ suspend fun translateChatImagePrompt(
     val restoredPositive = restoreProtectedChatImagePromptPart(normalized, protected)
     val restoredNegative = normalizedNegative?.let { restoreProtectedChatImagePromptPart(it, protected) }
     if (restoredPositive == null || (normalizedNegative != null && restoredNegative == null)) {
-        return Result.Failed(
+        return failed(
             Code.PROTECTED_SYNTAX_LOST,
             "聊天模型没有完整保留 LoRA、权重或数量信息，未启动生图。请重试。"
         )
@@ -620,7 +752,7 @@ suspend fun translateChatImagePrompt(
         authoredProtectedTokenOccurrences(token, restoredOutput) != expectedCount
     }
     if (restoredMismatch) {
-        return Result.Failed(
+        return failed(
             Code.PROTECTED_SYNTAX_LOST,
             "聊天模型重复或改写了图片数量、LoRA 或权重信息，未启动生图。请重试。"
         )
@@ -659,7 +791,7 @@ suspend fun translateChatImagePrompt(
                         ignoreCase = true
                     )
                 }
-                ?: return Result.Failed(
+                ?: return failed(
                     Code.PROTECTED_SYNTAX_LOST,
                     "聊天模型没有保留负面提示词，未启动生图。请重试。"
                 )
@@ -670,7 +802,7 @@ suspend fun translateChatImagePrompt(
             mergeChatImageNegativePrompts(
                 translatedNegative,
                 explicitNegative
-                    .split(',', '，', ';', '；', '\n')
+                    .let(::splitTopLevelPromptClauses)
                     .map(String::trim)
                     .filter {
                         it.isNotBlank() &&
@@ -688,24 +820,24 @@ suspend fun translateChatImagePrompt(
         else -> explicitNegative
     }
     if (effectivePositive.containsHanScript() || effectiveNegative?.containsHanScript() == true) {
-        return Result.Failed(Code.NON_ASCII_OUTPUT, "生图提示词中仍包含中文，未直接提交给英文图像模型。请重试。")
+        return failed(Code.NON_ASCII_OUTPUT, "生图提示词中仍包含中文，未直接提交给英文图像模型。请重试。")
     }
     if (!effectivePositive.isSafeAsciiDiffusionPrompt()) {
-        return Result.Failed(Code.UNSAFE_OUTPUT, "聊天模型返回的图片描述包含不支持的字符，未启动生图。请重试。")
+        return failed(Code.UNSAFE_OUTPUT, "聊天模型返回的图片描述包含不支持的字符，未启动生图。请重试。")
     }
     if (effectiveNegative != null && !effectiveNegative.isSafeAsciiDiffusionPrompt()) {
-        return Result.Failed(Code.UNSAFE_OUTPUT, "聊天模型返回的负面图片描述包含不支持的字符，未启动生图。请重试。")
+        return failed(Code.UNSAFE_OUTPUT, "聊天模型返回的负面图片描述包含不支持的字符，未启动生图。请重试。")
     }
     if (effectiveNegative != null &&
         effectiveNegative.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS
     ) {
-        return Result.Failed(
+        return failed(
             Code.UNSAFE_OUTPUT,
             "英文负面图片描述过长，未启动生图。请缩短描述后重试。"
         )
     }
     if (effectivePositive.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS) {
-        return Result.Failed(Code.UNSAFE_OUTPUT, "英文图片描述过长，未启动生图。请缩短描述后重试。")
+        return failed(Code.UNSAFE_OUTPUT, "英文图片描述过长，未启动生图。请缩短描述后重试。")
     }
     val protectedTokens = extractProtectedPromptTokens(
         translationSource,
@@ -718,7 +850,7 @@ suspend fun translateChatImagePrompt(
         // A missing protected token means the chat model changed user-authored control syntax or
         // counts. Do not silently append it to a different semantic location: fail closed and let
         // the caller retry the bounded translation pass.
-        return Result.Failed(
+        return failed(
             Code.PROTECTED_SYNTAX_LOST,
             "聊天模型没有完整保留 LoRA、权重或数量信息，未启动生图。请重试。"
         )
@@ -727,7 +859,7 @@ suspend fun translateChatImagePrompt(
     if (effective.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS ||
         !effective.isSafeAsciiDiffusionPrompt()
     ) {
-        return Result.Failed(
+        return failed(
             Code.PROTECTED_SYNTAX_LOST,
             "聊天模型没有完整保留 LoRA 或权重标记，未启动生图。请重试或直接输入英文提示词。"
         )
@@ -818,6 +950,9 @@ internal fun normalizeChatImagePromptResponse(raw: String): NormalizedChatImageP
             .firstNotNullOfOrNull { key ->
                 (json.opt(key) as? String)?.trim()?.takeIf(String::isNotBlank)
             }
+        if (json.has("negative_prompt") &&
+            json.opt("negative_prompt") !is String
+        ) return@runCatching null
         NormalizedChatImagePromptResponse(positive.trim(), negative?.trim())
     }.getOrNull()
 
@@ -1075,6 +1210,52 @@ internal fun extractProtectedPromptTokens(
     }
 }
 
+internal fun protectedPromptSpans(prompt: String): List<ProtectedPromptSpan> {
+    val patterns = listOf(
+        CHAT_IMAGE_ANGLE_CONTROL_TOKEN to ProtectedPromptKind.LORA_OR_EMBEDDING,
+        Regex("(?i)(?:lora|lyco|lycoris|embedding):[A-Za-z0-9_+./-]{1,120}(?::[+-]?\\d+(?:\\.\\d+)?)?") to ProtectedPromptKind.LORA_OR_EMBEDDING,
+        Regex("\\([^\\r\\n()]{1,160}:[+-]?\\d+(?:\\.\\d+)?\\)") to ProtectedPromptKind.WEIGHT,
+        Regex("\\[[^\\r\\n\\[\\]]{1,160}:[+-]?\\d+(?:\\.\\d+)?\\]") to ProtectedPromptKind.WEIGHT
+    )
+    val matches = patterns.flatMap { (pattern, kind) ->
+        pattern.findAll(prompt).map { match ->
+            val before = prompt.substring(0, match.range.first)
+            val lastNegative = CHAT_IMAGE_NEGATIVE_BRANCH_LABEL.findAll(before).lastOrNull()?.range?.first ?: -1
+            val lastPositive = CHAT_IMAGE_POSITIVE_BRANCH_LABEL.findAll(before).lastOrNull()?.range?.first ?: -1
+            ProtectedPromptSpan(
+                branch = if (lastNegative > lastPositive) ProtectedPromptBranch.NEGATIVE else ProtectedPromptBranch.POSITIVE,
+                kind = kind,
+                originalOffset = match.range.first,
+                rawText = match.value,
+                digest = promptDigest(match.value)
+            )
+        }.toList()
+    }.sortedBy { it.originalOffset }
+    return matches.filter { candidate ->
+        matches.none { other ->
+            other !== candidate && other.originalOffset <= candidate.originalOffset &&
+                other.originalOffset + other.rawText.length >= candidate.originalOffset + candidate.rawText.length &&
+                other.rawText.length > candidate.rawText.length
+        }
+    }
+}
+
+internal fun protectedPromptSpansPreserved(
+    original: List<ProtectedPromptSpan>,
+    positive: String,
+    negative: String?
+): Boolean {
+    val expected = original.groupingBy { Triple(it.branch, it.kind, it.rawText) }.eachCount()
+    val actual = protectedPromptSpans(
+        "Positive prompt: $positive\nNegative prompt: ${negative.orEmpty()}"
+    ).groupingBy { Triple(it.branch, it.kind, it.rawText) }.eachCount()
+    return expected.all { (token, count) -> actual[token] == count }
+}
+
+private fun promptDigest(value: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(value.toByteArray(Charsets.UTF_8))
+    .joinToString("") { byte -> "%02x".format(byte) }
+
 /**
  * Payload sent to the chat model with syntax and counts replaced by stable ASCII markers.
  * Markers are intentionally plain words rather than punctuation so small local models are less
@@ -1082,10 +1263,17 @@ internal fun extractProtectedPromptTokens(
  */
 private data class ProtectedChatImagePrompt(
     val payload: String,
-    val replacements: Map<String, String>
+    val replacements: Map<String, String>,
+    val markerBranches: Map<String, ProtectedPromptBranch>
 )
 
 private val PROTECTED_CHAT_MARKER = Regex("MCA_KEEP_[A-Z]+_\\d+")
+private val CHAT_IMAGE_NEGATIVE_BRANCH_LABEL = Regex(
+    "(?im)(?:^|[,;，；\\n])\\s*(?:negative(?:[\\s_-]+prompt)?|negative_prompt|负面提示词|负向|负面)\\s*[:：=]"
+)
+private val CHAT_IMAGE_POSITIVE_BRANCH_LABEL = Regex(
+    "(?im)(?:^|[,;，；\\n])\\s*(?:positive(?:[\\s_-]+prompt)?|positive_prompt|中文正向|英文正向|正向|正面)\\s*[:：=]"
+)
 // Only preserve angle-bracket forms that are known diffusion control syntax. A broad
 // `<...>` matcher makes arbitrary HTML/XML/Markdown pasted into the image skill look like a
 // mandatory LoRA token and can incorrectly reject an otherwise valid model summary.
@@ -1122,6 +1310,7 @@ private fun protectChatImagePrompt(
     protectNumericLiterals: Boolean = true
 ): ProtectedChatImagePrompt {
     val replacements = linkedMapOf<String, String>()
+    val markerBranches = linkedMapOf<String, ProtectedPromptBranch>()
     var index = 0
     var value = prompt
 
@@ -1129,6 +1318,14 @@ private fun protectChatImagePrompt(
         value = pattern.replace(value) { match ->
             val marker = "MCA_KEEP_${kind}_${index++}"
             replacements[marker] = convert(match.value)
+            val before = value.substring(0, match.range.first)
+            val lastNegative = CHAT_IMAGE_NEGATIVE_BRANCH_LABEL.findAll(before).lastOrNull()?.range?.first ?: -1
+            val lastPositive = CHAT_IMAGE_POSITIVE_BRANCH_LABEL.findAll(before).lastOrNull()?.range?.first ?: -1
+            markerBranches[marker] = if (lastNegative > lastPositive) {
+                ProtectedPromptBranch.NEGATIVE
+            } else {
+                ProtectedPromptBranch.POSITIVE
+            }
             marker
         }
     }
@@ -1159,7 +1356,7 @@ private fun protectChatImagePrompt(
         replaceMatches(SEMANTIC_ARABIC_COUNT, "NUMBER")
         replaceMatches(CHINESE_NUMBER, "NUMBER") { chineseNumberReplacement(it) ?: it }
     }
-    return ProtectedChatImagePrompt(value, replacements)
+    return ProtectedChatImagePrompt(value, replacements, markerBranches)
 }
 
 private fun restoreProtectedChatImagePromptPart(
@@ -1357,6 +1554,8 @@ internal fun chatImagePromptBridgeRequest(
         prompt,
         protectNumericLiterals = protectNumericLiterals
     ).payload
+    val outputTokenBudget = (protectedPrompt.length / 3 + 160)
+        .coerceIn(256, 1_024)
     val referenceContext = formatChatImagePromptReferenceContext(
         assistantName = assistantName,
         characterContext = characterContext,
@@ -1379,7 +1578,7 @@ internal fun chatImagePromptBridgeRequest(
             ChatMessage(Role.USER, userContent)
         ),
         params = params.copy(
-            nPredict = minOf(params.effectiveNPredict(), 256),
+            nPredict = minOf(maxOf(params.effectiveNPredict(), outputTokenBudget), 1_024),
             temperature = 0f,
             reasoningMode = ReasoningMode.OFF,
             hideReasoning = true,
@@ -1408,23 +1607,46 @@ internal fun formatChatImagePromptReferenceContext(
     val lines = buildList {
         assistantName?.let { inertText(it, 96).takeIf(String::isNotBlank) }
             ?.let { add("Character name (reference only): $it") }
-        characterContext?.let { inertText(it, 1_000).takeIf(String::isNotBlank) }
+        characterContext?.let { inertText(it, 700).takeIf(String::isNotBlank) }
             ?.let { add("Character description (reference only): $it") }
         conversationContext.asSequence()
             .filter { it.role == Role.USER || it.role == Role.ASSISTANT }
             .mapNotNull { message ->
-                inertText(message.content, 300)
+                inertText(message.content, 110)
                     .takeIf(String::isNotBlank)
                     ?.let { "${message.role.name.lowercase()}: $it" }
             }
             .toList()
             .takeLast(6)
             .forEach(::add)
-        runtimeContext?.let { inertText(it, 1_600).takeIf(String::isNotBlank) }
+        runtimeContext?.let { inertText(it, 1_100).takeIf(String::isNotBlank) }
             ?.let { add("Selected lore and knowledge (reference only): $it") }
     }
     if (lines.isEmpty()) return null
-    return lines.joinToString("\n").take(2_800)
+    return lines.joinToString("\n").also { context ->
+        check(context.length <= 2_800) { "Image reference context exceeded its reserved source budget." }
+    }
 }
 
 }
+
+internal typealias PromptEnvelope = ChatImagePromptBridge.PromptEnvelope
+internal typealias ChatImagePromptRecovery = ChatImagePromptBridge.ChatImagePromptRecovery
+internal typealias ChatImagePromptRecoveryAction = ChatImagePromptBridge.ChatImagePromptRecoveryAction
+
+internal fun parseChatImagePromptInput(prompt: String): ChatImagePromptBridge.ChatImagePromptInputParts =
+    ChatImagePromptBridge.parseChatImagePromptInput(prompt)
+
+internal fun chatImagePromptRecovery(original: String, nativeMultilingual: Boolean): ChatImagePromptRecovery =
+    ChatImagePromptBridge.chatImagePromptRecovery(original, nativeMultilingual)
+
+internal fun chatImagePromptBridgeHandoff(
+    result: ChatImagePromptBridge.Result.Prepared,
+    baseOptions: LocalImageGenerationOptions,
+    originalNegativePrompt: String?,
+    translatedModelNegativePrompt: String?,
+    nativeMultilingual: Boolean,
+    allowNegativePrompt: Boolean = true
+): ChatImagePromptBridge.ChatImagePromptBridgeHandoff = ChatImagePromptBridge.chatImagePromptBridgeHandoff(
+    result, baseOptions, originalNegativePrompt, translatedModelNegativePrompt, nativeMultilingual, allowNegativePrompt
+)

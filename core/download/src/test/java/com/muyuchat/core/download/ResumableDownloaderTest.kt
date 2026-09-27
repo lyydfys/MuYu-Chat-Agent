@@ -15,6 +15,38 @@ import kotlin.concurrent.thread
 
 class ResumableDownloaderTest {
     @Test
+    fun progressSpeedUsesMonotonicElapsedTime() = runBlocking {
+        val bytes = ByteArray(1024 * 1024 + 1024) { 0x41 }
+        FixedContentServer(bytes).use { server ->
+            val tempDir = Files.createTempDirectory("mca-download-speed-test").toFile()
+            try {
+                val remote = RemoteModelFile(
+                    repoId = "owner/model",
+                    revision = "main",
+                    path = "model.gguf",
+                    name = "model.gguf",
+                    sizeBytes = bytes.size.toLong(),
+                    downloadUrl = server.url
+                )
+                var monotonicReads = 0
+                val speeds = mutableListOf<Long>()
+                ResumableDownloader(
+                    maxRetries = 0,
+                    monotonicNanos = { if (monotonicReads++ == 0) 0L else 1_000_000_000L }
+                ).download(remote, File(tempDir, "model.gguf.part"), File(tempDir, "model.gguf")) { snapshot ->
+                    if (snapshot.status == DownloadStatus.RUNNING && snapshot.speedBytesPerSecond > 0L) {
+                        speeds += snapshot.speedBytesPerSecond
+                    }
+                }
+
+                assertEquals(listOf(1_048_576L), speeds)
+            } finally {
+                tempDir.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
     fun resumesFromPartialTempFileAfterConnectionAbort() = runBlocking {
         val bytes = "0123456789".toByteArray()
         PartialContentServer(bytes, firstChunkBytes = 5).use { server ->

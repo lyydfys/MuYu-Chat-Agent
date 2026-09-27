@@ -165,7 +165,7 @@ function Get-MnnVendorCanonicalDiff {
     $temporary = [System.IO.Path]::GetTempFileName()
     try {
         $result = Invoke-MnnVendorGit -Arguments @(
-            '-c', 'core.safecrlf=false', '-C', $SourceRoot,
+            '-c', 'core.safecrlf=false', '-c', 'diff.suppressBlankEmpty=true', '-C', $SourceRoot,
             'diff', '--binary', '--full-index', '--no-ext-diff', '--no-color',
             "--output=$temporary", 'HEAD', '--'
         ) -AllowFailure

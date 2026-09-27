@@ -154,6 +154,23 @@ internal class ModelGenerationProfileStore(context: Context) {
         readProfiles().containsKey(modelKey)
     }
 
+    /** Copy an old local-model profile without overwriting an existing target choice. */
+    fun migrateLocalModelIds(idMapping: Map<String, String>) = synchronized(lock) {
+        val profiles = readProfiles()
+        var changed = false
+        idMapping.forEach { (oldId, newId) ->
+            if (oldId == newId) return@forEach
+            val oldKey = ModelGenerationProfileKey.local(oldId)
+            val newKey = ModelGenerationProfileKey.local(newId)
+            val old = profiles[oldKey] ?: return@forEach
+            if (newKey !in profiles) {
+                profiles[newKey] = old
+                changed = true
+            }
+        }
+        if (changed) writeProfiles(profiles, durable = true)
+    }
+
     fun remove(modelKey: String) = synchronized(lock) {
         val profiles = readProfiles()
         if (profiles.remove(modelKey) != null) writeProfiles(profiles)
@@ -176,15 +193,16 @@ internal class ModelGenerationProfileStore(context: Context) {
         }
     }
 
-    private fun writeProfiles(profiles: Map<String, ModelGenerationProfileDocument>) {
+    private fun writeProfiles(profiles: Map<String, ModelGenerationProfileDocument>, durable: Boolean = false) {
         val values = JSONObject()
         profiles.forEach { (key, document) -> values.put(key, document.toJson()) }
-        preferences.edit()
+        val edit = preferences.edit()
             .putString(
                 PROFILES_KEY,
                 JSONObject().put("schema", SCHEMA).put("profiles", values).toString()
             )
-            .apply()
+        if (durable) check(edit.commit()) { "Model generation profile migration was not persisted." }
+        else edit.apply()
     }
 
     companion object {

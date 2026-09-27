@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cmath>
+#include <algorithm>
 #include <stdexcept>
+#include <string>
+#include <vector>
 #include "nlohmann/json.hpp"
 
 namespace mca::mnn {
@@ -33,12 +36,33 @@ inline void applySamplingConfig(nlohmann::json& config, const nlohmann::json& pa
         throw std::invalid_argument("MNN top_k and seed must be integers");
     const double topP = number("top_p", "topP", 0.95, 0, 1);
     const double minP = number("min_p", "minP", 0.0, 0, 1);
+    const double repetitionPenalty = number("repeat_penalty", "repetition_penalty", 1.0, 0.0, 100.0);
+    const double presencePenalty = number("presence_penalty", "presencePenalty", 0.0, -100.0, 100.0);
+    const double frequencyPenalty = number("frequency_penalty", "frequencyPenalty", 0.0, -100.0, 100.0);
     config["temperature"] = temperature;
     config["top_k"] = config["topK"] = temperature == 0 ? 1 : static_cast<int>(topK);
     config["top_p"] = config["topP"] = temperature == 0 ? 1.0 : topP;
     config["min_p"] = config["minP"] = minP;
     config["seed"] = static_cast<int>(seed);
+    config["repetition_penalty"] = config["repeat_penalty"] = repetitionPenalty;
+    config["presence_penalty"] = config["presencePenalty"] = presencePenalty;
+    config["frequency_penalty"] = config["frequencyPenalty"] = frequencyPenalty;
+    // The pinned MNN sampler only applies penalty fields when the penalty stage
+    // is present in the mixed pipeline. Preserve explicit stages, and use the
+    // pinned runtime's default stages when none were supplied.
+    const bool hasPenalty = repetitionPenalty != 1.0 || presencePenalty != 0.0 || frequencyPenalty != 0.0;
     config["sampler_type"] = temperature == 0 ? "greedy" : "mixed";
+    if (hasPenalty) {
+        auto stages = temperature == 0
+                ? std::vector<std::string>{"greedy"}
+                : config.value("mixed_samplers", std::vector<std::string>{
+                        "topK", "tfs", "typical", "topP", "min_p", "temperature"});
+        if (std::find(stages.begin(), stages.end(), "penalty") == stages.end()) {
+            stages.insert(stages.begin(), "penalty");
+        }
+        config["mixed_samplers"] = stages;
+        config["sampler_type"] = "mixed";
+    }
 }
 
 inline void applyCpuCacheSafety(nlohmann::json& config) {

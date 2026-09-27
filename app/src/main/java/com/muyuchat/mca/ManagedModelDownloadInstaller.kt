@@ -24,6 +24,9 @@ internal data class ManagedDownloadProgress(
     val downloadSpeedBytesPerSecond: Long = 0L,
     val downloadRemainingSeconds: Long? = null,
     val downloadStatus: DownloadStatus = DownloadStatus.RUNNING,
+    val phase: com.muyuchat.feature.modelhub.ModelHubDownloadPhase =
+        com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED,
+    val failureSource: com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource? = null,
     val statusMessage: String = "正在准备下载…",
     val integrityStatus: String = "UNKNOWN",
     val integrityMessage: String? = null,
@@ -50,28 +53,42 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
     private val device by lazy { DeviceProfileReader(context).read() }
     private val _uiState = MutableStateFlow(ManagedDownloadProgress())
     val progress get() = _uiState
-    private fun busy(message: String) { _uiState.update { it.copy(statusMessage = message) } }
+    private fun busy(message: String) { _uiState.update { it.copy(
+        statusMessage = message,
+        phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INSTALLING
+    ) } }
     private fun integrityPassed(message: String = "所有下载组件的大小和 SHA-256 与目录声明一致。") {
-        _uiState.update { it.copy(integrityStatus = "PASSED", integrityMessage = message) }
+        _uiState.update { it.copy(
+            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INTEGRITY_CHECK,
+            integrityStatus = "PASSED", integrityMessage = message
+        ) }
     }
     private fun executionResult(status: String, message: String) {
-        _uiState.update { it.copy(executionStatus = status, executionMessage = message) }
+        _uiState.update { it.copy(
+            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.EXECUTION_CHECK,
+            executionStatus = status, executionMessage = message
+        ) }
     }
     /** Publish a terminal installer failure without hiding a previously proven file check. */
     internal fun markFailure(error: Throwable) {
         val message = error.message?.takeIf(String::isNotBlank) ?: "下载或安装失败。"
         _uiState.update {
+            val source = when (it.phase) {
+                com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED,
+                com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING ->
+                    com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.DOWNLOAD
+                com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INSTALLING ->
+                    com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.INSTALL
+                com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INTEGRITY_CHECK ->
+                    com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.INTEGRITY
+                else -> com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.EXECUTION
+            }
             it.copy(
-                integrityStatus = when (it.integrityStatus) {
-                    "PASSED" -> "PASSED"
-                    else -> "FAILED"
-                },
-                integrityMessage = when (it.integrityStatus) {
-                    "PASSED" -> it.integrityMessage
-                    else -> message
-                },
-                executionStatus = "FAILED",
-                executionMessage = "安装阶段未完成：$message",
+                failureSource = source,
+                integrityStatus = if (source == com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.INTEGRITY) "FAILED" else it.integrityStatus,
+                integrityMessage = if (source == com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.INTEGRITY) message else it.integrityMessage,
+                executionStatus = if (source == com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.EXECUTION) "FAILED" else it.executionStatus,
+                executionMessage = if (source == com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.EXECUTION) message else it.executionMessage,
                 statusMessage = "下载或安装失败：$message"
             )
         }
@@ -162,22 +179,24 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
         val expectedProfile = installedBundle.requiredRuntimeProfile
         val contextSpecs = installedBundle.qnnSmokeSpecs
         val runtimeStatus = profile.qnnRuntime
+        val packagedRuntimeAvailable = qnnImageBundleRuntimeProfiles(bundleDir).isNotEmpty()
         val runtimeIssues = buildList {
-            if (!runtimeStatus.qnnSystemLibraryPresent) add("缺少 libQnnSystem.so")
-            if (!runtimeStatus.qnnHtpLibraryPresent) add("缺少 libQnnHtp.so")
-            if (!runtimeStatus.htpSkelLibraryPresent) {
-                val arch = deviceArch?.toString()?.let { "V${it}" } ?: "V*"
-                add("缺少 libQnnHtp${arch}Skel.so")
-            }
-            if (!runtimeStatus.htpStubLibraryPresent) {
-                add("缺少 QNN HTP stub transport（libQnnHtpV*Stub.so）")
-            }
-            if (runtimeStatus.probeState.name == "LOAD_FAILED") {
-                runtimeStatus.probeMessage.takeIf { it.isNotBlank() }
-                    ?.let { add("QNN runtime 加载失败：$it") }
-            }
-            if (runtimeStatus.ready && !runtimeStatus.exactArchMatch) {
-                add("QNN runtime HTP V${runtimeStatus.htpArchVersion} 与设备要求 HTP V${runtimeStatus.preferredHtpArchVersion} 不同")
+            // A device-wide probe can inspect a different SDK from the runtime
+            // packaged with this model. The bundle tuple is checked at staging.
+            if (!packagedRuntimeAvailable) {
+                if (!runtimeStatus.qnnSystemLibraryPresent) add("缺少 libQnnSystem.so")
+                if (!runtimeStatus.qnnHtpLibraryPresent) add("缺少 libQnnHtp.so")
+                if (!runtimeStatus.htpSkelLibraryPresent) {
+                    val arch = deviceArch?.toString()?.let { "V${it}" } ?: "V*"
+                    add("缺少 libQnnHtp${arch}Skel.so")
+                }
+                if (!runtimeStatus.htpStubLibraryPresent) {
+                    add("缺少 QNN HTP stub transport（libQnnHtpV*Stub.so）")
+                }
+                if (runtimeStatus.probeState.name == "LOAD_FAILED") {
+                    runtimeStatus.probeMessage.takeIf { it.isNotBlank() }
+                        ?.let { add("设备全局 QNN runtime 探测失败：$it") }
+                }
             }
         }
         if (contextSpecs.isEmpty()) {
@@ -196,11 +215,6 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
         val observedContextSocModels = mutableSetOf<Int>()
         val observedContextSocVersions = mutableSetOf<String>()
         val observedContextSdkVersions = mutableSetOf<String>()
-        packageMetadata?.socModel?.let(observedContextSocModels::add)
-        packageMetadata?.htpArch?.let(observedContextArchs::add)
-        packageMetadata?.socVersion?.let(observedContextSocVersions::add)
-        packageMetadata?.qnnSdk?.let(observedContextSdkVersions::add)
-
         val diagnostics = contextSpecs.map { spec ->
             val relative = resolvedDownloadedQnnContextPath(spec.contextBinary, emptyList())
             val direct = File(bundleDir, relative).canonicalFile.takeIf {
@@ -233,7 +247,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             val socVersion = metadata?.optString("socVersion").orEmpty().trim().takeIf { it.isNotBlank() }
             val build = metadata?.optString("buildId").orEmpty()
             val runtimeArch = runtime?.optInt("htpArchVersion", 0)?.takeIf { it > 0 }
-            val arch = socModel?.let(QnnRuntimeProfileSelector::htpArchVersionForSocModel) ?: runtimeArch
+            val arch = socModel?.let(QnnRuntimeProfileSelector::htpArchVersionForSocModel)
             val sdk = qnnSdkVersionFromContextBuildId(build)
             socModel?.let(observedContextSocModels::add)
             socVersion?.let(observedContextSocVersions::add)
@@ -261,7 +275,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     runtime?.optJSONObject("compile")?.let { compile ->
                         append("，APK SDK headers=").append(if (compile.optBoolean("sdkHeadersPresent", false)) "有" else "无")
                     }
-                    runtimeArch?.let { append("，context/runtime HTP V").append(it) }
+                    runtimeArch?.let { append("，本次探测所选 runtime HTP V").append(it) }
                     if (deviceArch != null && arch != null && deviceArch != arch) {
                         append("；当前设备 HTP V").append(deviceArch).append(" 与 context 不同")
                     }
@@ -288,9 +302,9 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
         } == true
         val metadataUnavailable = diagnostics.any { diagnostic ->
             !diagnostic.metadataParsed ||
-                (diagnostic.target?.socModel == null && packageMetadata?.socModel == null) ||
-                (diagnostic.target?.sdkVersion == null && packageMetadata?.qnnSdk.isNullOrBlank())
-        } || (packageMetadata == null && diagnostics.isNotEmpty())
+                diagnostic.target?.socModel == null ||
+                diagnostic.target?.sdkVersion == null
+        }
         val missingContextFiles = diagnostics.any { diagnostic ->
             diagnostic.text.contains("文件缺失") || diagnostic.text.contains("文件为空")
         }
@@ -302,7 +316,9 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 add("目标 SoC ${observedContextSocModels.joinToString()} 与当前 SoC $currentSocLabel 不同")
             }
             if (targetArchMismatch) {
-                add("目标 HTP V${observedContextArchs.joinToString("/V")} 与当前 HTP V$deviceArchLabel 不同")
+                val target = observedContextArchs.takeIf { it.isNotEmpty() }
+                    ?.joinToString("/V") ?: expectedProfile?.htpArch?.toString() ?: "未知"
+                add("包/context 目标 HTP V$target 与当前设备探测 HTP V$deviceArchLabel 不同")
             }
             if (declaredSdkMismatch) {
                 add("context SDK ${observedContextSdkVersions.joinToString()} 与声明 SDK ${expectedProfile.qnnSdk} 不同")
@@ -317,6 +333,10 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             val runtimeText = runtimeIssues.takeIf { it.isNotEmpty() }?.joinToString("；")
             android.util.Log.i("McaModelDownload", "QNN preflight ${installedBundle.id}: $profileText; $reasonText; runtime=${runtimeText ?: "ok"}; $text")
             val userMessage = buildString {
+                packageMetadata?.let { declared ->
+                    append("包元数据 ${declared.source}：SoC=${declared.socModel ?: "未知"}、HTP V${declared.htpArch ?: "未知"}、SDK=${declared.qnnSdk ?: "未知"}。")
+                    append(" ")
+                }
                 when {
                     missingContextFiles -> append("QNN context 文件缺失或为空（文件完整性与运行包兼容性分开报告），请重新校验或重新下载。")
                     mismatchReasons.isNotEmpty() -> append(mismatchReasons.joinToString("；")).append("。")
@@ -339,7 +359,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             android.util.Log.i("McaModelDownload", "QNN preflight ${installedBundle.id}: $deviceText; $text")
             QnnBundlePreflight(
                 "PREFLIGHT_PASSED",
-                "运行包信息检查完成，可在本地页选择模型。"
+                "包声明、context 元数据与运行库预检信息已分别记录；实际兼容性由隔离进程加载和 graph 执行决定。可在本地页选择模型。"
             )
         }
     }
@@ -347,6 +367,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
     suspend fun install(request: ManagedDownloadRequest): InstalledManagedDownload {
         _uiState.value = ManagedDownloadProgress(
             downloadStatus = DownloadStatus.RUNNING,
+            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
             statusMessage = "正在准备下载…",
             integrityStatus = "RUNNING",
             executionStatus = "PENDING"

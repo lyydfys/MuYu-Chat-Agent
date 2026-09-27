@@ -140,6 +140,31 @@ class RuntimeParametersTest {
     }
 
     @Test
+    fun generationSupportRecordsBackendSpecificEvidence() {
+        val registry = ParameterFieldPolicyRegistry()
+        assertEquals(
+            ParameterExecutionSupport.UNSUPPORTED,
+            registry.forRuntime(LocalChatRuntime.LITERT_LM, "0.16.1", "native")
+                .policy("min_p").executionSupport
+        )
+        assertEquals(
+            ParameterExecutionSupport.UNKNOWN,
+            registry.forRuntime(LocalChatRuntime.LITERT_LM, "0.16.1", "native")
+                .policy("temperature").executionSupport
+        )
+        assertEquals(
+            ParameterExecutionSupport.HOST_ENFORCED,
+            registry.forRuntime(LocalChatRuntime.LLAMA_CPP, "b7000", "native")
+                .policy("stop_words").executionSupport
+        )
+        assertEquals(
+            ParameterExecutionSupport.NATIVE,
+            registry.forRuntime(LocalChatRuntime.MNN_CPU, "3.6.1", "native")
+                .policy("min_p").executionSupport
+        )
+    }
+
+    @Test
     fun unknownAdvancedFieldsAreQuarantinedAndNeverReachNativeJson() {
         val identity = identity(LocalChatRuntime.LLAMA_CPP)
         val adapter = LlamaCppRuntimeParameterAdapter()

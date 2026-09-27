@@ -22,7 +22,8 @@ class ResumableDownloader(
     private val client: OkHttpClient = defaultClient(),
     private val maxRetries: Int = 8,
     private val retryDelayMs: Long = 1_200L,
-    private val storageBudget: DownloadStorageBudget = DownloadStorageBudget()
+    private val storageBudget: DownloadStorageBudget = DownloadStorageBudget(),
+    private val monotonicNanos: () -> Long = System::nanoTime
 ) {
     suspend fun download(
         remote: RemoteModelFile,
@@ -82,8 +83,7 @@ class ResumableDownloader(
     ): DownloadTaskSnapshot = coroutineScope {
         var downloaded = tempFile.takeIf { it.exists() }?.length() ?: 0L
         val request = request(remote.downloadUrl, downloaded)
-        val startedAt = System.currentTimeMillis()
-        var lastProgressAt = startedAt
+        var lastProgressAt = monotonicNanos()
 
         val downloadContext = currentCoroutineContext()
         val call = client.newCall(request)
@@ -140,8 +140,11 @@ class ResumableDownloader(
                         output.write(buffer, 0, read)
                         downloaded += read
                         if (downloaded - lastProgressBytes >= PROGRESS_STEP_BYTES) {
-                            val now = System.currentTimeMillis()
-                            val speed = speedBytes(downloaded - lastProgressBytes, now - lastProgressAt)
+                            val now = monotonicNanos()
+                            val speed = speedBytes(
+                                downloaded - lastProgressBytes,
+                                ((now - lastProgressAt) / 1_000_000L).coerceAtLeast(0L)
+                            )
                             lastProgressBytes = downloaded
                             lastProgressAt = now
                             onProgress(

@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Process
 import android.os.RemoteException
+import android.os.SystemClock
 import com.muyuchat.core.engine.ChatImageAttachment
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
@@ -83,7 +84,7 @@ class QairtDryRunWorkerService : Service() {
                 return false
             }
             val job = scope.launch {
-                val started = System.currentTimeMillis()
+                val started = SystemClock.elapsedRealtime()
                 val hardWatchdog = Runnable {
                     if (synchronized(lock) { active === next }) {
                         // Native graph calls are synchronous and are not safely interruptible.
@@ -221,7 +222,7 @@ class QairtDryRunWorkerService : Service() {
                 npuEvidence = evidence,
                 visibleChars = answer.length,
                 visionChecked = visionChecked,
-                elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
             )
         } finally {
             imageFile?.delete()
@@ -319,7 +320,7 @@ class QairtDryRunWorkerService : Service() {
                     requestId = activeRequest.request.requestId,
                     stage = stage,
                     message = message,
-                    elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                    elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
                 )
             )
         }.onFailure { cancelForDeadClient(activeRequest) }

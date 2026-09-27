@@ -2,6 +2,9 @@
 
 package com.muyuchat.feature.modelhub
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
@@ -13,6 +16,8 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -27,6 +32,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.offset
@@ -39,6 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -80,6 +87,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -105,6 +113,22 @@ import com.muyuchat.core.modelstore.ModelManifest
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
+enum class ModelHubDownloadPhase(val label: String) {
+    QUEUED("排队中"),
+    DOWNLOADING("下载中"),
+    INSTALLING("安装中"),
+    INTEGRITY_CHECK("校验文件"),
+    EXECUTION_CHECK("检查运行"),
+    COMPLETED("已完成")
+}
+
+enum class ModelHubDownloadFailureSource(val label: String) {
+    DOWNLOAD("下载"),
+    INSTALL("导入"),
+    INTEGRITY("文件校验"),
+    EXECUTION("运行检查")
+}
+
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,
@@ -116,12 +140,15 @@ data class ModelHubUiState(
     val hubPage: Int = 1,
     val hubTotalCount: Int = 0,
     val repoInput: String = "",
+    val downloadTaskId: String? = null,
     val downloadFileName: String? = null,
     val downloadedBytes: Long = 0L,
     val downloadTotalBytes: Long = 0L,
     val downloadSpeedBytesPerSecond: Long = 0L,
     val downloadRemainingSeconds: Long? = null,
     val downloadStatus: DownloadStatus? = null,
+    val downloadPhase: ModelHubDownloadPhase? = null,
+    val downloadFailureSource: ModelHubDownloadFailureSource? = null,
     val downloadIntegrityStatus: String = "UNKNOWN",
     val downloadIntegrityMessage: String? = null,
     val downloadExecutionStatus: String = "UNKNOWN",
@@ -290,6 +317,7 @@ fun ModelHubScreen(
     onSelectLocalImageModel: (String) -> Unit,
     onVerifyLocalImageModel: (String) -> Unit,
     onDeleteLocalImageModel: (String) -> Unit,
+    onRemoveLocalImageModelRecord: (String) -> Unit = {},
     onCloudEnabledChange: (Boolean) -> Unit,
     onBeginAddCloudModel: (String) -> Unit,
     onEditCloudModel: (String) -> Unit,
@@ -361,6 +389,7 @@ fun ModelHubScreen(
                     onSelectLocalImageModel = onSelectLocalImageModel,
                     onVerifyLocalImageModel = onVerifyLocalImageModel,
                     onDeleteLocalImageModel = onDeleteLocalImageModel,
+                    onRemoveLocalImageModelRecord = onRemoveLocalImageModelRecord,
                     modifier = Modifier.weight(1f)
                 )
                 ModelHubSection.CLOUD -> CloudModelsSection(
@@ -547,26 +576,13 @@ private fun ModelHubHeader(
             }
         }
 
-        state.statusMessage?.let {
-            // A download already has its own compact status row. Avoid stacking
-            // the generic operation card above it, which used to consume most
-            // of the viewport while a large model was downloading.
-            val showStatusCard = state.downloadFileName == null ||
-                it.contains("失败") || it.contains("不完整") || it.contains("无法")
-            if (showStatusCard) {
-                StatusMessageCard(message = it)
-                if (it.contains("失败") || it.contains("不完整") || it.contains("无法")) {
-                    Row {
-                        TextButton(onClick = { onSection(ModelHubSection.LOCAL) }) { Text("检查本地模型") }
-                        TextButton(onClick = { onSection(ModelHubSection.RECOMMENDED) }) { Text("选择其他模型") }
-                    }
-                }
+        state.statusMessage?.let { message ->
+            if (state.downloadFileName == null) {
+                StatusMessageCard(message = message, isError = state.downloadStatus == DownloadStatus.FAILED)
             }
         }
         if (state.downloadFileName != null) {
-            // Keep the search viewport stable. Detailed diagnostics open in a
-            // dialog instead of expanding the page and pushing results away.
-            var downloadDetailsOpen by rememberSaveable(state.downloadFileName) {
+            var downloadDetailsOpen by rememberSaveable(state.downloadTaskId ?: "download-task") {
                 mutableStateOf(false)
             }
             DownloadProgressPanel(
@@ -582,7 +598,8 @@ private fun ModelHubHeader(
                     onOpenLocalModels = {
                         downloadDetailsOpen = false
                         onSection(ModelHubSection.LOCAL)
-                    }
+                    },
+                    onResumeDownloads = onResumeDownloads
                 )
             }
         } else if (state.isBusy) {
@@ -644,6 +661,7 @@ private fun LocalModelsSection(
     onSelectLocalImageModel: (String) -> Unit,
     onVerifyLocalImageModel: (String) -> Unit,
     onDeleteLocalImageModel: (String) -> Unit,
+    onRemoveLocalImageModelRecord: (String) -> Unit,
     modifier: Modifier
 ) {
     var imageOnly by rememberSaveable { mutableStateOf(false) }
@@ -705,7 +723,7 @@ private fun LocalModelsSection(
                 CardBox {
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                localActionError?.let { StatusMessageCard(message = it) }
+                localActionError?.let { StatusMessageCard(message = it, isError = true) }
                 Button(
                     onClick = onImportClick,
                     enabled = !state.isBusy,
@@ -767,7 +785,8 @@ private fun LocalModelsSection(
                             enabled = !state.isBusy,
                             onSelect = { onSelectLocalImageModel(model.id) },
                             onVerify = { onVerifyLocalImageModel(model.id) },
-                            onDelete = { onDeleteLocalImageModel(model.id) }
+                            onDelete = { onDeleteLocalImageModel(model.id) },
+                            onRemoveRecord = { onRemoveLocalImageModelRecord(model.id) }
                         )
             }
         }
@@ -1298,24 +1317,9 @@ private fun CloudModelRow(
 }
 
 @Composable
-private fun StatusMessageCard(message: String) {
-    val isError = message.contains("失败") ||
-        message.contains("错误") ||
-        message.contains("无法") ||
-        message.contains("未找到") ||
-        message.contains("不能") ||
-        message.contains("error", ignoreCase = true)
-    val isSuccess = message.contains("成功") || message.contains("success", ignoreCase = true)
-    val background = when {
-        isError -> MaterialTheme.colorScheme.errorContainer
-        isSuccess -> MaterialTheme.colorScheme.primaryContainer
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
-    val foreground = when {
-        isError -> MaterialTheme.colorScheme.onErrorContainer
-        isSuccess -> MaterialTheme.colorScheme.onPrimaryContainer
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
+private fun StatusMessageCard(message: String, isError: Boolean = false) {
+    val background = if (isError) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceVariant
+    val foreground = if (isError) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurfaceVariant
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = background,
@@ -1903,7 +1907,17 @@ private fun DownloadProgressPanel(
         animationSpec = tween(durationMillis = 350),
         label = "downloadProgress"
     )
-    val percentText = if (total > 0L) "%.1f%%".format(progress * 100f) else "准备中"
+    val percentText = when (state.downloadStatus) {
+        DownloadStatus.FAILED -> "失败"
+        DownloadStatus.PAUSED -> "已暂停"
+        DownloadStatus.DONE -> "完成"
+        else -> when (state.downloadPhase) {
+            ModelHubDownloadPhase.INSTALLING,
+            ModelHubDownloadPhase.INTEGRITY_CHECK,
+            ModelHubDownloadPhase.EXECUTION_CHECK -> state.downloadPhase?.label ?: "处理中"
+            else -> if (total > 0L) "%.1f%%".format(progress * 100f) else "下载中"
+        }
+    }
     val totalText = if (total > 0L) formatBytes(total) else "未知大小"
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1940,7 +1954,8 @@ private fun DownloadProgressPanel(
                         onClick = onResumeDownloads,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                         modifier = Modifier.height(28.dp)
-                    ) { Text("继续", style = MaterialTheme.typography.labelMedium) }
+                    ) { Text(if (state.downloadStatus == DownloadStatus.FAILED) "重试" else "继续",
+                        style = MaterialTheme.typography.labelMedium) }
                 }
                 IconButton(
                     onClick = onShowDetails,
@@ -1953,13 +1968,25 @@ private fun DownloadProgressPanel(
                     )
                 }
             }
-            if (total > 0L) {
+            if (total > 0L || state.downloadStatus == DownloadStatus.FAILED ||
+                state.downloadStatus == DownloadStatus.PAUSED || state.downloadStatus == DownloadStatus.DONE
+            ) {
                 LinearProgressIndicator(
                     progress = { animatedProgress },
                     modifier = Modifier.fillMaxWidth().height(2.dp)
                 )
             } else {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
+            }
+            if (state.downloadStatus == DownloadStatus.FAILED) {
+                Text(
+                    listOfNotNull(state.downloadFailureSource?.label, state.statusMessage)
+                        .joinToString("：").ifBlank { "下载失败，请查看详情后重试。" },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -1969,11 +1996,18 @@ private fun DownloadProgressPanel(
 private fun DownloadDetailsDialog(
     state: ModelHubUiState,
     onDismiss: () -> Unit,
-    onOpenLocalModels: () -> Unit
+    onOpenLocalModels: () -> Unit,
+    onResumeDownloads: () -> Unit
 ) {
+    val context = LocalContext.current
     val total = state.downloadTotalBytes
     val downloaded = state.downloadedBytes
     val totalText = if (total > 0L) formatBytes(total) else "未知大小"
+    val stageLabel = if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
+        state.downloadPhase?.label ?: state.downloadStatus.downloadStatusLabel()
+    } else {
+        state.downloadStatus.downloadStatusLabel()
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -1985,9 +2019,10 @@ private fun DownloadDetailsDialog(
             )
         },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(modifier = Modifier.heightIn(min = 164.dp, max = 280.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    "${state.downloadStatus.downloadStatusLabel()} · 已下载 ${formatBytes(downloaded)} / $totalText",
+                    "$stageLabel · 已下载 ${formatBytes(downloaded)} / $totalText",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (state.downloadStatus == DownloadStatus.FAILED) {
                         MaterialTheme.colorScheme.error
@@ -2012,21 +2047,47 @@ private fun DownloadDetailsDialog(
                 }
                 DownloadCheckLine("文件完整性", state.downloadIntegrityStatus, state.downloadIntegrityMessage)
                 DownloadCheckLine("本机执行兼容性", state.downloadExecutionStatus, state.downloadExecutionMessage)
+                if (state.downloadStatus == DownloadStatus.FAILED) {
+                    state.statusMessage?.let { message ->
+                        Text(message, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                }
             }
         },
         confirmButton = {
-            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
+            if (state.downloadStatus == DownloadStatus.FAILED || state.downloadStatus == DownloadStatus.PAUSED) {
+                TextButton(onClick = onResumeDownloads) {
+                    Text(if (state.downloadStatus == DownloadStatus.FAILED) "重试" else "继续")
+                }
+            } else if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
                 TextButton(onClick = onOpenLocalModels) { Text("查看本地模型") }
-            } else {
-                TextButton(onClick = onDismiss) { Text("完成") }
             }
         },
         dismissButton = {
-            if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
-                TextButton(onClick = onDismiss) { Text("关闭") }
+            TextButton(onClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("模型下载诊断", downloadDiagnostics(state)))
+            }) {
+                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("复制诊断")
             }
+            TextButton(onClick = onDismiss) { Text("关闭") }
         }
     )
+}
+
+private fun downloadDiagnostics(state: ModelHubUiState): String = buildString {
+    appendLine("任务: ${state.downloadTaskId ?: "未知"}")
+    appendLine("文件: ${state.downloadFileName ?: "未知"}")
+    appendLine("状态: ${state.downloadStatus ?: "UNKNOWN"}")
+    appendLine("阶段: ${state.downloadPhase ?: "UNKNOWN"}")
+    state.downloadFailureSource?.let { appendLine("失败来源: $it") }
+    appendLine("进度: ${state.downloadedBytes}/${state.downloadTotalBytes} bytes")
+    appendLine("文件完整性: ${state.downloadIntegrityStatus}: ${state.downloadIntegrityMessage.orEmpty()}")
+    appendLine("本机执行: ${state.downloadExecutionStatus}: ${state.downloadExecutionMessage.orEmpty()}")
+    state.statusMessage?.let { appendLine("说明: $it") }
 }
 
 @Composable
@@ -2618,8 +2679,30 @@ private fun LocalImageModelCard(
     enabled: Boolean,
     onSelect: () -> Unit,
     onVerify: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onRemoveRecord: () -> Unit
 ) {
+    var confirmRemoval by remember { mutableStateOf(false) }
+    if (confirmRemoval) {
+        AlertDialog(
+            onDismissRequest = { confirmRemoval = false },
+            title = { Text("移除本地图像模型") },
+            text = { Text(model.displayName) },
+            confirmButton = {
+                TextButton(onClick = { confirmRemoval = false; onRemoveRecord() }) {
+                    Text("仅移除记录")
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = { confirmRemoval = false; onDelete() }) {
+                        Text("删除文件")
+                    }
+                    TextButton(onClick = { confirmRemoval = false }) { Text("取消") }
+                }
+            }
+        )
+    }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -2707,7 +2790,7 @@ private fun LocalImageModelCard(
                     Spacer(Modifier.width(6.dp))
                     Text("校验", maxLines = 1)
                 }
-                IconButton(onClick = onDelete, enabled = enabled) {
+                IconButton(onClick = { confirmRemoval = true }, enabled = enabled) {
                     Icon(Icons.Default.Delete, contentDescription = "删除本地图像生成引擎")
                 }
             }

@@ -23,4 +23,5 @@ interface ILocalChatWorker {
     boolean requestStopIfActive();
     String getRuntimeStatsJson();
     oneway void shutdown();
+    boolean canReleasePreparedInputs();
 }

@@ -26,6 +26,47 @@ import org.junit.Test
 
 class McaRoomMigrationExecutionTest {
     @Test
+    fun migration25To26PreservesRolesAndMemoriesAndAddsPendingTurnStore() {
+        Class.forName("org.sqlite.JDBC")
+        JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->
+            database.execSQL("CREATE TABLE assistants (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL)")
+            database.execSQL("INSERT INTO assistants(id, name) VALUES ('role-a', 'Existing role')")
+            database.execSQL(
+                "CREATE TABLE memories (id TEXT NOT NULL PRIMARY KEY, assistantId TEXT NOT NULL, " +
+                    "scope TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL, createdAt INTEGER NOT NULL)"
+            )
+            database.execSQL(
+                "INSERT INTO memories VALUES ('manual-1', 'role-a', 'user_profile', 'Likes tea', 'manual', 5)"
+            )
+
+            val migration = migration("MIGRATION_25_26")
+            migration.migrate(database)
+
+            assertEquals(25, migration.startVersion)
+            assertEquals(26, migration.endVersion)
+            database.query("SELECT name, memorySummaryInterval FROM assistants WHERE id = 'role-a'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Existing role", cursor.getString(0))
+                assertEquals(12, cursor.getInt(1))
+            }
+            database.query("SELECT content, source FROM memories WHERE id = 'manual-1'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Likes tea", cursor.getString(0))
+                assertEquals("manual", cursor.getString(1))
+            }
+            database.execSQL(
+                "INSERT INTO assistant_memory_turns " +
+                    "(id, assistantId, sessionId, userText, assistantText, createdAt) " +
+                    "VALUES ('reply-1', 'role-a', 'session-1', 'User fact', 'Reply', 6)"
+            )
+            database.query("SELECT isSummarized FROM assistant_memory_turns WHERE id = 'reply-1'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+            }
+        }
+    }
+
+    @Test
     fun migration21To22PreservesMessagesAndAddsNullableStatistics() {
         Class.forName("org.sqlite.JDBC")
         JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->

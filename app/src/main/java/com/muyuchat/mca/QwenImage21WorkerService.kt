@@ -7,6 +7,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Process
 import android.os.RemoteException
+import android.os.SystemClock
 import android.util.Log
 import com.muyuchat.api.local.imagePromptExecutionSha256
 import com.scsonic.qwenimage21.QwenImage21
@@ -56,7 +57,7 @@ class QwenImage21WorkerService : Service() {
                 return
             }
             submit(next) {
-                val started = System.currentTimeMillis()
+                val started = SystemClock.elapsedRealtime()
                 try {
                     ensureLoaded(
                         operation = next,
@@ -72,7 +73,7 @@ class QwenImage21WorkerService : Service() {
                     if (!next.cancelled.get()) fail(next, error)
                 } finally {
                     finish(next)
-                    Log.i(TAG, "load_finished durationMs=${(System.currentTimeMillis() - started).coerceAtLeast(0L)}")
+                    Log.i(TAG, "load_finished durationMs=${(SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)}")
                 }
             }
         }
@@ -88,7 +89,7 @@ class QwenImage21WorkerService : Service() {
                 return
             }
             submit(next) {
-                val started = System.currentTimeMillis()
+                val started = SystemClock.elapsedRealtime()
                 var generationStarted = started
                 var handleForGeneration = 0L
                 var nativeCallStarted = false
@@ -137,7 +138,7 @@ class QwenImage21WorkerService : Service() {
                     handleForGeneration = nativeHandle
                     require(handleForGeneration != 0L) { "Qwen image runtime is not loaded." }
                     state = STATE_GENERATING
-                    generationStarted = System.currentTimeMillis()
+                    generationStarted = SystemClock.elapsedRealtime()
                     emitProgress(next, 0, "generation_started")
                     nativeCallStarted = true
                     val code = QwenImage21.generate(
@@ -165,7 +166,7 @@ class QwenImage21WorkerService : Service() {
                     }
                     require(isPng(output)) { "Native generation output is not a valid PNG." }
                     state = STATE_READY
-                    val elapsedMs = (System.currentTimeMillis() - generationStarted).coerceAtLeast(0L)
+                    val elapsedMs = (SystemClock.elapsedRealtime() - generationStarted).coerceAtLeast(0L)
                     val nativeAudit = runCatching { JSONObject(QwenImage21.executionAudit(handleForGeneration)) }
                         .getOrElse { JSONObject() }
                     require(nativeAudit.optBoolean("nativeRunCompleted", false)) {
@@ -185,7 +186,7 @@ class QwenImage21WorkerService : Service() {
                             .put("steps", request.steps)
                             .put("seed", request.seed)
                             .put("elapsedMs", elapsedMs)
-                            .put("totalOperationElapsedMs", (System.currentTimeMillis() - started).coerceAtLeast(0L))
+                            .put("totalOperationElapsedMs", (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L))
                             .put("outputBytes", output.length())
                             .put("bundleFingerprint", loadedFingerprint.orEmpty())
                             .put("executionAudit", executionAudit(request, elapsedMs, output.length(), nativeAudit))
@@ -350,14 +351,14 @@ class QwenImage21WorkerService : Service() {
         clearLoadedIdentity()
         state = STATE_LOADING
         emitProgress(operation, 0, "runtime_verifying")
-        val started = System.currentTimeMillis()
+        val started = SystemClock.elapsedRealtime()
         QwenImage21.loadRuntimeLibraries(applicationContext)
         checkNotCancelled(operation)
         emitProgress(operation, 5, "model_loading")
         lastErrorCode = null
         lastErrorMessage = null
         val handle = QwenImage21.create(root.absolutePath, useGpu, threads)
-        modelLoadMs = (System.currentTimeMillis() - started).coerceAtLeast(0L)
+        modelLoadMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (handle == 0L) {
             throw QwenNativeException(
                 "model_load_failed",

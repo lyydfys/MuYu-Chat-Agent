@@ -250,13 +250,18 @@ class QnnImageRuntimeResolverTest {
             assertTrue(wrongSdkMessage?.contains("版本不兼容") == true)
 
             writeRuntimeMetadata(runtime, qnnSdk = "2.28", arch = 73)
-            File(runtime, "libQnnHtp.so").appendText("tampered")
+            val htpLibrary = File(runtime, "libQnnHtp.so")
+            val expectedSha = htpLibrary.resolverTestSha256()
+            htpLibrary.appendText("tampered")
+            val actualSha = htpLibrary.resolverTestSha256()
             val tamperedMessage = qnnRequiredBundleRuntimeReadinessMessage(
                 root,
                 LocalImageQnnRuntimeProfile("2.28", 73, completeBundleRuntime = true)
             )
             assertPublicRuntimeMessage(tamperedMessage, "骁龙 8 Gen 2 NPU 运行环境")
-            assertTrue(tamperedMessage?.contains("SHA-256") == true)
+            assertTrue(tamperedMessage?.contains("libQnnHtp.so") == true)
+            assertTrue(tamperedMessage?.contains("expected SHA-256=$expectedSha") == true)
+            assertTrue(tamperedMessage?.contains("actual SHA-256=$actualSha") == true)
         } finally {
             root.deleteRecursively()
         }
@@ -291,7 +296,7 @@ class QnnImageRuntimeResolverTest {
     }
 
     @Test
-    fun architectureMismatchUsesPublicChipsetNameOnly() {
+    fun architectureMismatchIdentifiesContextAndRuntimeVersions() {
         val root = Files.createTempDirectory("qnn-required-public-arch-mismatch").toFile()
         try {
             val runtime = File(root, "runtime").apply { mkdirs() }
@@ -304,9 +309,13 @@ class QnnImageRuntimeResolverTest {
                 LocalImageQnnRuntimeProfile("2.28", 73, completeBundleRuntime = true)
             )
 
-            assertPublicRuntimeMessage(message, "骁龙 8 Gen 2 NPU 运行环境")
-            assertTrue(message?.contains("NPU 运行环境") == true)
-            assertTrue(message?.contains("不匹配") == true)
+            assertPublicRuntimeMessage(
+                message,
+                "骁龙 8 Gen 2 NPU 运行环境",
+                allowInternalRuntimeCode = true
+            )
+            assertTrue(message?.contains("context 要求 V73") == true)
+            assertTrue(message?.contains("运行库清单声明 V81") == true)
         } finally {
             root.deleteRecursively()
         }

@@ -5,7 +5,7 @@ index 38990646f1c9ebc43ed8f62cca3ad728ae9f21ef..4fa07e54f1dfedfb02d5927c848e623b
 @@ -634,6 +634,13 @@ else()
      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /fp:precise")
  endif()
- 
+
 +# The official diffusion sources use try/catch for load and generation errors.
 +# Keep the lean default for regular MNN builds, but let a diffusion-enabled
 +# Android build compile those sources with the language feature available.
@@ -15,7 +15,7 @@ index 38990646f1c9ebc43ed8f62cca3ad728ae9f21ef..4fa07e54f1dfedfb02d5927c848e623b
 +
  # Metal
  list(APPEND MNN_DEPS MNN)
- 
+
 diff --git a/skills/support-new-llm/common-pitfalls.md b/skills/support-new-llm/common-pitfalls.md
 index aa4db6eeede9aa02a67c9216a31f8a0ce88f630e..39f9a0ca9458e99cdd1c7fcf865a1d164b1967fb 100644
 --- a/skills/support-new-llm/common-pitfalls.md
@@ -83,7 +83,7 @@ index a1cfccdc7a75800f0b294706042fc43693e4db70..739034f199f92191bda24d61274be9f0
 +extern void ___CoreMLRelu6__OpType_ReLU6__();
 +extern void ___CoreMLScale__OpType_Scale__();
 +extern void ___CoreMLUnary__OpType_UnaryOp__();
- 
+
  void registerCoreMLOps() {
 -___CoreMLRelu6__OpType_ReLU6__();
 -___CoreMLReduction__OpType_Reduction__();
@@ -645,7 +645,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 @@ -89,10 +89,10 @@ static inline void _writeAttentionOutput(int8_t* ptr, bool c4, int b, int l, int
      _writeElement(ptr, index, value, bytes);
  }
- 
+
 -// Snapshot the post-prefix recurrent state (lazy-allocated) for eraseHistory
 -// rollback. Allocation failure leaves mSnapshotValid=false; rollback then
 -// falls back to zeroing.
@@ -663,7 +663,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
      cache->mSnapshotValid = true;
 +    cache->mSnapshotTokens = tokens;
  }
- 
+
  ErrorCode CPULinearAttention::onResize(const std::vector<Tensor*>& inputs, const std::vector<Tensor*>& outputs) {
 @@ -166,49 +167,15 @@ ErrorCode CPULinearAttention::onResize(const std::vector<Tensor*>& inputs, const
                  return OUT_OF_MEMORY;
@@ -721,7 +721,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 -        // Keep the live state so the new prefill extends from it.
 +        mStateCache->mSnapshotValid = false;
      }
- 
+
      // ─── Temporary buffers (DYNAMIC) ───
 @@ -495,7 +462,7 @@ ErrorCode CPULinearAttention::onExecute(const std::vector<Tensor*>& inputs, cons
      // onResize() may be skipped when shapes are unchanged. Ensure state is reset here too.
@@ -753,7 +753,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 +                     mStateCache->mRecurrentState->elementSize());
          }
      }
- 
+
 @@ -568,7 +550,7 @@ ErrorCode CPULinearAttention::onExecute(const std::vector<Tensor*>& inputs, cons
                  MNN_PRINT("CPULinearAttention: Failed to open prefix cache file: %s\n", pathv.c_str());
              }
@@ -762,11 +762,11 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 +            snapshotPrefixState(mStateCache.get(), backend(), mMeta->seqlen_in_disk);
          }
      }
- 
+
 @@ -579,6 +561,11 @@ ErrorCode CPULinearAttention::onExecute(const std::vector<Tensor*>& inputs, cons
          gated_delta_rule_mnn(inputs, outputs);
      }
- 
+
 +    if (mMeta != nullptr && mMeta->captureRecurrentState) {
 +        snapshotPrefixState(mStateCache.get(), backend(), mMeta->previous - mMeta->remove + mMeta->add);
 +        if (!mStateCache->mSnapshotValid) mMeta->recurrentSnapshotValid = false;
@@ -783,7 +783,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 +            snapshotPrefixState(mStateCache.get(), backend(), mMeta->previous - mMeta->remove + mMeta->add);
          }
      }
- 
+
 @@ -1217,6 +1204,7 @@ CPULinearAttention::CPULinearAttention(Backend* backend, const MNN::Op* op) : Ex
      mBytes = static_cast<CPUBackend*>(backend)->functions()->bytes;
      mStateCache.reset(new StateCache);
@@ -791,7 +791,7 @@ index 2027297f00523fc9452d420feb2a3ff5e156f362..41febbcd2d211728a1bcb74dab18863b
 +    if (mMeta != nullptr) mMeta->recurrentState = true;
      mPrefixCacheDir = static_cast<CPUBackend*>(backend)->getRuntime()->hint().prefixcacheDirPath;
  }
- 
+
 diff --git a/source/backend/cpu/CPULinearAttention.hpp b/source/backend/cpu/CPULinearAttention.hpp
 index e22a2985838bd8a99d4a1a5e1ec3511808e95264..ad2e0fda24af614f70bea3b9f34c5848ef53a93a 100644
 --- a/source/backend/cpu/CPULinearAttention.hpp
@@ -935,7 +935,7 @@ index 5b633a1035578b2ce08ada92d2ac58a9687359b7..2d9a689db4eb4abea96a9f0b784f421c
 +extern void ___CPUUniqueCreator__OpType_Unique__();
 +extern void ___CPUUnravelIndexCreator__OpType_UnravelIndex__();
 +extern void ___CPUWhereCreator__OpType_Where__();
- 
+
  #ifdef MNN_SUPPORT_RENDER
  extern void ___CPURasterAndInterpolateCreator__OpType_RasterAndInterpolate__();
 @@ -78,87 +78,93 @@ extern void ___CPUTextureCreator__OpType_Texture__();
@@ -1319,7 +1319,7 @@ index 9a766814a1c5257eb82a0ffce36e51f7ecb9ee20..798c3bd8a6e8473abe74ffa4155d5bf5
 +extern void ___NNAPIReduction__OpType_Reduction__();
 +extern void ___NNAPIScale__OpType_Scale__();
 +extern void ___NNAPIUnary__OpType_UnaryOp__();
- 
+
  void registerNNAPIOps() {
 -___NNAPIQuant__OpType_FloatToInt8__();
 -___NNAPIDequant__OpType_Int8ToFloat__();
@@ -1460,7 +1460,7 @@ index 922876c12b2a188dc3be52e9e4a66d5eb5d1c6bd..ddb43b685623dd300cdf813fd873bda9
 +extern void ___OpenCLUnaryCreator__OpType_UnaryOp__IMAGE__();
 +extern void ___OpenCLUnaryCreator__OpType_Sigmoid__IMAGE__();
 +extern void ___OpenCLUnaryCreator__OpType_TanH__IMAGE__();
- 
+
  #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 -extern void ___OpenCLSelfAttentionBufCreator__OpType_FmhaV2__BUFFER__();
 -extern void ___OpenCLSplitGeluBufCreator__OpType_SplitGeLU__BUFFER__();
@@ -1593,7 +1593,7 @@ index 922876c12b2a188dc3be52e9e4a66d5eb5d1c6bd..ddb43b685623dd300cdf813fd873bda9
 +___OpenCLUnaryCreator__OpType_UnaryOp__IMAGE__();
 +___OpenCLUnaryCreator__OpType_Sigmoid__IMAGE__();
 +___OpenCLUnaryCreator__OpType_TanH__IMAGE__();
- 
+
  #ifdef MNN_SUPPORT_TRANSFORMER_FUSE
 -    ___OpenCLSelfAttentionBufCreator__OpType_FmhaV2__BUFFER__();
 -    ___OpenCLSplitGeluBufCreator__OpType_SplitGeLU__BUFFER__();
@@ -1707,7 +1707,7 @@ index 11982a07b9ab51e9634c6f3a5c3ce175dacb354b..a33747bda999c8ff8dd0701e67d796e4
 +extern void ___GeometryTopK___create__();
  extern void ___GeometryUnary___create__();
 -extern void ___GeometryBinary___create__();
- 
+
  void registerGeometryOps() {
 -___GeometryShape___create__();
 -___GeometryPermute___create__();
@@ -1979,7 +1979,7 @@ index a2c237074ab3720accc0a5b656968e74aa2d11ce..7996ce2826e5bd7f5ec00ad80fd2be0f
 +extern void ___UnpackComputer__OpType_Unpack__();
 +extern void ___UnravelIndexSize__OpType_UnravelIndex__();
 +extern void ___WhereSizeComputer__OpType_Where__();
- 
+
  #ifdef MNN_SUPPORT_RENDER
  extern void ___RasterAndInterpolateComputer__OpType_RasterAndInterpolate__();
  extern void ___TextureComputer__OpType_Texture__();
@@ -2239,7 +2239,7 @@ index fced3b1c240f859fa97f756a2077fa975352ac6a..e32419a53e51732fcf29d21f3260b900
 +        // input0->buffer().dim[2].extent, input0->buffer().dim[3].extent, input0->buffer().dim[4].extent);
          output0->buffer().type = input0->buffer().type;
          TensorUtils::getDescribe(output0)->dimensionFormat = TensorUtils::getDescribe(input0)->dimensionFormat;
- 
+
 @@ -36,8 +48,8 @@ class SeqLen2SpatialSizeComputer : public SizeComputer {
          MNN_ASSERT(inputs.size() == 4);
          auto input3 = inputs[0];
@@ -2571,9 +2571,9 @@ index 3330a05f9da26bcead961264503723ea23bae333..37bd1b62dc205469bb0943b2a419a9be
  #include "TestUtils.h"
  #include <cmath>
 @@ -1023,24 +1024,7 @@ public:
- 
+
  MNNTestSuiteRegister(LinearAttentionDecodeTest, "op/linear_attention_decode");
- 
+
 -// ─── Local mirror of MNN::Transformer::KVMeta (must match layout) ───
 -// Used to drive the rollback signal mMeta->remove without depending on the
 -// internal Llm header. See test/op/AttentionTest.cpp for the same pattern.
@@ -2593,7 +2593,7 @@ index 3330a05f9da26bcead961264503723ea23bae333..37bd1b62dc205469bb0943b2a419a9be
 -    std::vector<int> reserveHost;
 -};
 +using LATestKVMeta = MNN::KVMeta;
- 
+
  // Variant of _makeLinearAttentionModule that wires a caller-owned KVMeta
  // pointer via the runtime KVCACHE_INFO hint. The CPULinearAttention op reads
 diff --git a/test/op/PromptCacheTest.cpp b/test/op/PromptCacheTest.cpp
@@ -2602,10 +2602,10 @@ index 8120b11bcb165d5da0dde858970f695a609e9fad..a370513f9922fb2af005422ac6a2b8de
 +++ b/test/op/PromptCacheTest.cpp
 @@ -10,6 +10,7 @@
  #include "prompt_cache_utils.hpp"
- 
+
  using MNN::Transformer::stripThinkBlocks;
 +using MNN::Transformer::promptCacheReusableTokenPrefix;
- 
+
  class PromptCacheStripThinkTest : public MNNTestCase {
  public:
 @@ -57,6 +58,26 @@ public:
@@ -2761,7 +2761,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 @@ -37,29 +39,92 @@ namespace DIFFUSION {
  using namespace MNN::Express;
  using namespace MNN::Transformer;
- 
+
 +struct SanaLlmExecutionEvidence {
 +    std::vector<int> padded_token_ids;
 +    std::vector<int> attention_mask;
@@ -2832,7 +2832,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +            mMetaQueries.clear();
          }
      }
- 
+
 +    bool is_loaded() const {
 +        if (mLlm == nullptr) {
 +            return false;
@@ -2854,7 +2854,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +        if (!is_loaded() || mMetaQueries.empty() || mMetaQueries[0].get() == nullptr) {
              return nullptr;
          }
- 
+
 @@ -100,9 +165,14 @@ public:
              all_ids.push_back(ids);
              if (ids.size() > max_len) max_len = ids.size();
@@ -2870,10 +2870,10 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +        if (!is_loaded()) {
              return nullptr;
          }
- 
+
 @@ -130,10 +200,14 @@ public:
          }
- 
+
          auto input_ids_var = _Const(flat_input_ids.data(), {batch, max_len}, NCHW, halide_type_of<int>());
 +        if (input_ids_var.get() == nullptr) {
 +            MNN_ERROR("Failed to create Sana LLM input ids\n");
@@ -2895,7 +2895,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +            MNN_ERROR("Failed to reshape Sana LLM input embeddings\n");
 +            return nullptr;
 +        }
- 
+
          // 3. Meta Queries
          int num_queries = 256; 
          auto meta_queries = mMetaQueries[0]; // [256, H]
@@ -2914,7 +2914,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +            MNN_ERROR("Failed to expand Sana meta queries\n");
 +            return nullptr;
 +        }
- 
+
          // 4. Concatenate
          auto full_embeds = _Concat({inputs_embeds, meta_queries_batch}, 1); // Concat on SeqLen dim (1)
 +        if (full_embeds.get() == nullptr) {
@@ -2925,7 +2925,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
          // 5. Update Attention Mask
          // Original mask [Batch, SeqLen]. we need [Batch, SeqLen + NumQueries]
 @@ -288,33 +378,62 @@ public:
- 
+
          mLlm->setKVCacheInfo(batch*total_len, 0);
          auto outputs = mLlm->forwardRaw(full_embeds, attention_mask, position_ids);
 -        if(outputs.empty()) {
@@ -2935,7 +2935,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
          }
          int hiddenStateIndex = mLlm->getOutputIndex("hidden_states");
          hiddenStateIndex = hiddenStateIndex == -1 ? outputs.size() - 1 : hiddenStateIndex;
- 
+
 +        if (hiddenStateIndex < 0 || static_cast<size_t>(hiddenStateIndex) >= outputs.size() ||
 +            outputs[hiddenStateIndex].get() == nullptr || outputs[hiddenStateIndex]->getInfo() == nullptr ||
 +            outputs[hiddenStateIndex]->getInfo()->dim.size() < 3) {
@@ -2950,7 +2950,7 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +            MNN_ERROR("Failed to reshape Sana LLM hidden_states output\n");
 +            return nullptr;
 +        }
- 
+
          // 7. Slice last 256 tokens
          // output matches [Batch, TotalLen, HiddenSize] (if it is hidden states)
          // We want [Batch, 256, HiddenSize], corresponding to the queries.
@@ -2981,13 +2981,13 @@ index 42af902400bbb086abd35a041da4a416467c39d4..7a446dabf729794e5385d050d586bc74
 +        mLastExecutionEvidence.meta_query_count = num_queries;
          return splits[1];
      }
- 
+
  private:
      std::unique_ptr<Llm> mLlm;
      std::vector<VARP> mMetaQueries; // Store as VARP vector just in case
 +    SanaLlmExecutionEvidence mLastExecutionEvidence;
  };
- 
+
  } // namespace DIFFUSION
 diff --git a/transformers/diffusion/engine/src/sana_diffusion.cpp b/transformers/diffusion/engine/src/sana_diffusion.cpp
 index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f7b4e1fd5 100644
@@ -3002,9 +3002,9 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
  #include "tokenizer.hpp"
  #include "scheduler.hpp"
 @@ -33,6 +34,14 @@
- 
+
  using namespace CV;
- 
+
 +namespace {
 +
 +bool valid_varp(const VARP& value) {
@@ -3022,12 +3022,12 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
              AUTOTIME;
 +            try
 +            {
- 
+
              // 配置后端
              ScheduleConfig config;
 @@ -74,12 +85,22 @@ namespace MNN
              config.backendConfig = &backendConfig;
- 
+
              auto exe = ExecutorScope::Current();
 +            if (exe == nullptr)
 +            {
@@ -3036,7 +3036,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
              exe->lazyEval = false;
              exe->setGlobalExecutorConfig(config.type, backendConfig, config.numThread);
- 
+
              Module::Config module_config;
              module_config.shapeMutable = false;
              runtime_manager_.reset(Executor::RuntimeManager::createRuntimeManager(config));
@@ -3045,11 +3045,11 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                MNN_ERROR("Error: failed to create Sana runtime manager\n");
 +                return false;
 +            }
- 
+
              // 内存优化配置
              if (mMemoryMode == 0)
 @@ -99,18 +120,28 @@ namespace MNN
- 
+
              // 加载模型组件
              // Sana架构：LLM特征 -> Connector -> Projector -> DiT Transformer -> VAE Decoder
 -            mModules.resize(5);
@@ -3065,7 +3065,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                        return false;
 +                    }
                  }
- 
+
                  // 模块1: Projector - 投影到Diffusion特征空间
                  {
                      std::string model_path = mModelPath + "/projector.mnn";
@@ -3076,7 +3076,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                        return false;
 +                    }
                  }
- 
+
                  // 模块2: DiT Transformer - 核心去噪模型
 @@ -132,12 +163,21 @@ namespace MNN
                      {
@@ -3087,7 +3087,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                        return false;
 +                    }
                  }
- 
+
                  // 模块3: VAE Decoder - 将latent解码为图像
                  {
                      std::string model_path = mModelPath + "/vae_decoder.mnn";
@@ -3099,10 +3099,10 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                    }
                  }
              }
- 
+
 @@ -145,6 +185,21 @@ namespace MNN
              mModules[4] = nullptr;
- 
+
              return true;
 +            }
 +            catch (const std::exception& e)
@@ -3120,12 +3120,12 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                return false;
 +            }
          }
- 
+
          // VAE Decoder: 将latent解码为图像
 @@ -152,11 +207,32 @@ namespace MNN
          {
              AUTOTIME;
- 
+
 +            if (!valid_varp(latent) || mModules.size() <= 3 || mModules[3] == nullptr)
 +            {
 +                MNN_ERROR("Error: VAE decoder input or module is invalid\n");
@@ -3139,7 +3139,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                MNN_ERROR("Error: failed to normalize VAE decoder input\n");
 +                return nullptr;
 +            }
- 
+
              auto outputs = mModules[3]->onForward({latent});
 +            if (outputs.empty() || !valid_varp(outputs[0]))
 +            {
@@ -3152,12 +3152,12 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                MNN_ERROR("Error: VAE decoder output conversion failed\n");
 +                return nullptr;
 +            }
- 
+
              // 后处理：归一化到[0,1]并转换为uint8图像
              auto image = output;
 @@ -205,6 +281,11 @@ namespace MNN
              }
- 
+
              auto input_var = _Input({1, 3, 512, 512}, NCHW, halide_type_of<float>());
 +            if (!valid_varp(input_var))
 +            {
@@ -3166,17 +3166,17 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
              auto image_ptr = image->readMap<void>();
              auto input_ptr = input_var->writeMap<void>();
- 
+
 @@ -224,9 +305,19 @@ namespace MNN
              }
- 
+
              auto latent_dist = _Convert(outputs[0], NCHW);
 +            if (!valid_varp(latent_dist))
 +            {
 +                MNN_ERROR("Error: VAE encoder output conversion failed\n");
 +                return nullptr;
 +            }
- 
+
              // 归一化latent (scaling_factor = 0.41407)
              auto ref_latents = latent_dist * _Const(0.41407f);
 +            if (!valid_varp(ref_latents))
@@ -3186,11 +3186,11 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
              return ref_latents;
          }
- 
+
 @@ -236,13 +327,30 @@ namespace MNN
          {
              VARP image = imread(imagePath);
- 
+
 +            if (!valid_varp(image) || image->getInfo() == nullptr || image->getInfo()->dim.size() < 2)
 +            {
 +                MNN_ERROR("Error: failed to load input image from %s\n", imagePath.c_str());
@@ -3200,7 +3200,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
              auto info = image->getInfo();
              orig_height = info->dim[0];
              orig_width = info->dim[1];
- 
+
 +            if (orig_width <= 0 || orig_height <= 0)
 +            {
 +                MNN_ERROR("Error: input image has invalid dimensions %dx%d\n", orig_width, orig_height);
@@ -3208,16 +3208,16 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
 +
              MNN_PRINT("Original image size: %dx%d\n", orig_width, orig_height);
- 
+
              image = cvtColor(image, COLOR_BGR2RGB);
 +            if (!valid_varp(image))
 +            {
 +                MNN_ERROR("Error: failed to convert input image color format\n");
 +                return nullptr;
 +            }
- 
+
              float aspect_ratio = (float)std::max(orig_width, orig_height) / (float)std::min(orig_width, orig_height);
- 
+
 @@ -264,6 +372,11 @@ namespace MNN
                  std::vector<int> paddings = {pad_top, pad_bottom, pad_left, pad_right, 0, 0};
                  auto paddings_var = _Const(paddings.data(), {3, 2}, NCHW, halide_type_of<int>());
@@ -3231,7 +3231,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
              else
              {
 @@ -272,6 +385,11 @@ namespace MNN
- 
+
              // Resize到512x512
              image = resize(image, Size(512, 512), 0, 0, INTER_LINEAR, -1, {0, 0, 0}, {1, 1, 1});
 +            if (!valid_varp(image))
@@ -3239,7 +3239,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                MNN_ERROR("Error: failed to resize input image\n");
 +                return nullptr;
 +            }
- 
+
              // 归一化到[-1, 1]
              image = _Cast(image, halide_type_of<float>());
 @@ -281,12 +399,23 @@ namespace MNN
@@ -3251,10 +3251,10 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                MNN_ERROR("Error: failed to prepare VAE encoder image tensor\n");
 +                return nullptr;
 +            }
- 
+
              return image;
          }
- 
+
      bool SanaDiffusion::run(const std::string prompt, const std::string imagePath, int iterNum, int randomSeed, std::function<void(int)> progressCallback) {
 -        return true;
 +        (void)prompt;
@@ -3270,7 +3270,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 @@ -304,6 +433,18 @@ namespace MNN
          {
              AUTOTIME;
- 
+
 +            if (!valid_varp(input_embeds))
 +            {
 +                MNN_ERROR("Error: Sana input embeddings are null\n");
@@ -3289,7 +3289,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 @@ -339,6 +480,12 @@ namespace MNN
                  // 对于img2img，需要将输入图像resize到目标分辨率
                  VARP pixel_values = load_and_process_image(inputImagePath, orig_width, orig_height, pad_left, pad_top);
- 
+
 +                if (!valid_varp(pixel_values))
 +                {
 +                    MNN_ERROR("Error: failed to preprocess input image\n");
@@ -3298,9 +3298,9 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +
                  // TODO: 如果输入图像尺寸与目标尺寸不同，需要resize
                  // 当前实现假设输入图像会被resize到目标分辨率
- 
+
 @@ -353,7 +500,13 @@ namespace MNN
- 
+
                  if (mMemoryMode != 1)
                  {
 -                    ((MNN::Tensor *)(ref_latents->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
@@ -3324,7 +3324,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                return false;
 +            }
              auto connector_out = connector_res[0];
- 
+
              if (mMemoryMode != 1)
              {
 -                ((MNN::Tensor *)(connector_out->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
@@ -3337,7 +3337,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
                  mModules[0].reset();
              }
- 
+
              // Projector: 投影到Diffusion特征空间
              MNN_PRINT("Running Projector...\n");
              auto projector_res = mModules[1]->onForward({connector_out});
@@ -3347,7 +3347,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                return false;
 +            }
              auto prompt_embeds = projector_res[0];
- 
+
              if (mMemoryMode != 1)
              {
 -                ((MNN::Tensor *)(prompt_embeds->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
@@ -3360,7 +3360,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
                  mModules[1].reset();
              }
- 
+
              // ========== 步骤3: 处理CFG（Classifier-Free Guidance） ==========
              auto prompt_info = prompt_embeds->getInfo();
 +            if (prompt_info == nullptr || prompt_info->dim.size() < 2 || prompt_info->dim[0] <= 0 || prompt_info->dim[1] <= 0)
@@ -3382,7 +3382,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                }
                  auto prompt_embeds_pos = split_res[0]; // First is positive
                  auto prompt_embeds_neg = split_res[1]; // Second is negative
- 
+
                  // Reorder: [Neg, Pos]
                  prompt_embeds = _Concat({prompt_embeds_neg, prompt_embeds_pos}, 0);
 +                if (!valid_varp(prompt_embeds))
@@ -3407,7 +3407,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
                      seq_len = prompt_embeds->getInfo()->dim[1];
 @@ -456,12 +651,23 @@ namespace MNN
                  noise[i] = normal(rng);
- 
+
              VARP latents = _Input({1, latent_channels, latent_h, latent_w}, NCHW, halide_type_of<float>());
 -            memcpy(latents->writeMap<float>(), noise.data(), noise.size() * sizeof(float));
 +            auto latents_ptr = latents->writeMap<float>();
@@ -3417,7 +3417,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                return false;
 +            }
 +            memcpy(latents_ptr, noise.data(), noise.size() * sizeof(float));
- 
+
              // CFG模式需要批处理latents
              if (use_cfg)
              {
@@ -3429,7 +3429,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                }
                  MNN_PRINT("Batched latents for CFG: [2, %d, %d, %d]\n", latent_channels, latent_h, latent_w);
              }
- 
+
 @@ -479,6 +685,11 @@ namespace MNN
                  if (use_cfg)
                  {
@@ -3453,7 +3453,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
              std::vector<double> timesteps;
              std::vector<double> sigmas;
- 
+
 @@ -512,7 +728,9 @@ namespace MNN
              {
                  double start = 1.0;
@@ -3463,7 +3463,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                    ? end
 +                    : start + i * (end - start) / (double)(num_inference_steps - 1);
                  double sigma = 1.0 - alpha;
- 
+
                  // Flow shift: 调整噪声分布，加速收敛
 @@ -535,8 +753,19 @@ namespace MNN
              // Attention mask：根据batch_size调整
@@ -3484,11 +3484,11 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            }
 +            std::fill(attention_mask_ptr,
 +                      attention_mask_ptr + mask_batch * seq_len, 1.0f);
- 
+
              for (int i = 0; i < num_inference_steps; ++i)
              {
 @@ -548,7 +777,17 @@ namespace MNN
- 
+
                  // Timestep：根据batch_size调整
                  VARP timestep_var = _Input({mask_batch}, NCHW, halide_type_of<float>());
 +                if (!valid_varp(timestep_var))
@@ -3507,14 +3507,14 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
                      t_ptr[b] = (float)t;
 @@ -571,6 +810,11 @@ namespace MNN
                  }
- 
+
                  auto noise_pred = _Convert(res[0], NCHW);
 +                if (!valid_varp(noise_pred))
 +                {
 +                    MNN_ERROR("Error: Transformer output conversion failed at step %d\n", i + 1);
 +                    return false;
 +                }
- 
+
                  // 应用CFG（Classifier-Free Guidance）
                  VARP noise_pred_guided;
 @@ -578,6 +822,11 @@ namespace MNN
@@ -3528,7 +3528,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                    }
                      auto noise_pred_uncond = split_res[0]; // 负样本（无条件）
                      auto noise_pred_text = split_res[1];   // 正样本（有条件）
- 
+
 @@ -588,6 +837,11 @@ namespace MNN
                  {
                      noise_pred_guided = noise_pred;
@@ -3538,19 +3538,19 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                    MNN_ERROR("Error: failed to build guided noise prediction at step %d\n", i + 1);
 +                    return false;
 +                }
- 
+
                  // Euler采样步骤
                  float dt;
 @@ -601,19 +855,45 @@ namespace MNN
                  }
- 
+
                  sample = sample + noise_pred_guided * _Const(dt / 1000.0f);
 +                if (!valid_varp(sample))
 +                {
 +                    MNN_ERROR("Error: failed to update Sana latent at step %d\n", i + 1);
 +                    return false;
 +                }
- 
+
                  // CFG模式：保持batch维度一致
                  if (use_cfg)
                  {
@@ -3574,7 +3574,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                    progressCallback(5 + (i + 1) * 90 / num_inference_steps);
                  }
              }
- 
+
              if (mMemoryMode != 1)
              {
 -                ((MNN::Tensor *)(sample->getTensor()))->wait(Tensor::MAP_TENSOR_READ, true);
@@ -3587,7 +3587,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                ((MNN::Tensor *)tensor)->wait(Tensor::MAP_TENSOR_READ, true);
                  mModules[2].reset();
              }
- 
+
 @@ -622,6 +902,11 @@ namespace MNN
              if (use_cfg)
              {
@@ -3603,7 +3603,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 @@ -629,10 +914,24 @@ namespace MNN
                  final_latents = sample;
              }
- 
+
 +            if (!valid_varp(final_latents))
 +            {
 +                MNN_ERROR("Error: final Sana latents are invalid\n");
@@ -3623,7 +3623,7 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +                }
 +                return false;
 +            }
- 
+
              // ========== 步骤8: 保存结果 ==========
              bool success = imwrite(outputImagePath, image);
 @@ -640,13 +939,17 @@ namespace MNN
@@ -3634,16 +3634,16 @@ index 38c709ff6a83f21c5a133db5b2725f085fcc39c7..21da281db9c54b31a175d3f98c0c1e0f
 +            {
 +                MNN_ERROR("Error: failed to save generated image to %s\n", outputImagePath.c_str());
 +            }
- 
+
              if (mMemoryMode != 1)
              {
                  mModules[3].reset();
              }
- 
+
 -            return true;
 +            return success;
          }
- 
+
      } // namespace DIFFUSION
 diff --git a/transformers/llm/engine/include/llm/llm.hpp b/transformers/llm/engine/include/llm/llm.hpp
 index b7a06db562cc5d048bc7c5394790a4a05d5b6cf0..d336e257238c69136d866a154f71a1e69cee1336 100644
@@ -3651,7 +3651,7 @@ index b7a06db562cc5d048bc7c5394790a4a05d5b6cf0..d336e257238c69136d866a154f71a1e6
 +++ b/transformers/llm/engine/include/llm/llm.hpp
 @@ -9,6 +9,7 @@
  #define LLM_hpp
- 
+
  #include <vector>
 +#include <cstddef>
  #include <memory>
@@ -3659,7 +3659,7 @@ index b7a06db562cc5d048bc7c5394790a4a05d5b6cf0..d336e257238c69136d866a154f71a1e6
  #include <fstream>
 @@ -102,6 +103,7 @@ enum class MatchStrictLevel : int;
  enum class NgramSelectRule : int;
- 
+
  struct LlmContext {
 +    std::string prompt_cache_diagnostics_json;
      // forward
@@ -3688,7 +3688,7 @@ index b7a06db562cc5d048bc7c5394790a4a05d5b6cf0..d336e257238c69136d866a154f71a1e6
 @@ -278,4 +293,4 @@ public:
  }
  }
- 
+
 -#endif // LLM_hpp
 \ No newline at end of file
 +#endif // LLM_hpp
@@ -3702,11 +3702,11 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
  #include <iomanip>
 +#include <array>
  #include <unordered_set>
- 
+
  #include "prompt_cache_utils.hpp"
 @@ -125,8 +126,30 @@ void Llm::setChatTemplate() {
  }
- 
+
  bool Llm::set_config(const std::string& content) {
 -    mConfig->config_.merge(ujson::json::parse(content));
 +    auto update = ujson::json::parse(content);
@@ -3737,7 +3737,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
      mGenerateParam->timeout_ms = mConfig->timeout_ms();
      mValidBlockSize.clear();
 @@ -785,13 +808,12 @@ void Llm::updateContext(int seq_len, int gen_len) {
- 
+
  int Llm::sample(VARP logits, int offset, int size) {
      MNN::Express::ExecutorScope s(mExecutor);
 -    auto logitsShape = logits->getInfo()->dim;
@@ -3753,7 +3753,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
 -    return token_id;
 +    return mSampler->sample(logits, offset, size);
  }
- 
+
  void Llm::reset() {
 @@ -805,6 +827,7 @@ void Llm::reset() {
      mContext->audio_input_s = 0.0f;
@@ -3761,7 +3761,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
      mCachedPromptText.clear();
 +    mMeta->recurrentCheckpoint = 0;
  }
- 
+
  void Llm::generate_init(std::ostream* os, const char* end_with) {
 @@ -821,6 +844,16 @@ void Llm::generate_init(std::ostream* os, const char* end_with) {
      mContext->decode_us   = 0;
@@ -3801,7 +3801,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
 +        trimPromptTokenHistory(mContext->history_tokens, begin);
      }
  }
- 
+
 @@ -870,6 +905,12 @@ bool Llm::stoped() {
  void Llm::generate(int max_token) {
      CHECK_LLM_RUNNING(mContext);
@@ -3816,7 +3816,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
          return;
      }
 @@ -918,9 +959,34 @@ std::vector<int> Llm::generate(const std::vector<int>& input_ids, int max_tokens
- 
+
      mContext->history_tokens.insert(mContext->history_tokens.end(), input_ids.begin(), input_ids.end()); // push to history_ids_
      if(!passExecute) {
 +        // Keep one bounded recurrent checkpoint before the final prompt tail.
@@ -3883,7 +3883,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
 -    int seqLen = input_embeds->getInfo()->dim[mSeqLenIndex];
 +    int seqLen = inputInfo->dim[mSeqLenIndex];
      mContext->prompt_len = seqLen;
- 
+
      // Disable record queue during prefill for better performance
 @@ -997,7 +1074,9 @@ std::vector<int> Llm::generate(MNN::Express::VARP input_embeds, int max_tokens)
      }
@@ -3990,7 +3990,7 @@ index 95965ee80c61fe27ef720cb4d0108e5ecbdb0c51..6ba2cc64fa72c16a1417cbffcef3fce5
 +        MNN_PRINT("[prompt_cache] cached=%d, compare=%d, common=%d, live_kv=%d, token_split=%d, delta=%d\n",
 +                  (int)mCachedPromptText.size(), (int)prompt_for_compare.size(), (int)text_common,
 +                  (int)effective_kv_tokens, (int)token_split, (int)delta.size());
- 
+
          // Save/restore KV state across generate_init — only the delta path
          // should preserve KV; other response() overloads clear as normal.
 @@ -1176,6 +1264,10 @@ void Llm::response(const ChatMessages& chat_prompts, std::ostream* os, const cha
@@ -4027,7 +4027,7 @@ index beac99b1bfec5a54fdf43e576e11afd19f2553fc..eb58d38e1d1ff7490420ac18256177b4
  #endif
 @@ -172,6 +175,137 @@ bool Omni::load() {
  }
- 
+
  #ifdef LLM_SUPPORT_VISION
 +// Vision modules can own a different executor than the language model. Copying
 +// their evaluated output into an INPUT variable while the LLM executor is
@@ -4173,11 +4173,11 @@ index beac99b1bfec5a54fdf43e576e11afd19f2553fc..eb58d38e1d1ff7490420ac18256177b4
 +        MNN_PRINT("Omni failed to materialize default vision embedding\n");
 +        return {};
 +    }
- 
+
      mVisionEmbeddings.push_back(imageEmbedding);
      int visionLen = imageEmbedding->getInfo()->dim[0];
 @@ -284,7 +422,15 @@ std::vector<int> Omni::gemma4VisionProcess(VARP image) {
- 
+
      // Run vision model (outputs fixed max_soft_tokens)
      auto outputs = mVisionModule->onForward({image, posIds});
 -    auto imageEmbedding = outputs[0];
@@ -4190,7 +4190,7 @@ index beac99b1bfec5a54fdf43e576e11afd19f2553fc..eb58d38e1d1ff7490420ac18256177b4
 +        MNN_PRINT("Omni failed to materialize Gemma vision embedding\n");
 +        return {};
 +    }
- 
+
      // Squeeze batch dim: [1, max_soft_tokens, hidden] -> [max_soft_tokens, hidden]
      imageEmbedding = Express::_Squeeze(imageEmbedding, {0});
 @@ -316,18 +462,39 @@ std::vector<int> Omni::gemma4VisionProcess(VARP image) {
@@ -4712,7 +4712,7 @@ index beac99b1bfec5a54fdf43e576e11afd19f2553fc..eb58d38e1d1ff7490420ac18256177b4
 +    clearMultimodalEmbeddings();
      return mergedEmbed;
  }
- 
+
 @@ -1461,14 +1933,62 @@ void Omni::responseInterleaved(const std::vector<int>& input_ids, std::ostream*
  void Omni::response(const std::vector<int>& input_ids, std::ostream* os, const char* end_with, int max_new_tokens) {
      MNN::Express::ExecutorScope s(mExecutor);
@@ -5253,18 +5253,18 @@ index ecf649598524c520928d4ef8506dff78c5cca120..228fd9ce1269fdf19fc5a30123918612
 @@ -1,7 +1,10 @@
  #ifndef PROMPT_CACHE_UTILS_HPP
  #define PROMPT_CACHE_UTILS_HPP
- 
+
 +#include <algorithm>
 +#include <cstddef>
  #include <string>
 +#include <vector>
- 
+
  namespace MNN {
  namespace Transformer {
 @@ -25,6 +28,45 @@ inline void stripThinkBlocks(std::string& text) {
      }
  }
- 
+
 +inline std::size_t promptCacheReusableTokenPrefix(
 +        const std::vector<int>& liveHistory,
 +        std::size_t effectiveKvTokens,
@@ -5306,9 +5306,9 @@ index ecf649598524c520928d4ef8506dff78c5cca120..228fd9ce1269fdf19fc5a30123918612
 +
  }  // namespace Transformer
  }  // namespace MNN
- 
+
 diff --git a/transformers/llm/engine/src/sampler.cpp b/transformers/llm/engine/src/sampler.cpp
-index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7acd0a971c8 100644
+index d070c4a3318a30e1ccefe05e96191f890daac2a1..1ab82740ba9e21249aa91f39528d14ebbbb8408d 100644
 --- a/transformers/llm/engine/src/sampler.cpp
 +++ b/transformers/llm/engine/src/sampler.cpp
 @@ -1,9 +1,13 @@
@@ -5322,13 +5322,13 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
 +#include "half.hpp"
 +#include <cstring>
 +#include <MNN/expr/ExprCreator.hpp>
- 
+
  #include <MNN/AutoTime.hpp>
  #include <MNN/expr/Executor.hpp>
 @@ -16,18 +20,37 @@
  namespace MNN {
  namespace Transformer {
- 
+
 +static bool samplerFinite(float value) {
 +    uint32_t bits;
 +    std::memcpy(&bits, &value, sizeof(bits));
@@ -5364,13 +5364,13 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
      for (auto& p : probs) p *= invSum;
  }
 @@ -82,6 +105,7 @@ void Sampler::SamplerConfig::configTemperature(std::shared_ptr<LlmConfig> llmCon
- 
+
  void Sampler::SamplerConfig::configTopK(std::shared_ptr<LlmConfig> llmConfig) {
      topK = llmConfig->topK();
 +    temperature = llmConfig->temperature();
      select_type = "temperature";
  }
- 
+
 @@ -140,7 +164,7 @@ void Sampler::SamplerConfig::configMixed(std::shared_ptr<LlmConfig> llmConfig) {
      }
      mixedSamplers = std::move(newSamplers);
@@ -5380,10 +5380,10 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
          select_type = "greedy";
      } else {
          select_type = "temperature";
-@@ -158,22 +182,130 @@ Sampler* Sampler::createSampler(std::shared_ptr<LlmContext> context, std::shared
+@@ -158,22 +182,133 @@ Sampler* Sampler::createSampler(std::shared_ptr<LlmContext> context, std::shared
      return new Sampler(context, config);
  }
- 
+
 +static std::mt19937::result_type sampler_seed(const std::shared_ptr<LlmConfig>& config) {
 +    const int requested_seed = config->config_.value("seed", -1);
 +    if (requested_seed >= 0) {
@@ -5416,12 +5416,15 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
 +        effective["top_k"] = mConfig.topK;
 +        effective["top_p"] = mConfig.topP;
 +        effective["min_p"] = mConfig.minP;
++        effective["repetition_penalty"] = mConfig.repetition_penalty;
++        effective["presence_penalty"] = mConfig.presence_penalty;
++        effective["frequency_penalty"] = mConfig.frequency_penalty;
 +        effective["seed"] = config->config_.value("seed", -1);
 +        effective["mixed_samplers"] = mixedSamplers;
 +        mContext->sampler_config_json = effective.dump();
 +    }
  }
- 
+
 -SamplerState Sampler::createState(Express::VARP logits) {
 +SamplerState Sampler::createState(Express::VARP logits, int offset, int size) {
      SamplerState state;
@@ -5515,11 +5518,11 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
 +    }
      return state;
  }
- 
-@@ -216,13 +348,32 @@ void Sampler::buildPipeline() {
+
+@@ -216,13 +351,32 @@ void Sampler::buildPipeline() {
      mPipeline.push_back([this](SamplerState& s) { stepSelect(s); });
  }
- 
+
 -int Sampler::sample(Express::VARP logits) {
 +int Sampler::sample(Express::VARP logits, int offset, int size) {
      Timer _t;
@@ -5551,25 +5554,50 @@ index d070c4a3318a30e1ccefe05e96191f890daac2a1..1b40633b96d770e083e887a7cd9eb7ac
 +    }
      return state.selected_token;
  }
- 
-@@ -311,7 +462,7 @@ void Sampler::stepPenalty(SamplerState& state) {
+
+@@ -235,7 +389,7 @@ void Sampler::stepPenalty(SamplerState& state) {
+     int ngram = mConfig.ngram;
+     float ngram_factor = mConfig.ngram_factor;
+     bool penalizeNgram = (ngram_factor > 1.0f);
+-    if (repPenalty <= 1.0f && presPenalty <= 0.0f && freqPenalty <= 0.0f) return;
++    if ((repPenalty <= 0.0f || repPenalty == 1.0f) && presPenalty == 0.0f && freqPenalty == 0.0f) return;
+     repPenalty = std::min(repPenalty, mConfig.max_penalty);
+
+     const std::vector<int>& prev = mContext->history_tokens;
+@@ -295,13 +449,13 @@ void Sampler::stepPenalty(SamplerState& state) {
+         if (tokenId < 0 || tokenId >= (int)state.logits.size()) continue;
+         float& logit = state.logits[tokenId];
+         // repetition_penalty: multiplicative
+-        if (kv.second > 1.0f) {
++        if (kv.second > 0.0f && kv.second != 1.0f) {
+             logit = (logit >= 0.0f) ? (logit / kv.second) : (logit * kv.second);
+         }
+         // presence_penalty: additive, applied once per token
+         logit -= presPenalty;
+         // frequency_penalty: additive, proportional to count
+-        if (freqPenalty > 0.0f) {
++        if (freqPenalty != 0.0f) {
+             logit -= freqPenalty * freq_map[kv.first];
+         }
+     }
+@@ -311,7 +465,7 @@ void Sampler::stepPenalty(SamplerState& state) {
  void Sampler::stepTopK(SamplerState& state) {
      int K = mConfig.topK;
      int size = (int)state.logits.size();
 -    if (K >= size) return;
 +    if (K <= 0 || K >= size) return;
- 
+
      // Use nth_element for O(n) average
      std::vector<int> idx(size);
-@@ -513,6 +664,7 @@ void Sampler::stepBannedTokens(SamplerState& state) {
+@@ -513,6 +667,7 @@ void Sampler::stepBannedTokens(SamplerState& state) {
  }
- 
+
  void Sampler::stepSelect(SamplerState& state) {
 +    if (state.logits.empty()) return;
      if (mConfig.select_type == "greedy") {
          // argmax
          int bestIdx = 0;
-@@ -523,10 +675,12 @@ void Sampler::stepSelect(SamplerState& state) {
+@@ -523,10 +678,12 @@ void Sampler::stepSelect(SamplerState& state) {
                  bestIdx = i;
              }
          }
@@ -5591,7 +5619,7 @@ index f6519453a228367369113108ac56100f9cd60ded..1594de6796b023cbf9100f796d5067a8
      bool is_subset = false;
      int selected_token = -1;
 +    std::string error;
- 
+
      void ensureProbs(float temperature);
      void invalidateProbs();
 @@ -69,7 +70,7 @@ public:
@@ -5627,8 +5655,8 @@ index 2501b89fb54b61cc7048cded402fd383479b8ff8..c141fec60cef1381594ef9401582b362
          ar_sample_us += _t_sample.durationInUs();
  #endif
 @@ -162,4 +165,4 @@ int Generation::draftVerify(VARP logits, const std::vector<int> &drafts, bool& s
- 
- 
+
+
  } // namespace Transformer
 -} // namespace MNN
 \ No newline at end of file

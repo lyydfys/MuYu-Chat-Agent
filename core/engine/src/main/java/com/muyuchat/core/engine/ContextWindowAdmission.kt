@@ -140,11 +140,11 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
         return rejected(ContextWindowRejectionCode.CONTEXT_BUDGET_TOO_SMALL)
     }
 
-    // System messages, the configured system prompt, and runtime context are
-    // never silently removed. Reject before native execution when they alone
-    // exhaust the usable prompt window.
+    // System messages, explicit durable-memory messages, and request-pinned
+    // messages are never silently removed. Reject before native execution
+    // when protected content alone exhausts the usable prompt window.
     for (message in request.messages) {
-        if (message.role != Role.SYSTEM) continue
+        if (!isAdmissionProtectedMessage(message, request)) continue
         usage.tryAddMessage(message, limits)?.let { limit ->
             return rejected(ContextWindowRejectionCode.SYSTEM_CONTEXT_TOO_LARGE, limit)
         }
@@ -162,7 +162,7 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
     val newestUserIndex = request.messages.indexOfLast { it.role == Role.USER }
     val anchorIndex = newestUserIndex.takeIf { it >= 0 }
         ?: request.messages.indexOfLast { it.role != Role.SYSTEM }
-    if (anchorIndex >= 0) {
+    if (anchorIndex >= 0 && !isAdmissionProtectedMessage(request.messages[anchorIndex], request)) {
         usage.tryAddMessage(request.messages[anchorIndex], limits)?.let { limit ->
             return rejected(ContextWindowRejectionCode.LATEST_USER_INPUT_TOO_LARGE, limit)
         }
@@ -174,7 +174,7 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
     var retained: MutableSet<Int>? = null
     for (index in request.messages.indices.reversed()) {
         val message = request.messages[index]
-        if (message.role == Role.SYSTEM || index == anchorIndex) continue
+        if (isAdmissionProtectedMessage(message, request) || index == anchorIndex) continue
 
         val limit = usage.tryAddMessage(message, limits)
         if (limit == null) {
@@ -186,7 +186,7 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
             val knownRetained = HashSet<Int>()
             retained = knownRetained
             for (knownIndex in request.messages.indices) {
-                if (request.messages[knownIndex].role == Role.SYSTEM ||
+                if (isAdmissionProtectedMessage(request.messages[knownIndex], request) ||
                     knownIndex == anchorIndex ||
                     knownIndex > index
                 ) {
@@ -223,6 +223,19 @@ fun localContextWindowAdmission(request: ChatRequest): ContextWindowAdmission {
         }
     )
 }
+
+/**
+ * Content protection is deliberately based on stable message identity and
+ * durable flags. Array positions are only a legacy policy input and are not
+ * safe once retrieval, summary projection, or history edits reorder messages.
+ */
+private fun isAdmissionProtectedMessage(
+    message: ChatMessage,
+    request: ChatRequest
+): Boolean = message.role == Role.SYSTEM ||
+    message.pinned ||
+    message.id in request.protectedMessageIds ||
+    isContextMemoryMessage(message)
 
 private class MutableContextWindowUsage {
     var estimatedTokens: Long = 0L

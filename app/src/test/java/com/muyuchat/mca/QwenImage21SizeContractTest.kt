@@ -28,22 +28,24 @@ class QwenImage21SizeContractTest {
             QwenImage21SizeContract.OFFICIAL_EXAMPLE_SIZES
         )
         assertTrue(QwenImage21SizeContract.RECOMMENDATION_SIZE_LINE.contains("7 种比例"))
+        assertFalse(QwenImage21SizeContract.RECOMMENDATION_SIZE_LINE.contains("已在真机验证"))
         assertTrue(QwenImage21SizeContract.RECOMMENDATION_SIZE_LINE.contains("Standard"))
         assertTrue(QwenImage21SizeContract.RECOMMENDATION_SIZE_LINE.contains("512×512"))
-        assertFalse(QwenImage21SizeContract.isSupported(672, 672))
-        assertFalse(QwenImage21SizeContract.isSupported(1024, 1024))
+        assertTrue(QwenImage21SizeContract.isSupported(672, 672))
+        assertTrue(QwenImage21SizeContract.isSupported(1024, 1024))
+        assertFalse(QwenImage21SizeContract.isRecommendedPreset(672, 672))
         assertTrue(QwenImage21SizeContract.isNativeShape(672, 672))
         assertTrue(QwenImage21SizeContract.isNativeShape(1024, 1024))
         assertFalse(QwenImage21SizeContract.isNativeShape(255, 256))
         assertFalse(QwenImage21SizeContract.isNativeShape(256, 250))
+        assertFalse(QwenImage21SizeContract.isSupported(Int.MAX_VALUE, Int.MAX_VALUE))
     }
 
     @Test
     fun unsupportedSizeErrorContainsProblemAndNextStep() {
         val message = QwenImage21SizeContract.unsupportedSizeMessage(1024, 1024)
         assertTrue(message.contains("1024×1024"))
-        assertTrue(message.contains("已验证尺寸"))
-        assertTrue(message.contains("高分辨率运行包"))
+        assertTrue(message.contains("推荐预设"))
         assertTrue(message.contains("32"))
     }
 }

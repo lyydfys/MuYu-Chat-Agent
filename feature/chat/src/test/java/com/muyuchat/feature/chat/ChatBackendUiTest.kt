@@ -38,8 +38,8 @@ class ChatBackendUiTest {
     fun unavailableNpuRemainsVisibleWithConcreteReason() {
         val npu = chatBackendOptionsFor(ChatBackendFamily.LITERT_LM, npuAvailable = false).last()
         assertEquals("npu", npu.id)
-        assertFalse(npu.enabled)
-        assertTrue(npu.availabilityNote.orEmpty().contains("未就绪"))
+        assertTrue(npu.enabled)
+        assertTrue(npu.availabilityNote.orEmpty().contains("仍可尝试"))
     }
 
     @Test
@@ -49,8 +49,8 @@ class ChatBackendUiTest {
             gpuAvailable = false
         )
         val unavailableGpu = unavailable.first { it.id == "gpu" }
-        assertFalse(unavailableGpu.enabled)
-        assertEquals("GPU 不可用", unavailableGpu.label)
+        assertTrue(unavailableGpu.enabled)
+        assertEquals("GPU（全量）", unavailableGpu.label)
         assertTrue(unavailable.first().availabilityNote.orEmpty().contains("没有可用"))
 
         val available = chatBackendOptionsFor(
@@ -97,7 +97,7 @@ class ChatBackendUiTest {
             )
         )
         assertEquals(
-            false,
+            null,
             npuAvailabilityForChatBackend(
                 family = ChatBackendFamily.QAIRT,
                 chipsetCode = "SM8750P",
@@ -105,6 +105,23 @@ class ChatBackendUiTest {
                 packagedLiteRtTransportAvailable = true
             )
         )
+    }
+
+    @Test
+    fun knownChipsetWithoutProbeOrPackagedProfileStillAllowsNativeAttempt() {
+        assertEquals(
+            null,
+            npuAvailabilityForChatBackend(
+                family = ChatBackendFamily.LITERT_LM,
+                chipsetCode = "SM9999",
+                qnnRuntimeUsableForSmoke = false,
+                packagedLiteRtTransportAvailable = false
+            )
+        )
+        assertTrue(chatBackendOptionsFor(ChatBackendFamily.LITERT_LM, npuAvailable = false)
+            .first { it.id == "npu" }.enabled)
+        assertTrue(chatBackendOptionsFor(ChatBackendFamily.GENIEX_LLAMA_CPP, npuAvailable = false)
+            .first { it.id == "npu" }.enabled)
     }
 
     @Test
@@ -116,6 +133,32 @@ class ChatBackendUiTest {
                 ChatBackendFamily.MNN,
                 requested,
                 RuntimeStats(loaded = true, backend = "mnn_cpu")
+            )
+        )
+    }
+
+    @Test
+    fun genericLoadedLiteRtIdentityPreservesRequestedTransport() {
+        for (backend in listOf("cpu", "gpu", "npu")) {
+            assertEquals(
+                backend,
+                selectedChatBackendId(
+                    ChatBackendFamily.LITERT_LM,
+                    GenerationParams(advancedJson = "{\"backend\":\"$backend\"}"),
+                    RuntimeStats(loaded = true, backend = "litert_lm")
+                )
+            )
+        }
+    }
+
+    @Test
+    fun explicitLiteRtCpuReadbackCanOverrideRequestedTransport() {
+        assertEquals(
+            "cpu",
+            selectedChatBackendId(
+                ChatBackendFamily.LITERT_LM,
+                GenerationParams(advancedJson = "{\"backend\":\"npu\"}"),
+                RuntimeStats(loaded = true, backend = "litert_lm_cpu")
             )
         )
     }

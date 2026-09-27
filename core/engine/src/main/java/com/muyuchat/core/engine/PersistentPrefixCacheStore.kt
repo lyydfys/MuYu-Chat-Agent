@@ -270,6 +270,21 @@ class PersistentPrefixCacheStore private constructor(
         }
     }
 
+    /** Removes every verified cache entry for the supplied conversation fingerprints. */
+    fun clearPrefixFingerprints(fingerprints: Set<String>): Boolean = synchronized(lock) {
+        if (fingerprints.isEmpty()) return@synchronized true
+        if (fingerprints.any { !PrefixCacheKey.isSha256Hex(it) }) return@synchronized false
+        val root = resolveSafeRoot() ?: return@synchronized false
+        val storeLock = acquireStoreLock(root) ?: return@synchronized false
+        storeLock.use {
+            var succeeded = true
+            scan(root, cleanupInvalid = true)
+                .filter { it.key.prefixFingerprint in fingerprints }
+                .forEach { entry -> succeeded = deleteEntry(root, entry) && succeeded }
+            succeeded
+        }
+    }
+
     /** Trims verified entries to the configured quota using least-recently-used eviction. */
     fun trimToQuota(): Boolean = synchronized(lock) {
         val root = resolveSafeRoot() ?: return@synchronized false

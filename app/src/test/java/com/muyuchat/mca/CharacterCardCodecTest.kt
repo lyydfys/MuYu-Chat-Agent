@@ -158,7 +158,8 @@ class CharacterCardCodecTest {
         assertTrue(assistant.systemPrompt.contains("住在林间小屋的旅行者。"))
         assertTrue(assistant.systemPrompt.contains("温和、好奇。"))
         assertTrue(assistant.systemPrompt.contains("雨后的森林。"))
-        assertTrue(assistant.systemPrompt.contains("你也在躲雨吗？"))
+        assertTrue(!assistant.systemPrompt.contains("你也在躲雨吗？"))
+        assertEquals("你也在躲雨吗？", assistant.initialGreetingMessage()?.content)
         assertTrue(assistant.systemPrompt.contains("喝杯热茶吧。"))
         assertEquals(assistant.systemPrompt, snapshot.systemPrompt)
         assertEquals("林间旅人", snapshot.name)
@@ -293,6 +294,51 @@ class CharacterCardCodecTest {
         val failure = assertFailure(CharacterCardCodec.parsePng(truncated))
 
         assertEquals(CharacterCardParseErrorCode.INVALID_PNG, failure.error.code)
+    }
+
+    @Test
+    fun invalidStandardFieldReportsItsJsonPath() {
+        val result = CharacterCardCodec.parseJson(
+            """{"spec":"chara_card_v2","data":{"name":"card","tags":["valid",12]}}"""
+        )
+        val failure = assertFailure(result)
+        assertEquals(CharacterCardParseErrorCode.INVALID_JSON, failure.error.code)
+        assertTrue(failure.error.message.contains("data.tags[1]"))
+    }
+
+    @Test
+    fun rejectsOversizedOrUnsupportedIhdrBeforeCardMetadata() {
+        val payload = Base64.getEncoder().encodeToString(ccv2Card("valid", "card").toByteArray())
+        val metadata = chunk("tEXt", textChunk("chara", payload))
+        val oversized = ihdr().apply {
+            this[0] = 0x7f
+            this[1] = 0xff.toByte()
+            this[2] = 0xff.toByte()
+            this[3] = 0xff.toByte()
+        }
+        val unsupportedDepth = ihdr().apply { this[8] = 3 }
+
+        listOf(oversized, unsupportedDepth).forEach { header ->
+            val result = CharacterCardCodec.parsePng(
+                png(chunk("IHDR", header), metadata, chunk("IEND", byteArrayOf()))
+            )
+            assertEquals(CharacterCardParseErrorCode.INVALID_PNG, assertFailure(result).error.code)
+        }
+    }
+
+    @Test
+    fun rejectsInvalidCrcAndCompressedMetadataBeforeImport() {
+        val payload = Base64.getEncoder().encodeToString(ccv2Card("valid", "card").toByteArray())
+        val textChunk = chunk("tEXt", textChunk("chara", payload))
+        val badCrc = textChunk.copyOf().apply { this[lastIndex] = (this[lastIndex].toInt() xor 1).toByte() }
+        val badCompression = chunk("zTXt", "chara".toByteArray() + byteArrayOf(0, 0, 1, 2, 3))
+
+        listOf(badCrc, badCompression).forEach { metadata ->
+            val result = CharacterCardCodec.parsePng(
+                png(chunk("IHDR", ihdr()), metadata, chunk("IEND", byteArrayOf()))
+            )
+            assertTrue(result is CharacterCardParseResult.Failure)
+        }
     }
 
     private fun assertSuccess(result: CharacterCardParseResult): CharacterCardParseResult.Success {

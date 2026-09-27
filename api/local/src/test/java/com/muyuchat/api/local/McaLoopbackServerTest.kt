@@ -2283,6 +2283,44 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun chatPreservesWhitespaceChunksAndIgnoresLateEventsAfterDone() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk(text = " \n", stats = RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Done(RuntimeStats(completionTokens = 1)),
+                    GenerateEvent.Chunk(text = "late", stats = RuntimeStats(completionTokens = 2)),
+                    GenerateEvent.Error("late error", RuntimeStats())
+                )
+            }
+            for (streaming in listOf(false, true)) {
+                val body = JSONObject().put("model", "active-model")
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+                    .put("stream", streaming).toString()
+                val response = rawHttp(
+                    port,
+                    "POST /v1/chat/completions HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1\r\nAuthorization: Bearer secret\r\n" +
+                        "Content-Type: application/json\r\nContent-Length: ${body.toByteArray().size}\r\n\r\n" + body
+                )
+                assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+                assertFalse(response.contains("generation_empty_visible_output"))
+                assertFalse(response.contains("late"))
+                val text = if (streaming) {
+                    response.lineSequence().filter { it.startsWith("data: {") }
+                        .map { JSONObject(it.removePrefix("data: ")) }
+                        .mapNotNull { it.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")?.optString("content") }
+                        .joinToString("")
+                } else {
+                    responseJson(response).getJSONArray("choices").getJSONObject(0)
+                        .getJSONObject("message").getString("content")
+                }
+                assertEquals(" \n", text)
+            }
+        }
+    }
+
+    @Test
     fun streamingChatDoesNotStopWhenHiddenReasoningPrecedesVisibleContent() {
         val stopCalls = AtomicInteger(0)
         withServer(apiKey = "secret") { port ->
@@ -2394,6 +2432,7 @@ class McaLoopbackServerTest {
             assertTrue(response.startsWith("HTTP/1.1 200 OK"))
             assertTrue(response.contains("native stopped"))
             assertTrue(response.contains("data: [DONE]"))
+            assertFalse(response.contains("\"finish_reason\":\"stop\""))
         }
     }
 
@@ -2503,7 +2542,17 @@ class McaLoopbackServerTest {
             assertTrue(streamResponse.startsWith("HTTP/1.1 200 OK"))
             assertTrue(streamResponse.contains("event: response.output_text.delta"))
             assertTrue(streamResponse.contains("event: response.completed"))
-            assertTrue(streamResponse.contains("data: [DONE]"))
+            val events = streamResponse.substringAfter("\r\n\r\n")
+                .split("\n\n")
+                .filter { it.startsWith("event: ") }
+                .map { JSONObject(it.substringAfter("data: ").trim()) }
+            assertEquals((0 until events.size).map(Int::toLong), events.map { it.getLong("sequence_number") })
+            assertEquals("response", events.first().getJSONObject("response").getString("object"))
+            assertEquals("message", events.first { it.getString("type") == "response.output_item.added" }
+                .getJSONObject("item").getString("type"))
+            assertEquals("responses ok", events.first { it.getString("type") == "response.output_text.done" }.getString("text"))
+            assertEquals("completed", events.last().getJSONObject("response").getString("status"))
+            assertFalse(streamResponse.contains("data: [DONE]"))
         }
     }
 
@@ -2525,6 +2574,102 @@ class McaLoopbackServerTest {
             assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
             assertTrue(response.contains("\"param\":\"input\""))
             assertEquals(0, calls.get())
+        }
+    }
+
+    @Test
+    fun responsesFailureHasOneTypedTerminalAndUnnestedError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("partial", RuntimeStats()),
+                    GenerateEvent.Error("worker failed", RuntimeStats(), code = "worker_failed"),
+                    GenerateEvent.Chunk("late", RuntimeStats())
+                )
+            }
+            val raw = rawHttp(port, authenticatedPost(
+                "/v1/responses", body = """{"model":"active-model","input":"hi","stream":true}"""
+            ))
+            val events = raw.substringAfter("\r\n\r\n").split("\n\n")
+                .filter { it.startsWith("event: ") }
+                .map { JSONObject(it.substringAfter("data: ").trim()) }
+            assertEquals(1, events.count { it.getString("type") == "response.failed" })
+            assertFalse(raw.contains("response.completed"))
+            assertFalse(raw.contains("late"))
+            val error = events.last().getJSONObject("response").getJSONObject("error")
+            assertFalse(error.has("error"))
+            assertEquals("worker_failed", error.getString("code"))
+            assertEquals(1, Regex("HTTP/1.1").findAll(raw).count())
+        }
+    }
+
+    @Test
+    fun nonStreamingResponsesIgnoresCallbacksAfterTerminalError() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flowOf(
+                    GenerateEvent.Chunk("partial", RuntimeStats()),
+                    GenerateEvent.Error("native failed", RuntimeStats(), code = "native_failed"),
+                    GenerateEvent.Chunk("late content", RuntimeStats()),
+                    GenerateEvent.Done(RuntimeStats())
+                )
+            }
+            val response = rawHttp(port, authenticatedPost(
+                "/v1/responses", body = """{"model":"active-model","input":"hi","stream":false}"""
+            ))
+            assertTrue(response.startsWith("HTTP/1.1 500 Internal Server Error"))
+            assertTrue(response.contains("native_failed"))
+            assertFalse(response.contains("late content"))
+            assertEquals(1, Regex("HTTP/1.1").findAll(response).count())
+        }
+    }
+
+    @Test
+    fun staleScopedStopDoesNotCancelNewRequestOrUseGlobalStop() {
+        val started = CountDownLatch(1)
+        val cancelled = CountDownLatch(1)
+        val globalStopCalls = AtomicInteger(0)
+        val scopedStops = mutableListOf<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatWithContextProvider = { _, _ ->
+                flow {
+                    started.countDown()
+                    try { awaitCancellation() } finally { cancelled.countDown() }
+                }
+            }
+            LocalApiRuntime.stopGenerationProvider = { globalStopCalls.incrementAndGet() }
+            LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
+                scopedStops += requestId
+                true
+            }
+            val body = """{"model":"active-model","input":"hi","stream":true}"""
+            val requestThread = Thread {
+                runCatching {
+                    rawHttp(port, authenticatedPost("/v1/responses", body = body)
+                        .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: client-new\r\n"))
+                }
+            }
+            requestThread.start()
+            try {
+                assertTrue(started.await(5, TimeUnit.SECONDS))
+                val stale = rawHttp(port, authenticatedPost(
+                    "/v1/generate/stop", body = """{"request_id":"client-old"}"""
+                ))
+                assertTrue(stale.startsWith("HTTP/1.1 409 Conflict"))
+                assertEquals(0, globalStopCalls.get())
+                assertTrue(scopedStops.isEmpty())
+                assertEquals(1L, cancelled.count)
+                val matched = rawHttp(port, authenticatedPost(
+                    "/v1/generate/stop", body = """{"request_id":"client-new"}"""
+                ))
+                assertTrue(matched.startsWith("HTTP/1.1 200 OK"))
+                assertTrue(cancelled.await(5, TimeUnit.SECONDS))
+                assertEquals(0, globalStopCalls.get())
+                assertTrue(scopedStops.all { it.startsWith("resp-") })
+            } finally {
+                rawHttp(port, authenticatedPost("/v1/generate/stop"))
+                requestThread.join(5_000L)
+            }
         }
     }
 
@@ -2703,6 +2848,7 @@ class McaLoopbackServerTest {
         LocalApiRuntime.streamChatProvider = null
         LocalApiRuntime.streamChatWithContextProvider = null
         LocalApiRuntime.stopGenerationProvider = null
+        LocalApiRuntime.stopGenerationIfRequestActiveProvider = null
         LocalApiRuntime.imageGenerationProvider = null
         LocalApiRuntime.controlPlane = null
         LocalApiRuntime.clearRequestTrace()

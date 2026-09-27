@@ -71,6 +71,7 @@ class McaLoopbackServer(
     private var acceptJob: Job? = null
     private val clientSocketLock = Any()
     private val activeClientSockets = linkedSetOf<Socket>()
+    private val responseStartedSockets = mutableSetOf<Socket>()
     private var clientAdmissionOpen = false
     private val generationLeaseLock = Any()
     private var generationAdmissionOpen = false
@@ -79,6 +80,8 @@ class McaLoopbackServer(
     private val activeImageRequestJobs = linkedMapOf<String, Job>()
     private var imageRequestCancellationEpoch: Long = 0L
     private var imageRequestAdmissionPauseCount: Int = 0
+    private val clientRequestIdLock = Any()
+    private val usedClientRequestIds = mutableSetOf<String>()
 
     val isRunning: Boolean
         get() = serverSocket?.isClosed == false
@@ -140,7 +143,7 @@ class McaLoopbackServer(
                                 logDebug("Request rejected: ${rejection.code}")
                             }
                             runCatching {
-                                if (!client.isClosed) {
+                                if (!client.isClosed && synchronized(clientSocketLock) { client !in responseStartedSockets }) {
                                     writeError(
                                         client,
                                         rejection?.status ?: "500 Internal Server Error",
@@ -153,6 +156,7 @@ class McaLoopbackServer(
                             runCatching { client.close() }
                             synchronized(clientSocketLock) {
                                 activeClientSockets.remove(client)
+                                responseStartedSockets.remove(client)
                             }
                         }
                     }
@@ -254,12 +258,14 @@ class McaLoopbackServer(
                 method == "POST" && path == "/v1/mca/recommend" -> writeJson(client, LocalApiRuntime.agentRecommendationJsonProvider(body))
                 method == "POST" && path == "/v1/mca/benchmark" -> writeJson(client, LocalApiRuntime.benchmarkJsonProvider(body))
                 method == "POST" && path in IMAGE_GENERATION_PATHS -> {
-                    handleImageGeneration(client, body)
+                    handleImageGeneration(client, body, validatedClientRequestId(headers))
                 }
                 method == "POST" && path in RESPONSES_PATHS -> {
+                    val clientRequestId = validatedClientRequestId(headers)
                     val streaming = body.isStreamingRequest(headers)
                     when (val prepared = prepareResponsesRequest(body, streaming)) {
                         is PreparedResponsesRequest.Ready -> {
+                            if (clientRequestId != null) prepared.lease.clientRequestId = clientRequestId
                             try {
                                 if (streaming) {
                                     streamResponses(client, prepared.request, prepared.lease)
@@ -275,24 +281,14 @@ class McaLoopbackServer(
                 }
                 method == "GET" && path == "/metrics" -> writeText(client, LocalApiRuntime.metricsJson())
                 method == "POST" && path == "/v1/generate/stop" -> {
-                    val imageRequests = cancelActiveImageRequests(
-                        "Local API generation was stopped by the client."
-                    )
-                    try {
-                        LocalApiRuntime.stopGeneration()
-                    } finally {
-                        try {
-                            awaitImageRequestTermination(imageRequests)
-                        } finally {
-                            resumeImageRequestAdmission()
-                        }
-                    }
-                    writeJson(client, """{"stopped":true}""")
+                    handleGenerationStop(client, body)
                 }
                 method == "POST" && path in GENERATION_PATHS -> {
+                    val clientRequestId = validatedClientRequestId(headers)
                     val streaming = body.isStreamingRequest(headers)
                     when (val prepared = prepareGenerationRequest(path, body, streaming)) {
                         is PreparedGenerationRequest.Ready -> {
+                            if (clientRequestId != null) prepared.lease.clientRequestId = clientRequestId
                             try {
                                 if (streaming) {
                                     streamChat(client, prepared.request, prepared.lease)
@@ -311,7 +307,7 @@ class McaLoopbackServer(
         }
     }
 
-    private suspend fun handleImageGeneration(socket: Socket, body: String) {
+    private suspend fun handleImageGeneration(socket: Socket, body: String, clientRequestId: String?) {
         val cancellationEpoch = synchronized(imageRequestLock) { imageRequestCancellationEpoch }
         val request = try {
             ImageGenerationApiContract.parseRequest(body)
@@ -348,7 +344,7 @@ class McaLoopbackServer(
             return
         }
 
-        val requestId = "img-${UUID.randomUUID()}"
+        val requestId = clientRequestId ?: "img-${UUID.randomUUID()}"
         val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
             "Local API image generation requires a request coroutine."
         }
@@ -416,7 +412,81 @@ class McaLoopbackServer(
             )
             return
         }
-        writeJson(socket, response.rawBody)
+        writeJson(socket, response.rawBody, extraHeaders = mapOf("X-MCA-Request-Id" to requestId))
+    }
+
+    private fun validatedClientRequestId(headers: Map<String, String>): String? {
+        val value = headers["x-mca-request-id"] ?: return null
+        if (!REQUEST_ID_PATTERN.matches(value)) {
+            throw HttpRequestRejected(
+                "400 Bad Request", "invalid_request_id",
+                "X-MCA-Request-Id must contain 1 to 128 safe ASCII identifier characters."
+            )
+        }
+        synchronized(clientRequestIdLock) {
+            if (!usedClientRequestIds.add(value)) {
+                throw HttpRequestRejected(
+                    "409 Conflict", "request_id_conflict",
+                    "X-MCA-Request-Id has already been used by this Local API listener."
+                )
+            }
+        }
+        return value
+    }
+
+    private suspend fun handleGenerationStop(socket: Socket, body: String) {
+        val root = if (body.isBlank()) JSONObject() else runCatching { JSONObject(body) }.getOrElse {
+            writeError(socket, "400 Bad Request", "invalid_request", "Stop body must be a JSON object.")
+            return
+        }
+        if (root.keys().asSequence().any { it != "request_id" }) {
+            writeError(socket, "400 Bad Request", "unsupported_parameter", "Only request_id is supported by this stop endpoint.")
+            return
+        }
+        val requestedId = if (root.has("request_id")) {
+            (root.opt("request_id") as? String)?.takeIf { REQUEST_ID_PATTERN.matches(it) } ?: run {
+                writeError(socket, "400 Bad Request", "invalid_request_id", "request_id must be a valid request identifier.")
+                return
+            }
+        } else {
+            null
+        }
+        // Capture current ownership once. Every native stop uses that exact token, even if a
+        // replacement request starts while this HTTP call waits for cancellation to finish.
+        val chatLease = synchronized(generationLeaseLock) {
+            activeGenerationLease?.takeIf {
+                requestedId == null || it.requestId == requestedId || it.clientRequestId == requestedId
+            }?.also { it.stopRequested = true }
+        }
+        val imageJobs = synchronized(imageRequestLock) {
+            activeImageRequestJobs.filterKeys { requestedId == null || it == requestedId }.toList()
+        }
+        if (requestedId != null && chatLease == null && imageJobs.isEmpty()) {
+            writeError(
+                socket, "409 Conflict", "generation_not_active",
+                "No active Local API generation matches this request_id.",
+                requestedId?.let { JSONObject().put("request_id", it).toString() } ?: "{}"
+            )
+            return
+        }
+        val chatRequestId = chatLease?.requestId?.takeIf(String::isNotBlank)
+        if (requestedId == null) {
+            // Legacy operation stops the runtime's current generation, including callers
+            // outside this server. A supplied ID never takes this global path.
+            LocalApiRuntime.stopGeneration()
+        } else if (chatRequestId != null) {
+            LocalApiRuntime.stopGenerationIfRequestActive(chatRequestId)
+        }
+        chatLease?.job?.cancel(CancellationException("Local API generation was stopped by the client."))
+        imageJobs.forEach { (_, job) -> job.cancel(CancellationException("Local API generation was stopped by the client.")) }
+        imageJobs.map { it.second }.joinAll()
+        writeJson(
+            socket,
+            JSONObject()
+                .put("stopped", true)
+                .put("request_id", requestedId ?: chatRequestId ?: imageJobs.firstOrNull()?.first ?: JSONObject.NULL)
+                .toString()
+        )
     }
 
     /**
@@ -432,7 +502,7 @@ class McaLoopbackServer(
         if (imageRequestAdmissionPauseCount > 0 || cancellationEpoch != imageRequestCancellationEpoch) {
             false
         } else {
-            check(requestId !in activeImageRequestJobs) { "Duplicate Local API image request id." }
+            if (requestId in activeImageRequestJobs) return@synchronized false
             activeImageRequestJobs[requestId] = requestJob
             true
         }
@@ -461,16 +531,6 @@ class McaLoopbackServer(
         }
         requests.forEach { requestJob -> requestJob.cancel(CancellationException(reason)) }
         return requests
-    }
-
-    private fun resumeImageRequestAdmission() {
-        synchronized(imageRequestLock) {
-            if (imageRequestAdmissionPauseCount > 0) imageRequestAdmissionPauseCount -= 1
-        }
-    }
-
-    private suspend fun awaitImageRequestTermination(requests: List<Job>) {
-        requests.joinAll()
     }
 
     /**
@@ -925,6 +985,7 @@ class McaLoopbackServer(
         lease: GenerationLease
     ) = coroutineScope {
         lease.job = currentCoroutineContext()[Job]
+        if (lease.stopRequested) throw CancellationException("Local API request was stopped before execution.")
         val requestId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         lease.requestId = requestId
         val sequenceBefore = LocalApiRuntime.generationSequence()
@@ -955,7 +1016,7 @@ class McaLoopbackServer(
                 }
             generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
         }
-        fun writeTerminalFrame(includeEmptyVisibleError: Boolean = true) {
+        fun writeTerminalFrame(includeEmptyVisibleError: Boolean = true, completed: Boolean = true) {
             if (terminalSent) return
             if (includeEmptyVisibleError && !hasVisibleContent) {
                 output.write(
@@ -966,11 +1027,15 @@ class McaLoopbackServer(
                     )}\n\n"
                 )
             }
-            output.write("data: ${finishSseJson(requestId, created, generationSequence)}\n\n")
+            if (completed && (!includeEmptyVisibleError || hasVisibleContent)) {
+                output.write("data: ${finishSseJson(requestId, created, generationSequence)}\n\n")
+            }
             output.write("data: [DONE]\n\n")
             terminalSent = true
         }
+        synchronized(clientSocketLock) { responseStartedSockets.add(socket) }
         output.write("HTTP/1.1 200 OK\r\n")
+        output.write("X-MCA-Request-Id: ${lease.clientRequestId.ifBlank { requestId }}\r\n")
         output.write("Content-Type: text/event-stream; charset=utf-8\r\n")
         output.write("Cache-Control: no-cache\r\n")
         output.write("X-Accel-Buffering: no\r\n")
@@ -990,6 +1055,7 @@ class McaLoopbackServer(
         withChatClientDisconnectCancellation(socket, requestId) {
             try {
                 stream.collect { event ->
+                    if (terminalSent) return@collect
                     captureGenerationSequence()
                     synchronized(output) {
                         when (event) {
@@ -1003,9 +1069,7 @@ class McaLoopbackServer(
                                     )
                                 }
                                 if (event.text.isNotEmpty()) {
-                                    if (event.text.any { !it.isWhitespace() }) {
-                                        hasVisibleContent = true
-                                    }
+                                    hasVisibleContent = true
                                     output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
                                 }
                             }
@@ -1021,7 +1085,7 @@ class McaLoopbackServer(
                                         generationErrorDetails(event, requestId, generationSequence).toString()
                                     )}\n\n"
                                 )
-                                writeTerminalFrame(includeEmptyVisibleError = false)
+                                writeTerminalFrame(includeEmptyVisibleError = false, completed = false)
                             }
                         }
                         output.flush()
@@ -1043,6 +1107,7 @@ class McaLoopbackServer(
         lease: GenerationLease
     ) {
         lease.job = currentCoroutineContext()[Job]
+        if (lease.stopRequested) throw CancellationException("Local API request was stopped before execution.")
         val requestId = "chatcmpl-${UUID.randomUUID().toString().replace("-", "")}"
         lease.requestId = requestId
         val sequenceBefore = LocalApiRuntime.generationSequence()
@@ -1067,7 +1132,9 @@ class McaLoopbackServer(
         var finalStats: RuntimeStats? = null
         var generationSequence: Long? = null
         withChatClientDisconnectCancellation(socket, requestId) {
+            var terminalCaptured = false
             stream.collect { event ->
+                if (terminalCaptured) return@collect
                 generationSequence = generationSequence
                     ?: LocalApiRuntime.generationSequence()?.takeIf { current ->
                         sequenceBefore?.let { current > it } ?: (current > 0L)
@@ -1081,8 +1148,14 @@ class McaLoopbackServer(
                         if (event.text.isNotEmpty()) builder.append(event.text)
                         if (event.reasoning.isNotEmpty()) reasoningBuilder.append(event.reasoning)
                     }
-                    is GenerateEvent.Done -> finalStats = event.stats
-                    is GenerateEvent.Error -> generationError = event
+                    is GenerateEvent.Done -> {
+                        finalStats = event.stats
+                        terminalCaptured = true
+                    }
+                    is GenerateEvent.Error -> {
+                        generationError = event
+                        terminalCaptured = true
+                    }
                 }
             }
             if (generationError != null) {
@@ -1096,7 +1169,7 @@ class McaLoopbackServer(
                 )
                 return@withChatClientDisconnectCancellation
             }
-            if (builder.isBlank()) {
+            if (builder.isEmpty()) {
                 writeError(
                     socket,
                     "500 Internal Server Error",
@@ -1142,7 +1215,7 @@ class McaLoopbackServer(
                             } ?: JSONObject.NULL
                         )
                 )
-            writeJson(socket, response.toString())
+            writeJson(socket, response.toString(), extraHeaders = mapOf("X-MCA-Request-Id" to lease.clientRequestId.ifBlank { requestId }))
         }
     }
 
@@ -1240,6 +1313,7 @@ class McaLoopbackServer(
         } finally {
             withContext(NonCancellable) {
                 completed.set(true)
+                runCatching { if (!socket.isInputShutdown) socket.shutdownInput() }
                 monitor.cancelAndJoin()
                 peerProbe.cancelAndJoin()
                 if (disconnected.get()) {
@@ -1307,9 +1381,11 @@ class McaLoopbackServer(
         lease: GenerationLease
     ) = coroutineScope {
         lease.job = currentCoroutineContext()[Job]
+        if (lease.stopRequested) throw CancellationException("Local API request was stopped before execution.")
         val responseId = "resp-${UUID.randomUUID().toString().replace("-", "")}";
         lease.requestId = responseId
-        val messageId = "msg-${UUID.randomUUID().toString().replace("-", "")}";
+        val messageId = "msg-${responseId.removePrefix("resp-")}";
+        val eventEncoder = LocalResponsesEventEncoder(messageId)
         val created = System.currentTimeMillis() / 1000L
         val stream = LocalApiRuntime.streamChat(
             request.chatRequest,
@@ -1342,7 +1418,7 @@ class McaLoopbackServer(
                 is GenerateEvent.Persist -> Unit
                 is GenerateEvent.Chunk -> {
                     finalStats = event.stats
-                    text.append(event.text)
+                    if (event.text.isNotEmpty()) text.append(event.text)
                     reasoning.append(event.reasoning)
                 }
                 is GenerateEvent.Done -> finalStats = event.stats
@@ -1355,7 +1431,9 @@ class McaLoopbackServer(
             output.flush()
         }
         withChatClientDisconnectCancellation(socket, responseId) {
+            synchronized(clientSocketLock) { responseStartedSockets.add(socket) }
             output.write("HTTP/1.1 200 OK\r\n")
+            output.write("X-MCA-Request-Id: ${lease.clientRequestId.ifBlank { responseId }}\r\n")
             output.write("Content-Type: text/event-stream; charset=utf-8\r\n")
             output.write("Cache-Control: no-cache\r\n")
             output.write("X-Accel-Buffering: no\r\n")
@@ -1364,105 +1442,122 @@ class McaLoopbackServer(
             output.flush()
             sendEvent(
                 "response.created",
-                responsesEnvelope(responseId, created, request.model, "in_progress", "", "", null)
+                eventEncoder.response(
+                    "response.created",
+                    responsesEnvelope(responseId, created, request.model, "in_progress", "", "", null)
+                )
+            )
+            sendEvent(
+                "response.in_progress",
+                eventEncoder.response(
+                    "response.in_progress",
+                    responsesEnvelope(responseId, created, request.model, "in_progress", "", "", null)
+                )
             )
             sendEvent(
                 "response.output_item.added",
-                responsesOutputItem(messageId, "in_progress", "")
+                eventEncoder.item("response.output_item.added", responsesOutputItem(messageId, "in_progress", ""))
+                    .put("response_id", responseId)
             )
             sendEvent(
                 "response.content_part.added",
-                JSONObject()
-                    .put("type", "response.content_part.added")
+                eventEncoder.part(
+                    "response.content_part.added",
+                    JSONObject().put("type", "output_text").put("text", "").put("annotations", JSONArray())
+                )
                     .put("response_id", responseId)
-                    .put("item_id", messageId)
-                    .put("output_index", 0)
-                    .put("content_index", 0)
-                    .put("part", JSONObject().put("type", "output_text").put("text", "").put("annotations", JSONArray()))
             )
-            stream.collect { event ->
-                capture(event)
-                when (event) {
-                    is GenerateEvent.Chunk -> {
-                        if (event.reasoning.isNotEmpty()) {
-                            sendEvent(
-                                "response.reasoning_summary_text.delta",
-                                JSONObject()
-                                    .put("type", "response.reasoning_summary_text.delta")
-                                    .put("response_id", responseId)
-                                    .put("item_id", messageId)
-                                    .put("output_index", 0)
-                                    .put("summary_index", 0)
-                                    .put("delta", event.reasoning)
-                            )
+            var terminalCaptured = false
+            try {
+                stream.collect { event ->
+                    if (terminalCaptured) return@collect
+                    capture(event)
+                    when (event) {
+                        is GenerateEvent.Chunk -> {
+                            if (event.text.isNotEmpty()) {
+                                sendEvent(
+                                    "response.output_text.delta",
+                                    eventEncoder.textDelta(event.text).put("response_id", responseId)
+                                )
+                            }
                         }
-                        if (event.text.isNotEmpty()) {
-                            sendEvent(
-                                "response.output_text.delta",
-                                JSONObject()
-                                    .put("type", "response.output_text.delta")
-                                    .put("response_id", responseId)
-                                    .put("item_id", messageId)
-                                    .put("output_index", 0)
-                                    .put("content_index", 0)
-                                    .put("delta", event.text)
-                            )
-                        }
+                        is GenerateEvent.Phase,
+                        is GenerateEvent.Persist -> Unit
+                        is GenerateEvent.Done,
+                        is GenerateEvent.Error -> terminalCaptured = true
                     }
-                    is GenerateEvent.Phase,
-                    is GenerateEvent.Persist,
-                    is GenerateEvent.Done,
-                    is GenerateEvent.Error -> Unit
                 }
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) {
+                    runCatching {
+                        sendEvent(
+                            "response.failed",
+                            eventEncoder.response(
+                                "response.failed",
+                                responsesEnvelope(responseId, created, request.model, "failed", text.toString(), "", finalStats)
+                                    .put("error", errorJson("generation_cancelled", "Local API generation was cancelled.").getJSONObject("error"))
+                            )
+                        )
+                    }
+                }
+                throw cancelled
+            } catch (error: IOException) {
+                throw error
+            } catch (error: Throwable) {
+                generationError = GenerateEvent.Error(
+                    message = error.message ?: "Local API generation failed.",
+                    stats = finalStats ?: RuntimeStats(),
+                    code = "generation_failed"
+                )
             }
             if (generationError != null) {
                 val error = requireNotNull(generationError)
+                val failedResponse = responsesEnvelope(
+                    responseId, created, request.model, "failed", text.toString(), reasoning.toString(), finalStats
+                ).put("error", errorJson(generationErrorCode(error), error.message).getJSONObject("error"))
                 sendEvent(
                     "response.failed",
-                    responsesEnvelope(responseId, created, request.model, "failed", text.toString(), reasoning.toString(), finalStats)
-                        .put("error", errorJson(generationErrorCode(error), error.message))
+                    eventEncoder.response("response.failed", failedResponse)
                 )
-                output.write("data: [DONE]\n\n")
-                output.flush()
                 return@withChatClientDisconnectCancellation
             }
-            if (text.isBlank()) {
+            if (text.isEmpty()) {
+                val failedResponse = responsesEnvelope(
+                    responseId, created, request.model, "failed", "", reasoning.toString(), finalStats
+                ).put(
+                    "error",
+                    errorJson("generation_empty_visible_output", emptyVisibleOutputMessage(finalStats, request.chatRequest.params))
+                        .getJSONObject("error")
+                )
                 sendEvent(
                     "response.failed",
-                    responsesEnvelope(responseId, created, request.model, "failed", "", reasoning.toString(), finalStats)
-                        .put("error", errorJson("generation_empty_visible_output", emptyVisibleOutputMessage(finalStats, request.chatRequest.params)))
+                    eventEncoder.response("response.failed", failedResponse)
                 )
-                output.write("data: [DONE]\n\n")
-                output.flush()
                 return@withChatClientDisconnectCancellation
             }
             sendEvent(
                 "response.output_text.done",
-                JSONObject()
-                    .put("type", "response.output_text.done")
-                    .put("response_id", responseId)
-                    .put("item_id", messageId)
-                    .put("output_index", 0)
-                    .put("content_index", 0)
-                    .put("text", text.toString())
+                eventEncoder.textDone(text.toString()).put("response_id", responseId)
             )
             sendEvent(
                 "response.content_part.done",
-                JSONObject()
-                    .put("type", "response.content_part.done")
-                    .put("response_id", responseId)
-                    .put("item_id", messageId)
-                    .put("output_index", 0)
-                    .put("content_index", 0)
-                    .put("part", JSONObject().put("type", "output_text").put("text", text.toString()).put("annotations", JSONArray()))
+                eventEncoder.part(
+                    "response.content_part.done",
+                    JSONObject().put("type", "output_text").put("text", text.toString()).put("annotations", JSONArray())
+                ).put("response_id", responseId)
             )
-            sendEvent("response.output_item.done", responsesOutputItem(messageId, "completed", text.toString()))
+            sendEvent(
+                "response.output_item.done",
+                eventEncoder.item("response.output_item.done", responsesOutputItem(messageId, "completed", text.toString()))
+                    .put("response_id", responseId)
+            )
             sendEvent(
                 "response.completed",
-                responsesEnvelope(responseId, created, request.model, "completed", text.toString(), reasoning.toString(), finalStats)
+                eventEncoder.response(
+                    "response.completed",
+                    responsesEnvelope(responseId, created, request.model, "completed", text.toString(), reasoning.toString(), finalStats)
+                )
             )
-            output.write("data: [DONE]\n\n")
-            output.flush()
         }
     }
 
@@ -1472,6 +1567,7 @@ class McaLoopbackServer(
         lease: GenerationLease
     ) = coroutineScope {
         lease.job = currentCoroutineContext()[Job]
+        if (lease.stopRequested) throw CancellationException("Local API request was stopped before execution.")
         val responseId = "resp-${UUID.randomUUID().toString().replace("-", "")}";
         lease.requestId = responseId
         val created = System.currentTimeMillis() / 1000L
@@ -1490,7 +1586,9 @@ class McaLoopbackServer(
         var generationSequence: Long? = null
         val sequenceBefore = LocalApiRuntime.generationSequence()
         withChatClientDisconnectCancellation(socket, responseId) {
+            var terminalCaptured = false
             stream.collect { event ->
+                if (terminalCaptured) return@collect
                 generationSequence = generationSequence
                     ?: LocalApiRuntime.generationSequence()?.takeIf { current ->
                         sequenceBefore?.let { current > it } ?: (current > 0L)
@@ -1504,8 +1602,14 @@ class McaLoopbackServer(
                         text.append(event.text)
                         reasoning.append(event.reasoning)
                     }
-                    is GenerateEvent.Done -> finalStats = event.stats
-                    is GenerateEvent.Error -> generationError = event
+                    is GenerateEvent.Done -> {
+                        finalStats = event.stats
+                        terminalCaptured = true
+                    }
+                    is GenerateEvent.Error -> {
+                        generationError = event
+                        terminalCaptured = true
+                    }
                 }
             }
             if (generationError != null) {
@@ -1519,7 +1623,7 @@ class McaLoopbackServer(
                 )
                 return@withChatClientDisconnectCancellation
             }
-            if (text.isBlank()) {
+            if (text.isEmpty()) {
                 writeError(
                     socket,
                     "500 Internal Server Error",
@@ -1539,7 +1643,8 @@ class McaLoopbackServer(
                     text.toString(),
                     reasoning.toString(),
                     finalStats
-                ).toString()
+                ).toString(),
+                extraHeaders = mapOf("X-MCA-Request-Id" to lease.clientRequestId.ifBlank { responseId })
             )
         }
     }
@@ -1569,7 +1674,6 @@ class McaLoopbackServer(
                 )
             )
         }
-        if (reasoning.isNotBlank()) response.put("reasoning_summary", reasoning)
         stats?.let { value ->
             response.put(
                 "usage",
@@ -1658,6 +1762,7 @@ class McaLoopbackServer(
 
     private fun writeNoContent(socket: Socket) {
         val output = socket.getOutputStream()
+        synchronized(clientSocketLock) { responseStartedSockets.add(socket) }
         output.write("HTTP/1.1 204 No Content\r\n".toByteArray())
         output.write(corsHeaders().toByteArray())
         output.write("Content-Length: 0\r\n".toByteArray())
@@ -1686,6 +1791,7 @@ class McaLoopbackServer(
     ) {
         val bytes = body.toByteArray(Charsets.UTF_8)
         val output = socket.getOutputStream()
+        synchronized(clientSocketLock) { responseStartedSockets.add(socket) }
         output.write("HTTP/1.1 $status\r\n".toByteArray())
         output.write("Content-Type: $contentType\r\n".toByteArray())
         output.write(corsHeaders().toByteArray())
@@ -1764,7 +1870,8 @@ class McaLoopbackServer(
     ): PreparedResponsesRequest {
         val parsed = LocalResponsesCompat.parseRequest(
             body = body,
-            baseParams = LocalApiRuntime.generationParamsProvider()
+            baseParams = LocalApiRuntime.generationParamsProvider(),
+            streaming = streaming
         )
         if (parsed is LocalResponsesParseResult.Rejected) {
             return PreparedResponsesRequest.Rejected(parsed.rejection)
@@ -2460,6 +2567,12 @@ class McaLoopbackServer(
 
         @Volatile
         var requestId: String = ""
+
+        @Volatile
+        var clientRequestId: String = ""
+
+        @Volatile
+        var stopRequested: Boolean = false
     }
 
     private data class HttpRequest(
@@ -2509,6 +2622,7 @@ class McaLoopbackServer(
         private const val CLIENT_READ_TIMEOUT_MS = 15_000
         private const val SERVER_BACKLOG = 128
         private const val MAX_ACTIVE_CLIENTS = 16
+        private val REQUEST_ID_PATTERN = Regex("[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
         // Keep a disconnected SSE client observable before the native request can hold the
         // single generation slot for several seconds.
         private const val SSE_HEARTBEAT_INTERVAL_MS = 1_000L

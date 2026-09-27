@@ -95,17 +95,15 @@ object LocalApiCapabilityRegistry {
             authRequired = true,
             streaming = true,
             description = "OpenAI Responses-compatible text/message subset.",
-            acceptedFields = listOf(
-                "model", "instructions", "input", "stream", "max_output_tokens", "temperature",
-                "top_p", "stop", "reasoning_mode", "thinking_mode", "enable_thinking",
-                "hide_reasoning"
-            ),
+            acceptedFields = LocalResponsesCompat.acceptedFields,
             notes = listOf(
-                "Only text and message input parts are supported; unsupported input parts are rejected.",
-                "Tool calls, hosted tools and arbitrary Responses fields are not implemented."
+                "Input is text or an array of role/content messages with input_text parts; unsupported fields and parts are rejected before dispatch.",
+                "Streaming emits numbered typed Responses events and a response.completed or response.failed terminal event.",
+                "Reasoning controls and reasoning output items are outside this text subset and are rejected when requested.",
+                "Tool calls, hosted tools, response continuation and stored-response retrieval are not implemented."
             ),
             errorCodes = listOf(
-                "invalid_request", "parameter_scope_conflict", "model_not_found", "runtime_busy",
+                "invalid_request", "unsupported_parameter", "parameter_scope_conflict", "model_not_found", "runtime_busy",
                 "context_length_exceeded", "generation_failed", "generation_cancelled", "unauthorized"
             )
         ),
@@ -124,7 +122,8 @@ object LocalApiCapabilityRegistry {
             ),
             notes = listOf(
                 "Runtime/model capability and execution evidence are validated before native dispatch.",
-                "Unsupported task modes, samplers, image counts and response formats are rejected."
+                "Unsupported task modes, samplers, image counts and response formats are rejected.",
+                "Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it."
             ),
             errorCodes = listOf(
                 "invalid_json", "unsupported_sampler", "unsupported_image_count",
@@ -139,8 +138,13 @@ object LocalApiCapabilityRegistry {
             support = LocalApiCapabilitySupport.SUPPORTED,
             authRequired = true,
             streaming = false,
-            description = "Stops the active chat or image generation request.",
-            errorCodes = listOf("unauthorized", "generation_not_active", "stop_failed")
+            description = "Stops the current generation or one matching request_id.",
+            acceptedFields = listOf("request_id"),
+            notes = listOf(
+                "With request_id, only the matching active Local API request is stopped; stale IDs do not affect later requests.",
+                "Without request_id, the legacy operation stops the generation current when this call is received."
+            ),
+            errorCodes = listOf("unauthorized", "invalid_request", "invalid_request_id", "unsupported_parameter", "generation_not_active", "stop_failed")
         ),
         LocalApiEndpointCapability(
             method = "GET",

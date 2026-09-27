@@ -54,8 +54,10 @@ class ManagedGgufRecoveryTest {
 
         val parsed = parsePersistedModelManifest(persisted.toString())
 
-        assertEquals(listOf(valid), parsed)
-        assertTrue(parsed.single().id.isNotBlank())
+        assertEquals(valid, parsed.first())
+        assertEquals(3, parsed.size)
+        assertTrue(parsed.drop(1).all { it.integrityState == ModelIntegrityState.DAMAGED })
+        assertTrue(parsed.drop(1).all { !it.diagnostic.isNullOrBlank() })
     }
 
     @Test
@@ -85,7 +87,7 @@ class ManagedGgufRecoveryTest {
     }
 
     @Test
-    fun exactDuplicateModelsCollapseAndKeepVisualProjectorBinding() {
+    fun sameMainDigestWithDifferentProjectorsRemainsDistinct() {
         val plain = manifest(File("plain.gguf")).copy(
             sha256 = "a".repeat(64),
             sizeBytes = 42L,
@@ -103,11 +105,9 @@ class ManagedGgufRecoveryTest {
 
         val merged = deduplicateEquivalentModelRecordsForCatalog(listOf(plain, bound))
 
-        assertEquals(1, merged.size)
-        assertEquals("The bound exact-content record keeps the stable catalog id", bound.id, merged.single().id)
-        assertEquals(bound.path, merged.single().path)
-        assertTrue(merged.single().hasVisionProjector)
-        assertEquals(bound.visionProjectorPath, merged.single().visionProjectorPath)
+        assertEquals(2, merged.size)
+        assertTrue(merged.any { it.id == plain.id && !it.hasVisionProjector })
+        assertTrue(merged.any { it.id == bound.id && it.visionProjectorPath == bound.visionProjectorPath })
     }
 
     @Test
@@ -121,7 +121,7 @@ class ManagedGgufRecoveryTest {
     }
 
     @Test
-    fun sameCanonicalPathKeepsOlderProjectorWhenNewerRowIsPlain() {
+    fun sameCanonicalPathDoesNotStealOlderProjector() {
         val modelPath = File("same-model.gguf").absoluteFile
         val newerPlain = manifest(modelPath).copy(
             id = "newer-plain",
@@ -142,10 +142,9 @@ class ManagedGgufRecoveryTest {
 
         val merged = deduplicateModelRecordsByCanonicalPath(listOf(newerPlain, olderBound))
 
-        assertEquals(1, merged.size)
-        assertEquals("newer-plain", merged.single().id)
-        assertTrue(merged.single().hasVisionProjector)
-        assertEquals(olderBound.visionProjectorPath, merged.single().visionProjectorPath)
+        assertEquals(2, merged.size)
+        assertTrue(merged.any { it.id == "newer-plain" && !it.hasVisionProjector })
+        assertTrue(merged.any { it.id == "older-bound" && it.visionProjectorPath == olderBound.visionProjectorPath })
     }
 
     @Test

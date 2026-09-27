@@ -27,6 +27,13 @@ enum class ParameterApiOverridePolicy {
     NEVER
 }
 
+enum class ParameterExecutionSupport {
+    NATIVE,
+    HOST_ENFORCED,
+    UNSUPPORTED,
+    UNKNOWN
+}
+
 data class ParameterFieldPolicy(
     val field: String,
     val owner: ParameterOwner,
@@ -34,7 +41,8 @@ data class ParameterFieldPolicy(
     val apiOverridePolicy: ParameterApiOverridePolicy,
     val affectsSemantics: Boolean = false,
     val requiredGate: String? = null,
-    val evidence: String = "product-contract"
+    val evidence: String = "product-contract",
+    val executionSupport: ParameterExecutionSupport = ParameterExecutionSupport.UNKNOWN
 )
 
 data class VersionedParameterPolicySet(
@@ -117,7 +125,7 @@ class ParameterFieldPolicyRegistry(
                 policyVersion = BUILTIN_POLICY_VERSION,
                 policies = when (runtime) {
                     LocalChatRuntime.LLAMA_CPP -> llamaPolicies()
-                    LocalChatRuntime.GENIEX_LLAMA_CPP -> llamaPolicies() + mapOf(
+                    LocalChatRuntime.GENIEX_LLAMA_CPP -> llamaPolicies(LocalChatRuntime.GENIEX_LLAMA_CPP) + mapOf(
                         "geniex_compute_unit" to ParameterFieldPolicy(
                             field = "geniex_compute_unit",
                             owner = ParameterOwner.MODEL_EXECUTION,
@@ -131,7 +139,7 @@ class ParameterFieldPolicyRegistry(
                 }
             )
 
-        private fun llamaPolicies(): Map<String, ParameterFieldPolicy> = buildMap {
+        private fun llamaPolicies(runtime: LocalChatRuntime = LocalChatRuntime.LLAMA_CPP): Map<String, ParameterFieldPolicy> = buildMap {
             loadFields(
                 "n_ctx", "n_batch", "n_ubatch", "n_gpu_layers", "main_gpu", "split_mode",
                 "n_cpu_moe", "cache_type_k", "cache_type_v", "flash_attn", "perf", "n_parallel",
@@ -141,7 +149,7 @@ class ParameterFieldPolicyRegistry(
             behaviorHotField("use_jinja", "template-correctness")
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
-            generationFields()
+            generationFields(runtime)
         }
 
         private fun mnnPolicies(): Map<String, ParameterFieldPolicy> = buildMap {
@@ -153,7 +161,7 @@ class ParameterFieldPolicyRegistry(
             behaviorHotField("use_jinja", "template-correctness")
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
-            generationFields()
+            generationFields(LocalChatRuntime.MNN_CPU)
             put(
                 "mca_debug_trace",
                 ParameterFieldPolicy(
@@ -171,7 +179,7 @@ class ParameterFieldPolicyRegistry(
             loadFields("bundle_fingerprint", "backend", "runtime_id", "context_binary", "shape_profile")
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
-            generationFields()
+            generationFields(LocalChatRuntime.GENIEX_QAIRT)
         }
 
         /**
@@ -184,7 +192,7 @@ class ParameterFieldPolicyRegistry(
             loadFields("backend", "max_num_tokens", "cache_dir", "n_threads")
             behaviorHotField("chat_template_mode", "template-correctness")
             behaviorHotField("template_policy_ref", "template-correctness")
-            generationFields()
+            generationFields(LocalChatRuntime.LITERT_LM)
         }
 
         private fun MutableMap<String, ParameterFieldPolicy>.loadFields(vararg fields: String) {
@@ -232,13 +240,33 @@ class ParameterFieldPolicyRegistry(
             )
         }
 
-        private fun MutableMap<String, ParameterFieldPolicy>.generationFields() {
+        private fun MutableMap<String, ParameterFieldPolicy>.generationFields(runtime: LocalChatRuntime) {
             listOf(
                 "n_predict", "max_tokens", "temperature", "top_k", "top_p", "min_p",
                 "repeat_penalty", "repetition_penalty", "presence_penalty", "frequency_penalty",
                 "seed", "system_prompt", "stop_words", "stop",
                 "reasoning_mode", "enable_thinking", "thinking_budget", "hide_reasoning"
             ).forEach { field ->
+                val support = when {
+                    field in setOf("system_prompt", "hide_reasoning", "reasoning_mode", "stop_words", "stop") ->
+                        ParameterExecutionSupport.HOST_ENFORCED
+                    runtime == LocalChatRuntime.LITERT_LM && field == "min_p" ->
+                        ParameterExecutionSupport.UNSUPPORTED
+                    runtime == LocalChatRuntime.LITERT_LM && field in setOf("temperature", "top_k", "top_p", "seed") ->
+                        ParameterExecutionSupport.UNKNOWN
+                    runtime in setOf(LocalChatRuntime.GENIEX_QAIRT, LocalChatRuntime.GENIEX_LLAMA_CPP) && field == "thinking_budget" ->
+                        ParameterExecutionSupport.UNSUPPORTED
+                    else -> ParameterExecutionSupport.NATIVE
+                }
+                val evidence = when {
+                    runtime == LocalChatRuntime.LITERT_LM && field == "min_p" -> "litertlm-0.16.1:no-min-p-api"
+                    runtime == LocalChatRuntime.LITERT_LM && support == ParameterExecutionSupport.UNKNOWN ->
+                        "litertlm-0.16.1:conversation-sampler-cpu-gpu-only; inspect request trace for delegate"
+                    runtime in setOf(LocalChatRuntime.GENIEX_QAIRT, LocalChatRuntime.GENIEX_LLAMA_CPP) && field == "thinking_budget" ->
+                        "geniex-0.3.12:template-enable-thinking-only"
+                    support == ParameterExecutionSupport.HOST_ENFORCED -> "mca-request-context-and-stream-policy"
+                    else -> "adapter-submission; native acknowledgement is separate"
+                }
                 put(
                     field,
                     ParameterFieldPolicy(
@@ -246,7 +274,9 @@ class ParameterFieldPolicyRegistry(
                         owner = ParameterOwner.ASSISTANT_GENERATION,
                         mutability = ParameterMutability.GENERATION_ONLY,
                         apiOverridePolicy = ParameterApiOverridePolicy.REQUEST_ALLOWED,
-                        affectsSemantics = true
+                        affectsSemantics = true,
+                        evidence = evidence,
+                        executionSupport = support
                     )
                 )
             }

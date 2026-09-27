@@ -27,6 +27,7 @@ class LocalImageBundleRecoveryTest {
         assertEquals(listOf(destination.canonicalFile), recovered)
         assertFalse(candidate.exists())
         assertTrue(File(destination, "model.gguf").isFile)
+        assertTrue(root.listFiles().orEmpty().any { it.name.startsWith(".bundle-example.empty-") && it.isDirectory })
     }
 
     @Test

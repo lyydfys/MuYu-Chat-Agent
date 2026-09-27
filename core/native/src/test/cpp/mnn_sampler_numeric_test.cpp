@@ -1,4 +1,5 @@
 #include <cstring>
+#include <algorithm>
 #include <iostream>
 #include <limits>
 #include <set>
@@ -82,22 +83,48 @@ int main() {
         Sampler allBanned(context, config(R"({"sampler_type":"mixed","mixed_samplers":["temperature"],"banned_tokens":[0,1,2],"temperature":1,"seed":7})"));
         require(allBanned.sample(floats({1,2,3})) == -1, "all banned tokens fail closed");
 
-        json params = {{"temperature",0.7},{"top_k",40},{"top_p",0.9},{"min_p",0.05},{"seed",7}};
+        json params = {{"temperature",0.7},{"top_k",40},{"top_p",0.9},{"min_p",0.05},
+                       {"repeat_penalty",1.12},{"presence_penalty",0.15},{"frequency_penalty",0.25},
+                       {"seed",7}};
         json cpu = {{"backend_type","cpu"},{"precision","low"},{"use_cached_mmap",true},{"use_mmap",true},{"reuse_kv",true}};
         mca::mnn::applyCpuCacheSafety(cpu);
         mca::mnn::applySamplingConfig(cpu, params, json::object());
         require(cpu["precision"] == "high" && cpu["use_cached_mmap"] == false && cpu["reuse_kv"] == true && cpu["use_mmap"] == true, "CPU precision/cache safety");
         for (auto field : {"temperature","top_k","top_p","min_p","seed"}) require(cpu[field] == params[field], "all CPU sampler params transmitted");
+        require(cpu["repetition_penalty"] == params["repeat_penalty"] &&
+                cpu["presence_penalty"] == params["presence_penalty"] &&
+                cpu["frequency_penalty"] == params["frequency_penalty"],
+                "all CPU penalty params transmitted");
+        require(std::find(cpu["mixed_samplers"].begin(), cpu["mixed_samplers"].end(), "penalty") !=
+                    cpu["mixed_samplers"].end(),
+                "penalty stage is enabled when penalty params are requested");
         json opencl = {{"backend_type","opencl"},{"precision","low"},{"use_cached_mmap",true}};
         auto original = opencl;
         mca::mnn::applyCpuCacheSafety(opencl);
         require(opencl == original, "OpenCL policy unchanged");
         mca::mnn::applySamplingConfig(opencl, params, json::object());
-        for (auto field : {"temperature","top_k","top_p","min_p","seed","sampler_type"}) require(cpu[field] == opencl[field], "CPU/OpenCL sampler parity");
+        for (auto field : {"temperature","top_k","top_p","min_p","seed","sampler_type",
+                           "repetition_penalty","presence_penalty","frequency_penalty"}) require(cpu[field] == opencl[field], "CPU/OpenCL sampler parity");
         mca::mnn::applySamplingConfig(cpu, params, {{"topK",8},{"topP",0.8},{"minP",0.2},{"seed",11}});
         require(cpu["top_k"] == 8 && cpu["topK"] == 8 && cpu["top_p"] == 0.8 && cpu["min_p"] == 0.2 && cpu["seed"] == 11, "advanced aliases win");
         mca::mnn::applySamplingConfig(cpu, params, {{"temperature",0}});
-        require(cpu["sampler_type"] == "greedy" && cpu["top_k"] == 1 && cpu["top_p"] == 1, "greedy config");
+        require(cpu["sampler_type"] == "mixed" && cpu["top_k"] == 1 && cpu["top_p"] == 1 &&
+                cpu["mixed_samplers"] == json::array({"penalty", "greedy"}), "greedy config preserves penalties");
+        json penalizedConfig;
+        mca::mnn::applySamplingConfig(penalizedConfig, {
+                {"temperature",0}, {"repeat_penalty",2.0}, {"presence_penalty",0.0},
+                {"frequency_penalty",0.0}}, json::object());
+        auto penaltyContext = std::make_shared<LlmContext>();
+        penaltyContext->history_tokens = {0};
+        Sampler penalized(penaltyContext, config(penalizedConfig.dump()));
+        require(penalized.sample(floats({4,3,1})) == 1, "repetition penalty changes actual argmax");
+        require(json::parse(penaltyContext->sampler_config_json)["repetition_penalty"] == 2.0,
+                "penalty readback comes from active sampler");
+        mca::mnn::applySamplingConfig(penalizedConfig, {
+                {"temperature",0}, {"repeat_penalty",1.0}, {"presence_penalty",-1.0},
+                {"frequency_penalty",-1.0}}, json::object());
+        Sampler promoted(penaltyContext, config(penalizedConfig.dump()));
+        require(promoted.sample(floats({2,3,1})) == 0, "negative penalties promote repeated tokens");
         for (const auto& bad : {json{{"top_k",1.5}}, json{{"min_p",2}}, json{{"temperature",-1}}, json{{"seed","7"}}}) {
             bool rejected = false;
             try { mca::mnn::applySamplingConfig(cpu, params, bad); } catch (const std::invalid_argument&) { rejected = true; }

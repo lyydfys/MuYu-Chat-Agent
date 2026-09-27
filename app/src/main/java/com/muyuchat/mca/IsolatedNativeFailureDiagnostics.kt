@@ -518,8 +518,12 @@ internal class LocalChatWorkerStageJournal private constructor(
         private const val STATE_COMPLETED = "completed"
         private const val STATE_FAILED = "failed"
 
-        fun forContext(context: Context): LocalChatWorkerStageJournal = LocalChatWorkerStageJournal(
-            file = File(File(context.filesDir, JOURNAL_DIRECTORY), JOURNAL_FILE),
+        fun forContext(context: Context, scope: String? = null): LocalChatWorkerStageJournal = LocalChatWorkerStageJournal(
+            file = File(File(context.filesDir, JOURNAL_DIRECTORY),
+                if (scope == null) JOURNAL_FILE else {
+                    require(scope.matches(Regex("[a-z0-9_]{1,40}")))
+                    "$scope-$JOURNAL_FILE"
+                }),
             now = System::currentTimeMillis
         )
 

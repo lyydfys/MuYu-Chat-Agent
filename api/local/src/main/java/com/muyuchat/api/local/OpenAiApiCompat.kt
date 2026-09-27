@@ -31,8 +31,8 @@ internal object OpenAiApiCompat {
     fun corsHeaders(): String = buildString {
         append("Access-Control-Allow-Origin: *\r\n")
         append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
-        append("Access-Control-Allow-Headers: Authorization, Content-Type, X-API-Key, x-api-key, Accept, Idempotency-Key\r\n")
-        append("Access-Control-Expose-Headers: Retry-After, X-Retry-After-Ms\r\n")
+        append("Access-Control-Allow-Headers: Authorization, Content-Type, X-API-Key, x-api-key, Accept, Idempotency-Key, X-MCA-Request-Id\r\n")
+        append("Access-Control-Expose-Headers: Retry-After, X-Retry-After-Ms, X-MCA-Request-Id\r\n")
         append("Access-Control-Max-Age: 86400\r\n")
         append("Access-Control-Allow-Private-Network: true\r\n")
         append("Access-Control-Allow-Credentials: false\r\n")

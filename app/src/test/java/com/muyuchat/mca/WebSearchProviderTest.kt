@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.Role
+import com.muyuchat.core.engine.RuntimeMonotonicClock
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -597,12 +598,69 @@ class WebSearchProviderTest {
     }
 
     @Test
+    fun searchElapsedUsesMonotonicClockWhileCacheKeepsItsEpochClock() = runBlocking {
+        var epochMs = 100_000L
+        var elapsedMs = 0L
+        var calls = 0
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            calls++
+            epochMs -= 10_000L
+            elapsedMs += 25L
+            Response.Builder()
+                .request(chain.request()).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("""{"results":[{"title":"MCA local AI","url":"https://example.com/mca","snippet":"MCA local AI documentation"}]}"""
+                    .toResponseBody("application/json".toMediaType()))
+                .build()
+        }.build()
+        val provider = WebSearchProvider(
+            client = client,
+            nowMillis = { epochMs },
+            clock = RuntimeMonotonicClock { elapsedMs }
+        )
+        val config = WebSearchConfig(
+            enabled = true,
+            provider = WebSearchProviderType.CUSTOM_JSON,
+            endpoint = WEB_SEARCH_PUBLIC_CHECK_ENDPOINT,
+            fetchPageContent = false
+        )
+        val plan = buildWebSearchPlan("MCA local AI")
+        val first = provider.search(plan, config)
+        epochMs += 1L
+        val cached = provider.search(plan, config)
+
+        assertEquals(25L, first.elapsedMs)
+        assertEquals(0L, cached.elapsedMs)
+        assertEquals(first.documents, cached.documents)
+        assertEquals(1, calls)
+    }
+
+    @Test
+    fun failedChatSearchMeasuresElapsedFromANegativeMonotonicOrigin() = runBlocking {
+        val ticks = ArrayDeque(listOf(-50L, 25L))
+        val outcome = executeWebSearchForChatTurn(
+            messages = listOf(ChatMessage(Role.USER, "MCA documentation")),
+            config = WebSearchConfig(
+                enabled = true,
+                provider = WebSearchProviderType.SEARXNG,
+                endpoint = "https://search.example.test"
+            ),
+            oneShotEnabled = true,
+            assistantWebSearchEnabled = false,
+            search = { _, _ -> throw java.io.IOException("test failure") },
+            clock = RuntimeMonotonicClock { ticks.removeFirst() }
+        )
+        assertFalse(outcome.success)
+        assertEquals(75L, checkNotNull(outcome.diagnostic).elapsedMs)
+    }
+
+    @Test
     fun repeatedKeywordSearchUsesShortLocalCache() = runBlocking {
         val server = MiniSearchServer()
         var now = 10_000L
         val provider = WebSearchProvider(
             allowPrivateNetworkFetch = true,
-            nowMillis = { now }
+            nowMillis = { now },
+            clock = RuntimeMonotonicClock { 100L }
         )
         server.start()
         try {
@@ -635,7 +693,8 @@ class WebSearchProviderTest {
         val provider = WebSearchProvider(
             allowPrivateNetworkFetch = true,
             cacheTtlMillis = 50L,
-            nowMillis = { now }
+            nowMillis = { now },
+            clock = RuntimeMonotonicClock { 100L }
         )
         server.start()
         try {
@@ -2158,7 +2217,7 @@ class WebSearchProviderTest {
                 oneShotEnabled = false,
                 assistantWebSearchEnabled = false,
                 search = { plan, config -> WebSearchProvider(allowPrivateNetworkFetch = true).search(plan, config) },
-                nowMillis = { 1_000L }
+                clock = RuntimeMonotonicClock { 1_000L }
             )
 
             assertTrue(outcome.requested)

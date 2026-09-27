@@ -10,6 +10,7 @@ import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
 import java.nio.file.Files
+import java.security.MessageDigest
 
 class GgufLoadPreflightTest {
     @Test
@@ -73,16 +74,42 @@ class GgufLoadPreflightTest {
     }
 
     @Test
-    fun repositoryLoadPathContainsNoFullContentHash() {
-        val source = sourceFile("core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreRepository.kt")
-        val load = functionBody(source, "fun validateForLoad(id: String)")
-        val verify = functionBody(source, "fun verify(id: String)")
+    fun loadFingerprintRejectsSameSizeMutationBeyondTheMetadataPrefix() {
+        val root = Files.createTempDirectory("gguf-load-full-sha").toFile()
+        val model = writeGguf(File(root, "Qwen3.5-4B-Q4_0.gguf"), architecture = "qwen3")
+        val projector = writeGguf(File(root, "mmproj-model-f16.gguf"), architecture = "clip")
+        for (file in listOf(model, projector)) {
+            expandSparse(file)
+            val expectedSize = file.length()
+            val expectedSha = sha256(file)
+            val validate = {
+                if (file == model) validateGgufLoadPreflight(file, expectedSize, expectedSha256 = expectedSha)
+                else validateGgufProjectorLoadPreflight(file, expectedSize, expectedSha256 = expectedSha)
+            }
+            assertTrue(validate().canLoad)
+            RandomAccessFile(file, "rw").use { changed ->
+                changed.seek(expectedSize - 1)
+                changed.write(0x5a)
+            }
+            val rejected = validate()
+            assertFalse(rejected.canLoad)
+            assertTrue(rejected.details.contains("expected=$expectedSha"))
+            assertTrue(rejected.details.contains("actual="))
+            assertEquals(expectedSize, file.length())
+        }
+    }
 
-        assertTrue(load.contains("validateGgufLoadPreflight(file, model.sizeBytes)"))
-        assertTrue(load.contains("validateGgufProjectorLoadPreflight("))
-        assertFalse(load.contains("sha256("))
-        assertTrue(verify.contains("sha256(file)"))
-        assertTrue(verify.contains("sha256(candidate)"))
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(8_192)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read > 0) digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
     }
 
     private fun expandSparse(file: File) {

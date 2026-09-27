@@ -36,10 +36,14 @@ import org.json.JSONObject
  * error path.  This is an execution boundary, not a device admission gate.
  */
 open class LocalChatWorkerService : Service() {
+    protected open val journalScope: String? = null
+    protected open val foregroundNotificationId: Int get() = FOREGROUND_NOTIFICATION_ID
+    protected open val nativeOperationTimeoutLimitMs: Long? = null
     private val lock = Any()
     private val nativeOperationGate = ReentrantLock()
     private val watchdogHandler = Handler(Looper.getMainLooper())
     private val operationSequence = AtomicLong(0L)
+    private val generationSequence = AtomicLong(0L)
     private val watchdogs = ConcurrentHashMap<Long, Runnable>()
     private val cancellationWatchdogs = ConcurrentHashMap<Long, Runnable>()
     private val liteRtCancellationState = LocalChatCancellationState()
@@ -70,7 +74,7 @@ open class LocalChatWorkerService : Service() {
     private var retainedLoadFailureStatsJson: String? = null
 
     @Volatile
-    private var lastStableRuntimeStatsJson: String = IDLE_RUNTIME_STATS_JSON
+    private var lastStableRuntimeStatsJson: String = withRuntimeStatsLoadGeneration(IDLE_RUNTIME_STATS_JSON, 0L)
 
     @Volatile
     private var activeNativeStage: String? = null
@@ -108,6 +112,7 @@ open class LocalChatWorkerService : Service() {
             activeOperationTarget = loadTarget
             var successfulReadback: JSONObject? = null
             var loadSucceeded = false
+            var loadEpoch: Long? = null
             prepareLoadDiagnostic(runtime, modelPath, paramsJson)
             try {
                 val result = guarded(
@@ -119,6 +124,10 @@ open class LocalChatWorkerService : Service() {
                     synchronized(lock) {
                     retainedLoadFailureStatsJson = null
                     val previous = activeRunner
+                    activeRuntime = null
+                    activeRunner = null
+                    invalidateRuntimeStatsLocked()
+                    loadEpoch = runtimeStateEpoch
                     if (previous != null && previous !== runner) {
                         runCatching { previous.unloadModel() }
                     }
@@ -161,7 +170,6 @@ open class LocalChatWorkerService : Service() {
                     }
                     activeRuntime = runtime
                     activeRunner = runner
-                    runtimeStateEpoch += 1L
                     val result = runner.loadModel(modelPath, paramsJson)
                     if (result != 0) {
                         val failureStatsJson = LocalChatWorkerLoadFailureStats.capture(
@@ -177,16 +185,17 @@ open class LocalChatWorkerService : Service() {
                         runCatching { runner.unloadModel() }
                         activeRuntime = null
                         activeRunner = null
-                        retainedLoadFailureStatsJson = failureStatsJson
-                        lastStableRuntimeStatsJson = failureStatsJson
-                        runtimeStateEpoch += 1L
+                        invalidateRuntimeStatsLocked(failureStatsJson)
+                        retainedLoadFailureStatsJson = lastStableRuntimeStatsJson
                     } else {
                         val readbackStats = runCatching {
                             guardedNativeCall("stats", recordStage = false) {
                                 runner.getRuntimeStatsJson()
                             }
                         }.getOrNull()
-                        readbackStats?.let { lastStableRuntimeStatsJson = it }
+                        readbackStats?.let {
+                            lastStableRuntimeStatsJson = withRuntimeStatsLoadGeneration(it, runtimeStateEpoch)
+                        }
                         successfulReadback = readbackStats
                             ?.let { runCatching { JSONObject(it) }.getOrNull() }
                     }
@@ -212,15 +221,15 @@ open class LocalChatWorkerService : Service() {
                 if (!loadSucceeded) {
                     runCatching {
                         guarded("unload", recordStage = false) {
-                            runCatching { runner.requestStop() }
-                            runner.unloadModel()
-                        }
-                    }
-                    synchronized(lock) {
-                        if (activeRunner === runner) {
-                            activeRuntime = null
-                            activeRunner = null
-                            runtimeStateEpoch += 1L
+                            synchronized(lock) {
+                                if (loadEpoch == runtimeStateEpoch) {
+                                    activeRuntime = null
+                                    activeRunner = null
+                                    invalidateRuntimeStatsLocked()
+                                    runCatching { runner.requestStop() }
+                                    runner.unloadModel()
+                                }
+                            }
                         }
                     }
                     leaveLoadedModelForeground()
@@ -238,16 +247,16 @@ open class LocalChatWorkerService : Service() {
         override fun unloadModel() {
             guarded("unload") {
                 synchronized(lock) {
-                    activeRunner?.let { runner ->
-                        runCatching { runner.requestStop() }
-                        runner.unloadModel()
-                    }
+                    val runner = activeRunner
                     activeRuntime = null
                     activeRunner = null
                     activeOperationTarget = null
                     retainedLoadFailureStatsJson = null
-                    lastStableRuntimeStatsJson = IDLE_RUNTIME_STATS_JSON
-                    runtimeStateEpoch += 1L
+                    invalidateRuntimeStatsLocked()
+                    runner?.let {
+                        runCatching { runner.requestStop() }
+                        runner.unloadModel()
+                    }
                 }
             }
             leaveLoadedModelForeground()
@@ -267,7 +276,9 @@ open class LocalChatWorkerService : Service() {
                 require(!request.hasPrefixCache) {
                     "An ordinary isolated text request must not contain prefix-cache metadata."
                 }
-                requireRunner().beginCompletion(request.messagesJson, request.paramsJson)
+                requireRunner().beginCompletion(request.messagesJson, request.paramsJson).also {
+                    if (it == 0) generationSequence.incrementAndGet()
+                }
             }
         }
 
@@ -295,7 +306,7 @@ open class LocalChatWorkerService : Service() {
                         },
                         fullSessionState = request.fullSessionState
                     )
-                )
+                ).also { if (it == 0) generationSequence.incrementAndGet() }
             }
         }
 
@@ -334,6 +345,7 @@ open class LocalChatWorkerService : Service() {
                 // thread.  The worker is isolated, so killing it after the
                 // grace window cannot take down the UI process.
                 scheduleForcedRecoveryAfterStop()
+                scheduleMnnProducerRecoveryAfterStop()
                 dispatchRunnerStop()
                 return
             }
@@ -353,6 +365,7 @@ open class LocalChatWorkerService : Service() {
             val active = activeNativeStage != null || activeRunner?.isGenerationRunning() == true
             if (!active) return false
             scheduleForcedRecoveryAfterStop()
+            scheduleMnnProducerRecoveryAfterStop()
             dispatchRunnerStop()
             return true
         }
@@ -370,7 +383,10 @@ open class LocalChatWorkerService : Service() {
                             fallback = retainedLoadFailureStatsJson ?: lastStableRuntimeStatsJson
                         )
                     }
-                    val stats = snapshot.runner?.getRuntimeStatsJson() ?: snapshot.fallback
+                    val stats = withRuntimeStatsLoadGeneration(
+                        snapshot.runner?.getRuntimeStatsJson() ?: snapshot.fallback,
+                        snapshot.epoch
+                    )
                     val accepted = synchronized(lock) {
                         if (isRuntimeStatsSnapshotCurrent(
                                 capturedEpoch = snapshot.epoch,
@@ -401,20 +417,29 @@ open class LocalChatWorkerService : Service() {
             }
         }
 
+        override fun canReleasePreparedInputs(): Boolean {
+            if (!nativeOperationGate.tryLock()) return false
+            return try {
+                activeNativeStage == null && (activeRunner?.canReleasePreparedInputs() ?: true)
+            } finally {
+                nativeOperationGate.unlock()
+            }
+        }
+
         override fun shutdown() {
             guarded("shutdown") {
                 synchronized(lock) {
-                    activeRunner?.let { runner ->
-                        runCatching { runner.requestStop() }
-                        runCatching { runner.unloadModel() }
-                        runCatching { runner.shutdown() }
-                    }
+                    val runner = activeRunner
                     activeRuntime = null
                     activeRunner = null
                     activeOperationTarget = null
                     retainedLoadFailureStatsJson = null
-                    lastStableRuntimeStatsJson = IDLE_RUNTIME_STATS_JSON
-                    runtimeStateEpoch += 1L
+                    invalidateRuntimeStatsLocked()
+                    runner?.let {
+                        runCatching { runner.requestStop() }
+                        runCatching { runner.unloadModel() }
+                        runCatching { runner.shutdown() }
+                    }
                 }
             }
             leaveLoadedModelForeground()
@@ -425,7 +450,7 @@ open class LocalChatWorkerService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureForegroundChannel()
-        stageJournal = LocalChatWorkerStageJournal.forContext(applicationContext)
+        stageJournal = LocalChatWorkerStageJournal.forContext(applicationContext, journalScope)
         runCatching { stageJournal.recordWorkerStarted(Process.myPid(), processPssKb()) }
     }
 
@@ -469,8 +494,7 @@ open class LocalChatWorkerService : Service() {
             activeNativeOperationToken = 0L
             runners.clear()
             retainedLoadFailureStatsJson = null
-            lastStableRuntimeStatsJson = IDLE_RUNTIME_STATS_JSON
-            runtimeStateEpoch += 1L
+            invalidateRuntimeStatsLocked()
         }
         super.onDestroy()
     }
@@ -495,7 +519,7 @@ open class LocalChatWorkerService : Service() {
             .build()
         ServiceCompat.startForeground(
             this,
-            FOREGROUND_NOTIFICATION_ID,
+            foregroundNotificationId,
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
@@ -521,7 +545,7 @@ open class LocalChatWorkerService : Service() {
             .build()
         ServiceCompat.startForeground(
             this,
-            FOREGROUND_NOTIFICATION_ID,
+            foregroundNotificationId,
             notification,
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         )
@@ -618,7 +642,14 @@ open class LocalChatWorkerService : Service() {
         var liteRtTerminal = true
         if (recordStage) recordStageStarted(stage, paramsJson)
         val token = operationSequence.incrementAndGet()
-        val operationPolicy = watchdogOperationPolicy(stage, paramsJson, operationTarget)
+        val defaultPolicy = watchdogOperationPolicy(stage, paramsJson, operationTarget)
+        val operationPolicy = nativeOperationTimeoutLimitMs?.let { limit ->
+            defaultPolicy.copy(
+                timeoutMs = minOf(defaultPolicy.timeoutMs, limit),
+                timeoutFailureCode = "offline_translation_${stage}_timeout",
+                operationLabel = "Offline translation"
+            )
+        } ?: defaultPolicy
         val timeoutMs = operationPolicy.timeoutMs
         val previousStage = activeNativeStage
         val previousToken = activeNativeOperationToken
@@ -794,6 +825,23 @@ open class LocalChatWorkerService : Service() {
         return true
     }
 
+    private fun scheduleMnnProducerRecoveryAfterStop() {
+        if (activeRuntime != LocalChatRuntime.MNN_CPU) return
+        val runner = activeRunner ?: return
+        val epoch = runtimeStateEpoch
+        val generation = generationSequence.get()
+        watchdogHandler.postDelayed({
+            if (activeRunner === runner && runtimeStateEpoch == epoch &&
+                generationSequence.get() == generation &&
+                runner.isGenerationRunning() == true
+            ) {
+                recordStageFailure("decode", "mnn_visual_cancel_timeout")
+                Log.w(WORKER_LOG_TAG, "mnn_visual_cancel_timeout: native producer did not release its inputs")
+                Process.killProcess(Process.myPid())
+            }
+        }, NATIVE_CANCEL_GRACE_TIMEOUT_MS)
+    }
+
     private fun dispatchRunnerStop() {
         val runner = activeRunner ?: return
         // Some SDK-backed runners serialize cancellation with their generation
@@ -806,6 +854,11 @@ open class LocalChatWorkerService : Service() {
 
     private fun deferredRuntimeStatsJson(stage: String): String {
         return buildDeferredRuntimeStatsJson(lastStableRuntimeStatsJson, stage)
+    }
+
+    private fun invalidateRuntimeStatsLocked(statsJson: String = IDLE_RUNTIME_STATS_JSON) {
+        runtimeStateEpoch += 1L
+        lastStableRuntimeStatsJson = withRuntimeStatsLoadGeneration(statsJson, runtimeStateEpoch)
     }
 
     private fun prepareLoadDiagnostic(runtime: LocalChatRuntime, modelPath: String, paramsJson: String) {
@@ -907,9 +960,22 @@ internal fun isRuntimeStatsSnapshotCurrent(
     sameRunner: Boolean
 ): Boolean = sameRunner && capturedEpoch == currentEpoch
 
+internal fun withRuntimeStatsLoadGeneration(statsJson: String, loadGeneration: Long): String =
+    (runCatching { JSONObject(statsJson) }.getOrNull()
+        ?: JSONObject().put("loaded", false).put("runnerReady", true))
+        .put("loadGeneration", loadGeneration)
+        .toString()
+
 internal fun buildDeferredRuntimeStatsJson(stableStatsJson: String, stage: String): String =
     runCatching {
         JSONObject(stableStatsJson)
+            .apply {
+                if (stage in setOf("load", "unload", "shutdown", "session_changed")) {
+                    // A prior handle's readiness is not evidence for an in-flight replacement.
+                    put("loaded", false)
+                    put("visionReady", false)
+                }
+            }
             .put("runtimeStatsDeferred", true)
             .put("runtimeBusyStage", stage)
             .toString()

@@ -21,8 +21,10 @@ class ChatSessionAssistantSnapshotContractTest {
     fun activeConversationUsesItsSnapshotForTheRequestAndPrefixCache() {
         val source = sourceFile("MainViewModel.kt")
         val startGeneration = functionBody(source, "startGeneration")
-        val sendMessage = functionBody(source, "sendPreparedMessage")
+        val sendMessage = functionBody(source, "sendPreparedMessageAsync")
 
+        assertTrue(functionBody(source, "sendPreparedMessage")
+            .contains("sendPreparedMessageAsync(state, preparedInput)"))
         assertTrue(startGeneration.contains("val assistantSnapshot = initialState.activeAssistantSnapshot()"))
         assertTrue(startGeneration.contains("val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams"))
         assertTrue(startGeneration.contains("assistantId = assistantSnapshot?.assistantId"))

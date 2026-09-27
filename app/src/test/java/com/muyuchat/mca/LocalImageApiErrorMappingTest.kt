@@ -45,8 +45,8 @@ class LocalImageApiErrorMappingTest {
     fun `authenticated image count capability is explicit per runtime`() {
         assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 8))
         assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 1))
-        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 2))
-        assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.QNN_HTP, 8))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.MNN_DIFFUSION, 2))
+        assertTrue(supportsAuthenticatedLocalImageCount(LocalImageRuntime.QNN_HTP, 8))
         assertFalse(supportsAuthenticatedLocalImageCount(LocalImageRuntime.STABLE_DIFFUSION_CPP, 9))
     }
 

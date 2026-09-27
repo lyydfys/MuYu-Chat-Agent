@@ -58,4 +58,17 @@ class InternalBrowserUrlPolicyTest {
             )
         )
     }
+
+    @Test
+    fun approvedOriginDoesNotGrantAnotherPortOrSubdomain() {
+        val origins = setOf("https://result.test:8443")
+        assertTrue(InternalBrowserUrlPolicy.allowsNavigation("https://search.test", "https://result.test:8443/article",
+            additionalApprovedOrigins = origins))
+        assertFalse(InternalBrowserUrlPolicy.allowsNavigation("https://search.test", "https://result.test/article",
+            additionalApprovedOrigins = origins))
+        assertFalse(InternalBrowserUrlPolicy.allowsNavigation("https://search.test", "https://sub.result.test:8443/article",
+            additionalApprovedOrigins = origins))
+        assertFalse(InternalBrowserUrlPolicy.allowsNavigation("https://search.test", "https://search.test:8443/article"))
+        assertNull(InternalBrowserUrlPolicy.normalizeInitialUrl("https://example.com/a\nb"))
+    }
 }

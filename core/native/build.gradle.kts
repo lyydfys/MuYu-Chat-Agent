@@ -400,7 +400,8 @@ val verifyMcaMnnVendor = tasks.register("verifyMcaMnnVendor") {
         }
         val diffCommand = runMcaCommand(
             listOf(
-                git, "-c", "core.safecrlf=false", "-C", sourceRoot.absolutePath,
+                git, "-c", "core.safecrlf=false", "-c", "diff.suppressBlankEmpty=true",
+                "-C", sourceRoot.absolutePath,
                 "diff", "--binary", "--full-index", "--no-ext-diff", "--no-color", "HEAD", "--",
             )
         )
@@ -570,7 +571,7 @@ android {
                 mcaMnnSourceRoot?.absolutePath?.let {
                     cmakeArgs += "-DMCA_MNN_SOURCE_ROOT=$it"
                 }
-                mcaMnnAndroidBuildRoot.orNull?.takeIf { it.isNotBlank() }?.let {
+                mcaMnnRuntimeRoot?.absolutePath?.let {
                     cmakeArgs += "-DMCA_MNN_ANDROID_BUILD_ROOT=$it"
                 }
                 mcaQnnSdkRootForCMake?.absolutePath?.let {

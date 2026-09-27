@@ -3,6 +3,8 @@ package com.muyuchat.mca
 import kotlin.random.Random
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 internal enum class LocalImageBatchExecutionMode {
     NATIVE_BATCH,
@@ -157,6 +159,7 @@ internal suspend fun <T> executeLocalImageBatchPlan(
     plan: LocalImageBatchPlan,
     cancellationRequested: () -> Boolean,
     execute: suspend (LocalImageBatchRequestPlan) -> List<T>,
+    onChildCompleted: (LocalImageBatchRequestPlan, Int) -> Unit = { _, _ -> },
     cleanup: suspend (List<T>) -> Unit
 ): List<T> {
     val candidates = mutableListOf<T>()
@@ -164,12 +167,13 @@ internal suspend fun <T> executeLocalImageBatchPlan(
         plan.requests.forEach { request ->
             currentCoroutineContext().ensureActive()
             if (cancellationRequested()) throw LocalImageWorkerCancelledException()
+            onChildCompleted(request, candidates.size)
             val outputs = execute(request)
+            candidates += outputs
             require(outputs.size == request.outputCount) {
                 "Image batch child ${request.requestId} returned ${outputs.size} output(s); " +
                     "expected ${request.outputCount}."
             }
-            candidates += outputs
             currentCoroutineContext().ensureActive()
             if (cancellationRequested()) throw LocalImageWorkerCancelledException()
         }
@@ -179,7 +183,7 @@ internal suspend fun <T> executeLocalImageBatchPlan(
         return candidates
     } catch (error: Throwable) {
         if (candidates.isNotEmpty()) {
-            runCatching { cleanup(candidates.toList()) }
+            runCatching { withContext(NonCancellable) { cleanup(candidates.toList()) } }
                 .exceptionOrNull()
                 ?.let(error::addSuppressed)
         }

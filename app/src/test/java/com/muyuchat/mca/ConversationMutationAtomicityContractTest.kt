@@ -25,7 +25,7 @@ class ConversationMutationAtomicityContractTest {
         val persist = functionBody(source, "persistConversationMutation")
         assertInOrder(
             persist,
-            "chatSessionStore.save(snapshot, knowledgeBindingsForSave)",
+            "chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)",
             "durableChatSessions = snapshot",
             "engine.invalidateConversationContext()",
             "onCommitted?.invoke()"

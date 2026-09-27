@@ -121,6 +121,24 @@ class AssistantStoreTest {
     }
 
     @Test
+    fun memorySummaryIntervalSurvivesJsonAndBoundsLegacyValues() {
+        val assistant = AssistantRecord(id = "writer", memorySummaryInterval = 27)
+        assertEquals(27, AssistantRecord.fromJson(assistant.toJson()).memorySummaryInterval)
+        assertEquals(
+            AssistantRecord.DEFAULT_MEMORY_SUMMARY_INTERVAL,
+            AssistantRecord.fromJson(JSONObject().put("id", "old-card")).memorySummaryInterval
+        )
+        assertEquals(
+            AssistantRecord.MIN_MEMORY_SUMMARY_INTERVAL,
+            AssistantRecord.fromJson(JSONObject().put("memorySummaryInterval", -50)).memorySummaryInterval
+        )
+        assertEquals(
+            AssistantRecord.MAX_MEMORY_SUMMARY_INTERVAL,
+            AssistantRecord.fromJson(JSONObject().put("memorySummaryInterval", 500)).memorySummaryInterval
+        )
+    }
+
+    @Test
     fun systemPromptLimitAppliesToImportedAndManualValues() {
         val overLimit = "x".repeat(AssistantRecord.MAX_SYSTEM_PROMPT_CHARS + 37)
         val imported = AssistantRecord.fromJson(JSONObject().put("systemPrompt", overLimit))

@@ -9,10 +9,45 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatImagePromptBridgeTest {
+    @Test
+    fun protectedLoraCannotMoveFromPositiveIntoNegativeBranch() = runBlocking {
+        val result = ChatImagePromptBridge.translateChatImagePrompt(
+            prompt = "positive_prompt: a cat <lora:cat:0.8>\nnegative_prompt: blurry",
+            stream = flowOf(
+                GenerateEvent.Chunk(
+                    "{\"positive_prompt\":\"a cat\",\"negative_prompt\":\"blurry, MCA_KEEP_TOKEN_0\"}",
+                    RuntimeStats()
+                ),
+                GenerateEvent.Done(RuntimeStats())
+            ),
+            requireModelSummary = true
+        )
+        assertEquals(ChatImagePromptBridge.Code.PROTECTED_SYNTAX_LOST,
+            (result as ChatImagePromptBridge.Result.Failed).code)
+    }
+
+    @Test
+    fun negativeClausesPreserveNestedCommaAndWeightedSyntax() {
+        assertEquals(
+            "(red coat, silk:1.1), watermark",
+            mergeChatImageNegativePrompts("(red coat, silk:1.1), watermark", "watermark")
+        )
+    }
+
+    @Test
+    fun rawRecoveryDependsOnLanguageAndWrapperContract() {
+        assertTrue(chatImagePromptRecovery("positive_prompt: a cat\nnegative_prompt: blurry", false).canUseOriginal)
+        val chinese = chatImagePromptRecovery("一只猫，雨夜街头", false)
+        assertFalse(chinese.canUseOriginal)
+        assertTrue(ChatImagePromptRecoveryAction.TRANSLATE in chinese.actions)
+        assertFalse(chatImagePromptRecovery("{\"positive_prompt\":\"a cat\"}", false).canUseOriginal)
+    }
+
     @Test
     fun promptEnvelopeRetainsOriginalBranchesAndProtectedLoraSyntax() {
         val envelope = PromptEnvelope(

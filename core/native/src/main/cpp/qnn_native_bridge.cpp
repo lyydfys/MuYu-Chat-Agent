@@ -5334,7 +5334,10 @@ bool write_vae_tensor_png(
     return true;
 }
 
-bool fsync_regular_file(const std::string& path, std::string* error) {
+bool fsync_regular_file(
+        const std::string& path,
+        std::string* error,
+        uint64_t maximum_bytes = mca::qnn::preview::kMaximumPngBytes) {
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         *error = "Unable to open preview PNG for fsync.";
@@ -5342,12 +5345,11 @@ bool fsync_regular_file(const std::string& path, std::string* error) {
     }
     struct stat st {};
     const bool valid = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-        st.st_size > 0 && static_cast<uint64_t>(st.st_size) <=
-            mca::qnn::preview::kMaximumPngBytes;
+        st.st_size > 0 && static_cast<uint64_t>(st.st_size) <= maximum_bytes;
     const bool synced = valid && ::fsync(fd) == 0;
     ::close(fd);
     if (!valid) {
-        *error = "Preview PNG is empty, non-regular, or exceeds 32 MiB.";
+        *error = "PNG is empty, non-regular, or exceeds the output byte budget.";
         return false;
     }
     if (!synced) {
@@ -5383,8 +5385,9 @@ bool validate_preview_png(
         const std::string& path,
         int expected_width,
         int expected_height,
-        std::string* error) {
-    if (!fsync_regular_file(path, error)) return false;
+        std::string* error,
+        uint64_t maximum_bytes = mca::qnn::preview::kMaximumPngBytes) {
+    if (!fsync_regular_file(path, error, maximum_bytes)) return false;
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         *error = "Unable to reopen preview PNG for validation.";
@@ -5421,7 +5424,7 @@ bool validate_preview_png(
     return true;
 }
 
-bool write_ultrafix_png_atomic(
+bool write_qnn_image_png_atomic(
         const QnnTensorBinding& tensor,
         const std::vector<float>& values,
         const std::string& output_path,
@@ -5433,11 +5436,11 @@ bool write_ultrafix_png_atomic(
     if (output_path.empty() || error == nullptr) return false;
     const size_t separator = output_path.find_last_of('/');
     if (separator == std::string::npos || separator == 0U) {
-        *error = "UltraFix output must be inside an app-owned directory.";
+        *error = "QNN image output must be inside an app-owned directory.";
         return false;
     }
     const std::string directory = output_path.substr(0U, separator);
-    const std::string temporary = output_path + ".ultrafix.part";
+    const std::string temporary = output_path + ".part";
     ::unlink(temporary.c_str());
     if (!write_vae_tensor_png(
             tensor,
@@ -5448,24 +5451,26 @@ bool write_ultrafix_png_atomic(
             width,
             height,
             error) ||
-        !validate_preview_png(temporary, *width, *height, error)) {
+        !validate_preview_png(temporary, *width, *height, error, 64U * 1024U * 1024U)) {
         ::unlink(temporary.c_str());
         return false;
     }
     if (qnn_image_generation_cancelled()) {
         ::unlink(temporary.c_str());
-        *error = "Image generation was cancelled before UltraFix output publication.";
+        *error = "Image generation was cancelled before QNN image output publication.";
         return false;
     }
     struct stat existing {};
     if (::lstat(output_path.c_str(), &existing) == 0 ||
         ::rename(temporary.c_str(), output_path.c_str()) != 0) {
         ::unlink(temporary.c_str());
-        *error = "UltraFix output atomic rename failed or would replace an existing file.";
+        *error = "QNN image output atomic rename failed or would replace an existing file.";
         return false;
     }
     if (!fsync_directory(directory, error)) {
         ::unlink(output_path.c_str());
+        std::string ignored;
+        fsync_directory(directory, &ignored);
         return false;
     }
     error->clear();
@@ -11366,7 +11371,7 @@ std::string qnn_semantic_generate_json(
             mca::qnn::ImageStage::PngWrite,
             kQnnImagePngWrite);
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
-        if (!write_vae_tensor_png(
+        if (!write_qnn_image_png_atomic(
                 final_output_binding,
                 vae_decode.pixels_nchw,
                 output_path,
@@ -11375,6 +11380,7 @@ std::string qnn_semantic_generate_json(
                 &width,
                 &height,
                 &error)) {
+            if (generation.cancelled()) return qnn_image_generation_cancelled_json();
             return std::string("{\"ok\":false,\"backend\":\"qnn_htp\",\"semanticReady\":false,\"executionStage\":\"sdxl_png_write_failed\",\"message\":") +
                 quote(error) + "}";
         }
@@ -11585,6 +11591,7 @@ std::string qnn_semantic_generate_json(
             << "\"outputPath\":" << quote(output_path) << ","
             << "\"outputBytes\":" << output_bytes << ","
             << "\"outputSha256\":" << quote(output_sha256) << ","
+            << "\"outputAtomicCommit\":true,"
             << "\"unetGraph\":" << quote(unet.graph_name) << ","
             << "\"vaeGraph\":" << quote(vae.graph_name) << ","
             << "\"debug\":{"
@@ -12692,17 +12699,7 @@ std::string qnn_semantic_generate_json(
             static_cast<uint32_t>(ultra_fix_plan.target_pixels.width),
         }
         : vae.outputs[0].dimensions;
-    const bool png_written = ultra_fix_request.enabled
-        ? write_ultrafix_png_atomic(
-            final_output_binding,
-            pixels,
-            output_path,
-            execution_contract.pixel_range,
-            &pixel_range_evidence,
-            &width,
-            &height,
-            &error)
-        : write_vae_tensor_png(
+    const bool png_written = write_qnn_image_png_atomic(
             final_output_binding,
             pixels,
             output_path,
@@ -13439,8 +13436,6 @@ std::string qnn_semantic_generate_json(
         out << "\"ultraFix\":" << native_evidence.ultra_fix_json << ","
             << "\"strengthMechanism\":\"ddim_inversion\","
             << "\"outputSizeBytes\":" << native_evidence.ultra_fix_output_bytes << ","
-            << "\"outputAtomicCommit\":"
-            << (native_evidence.ultra_fix_output_atomic_commit ? "true" : "false") << ","
             << "\"actualDiffusionModelComputeCount\":"
             << native_evidence.ultra_fix_total_unet_execution_count << ","
             << "\"actualPositiveDiffusionModelComputeCount\":"
@@ -13532,6 +13527,7 @@ std::string qnn_semantic_generate_json(
         << "\"outputPath\":" << quote(output_path) << ","
         << "\"outputBytes\":" << output_bytes << ","
         << "\"outputSha256\":" << quote(output_sha256) << ","
+        << "\"outputAtomicCommit\":true,"
         << "\"textEncoderGraph\":" << quote(loaded_text_encoder_graph) << ","
         << "\"controlNetLoadedGraph\":" << quote(native_evidence.controlnet_graph_name) << ","
         << "\"unetGraph\":" << quote(unet.graph_name) << ","

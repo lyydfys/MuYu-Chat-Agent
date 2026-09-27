@@ -51,6 +51,44 @@ class RemoteLocalChatRunnerStateTest {
     }
 
     @Test
+    fun ownedReadbackPreservesNativeReadinessWithoutPromotingIt() {
+        val ready = JSONObject(withRuntimeStatsLoadGeneration(
+            "{\"loaded\":true,\"visionReady\":true,\"mmprojPath\":\"/private/projector.gguf\"}",
+            8L
+        ))
+        val unavailable = JSONObject(withRuntimeStatsLoadGeneration(
+            "{\"loaded\":true,\"visionReady\":false,\"loadGeneration\":7}",
+            9L
+        ))
+
+        assertTrue(ready.getBoolean("visionReady"))
+        assertEquals(8L, ready.getLong("loadGeneration"))
+        assertEquals("/private/projector.gguf", ready.getString("mmprojPath"))
+        assertFalse(unavailable.getBoolean("visionReady"))
+        assertEquals(9L, unavailable.getLong("loadGeneration"))
+        assertFalse(JSONObject(withRuntimeStatsLoadGeneration("invalid", 10L)).getBoolean("loaded"))
+    }
+
+    @Test
+    fun lifecycleTransitionsCannotReuseThePreviousHandlesReadiness() {
+        val stable = withRuntimeStatsLoadGeneration("{\"loaded\":true,\"visionReady\":true}", 7L)
+        for (stage in listOf("load", "unload", "shutdown", "session_changed")) {
+            val deferred = JSONObject(buildDeferredRuntimeStatsJson(stable, stage))
+            assertFalse(deferred.getBoolean("loaded"))
+            assertFalse(deferred.getBoolean("visionReady"))
+            assertEquals(7L, deferred.getLong("loadGeneration"))
+            assertTrue(deferred.getBoolean("runtimeStatsDeferred"))
+            assertFalse(workerStatsConfirmLoadedModelLoss(true, deferred.toString()))
+        }
+
+        val decode = JSONObject(buildDeferredRuntimeStatsJson(stable, "decode"))
+        assertTrue(decode.getBoolean("visionReady"))
+        assertEquals(7L, decode.getLong("loadGeneration"))
+        assertTrue(workerStatsConfirmLoadedModelLoss(true, "{\"loaded\":false}"))
+        assertFalse(workerStatsConfirmLoadedModelLoss(false, "{\"loaded\":false}"))
+    }
+
+    @Test
     fun workerStatsPathIsNonBlockingWhenAnotherNativeOperationOwnsTheGate() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt")
         val body = functionBody(source, "override fun getRuntimeStatsJson()")

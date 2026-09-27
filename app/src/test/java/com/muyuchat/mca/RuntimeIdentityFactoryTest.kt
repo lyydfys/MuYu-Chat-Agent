@@ -20,7 +20,7 @@ import org.junit.Test
 
 class RuntimeIdentityFactoryTest {
     @Test
-    fun validManifestShaIsPreferredWithoutRehashingTheMainArtifact() {
+    fun sameSizeMainArtifactMutationChangesIdentityEvenWithManifestSha() {
         val root = tempDirectory()
         try {
             val modelFile = File(root, "model.gguf").apply { writeText("AAAA") }
@@ -28,13 +28,11 @@ class RuntimeIdentityFactoryTest {
             val model = manifest(modelFile, sha256 = manifestSha)
             val first = build(model).identity
 
-            // A persisted, verified manifest SHA remains the artifact identity;
-            // changing the file forces the model-store verifier to repair the
-            // manifest, but this factory must not scan a multi-GB GGUF again.
             modelFile.writeText("BBBB")
             val second = build(model).identity
-            assertEquals(manifestSha, first.artifactFingerprint)
-            assertEquals(first.identityHash, second.identityHash)
+            assertNotEquals(manifestSha, first.artifactFingerprint)
+            assertNotEquals(first.artifactFingerprint, second.artifactFingerprint)
+            assertNotEquals(first.identityHash, second.identityHash)
         } finally {
             root.deleteRecursively()
         }
@@ -240,7 +238,12 @@ class RuntimeIdentityFactoryTest {
                 device = device(),
                 installationScopeId = "scope"
             )
-            assertEquals("b".repeat(64), result.identity.projectorFingerprint)
+            assertNotEquals("b".repeat(64), result.identity.projectorFingerprint)
+            val originalFingerprint = result.identity.projectorFingerprint
+            projector.writeText("PROJECTOR")
+            val replacedProjector = build(model)
+            assertEquals("projector".length, projector.length().toInt())
+            assertNotEquals(originalFingerprint, replacedProjector.identity.projectorFingerprint)
             assertTrue(result.identity.runtimeVersion.contains("llama.cpp@4ceb1719101f32637b841206c172f3f058ffc182+mca-stq1_0"))
             assertEquals("runtime-parameters-v2-sparse-moe-mmap", result.identity.parameterPolicyVersion)
             assertTrue(result.identity.evaluatorFingerprint.length == 64)

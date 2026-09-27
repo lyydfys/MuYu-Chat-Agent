@@ -33,6 +33,12 @@ int main() {
     const std::vector<int> fullPrompt = {1, 2, 3, 4, 5};
     const std::vector<int> probePrompt = {1, 2, 9, 10};
     assert(mca::llama::longestCommonTokenPrefix(fullPrompt, probePrompt) == 2);
+    assert(mca::llama::reusableSessionTokenPrefix(
+            std::vector<int>{1, 2, 3, 9}, std::vector<int>{1, 2, 3, 4, 5}) == 3);
+    assert(mca::llama::reusableSessionTokenPrefix(
+            std::vector<int>{1, 2, 3}, std::vector<int>{1, 2, 3, 4}) == 2);
+    assert(mca::llama::reusableSessionTokenPrefix(
+            std::vector<int>{9, 2, 3}, std::vector<int>{1, 2, 3}) == 0);
 
     assert(mca::llama::canReusePartialStateCheckpoint(
             PrefixCacheStrategy::PartialStateCheckpoint,

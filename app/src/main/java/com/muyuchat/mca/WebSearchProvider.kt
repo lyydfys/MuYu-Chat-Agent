@@ -8,6 +8,8 @@ import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.Role
+import com.muyuchat.core.engine.RuntimeMonotonicClock
+import com.muyuchat.core.engine.SystemRuntimeMonotonicClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -972,7 +974,7 @@ internal suspend fun executeWebSearchForChatTurn(
     allowPublicCheckSourceForProtocolTest: Boolean = false,
     search: suspend (WebSearchPlan, WebSearchConfig) -> WebSearchResult,
     beforeSearch: suspend (WebSearchPlan, List<String>) -> Unit = { _, _ -> },
-    nowMillis: () -> Long = { System.currentTimeMillis() }
+    clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
 ): WebSearchTurnOutcome {
     val plan = buildWebSearchPlanFromMessages(messages, config.researchMode)
     val searchConfig = if (allowPublicCheckSourceForProtocolTest) {
@@ -1048,7 +1050,7 @@ internal suspend fun executeWebSearchForChatTurn(
     }
 
     beforeSearch(plan, triggerReasons)
-    val started = nowMillis()
+    val started = clock.nowMs()
     return runCatching { search(plan, searchConfig) }
         .fold(
             onSuccess = { result ->
@@ -1114,7 +1116,7 @@ internal suspend fun executeWebSearchForChatTurn(
                     success = false,
                     diagnostic = plan.toFailedDiagnosticRecord(
                         config = searchConfig,
-                        elapsedMs = nowMillis() - started,
+                        elapsedMs = (clock.nowMs() - started).coerceAtLeast(0L),
                         message = message,
                         closedLoopChecks = listOf(
                             "已生成检索计划",
@@ -1357,7 +1359,8 @@ class WebSearchProvider(
         .build(),
     private val allowPrivateNetworkFetch: Boolean = false,
     private val cacheTtlMillis: Long = DEFAULT_WEB_SEARCH_CACHE_TTL_MS,
-    private val nowMillis: () -> Long = { System.currentTimeMillis() }
+    private val nowMillis: () -> Long = { System.currentTimeMillis() },
+    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
 ) {
     private val cacheLock = Any()
     private val searchCache = linkedMapOf<String, WebSearchCacheEntry>()
@@ -1383,7 +1386,7 @@ class WebSearchProvider(
                 "请先在系统设置 > 联网检索 配置搜索服务"
             }
         }
-        val started = nowMillis()
+        val started = clock.nowMs()
         val directDocuments = fetchDirectDocuments(plan.directUrls.take(3), config)
             .filter { it.content.isNotBlank() || it.snippet.isNotBlank() }
         val attemptedQueries = if (canSearchProvider) {
@@ -1470,7 +1473,7 @@ class WebSearchProvider(
                 includeDirectRead = directDocuments.isNotEmpty()
             ),
             documents = documents,
-            elapsedMs = nowMillis() - started,
+            elapsedMs = (clock.nowMs() - started).coerceAtLeast(0L),
             searchedQueries = searchCollection.searchedQueries.ifEmpty { attemptedQueries },
             directUrls = plan.directUrls,
             warnings = (

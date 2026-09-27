@@ -29,6 +29,7 @@
 #include <unistd.h>
 #if defined(__ANDROID__)
 #include <dlfcn.h>
+#include "mca_opencl_driver.hpp"
 #endif
 #include <nlohmann/json.hpp>
 #include "chat.h"
@@ -140,6 +141,16 @@ std::string g_backend_load_diagnostic;
 // known before registration; the backend itself resolves every OpenCL symbol
 // through its local dispatch layer and carries no DT_NEEDED libOpenCL entry.
 void *g_android_opencl_handle = nullptr;
+void *g_mca_opencl_dispatch_handle = nullptr;
+using OpenClBeginExecutionScope = std::uint64_t (*)();
+using OpenClExecutionSnapshot = int (*)(std::uint64_t, std::uint64_t *, std::uint64_t *);
+OpenClBeginExecutionScope g_opencl_begin_execution_scope = nullptr;
+OpenClExecutionSnapshot g_opencl_execution_snapshot = nullptr;
+std::uint64_t g_opencl_execution_scope = 0;
+std::uint64_t g_opencl_kernel_submissions = 0;
+std::uint64_t g_opencl_kernel_completions = 0;
+bool g_opencl_execution_telemetry_available = false;
+bool g_gpu_decode_succeeded = false;
 bool g_backend_initialized = false;
 size_t g_backend_device_count = 0;
 int g_n_threads = 0;
@@ -248,7 +259,7 @@ size_t g_backend_gpu_device_count = 0;
 bool g_gpu_offload_supported = false;
 // Configuration is only a request.  A loaded GPU backend is not enough to
 // claim that this request ran on it: the label is published only after both
-// allocation evidence and a successful llama_decode on this context.
+// allocation evidence and directly observed completed OpenCL kernels in this request.
 bool g_gpu_offload_active = false;
 bool g_gpu_offload_allocation_observed = false;
 bool g_gpu_offload_execution_observed = false;
@@ -854,6 +865,12 @@ std::string stats_json(const char *backend) {
         << (g_gpu_offload_allocation_observed ? "true" : "false") << ","
         << "\"gpuOffloadExecutionObserved\":"
         << (g_gpu_offload_execution_observed ? "true" : "false") << ","
+        << "\"gpuExecutionEvidence\":{"
+        << "\"source\":\"mca_opencl_dispatch:successful_enqueue_and_finish\","
+        << "\"status\":\"" << (g_opencl_execution_telemetry_available ? "observed_counters" : "unknown") << "\","
+        << "\"requestScope\":" << g_opencl_execution_scope << ","
+        << "\"kernelSubmissions\":" << (g_opencl_execution_telemetry_available ? std::to_string(g_opencl_kernel_submissions) : "null") << ","
+        << "\"kernelCompletions\":" << (g_opencl_execution_telemetry_available ? std::to_string(g_opencl_kernel_completions) : "null") << "},"
         << "\"gpuOffloadBytes\":" << g_gpu_offload_bytes << ","
         << "\"gpuOffloadModelBytes\":" << g_gpu_offload_model_bytes << ","
         << "\"gpuOffloadContextBytes\":" << g_gpu_offload_context_bytes << ","
@@ -1057,6 +1074,32 @@ void clear_gpu_offload_evidence_locked() {
     g_gpu_offload_context_bytes = 0;
     g_gpu_offload_compute_bytes = 0;
     g_gpu_offload_layers = 0;
+    g_opencl_execution_scope = 0;
+    g_opencl_kernel_submissions = 0;
+    g_opencl_kernel_completions = 0;
+    g_opencl_execution_telemetry_available = false;
+    g_gpu_decode_succeeded = false;
+}
+
+void begin_gpu_execution_scope_locked() {
+    g_gpu_offload_active = false;
+    g_gpu_offload_execution_observed = false;
+    g_gpu_decode_succeeded = false;
+    g_opencl_kernel_submissions = 0;
+    g_opencl_kernel_completions = 0;
+    g_opencl_execution_scope = g_opencl_begin_execution_scope == nullptr ? 0 :
+            g_opencl_begin_execution_scope();
+    g_opencl_execution_telemetry_available = g_opencl_execution_scope != 0 &&
+            g_opencl_execution_snapshot != nullptr;
+}
+
+void read_gpu_execution_evidence_locked() {
+    g_opencl_execution_telemetry_available = g_opencl_execution_scope != 0 &&
+            g_opencl_execution_snapshot != nullptr &&
+            g_opencl_execution_snapshot(g_opencl_execution_scope, &g_opencl_kernel_submissions,
+                                       &g_opencl_kernel_completions) != 0;
+    g_gpu_offload_execution_observed = g_gpu_decode_succeeded &&
+            g_opencl_execution_telemetry_available && g_opencl_kernel_completions > 0;
 }
 
 void reconcile_gpu_offload_evidence_locked() {
@@ -1065,7 +1108,7 @@ void reconcile_gpu_offload_evidence_locked() {
 }
 
 void refresh_gpu_offload_evidence_locked() {
-    // Keep execution evidence until this model/context is released. Runtime
+    // Keep execution evidence until this request ends. Runtime
     // stats are polled between tokens, so clearing it here would make a real
     // GPU request oscillate back to CPU after its first successful decode.
     g_gpu_offload_active = false;
@@ -1076,6 +1119,7 @@ void refresh_gpu_offload_evidence_locked() {
     g_gpu_offload_context_bytes = 0;
     g_gpu_offload_compute_bytes = 0;
     g_gpu_offload_layers = 0;
+    read_gpu_execution_evidence_locked();
     if (!g_gpu_offload_supported || g_model == nullptr || g_context == nullptr) return;
 
     try {
@@ -1121,10 +1165,8 @@ void refresh_gpu_offload_evidence_locked() {
 }
 
 void record_gpu_decode_execution_locked() {
+    g_gpu_decode_succeeded = true;
     refresh_gpu_offload_evidence_locked();
-    if (g_gpu_offload_allocation_observed) {
-        g_gpu_offload_execution_observed = true;
-    }
     reconcile_gpu_offload_evidence_locked();
 }
 
@@ -1697,7 +1739,7 @@ bool load_android_opencl_runtime_if_available_locked() {
     if (g_android_opencl_handle != nullptr) {
         using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
         auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
-                dlsym(g_android_opencl_handle, "clGetPlatformIDs"));
+                mca::opencl::driver_symbol(g_android_opencl_handle, "clGetPlatformIDs"));
         if (get_platform_ids == nullptr) {
             g_backend_load_diagnostic += "Android OpenCL runtime loaded but clGetPlatformIDs is not exported.";
             return false;
@@ -1715,7 +1757,19 @@ bool load_android_opencl_runtime_if_available_locked() {
     // devices. Keep CPU-only devices installable by treating dlopen failure as
     // a normal accelerator miss. RTLD_LOCAL avoids leaking vendor symbols into
     // unrelated JNI libraries; mca_opencl_dispatch resolves its own symbols.
-    g_android_opencl_handle = dlopen("libOpenCL.so", RTLD_NOW | RTLD_LOCAL);
+    for (const char * candidate : mca::opencl::driver_paths) {
+        void * driver = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
+        if (driver == nullptr) continue;
+        const char * missing = mca::opencl::missing_required_symbol(driver);
+        if (missing != nullptr) {
+            g_backend_load_diagnostic += std::string(candidate) + " missing driver symbol " + missing + ". ";
+            dlclose(driver);
+            continue;
+        }
+        g_android_opencl_handle = driver;
+        g_backend_load_diagnostic += std::string("OpenCL driver loaded: ") + candidate + ". ";
+        break;
+    }
     if (g_android_opencl_handle == nullptr) {
         const char *diagnostic = dlerror();
         g_backend_load_diagnostic += "Android OpenCL runtime unavailable: ";
@@ -1724,7 +1778,7 @@ bool load_android_opencl_runtime_if_available_locked() {
     }
     using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
     auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
-            dlsym(g_android_opencl_handle, "clGetPlatformIDs"));
+            mca::opencl::driver_symbol(g_android_opencl_handle, "clGetPlatformIDs"));
     if (get_platform_ids == nullptr) {
         g_backend_load_diagnostic += "Android OpenCL runtime loaded from libOpenCL.so but clGetPlatformIDs is not exported.";
         return false;
@@ -1761,6 +1815,20 @@ bool ensure_backends_loaded_locked() {
                 g_backend_load_diagnostic += " MCA OpenCL backend failed to register: " + mca_opencl + ".";
             } else {
                 g_backend_load_diagnostic += " MCA OpenCL backend registered: " + mca_opencl + ".";
+#if defined(__ANDROID__) && defined(__aarch64__)
+                if (g_mca_opencl_dispatch_handle == nullptr) {
+                    g_mca_opencl_dispatch_handle = dlopen(mca_opencl.c_str(), RTLD_NOW | RTLD_LOCAL);
+                    if (g_mca_opencl_dispatch_handle != nullptr) {
+                        g_opencl_begin_execution_scope = reinterpret_cast<OpenClBeginExecutionScope>(
+                                dlsym(g_mca_opencl_dispatch_handle, "mca_opencl_begin_execution_scope"));
+                        g_opencl_execution_snapshot = reinterpret_cast<OpenClExecutionSnapshot>(
+                                dlsym(g_mca_opencl_dispatch_handle, "mca_opencl_execution_snapshot"));
+                    }
+                }
+                if (g_opencl_begin_execution_scope == nullptr || g_opencl_execution_snapshot == nullptr) {
+                    g_backend_load_diagnostic += " OpenCL execution counters unavailable; execution stays unknown.";
+                }
+#endif
             }
         }
     }
@@ -1792,10 +1860,11 @@ bool ensure_backends_loaded_locked() {
 
 bool resolve_backend_config(const RuntimeConfig &requested,
                             RuntimeConfig &effective,
+                            bool allow_cpu_fallback,
                             std::string &error) {
     effective = requested;
     const bool force_gpu = requested.n_gpu_layers == -2 || requested.n_gpu_layers > 0;
-    if (force_gpu && !g_gpu_offload_supported) {
+    if (force_gpu && !g_gpu_offload_supported && !allow_cpu_fallback) {
         error = "n_gpu_layers requests GPU offload, but this APK has no usable non-CPU llama.cpp backend.";
         if (!g_backend_load_diagnostic.empty()) {
             error += " Backend diagnostics: " + g_backend_load_diagnostic;
@@ -1818,11 +1887,11 @@ bool resolve_backend_config(const RuntimeConfig &requested,
         return false;
     }
     if (!g_gpu_offload_supported) {
-        if (requested.main_gpu != 0 && force_gpu) {
+        if (requested.main_gpu != 0 && force_gpu && !allow_cpu_fallback) {
             error = "main_gpu must be 0 when no GPU backend is registered.";
             return false;
         }
-        if (requested.n_gpu_layers == -1) {
+        if (requested.n_gpu_layers == -1 || allow_cpu_fallback) {
             effective.n_gpu_layers = 0;
         }
         effective.main_gpu = 0;
@@ -2060,6 +2129,7 @@ bool prompt_ends_inside_reasoning(const std::string &prompt) {
 }
 
 void clear_target_context_locked(const std::string &reason);
+bool trim_context_locked(llama_context *ctx, llama_pos position, const char *label);
 
 std::string format_messages(const std::vector<ParsedMessage> &messages, const ChatTemplateOptions &options) {
     const bool has_template = g_chat_templates != nullptr;
@@ -2125,42 +2195,62 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
         clear_target_context_locked("persistent_session_prepare");
         if (!request.restore_state_path.empty()) {
             try {
-                llama_tokens restored(full_tokens.size());
                 size_t restored_count = 0;
-                const size_t loaded = llama_state_seq_load_file(
+                const size_t header_size = llama_state_seq_load_file(
                         g_context,
                         request.restore_state_path.c_str(),
                         0,
-                        restored.data(),
-                        restored.size(),
+                        nullptr,
+                        0,
                         &restored_count);
-                const bool valid = loaded > 0 && restored_count > 0 &&
-                        restored_count <= full_tokens.size() &&
-                        mca::llama::tokenPrefixMatches(
-                                full_tokens,
-                                llama_tokens(restored.begin(),
-                                             restored.begin() + restored_count));
-                if (valid) {
-                    restored.resize(restored_count);
-                    g_current_position = (llama_pos) restored_count;
-                    g_context_tokens = restored;
-                    g_cache_state_valid = true;
-                    g_cache_reuse_hit = true;
-                    g_cache_reused_tokens = (int) restored_count;
-                    g_cache_reuse_hits++;
-                    g_cache_reuse_reason = "persistent_session_hit";
-                    g_persistent_prefix_cache_hit = true;
-                    g_persistent_prefix_cache_tokens = (int) restored_count;
-                    g_persistent_prefix_cache_reason = "session_state_loaded";
-                    g_pending_full_session_write_path = request.write_state_path;
-                    result.handled = true;
-                    result.reused_tokens = restored_count;
-                    return result;
+                if (header_size > 0 && restored_count > 0 &&
+                    restored_count <= static_cast<size_t>(g_n_ctx)) {
+                    llama_tokens restored(restored_count);
+                    size_t loaded_count = 0;
+                    const size_t loaded = llama_state_seq_load_file(
+                            g_context,
+                            request.restore_state_path.c_str(),
+                            0,
+                            restored.data(),
+                            restored.size(),
+                            &loaded_count);
+                    if (loaded > 0 && loaded_count == restored_count) {
+                        const size_t reusable = mca::llama::reusableSessionTokenPrefix(
+                                full_tokens, restored);
+                        if (reusable > 0 &&
+                            (reusable == restored_count || trim_context_locked(
+                                    g_context,
+                                    static_cast<llama_pos>(reusable),
+                                    "persistent session"))) {
+                            restored.resize(reusable);
+                            g_current_position = static_cast<llama_pos>(reusable);
+                            g_context_tokens = std::move(restored);
+                            g_cache_state_valid = true;
+                            g_cache_reuse_hit = true;
+                            g_cache_reused_tokens = static_cast<int>(reusable);
+                            g_cache_reuse_hits++;
+                            g_cache_reuse_reason = "persistent_session_hit";
+                            g_persistent_prefix_cache_hit = true;
+                            g_persistent_prefix_cache_tokens = static_cast<int>(reusable);
+                            g_persistent_prefix_cache_reason = "session_state_loaded";
+                            g_pending_full_session_write_path = request.write_state_path;
+                            result.handled = true;
+                            result.reused_tokens = reusable;
+                            return result;
+                        }
+                        g_persistent_prefix_cache_reason = reusable > 0
+                                ? "session_state_trim_failed"
+                                : "session_state_token_mismatch";
+                    } else {
+                        g_persistent_prefix_cache_reason = "session_state_load_failed";
+                    }
+                } else {
+                    g_persistent_prefix_cache_reason = "session_state_load_failed";
                 }
-                g_persistent_prefix_cache_reason = "session_state_token_mismatch";
             } catch (...) {
                 g_persistent_prefix_cache_reason = "session_state_load_failed";
             }
+            clear_target_context_locked("persistent_session_restore_failed");
         } else {
             g_persistent_prefix_cache_reason = "session_state_cold_start";
         }
@@ -2450,11 +2540,10 @@ bool trim_context_locked(llama_context *ctx, llama_pos position, const char *lab
     return true;
 }
 
-// Serializes the seq_id KV state to `path` in two phases so the UI can report
-// real-time progress. The in-memory encode is a single atomic llama.cpp call
-// (no incremental interface exists), but the file write is chunked so bytes
-// written/total are updated per chunk. The on-disk layout is identical to
-// llama_state_seq_save_file(). Returns bytes written, or 0 on failure.
+// The public save/load pair owns the sequence-file header and token list.
+// Raw llama_state_seq_get_data_ext bytes cannot be loaded by
+// llama_state_seq_load_file. The native writer is opaque, so progress moves
+// from encoding to done when it returns.
 // Must be called with g_mutex held; the progress atomics stay lock-free readable.
 size_t save_llama_state_with_progress_locked(
         llama_context *ctx,
@@ -2465,42 +2554,27 @@ size_t save_llama_state_with_progress_locked(
         llama_state_seq_flags flags) {
     g_persist_stage.store(static_cast<int>(PersistStage::Idle), std::memory_order_release);
     g_persist_written_bytes.store(0, std::memory_order_release);
-    const size_t total = llama_state_seq_get_size_ext(ctx, seq_id, flags);
-    if (total == 0) {
+    const size_t state_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
+    if (state_size == 0 || flags != LLAMA_STATE_SEQ_FLAGS_NONE ||
+        n_token_count > std::numeric_limits<uint32_t>::max()) {
         g_persist_total_bytes.store(0, std::memory_order_release);
         return 0;
     }
+    const size_t total = state_size + sizeof(uint32_t) * 3 +
+            n_token_count * sizeof(llama_token);
     g_persist_total_bytes.store(total, std::memory_order_release);
     try {
-        std::vector<uint8_t> buf(total);
         g_persist_stage.store(static_cast<int>(PersistStage::Encoding), std::memory_order_release);
-        const size_t encoded = llama_state_seq_get_data_ext(ctx, buf.data(), buf.size(), seq_id, flags);
-        if (encoded != total) {
+        const size_t written = llama_state_seq_save_file(
+                ctx, path, seq_id, tokens, n_token_count);
+        if (written == 0) {
             reset_persist_progress();
             return 0;
         }
-        g_persist_stage.store(static_cast<int>(PersistStage::Writing), std::memory_order_release);
-        std::ofstream out(path, std::ios::binary);
-        if (!out) {
-            reset_persist_progress();
-            return 0;
-        }
-        constexpr size_t kWriteChunk = 1 << 20; // 1 MiB
-        size_t written_total = 0;
-        for (size_t offset = 0; offset < total; offset += kWriteChunk) {
-            const size_t n = std::min(kWriteChunk, total - offset);
-            out.write(reinterpret_cast<const char *>(buf.data() + offset), static_cast<std::streamsize>(n));
-            if (!out) {
-                reset_persist_progress();
-                return 0;
-            }
-            written_total += n;
-            g_persist_written_bytes.store(written_total, std::memory_order_release);
-        }
-        out.flush();
-        out.close();
+        g_persist_written_bytes.store(written, std::memory_order_release);
+        g_persist_total_bytes.store(written, std::memory_order_release);
         g_persist_stage.store(static_cast<int>(PersistStage::Done), std::memory_order_release);
-        return written_total;
+        return written;
     } catch (const std::exception &) {
         reset_persist_progress();
         return 0;
@@ -2688,6 +2762,33 @@ void save_completed_turn_checkpoint_locked(GenerationStopReason reason) {
         case GenerationStopReason::MAX_NEW_TOKENS:
         case GenerationStopReason::NORMAL_FINISHED:
             (void) save_turn_cache_checkpoint_locked();
+            if (!g_pending_full_session_write_path.empty()) {
+                if (g_context_shifts == 0 && g_cache_state_valid &&
+                    !g_context_tokens.empty() &&
+                    g_current_position == (llama_pos) g_context_tokens.size()) {
+                    try {
+                        const size_t saved = save_llama_state_with_progress_locked(
+                                g_context,
+                                g_pending_full_session_write_path.c_str(),
+                                0,
+                                g_context_tokens.data(),
+                                g_context_tokens.size(),
+                                LLAMA_STATE_SEQ_FLAGS_NONE);
+                        g_persistent_prefix_cache_saved = saved > 0;
+                        if (!g_persistent_prefix_cache_hit) {
+                            g_persistent_prefix_cache_tokens = (int) g_context_tokens.size();
+                        }
+                        g_persistent_prefix_cache_reason = saved > 0
+                                ? "session_state_saved"
+                                : "session_state_save_failed";
+                    } catch (...) {
+                        g_persistent_prefix_cache_reason = "session_state_save_failed";
+                    }
+                } else {
+                    g_persistent_prefix_cache_reason = "session_state_unavailable";
+                }
+                g_pending_full_session_write_path.clear();
+            }
             return;
         default:
             return;
@@ -3317,8 +3418,14 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     }
     g_last_error.clear();
 
+    const std::string fallback_policy = parse_string(params, "fallback_policy",
+            requested.n_gpu_layers == -1 ? "allow_cpu" : "require_requested_backend");
+    if (fallback_policy != "allow_cpu" && fallback_policy != "require_requested_backend") {
+        set_load_failure("MCA_BACKEND_FALLBACK_POLICY_INVALID", "Unsupported fallback_policy: " + fallback_policy);
+        return 11;
+    }
     RuntimeConfig effective;
-    if (!resolve_backend_config(requested, effective, config_error)) {
+    if (!resolve_backend_config(requested, effective, fallback_policy == "allow_cpu", config_error)) {
         g_last_error = "Unsupported llama runtime config: " + config_error;
         set_load_failure_code("MCA_LOAD_RUNTIME_CONFIG_UNSUPPORTED");
         return 13;
@@ -3365,16 +3472,20 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
             return 1;
     }
 
+    if (fallback_policy == "require_requested_backend" && requested.n_gpu_layers != 0 &&
+        (effective.n_gpu_layers == 0 || g_backend_gpu_device_count == 0)) {
+        set_load_failure("MCA_REQUESTED_BACKEND_UNAVAILABLE", "Requested GPU backend has no registered usable device. " + g_backend_load_diagnostic);
+        return 11;
+    }
     const bool auto_gpu_cpu_fallback_allowed =
-            requested.n_gpu_layers == -1 &&
+            fallback_policy == "allow_cpu" &&
             effective.n_gpu_layers != 0 &&
             effective.n_cpu_moe == 0;
-    g_gpu_auto_fallback_applied = false;
-    g_gpu_auto_fallback_reason = auto_gpu_cpu_fallback_allowed
-                                 ? "pending"
-                                 : (requested.n_gpu_layers == -1
-                                    ? "no_gpu_backend_cpu"
-                                    : "not_requested");
+    g_gpu_auto_fallback_applied = fallback_policy == "allow_cpu" &&
+            requested.n_gpu_layers != 0 && effective.n_gpu_layers == 0;
+    g_gpu_auto_fallback_reason = g_gpu_auto_fallback_applied
+                                 ? "gpu_backend_unavailable: " + g_backend_load_diagnostic
+                                 : (auto_gpu_cpu_fallback_allowed ? "pending" : "not_requested");
 
     auto restore_load_state_for_attempt = [&]() {
         g_spec_requested = effective.spec_type == "draft-mtp";
@@ -3764,6 +3875,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
             g_stop_epoch.load(std::memory_order_acquire);
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
+#if MCA_WITH_LLAMA_CPP
+        begin_gpu_execution_scope_locked();
+#endif
         g_cache_reuse_hit = false;
         g_cache_reused_tokens = 0;
         g_cache_reuse_reason = "not_attempted";
@@ -3945,29 +4059,6 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
                     g_context_tokens.clear();
                     g_cache_state_valid = false;
                     g_cache_reuse_reason = "invalidated_by_context_shift";
-                }
-                if (!g_pending_full_session_write_path.empty() &&
-                    g_context_shifts == 0 &&
-                    !g_stop_requested.load(std::memory_order_acquire)) {
-                    try {
-                        const size_t saved = save_llama_state_with_progress_locked(
-                                g_context,
-                                g_pending_full_session_write_path.c_str(),
-                                0,
-                                tokens.data(),
-                                tokens.size(),
-                                LLAMA_STATE_SEQ_FLAGS_NONE);
-                        if (saved > 0) {
-                            g_persistent_prefix_cache_saved = true;
-                            g_persistent_prefix_cache_tokens = (int) tokens.size();
-                            g_persistent_prefix_cache_reason = "session_state_saved";
-                        } else {
-                            g_persistent_prefix_cache_reason = "session_state_save_failed";
-                        }
-                    } catch (...) {
-                        g_persistent_prefix_cache_reason = "session_state_save_failed";
-                    }
-                    g_pending_full_session_write_path.clear();
                 }
                 if (g_spec_request_active) {
                     g_spec_prompt_tokens = tokens;

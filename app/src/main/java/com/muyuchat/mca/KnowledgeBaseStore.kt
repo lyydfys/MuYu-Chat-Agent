@@ -1,12 +1,25 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
 import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 data class KnowledgeBaseRecord(
     val id: String = UUID.randomUUID().toString(),
@@ -56,8 +69,102 @@ data class KnowledgeRetrieval(
     val chunks: List<KnowledgeChunkRecord> = emptyList(),
     val context: String = "",
     val estimatedTokens: Int = 0,
-    val skippedChunkIds: List<String> = emptyList()
+    val skippedChunkIds: List<String> = emptyList(),
+    val selectedSources: List<KnowledgeSource> = emptyList(),
+    val skippedSources: List<KnowledgeSource> = emptyList()
 )
+
+data class KnowledgeSource(
+    val knowledgeBaseId: String,
+    val documentId: String,
+    val chunkId: String,
+    val excerpt: String,
+    val lexicalScore: Int,
+    val estimatedTokens: Int,
+    val reason: String
+)
+
+internal data class PreparedKnowledgeDocument(
+    val document: KnowledgeDocumentRecord,
+    val chunks: List<KnowledgeChunkRecord>,
+    val originalText: String
+)
+
+internal object KnowledgeDocumentImportCodec {
+    const val MAX_SOURCE_BYTES = 1_048_576
+
+    suspend fun readTextCancellable(input: InputStream): String = suspendCancellableCoroutine { continuation ->
+        continuation.invokeOnCancellation { runCatching { input.close() } }
+        try {
+            val text = readText(input) {
+                if (!continuation.isActive) throw CancellationException("Knowledge document read cancelled.")
+            }
+            if (continuation.isActive) continuation.resume(text)
+        } catch (error: Throwable) {
+            if (continuation.isActive) continuation.resumeWithException(error)
+        }
+    }
+
+    fun readText(input: InputStream): String {
+        return readText(input, beforeRead = {})
+    }
+
+    private fun readText(input: InputStream, beforeRead: () -> Unit): String {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(8192)
+        while (true) {
+            beforeRead()
+            val count = input.read(buffer)
+            if (count < 0) break
+            require(count <= MAX_SOURCE_BYTES - output.size()) { "知识库文件超过 1 MiB，请拆分后导入。" }
+            output.write(buffer, 0, count)
+        }
+        return try {
+            Charsets.UTF_8.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT)
+                .decode(ByteBuffer.wrap(output.toByteArray())).toString()
+        } catch (error: java.nio.charset.CharacterCodingException) {
+            throw IllegalArgumentException("知识库文档不是有效的 UTF-8 文本，请转换编码后重试。", error)
+        }
+    }
+
+    fun prepare(
+        knowledgeBaseId: String,
+        title: String,
+        text: String,
+        source: String = "local",
+        now: Long = System.currentTimeMillis()
+    ): PreparedKnowledgeDocument {
+        require(knowledgeBaseId.isNotBlank()) { "Knowledge base ID must not be blank." }
+        require(text.toByteArray(Charsets.UTF_8).size <= MAX_SOURCE_BYTES) { "知识库文件超过 1 MiB，请拆分后导入。" }
+        require('\u0000' !in text) { "知识库文档包含二进制空字节，请选择文本文件。" }
+        val normalized = text.removePrefix("\uFEFF").replace("\r\n", "\n").trim()
+        require(normalized.isNotBlank()) { "知识库文档为空。" }
+        val hash = knowledgeDocumentSha256(normalized)
+        val documentId = "$knowledgeBaseId:$hash"
+        val chunks = KnowledgeChunker.chunk(knowledgeBaseId, documentId, normalized, hash)
+        require(chunks.isNotEmpty()) { "知识库文档没有可索引的文本。" }
+        return PreparedKnowledgeDocument(
+            document = KnowledgeDocumentRecord(
+                id = documentId,
+                knowledgeBaseId = knowledgeBaseId,
+                title = title.trim().take(96).ifBlank { "Imported document" },
+                source = source.trim().take(128).ifBlank { "local" },
+                contentHash = hash,
+                contentLength = normalized.length,
+                chunkCount = chunks.size,
+                createdAt = now,
+                updatedAt = now
+            ),
+            chunks = chunks,
+            originalText = text
+        )
+    }
+}
+
+private fun knowledgeDocumentSha256(text: String): String = MessageDigest.getInstance("SHA-256")
+    .digest(text.toByteArray(Charsets.UTF_8)).joinToString("") { byte -> "%02x".format(byte) }
 
 /**
  * Offline, bounded retrieval for the first knowledge-base release. The schema
@@ -66,6 +173,7 @@ data class KnowledgeRetrieval(
  */
 class KnowledgeBaseStore(context: Context) {
     private val database = McaRoomDatabase.get(context.applicationContext)
+    private val originalSourceDirectory = File(context.applicationContext.filesDir, "knowledge_document_sources_v1")
 
     fun loadBases(): List<KnowledgeBaseRecord> = runBlocking(Dispatchers.IO) {
         database.chatSessionDao().knowledgeBaseRecords()
@@ -84,8 +192,14 @@ class KnowledgeBaseStore(context: Context) {
         database.chatSessionDao().upsertKnowledgeBases(listOf(record.toEntity()))
     }
 
-    fun remove(knowledgeBaseId: String) = runBlocking(Dispatchers.IO) {
-        database.chatSessionDao().deleteKnowledgeBaseCompletely(knowledgeBaseId)
+    fun remove(knowledgeBaseId: String) {
+        val documentIds = documents(knowledgeBaseId).map(KnowledgeDocumentRecord::id)
+        runBlocking(Dispatchers.IO) {
+            database.chatSessionDao().deleteKnowledgeBaseCompletely(knowledgeBaseId)
+        }
+        documentIds.forEach { id ->
+            File(originalSourceDirectory, "${knowledgeDocumentSha256(id)}.txt").delete()
+        }
     }
 
     fun documents(knowledgeBaseId: String): List<KnowledgeDocumentRecord> = runBlocking(Dispatchers.IO) {
@@ -98,45 +212,55 @@ class KnowledgeBaseStore(context: Context) {
         text: String,
         source: String = "local"
     ): KnowledgeDocumentRecord {
-        val normalized = text.replace("\r\n", "\n").trim()
-        require(normalized.isNotBlank()) { "Knowledge document is empty." }
-        require(normalized.length <= MAX_DOCUMENT_CHARS) {
-            "Knowledge document is larger than ${MAX_DOCUMENT_CHARS / 1024} KiB."
-        }
-        val hash = sha256(normalized)
-        val documentId = "$knowledgeBaseId:$hash"
-        val chunks = KnowledgeChunker.chunk(
-            knowledgeBaseId = knowledgeBaseId,
-            documentId = documentId,
-            text = normalized,
-            contentHash = hash
-        )
-        val now = System.currentTimeMillis()
-        val document = KnowledgeDocumentRecord(
-            id = documentId,
-            knowledgeBaseId = knowledgeBaseId,
-            title = title.trim().take(MAX_NAME_CHARS).ifBlank { "Imported document" },
-            source = source.trim().take(128).ifBlank { "local" },
-            contentHash = hash,
-            contentLength = normalized.length,
-            chunkCount = chunks.size,
-            createdAt = now,
-            updatedAt = now
-        )
+        val prepared = KnowledgeDocumentImportCodec.prepare(knowledgeBaseId, title, text, source)
+        val existing = documents(knowledgeBaseId).firstOrNull { it.id == prepared.document.id }
+        val document = prepared.document.copy(createdAt = existing?.createdAt ?: prepared.document.createdAt)
+        // Retain the original UTF-8 source before committing its searchable projection. A
+        // failed Room write can be retried with the same document id without losing the source.
+        retainOriginalSource(document.id, prepared.originalText)
         runBlocking(Dispatchers.IO) {
             database.chatSessionDao().replaceKnowledgeDocument(
                 document = document.toEntity(),
-                chunks = chunks.map { it.toEntity() }
+                chunks = prepared.chunks.map { it.toEntity() }
             )
         }
         return document
     }
 
-    fun deleteDocument(documentId: String) = runBlocking(Dispatchers.IO) {
-        database.chatSessionDao().deleteKnowledgeDocumentCompletely(
-            documentId = documentId,
-            updatedAt = System.currentTimeMillis()
-        )
+    fun originalDocumentText(documentId: String): String? {
+        val file = File(originalSourceDirectory, "${knowledgeDocumentSha256(documentId)}.txt")
+        return if (file.isFile) file.inputStream().use(KnowledgeDocumentImportCodec::readText) else null
+    }
+
+    private fun retainOriginalSource(documentId: String, text: String) {
+        check(originalSourceDirectory.isDirectory || originalSourceDirectory.mkdirs()) {
+            "Unable to create the knowledge document source directory."
+        }
+        val target = File(originalSourceDirectory, "${knowledgeDocumentSha256(documentId)}.txt")
+        val pending = File(originalSourceDirectory, ".${target.name}.${UUID.randomUUID()}.pending")
+        try {
+            FileOutputStream(pending).use { output ->
+                output.write(text.toByteArray(Charsets.UTF_8))
+                output.fd.sync()
+            }
+            try {
+                Files.move(pending.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: AtomicMoveNotSupportedException) {
+                Files.move(pending.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
+            pending.delete()
+        }
+    }
+
+    fun deleteDocument(documentId: String) {
+        runBlocking(Dispatchers.IO) {
+            database.chatSessionDao().deleteKnowledgeDocumentCompletely(
+                documentId = documentId,
+                updatedAt = System.currentTimeMillis()
+            )
+        }
+        File(originalSourceDirectory, "${knowledgeDocumentSha256(documentId)}.txt").delete()
     }
 
     fun selectedKnowledgeBaseIds(chatSessionId: String): Set<String> = runBlocking(Dispatchers.IO) {
@@ -219,13 +343,30 @@ class KnowledgeBaseStore(context: Context) {
                 "[Knowledge]\n${chunk.content}"
             }
             .orEmpty()
+        val selectedIds = selected.mapTo(hashSetOf()) { it.id }
+        val skippedIds = skipped.toSet()
         return KnowledgeRetrieval(
             chunks = selected,
             context = context,
             estimatedTokens = used,
-            skippedChunkIds = skipped
+            skippedChunkIds = skipped,
+            selectedSources = ranked.filter { it.chunk.id in selectedIds }
+                .map { candidate -> candidate.toSource("lexical_match") },
+            skippedSources = ranked.filter { it.chunk.id in skippedIds }
+                .map { candidate -> candidate.toSource("budget_or_limit") }
         )
     }
+
+    private fun KnowledgeLexicalRetriever.RankedChunk.toSource(reason: String): KnowledgeSource =
+        KnowledgeSource(
+            knowledgeBaseId = chunk.knowledgeBaseId,
+            documentId = chunk.documentId,
+            chunkId = chunk.id,
+            excerpt = chunk.content,
+            lexicalScore = score,
+            estimatedTokens = chunk.estimatedTokens.coerceAtLeast(1),
+            reason = reason
+        )
 
     fun markEmbeddingModel(knowledgeBaseId: String, fingerprint: String?) {
         val current = loadBases().firstOrNull { it.id == knowledgeBaseId } ?: return
@@ -243,14 +384,9 @@ class KnowledgeBaseStore(context: Context) {
         )
     }
 
-    private fun sha256(text: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(text.toByteArray(Charsets.UTF_8))
-        .joinToString("") { byte -> "%02x".format(byte) }
-
     private companion object {
         const val MAX_NAME_CHARS = 96
         const val MAX_DESCRIPTION_CHARS = 512
-        const val MAX_DOCUMENT_CHARS = 1_048_576
         const val DEFAULT_MAX_CHUNKS = 4
         const val DEFAULT_TOKEN_BUDGET = 768
         const val MAX_RANKED_CANDIDATES = 64

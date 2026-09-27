@@ -37,7 +37,7 @@ internal fun responsesHttpRequest(config: CloudApiConfig, request: ChatRequest, 
         .build()
 
 /** Cancellation closes both a pending connect/headers call and a blocked SSE body read. */
-private suspend fun <T> withResponsesCall(call: Call, block: suspend (Response) -> T): T = coroutineScope {
+internal suspend fun <T> withCancellableCloudCall(call: Call, block: suspend (Response) -> T): T = coroutineScope {
     val canceller = launch(start = CoroutineStart.UNDISPATCHED) {
         try { awaitCancellation() } finally { call.cancel() }
     }
@@ -47,6 +47,9 @@ private suspend fun <T> withResponsesCall(call: Call, block: suspend (Response) 
             currentCoroutineContext().ensureActive()
             block(response)
         }
+    } catch (error: Throwable) {
+        currentCoroutineContext().ensureActive()
+        throw error
     } finally {
         canceller.cancel()
     }
@@ -76,7 +79,7 @@ internal fun streamOpenAiResponsesChat(client: OkHttpClient, config: CloudApiCon
             decodeMs = elapsed, decodeTps = if (rateMs > 0) outputTokens * 1000.0 / rateMs else 0.0,
             e2eTps = if (now > started) outputTokens * 1000.0 / (now - started) else 0.0,
             cacheReuseHit = (decoder.cachedTokens ?: 0) > 0, cacheReusedTokens = decoder.cachedTokens ?: 0,
-            cacheReuseReason = decoder.cachedTokens?.let { "provider_prompt_cache" },
+            cacheReuseReason = decoder.cachedTokens?.let { "provider_prompt_cache" } ?: "unknown",
             promptTokensEstimated = decoder.inputTokens == null,
             completionTokensEstimated = decoder.outputTokens == null
         )
@@ -93,7 +96,7 @@ internal fun streamOpenAiResponsesChat(client: OkHttpClient, config: CloudApiCon
             emit(GenerateEvent.Chunk(text = text, reasoning = reasoning, reasoningDurationMs = 0L, stats = stats()))
         }
     }
-    withResponsesCall(client.newCall(responsesHttpRequest(config, request))) { response ->
+    withCancellableCloudCall(client.newCall(responsesHttpRequest(config, request))) { response ->
         val body = response.body ?: throw IOException("云端接口没有返回内容，请检查服务状态。")
         if (!response.isSuccessful) {
             val raw = body.charStream().buffered().readBoundedText()
@@ -166,7 +169,7 @@ internal suspend fun quickTestOpenAiResponses(client: OkHttpClient, config: Clou
         require(config.configured) { "请先填写 Responses 接口地址、模型名和必要的 API Key。" }
         val request = ChatRequest(listOf(ChatMessage(Role.USER, "Reply OK.")),
             GenerationParams(systemPrompt = "", nPredict = 16, reasoningMode = ReasoningMode.OFF))
-        withResponsesCall(client.newCall(responsesHttpRequest(config, request, stream = false))) { response ->
+        withCancellableCloudCall(client.newCall(responsesHttpRequest(config, request, stream = false))) { response ->
             val body = response.body?.charStream()?.buffered()?.readBoundedText().orEmpty()
             if (!response.isSuccessful) throw IOException("云端接口错误 ${response.code}: " +
                 runCatching { responsesError(JSONObject(body)) }.getOrDefault(body.take(300)))

@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Process
 import android.os.RemoteException
+import android.os.SystemClock
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
@@ -151,7 +152,7 @@ class TuningProbeWorkerService : Service() {
                 return false
             }
             val job = scope.launch {
-                val startedAt = System.currentTimeMillis()
+                val startedAt = SystemClock.elapsedRealtime()
                 val watchdog = Runnable {
                     if (synchronized(lock) { active === next }) {
                         val diagnostic = IsolatedNativeFailureDiagnostics.watchdog(
@@ -451,7 +452,7 @@ class TuningProbeWorkerService : Service() {
                     endPssBytes = endMemory.pssBytes,
                     endRssBytes = endMemory.rssBytes,
                     lowMemoryTriggered = lowMemory,
-                    elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                    elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
                 )
             }
 
@@ -623,7 +624,7 @@ class TuningProbeWorkerService : Service() {
                 endPssBytes = endMemory.pssBytes,
                 endRssBytes = endMemory.rssBytes,
                 lowMemoryTriggered = lowMemory,
-                elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
             )
         } finally {
             if (loaded) runCatching { withTimeout(UNLOAD_TIMEOUT_MS) { engine.unloadModel() } }
@@ -858,7 +859,7 @@ class TuningProbeWorkerService : Service() {
                     requestId = activeRequest.request.requestId,
                     stage = stage,
                     message = message,
-                    elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+                    elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
                 )
             )
         }.onFailure { cancelForDeadClient(activeRequest) }

@@ -53,6 +53,76 @@ class McaInferenceServicePersistentPrefixCacheTest {
     }
 
     @Test
+    fun fullSessionStateIsPublishedAfterTheVisibleReplyAndRestoredOnReturn() = runBlocking {
+        val root = temporaryRoot("session-round-trip")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        val first = request("first").copy(persistentSessionId = "conversation-a")
+
+        runner.enqueue("first reply")
+        val coldEvents = mutableListOf<GenerateEvent>()
+        service.streamChat(first).collect { event ->
+            coldEvents += event
+            if (event is GenerateEvent.Chunk) assertTrue(store.entries().isEmpty())
+        }
+
+        assertTrue(coldEvents.last() is GenerateEvent.Done)
+        assertTrue(runner.prefixRequests.first().fullSessionState)
+        assertEquals(1, store.entries().size)
+
+        runner.enqueue("second reply")
+        runner.reportRestoreHit = true
+        val warmEvents = service.streamChat(
+            request("second").copy(persistentSessionId = "conversation-a")
+        ).toList()
+
+        assertTrue(warmEvents.last() is GenerateEvent.Done)
+        assertNotNull(runner.prefixRequests.last().restoreStatePath)
+        val warmStats = (warmEvents.last() as GenerateEvent.Done).stats
+        assertTrue(warmStats.persistentPrefixCacheHit)
+        assertEquals("session_state_saved", warmStats.persistentPrefixCacheReason)
+    }
+
+    @Test
+    fun purgingOneSessionPreservesAnotherConversation() = runBlocking {
+        val root = temporaryRoot("session-purge")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        runner.enqueue("first reply")
+        service.streamChat(request("first").copy(persistentSessionId = "conversation-a")).toList()
+        runner.enqueue("other reply")
+        service.streamChat(request("other").copy(persistentSessionId = "conversation-b")).toList()
+        assertEquals(2, store.entries().size)
+
+        assertTrue(service.clearPersistentSessionStates(setOf(" conversation-a ")))
+        assertEquals(1, store.entries().size)
+        runner.enqueue("return")
+        service.streamChat(request("return").copy(persistentSessionId = "conversation-b")).toList()
+        assertNotNull(runner.prefixRequests.last().restoreStatePath)
+    }
+
+    @Test
+    fun failedReplacementExportEvictsAnUnrestorableFullSessionState() = runBlocking {
+        val root = temporaryRoot("session-failed-replacement")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        val session = request("first").copy(persistentSessionId = "conversation-a")
+        runner.enqueue("first reply")
+        service.streamChat(session).toList()
+        assertEquals(1, store.entries().size)
+
+        runner.writeState = false
+        runner.enqueue("second reply")
+        val result = service.streamChat(request("second").copy(persistentSessionId = "conversation-a")).toList()
+        assertTrue(result.last() is GenerateEvent.Done)
+        assertEquals("session_state_save_failed", (result.last() as GenerateEvent.Done).stats.persistentPrefixCacheReason)
+        assertTrue(store.entries().isEmpty())
+    }
+
+    @Test
     fun failedStateExportDoesNotFailTheAnswerOrPublishAnEntry() = runBlocking {
         val root = temporaryRoot("save-failure")
         val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
@@ -259,6 +329,7 @@ class McaInferenceServicePersistentPrefixCacheTest {
     private class PrefixRunner : LocalChatRunner {
         private var stats = loadedStats("{}")
         private val chunks = ArrayDeque<String>()
+        private var pendingSessionState: PersistentPrefixCacheRequest? = null
 
         val prefixRequests = mutableListOf<PersistentPrefixCacheRequest>()
         var ordinaryBeginCalls = 0
@@ -296,7 +367,8 @@ class McaInferenceServicePersistentPrefixCacheTest {
             val request = requireNotNull(prefixCache)
             prefixRequests += request
             val hit = reportRestoreHit && request.restoreStatePath != null
-            val saved = !hit && writeState && request.writeStatePath != null
+            pendingSessionState = request.takeIf { it.fullSessionState }
+            val saved = !request.fullSessionState && !hit && writeState && request.writeStatePath != null
             if (saved) {
                 val stateFile = File(requireNotNull(request.writeStatePath))
                 stateFile.writeBytes("native-state".toByteArray())
@@ -320,8 +392,28 @@ class McaInferenceServicePersistentPrefixCacheTest {
             return 0
         }
 
-        override fun generateNextChunk(): String? =
-            if (chunks.isEmpty()) null else chunks.removeFirst()
+        override fun generateNextChunk(): String? {
+            if (chunks.isNotEmpty()) return chunks.removeFirst()
+            pendingSessionState?.let { request ->
+                pendingSessionState = null
+                val saved = writeState && request.writeStatePath != null
+                if (saved) {
+                    val stateFile = File(requireNotNull(request.writeStatePath))
+                    stateFile.writeBytes("completed-turn-state".toByteArray())
+                    if (deleteStateBeforeCommit) stateFile.delete()
+                }
+                stats = JSONObject(stats).put(
+                    "persistentPrefixCache",
+                    JSONObject()
+                        .put("attempted", true)
+                        .put("hit", reportRestoreHit && request.restoreStatePath != null)
+                        .put("saved", saved)
+                        .put("tokens", 24)
+                        .put("reason", if (saved) "session_state_saved" else "session_state_save_failed")
+                ).toString()
+            }
+            return null
+        }
 
         override fun requestStop() = Unit
         override fun getRuntimeStatsJson(): String = stats

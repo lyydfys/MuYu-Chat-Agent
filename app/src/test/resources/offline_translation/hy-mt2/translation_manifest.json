@@ -1,0 +1,22 @@
+{
+  "kind": "mca-offline-prompt-translation",
+  "contractVersion": 2,
+  "translatorFamily": "HY_MT2",
+  "runtimeKind": "LLAMA_CPP",
+  "model": {
+    "sourceId": "tencent/Hy-MT2-1.8B-GGUF",
+    "sourceRevision": "a0c709d9fac510f2c807aa3af52872340dc37a4a",
+    "license": "Apache-2.0",
+    "fileName": "Hy-MT2-1.8B-Q4_K_M.gguf",
+    "sha256": "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699",
+    "sizeBytes": 1133080448,
+    "architecture": "hunyuan-dense",
+    "quantization": "Q4_K_M"
+  },
+  "runtime": {
+    "sourceId": "ggml-org/llama.cpp",
+    "sourceRevision": "4ceb1719101f32637b841206c172f3f058ffc182",
+    "license": "MIT",
+    "nativeLibraryFileName": "libmca_native.so"
+  }
+}

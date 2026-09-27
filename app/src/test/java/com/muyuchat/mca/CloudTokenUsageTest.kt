@@ -4,7 +4,9 @@ import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
+import com.muyuchat.core.engine.RuntimeMonotonicClock
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import okhttp3.MediaType.Companion.toMediaType
@@ -13,11 +15,13 @@ import okhttp3.Protocol
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import okio.Buffer
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
 class CloudTokenUsageTest {
+    private val fixedClock = RuntimeMonotonicClock { 1_000L }
     private val config = CloudApiConfig(enabled = true, baseUrl = "https://example.test/v1", apiKey = "test", chatModel = "model")
     private val request = ChatRequest(listOf(ChatMessage(Role.USER, "question")),
         GenerationParams(systemPrompt = "system context"), runtimeSystemContext = "retrieved context")
@@ -33,6 +37,21 @@ class CloudTokenUsageTest {
         assertEquals(86, stats.completionTokens)
         assertFalse(stats.promptTokensEstimated)
         assertFalse(stats.completionTokensEstimated)
+    }
+
+    @Test fun monotonicZeroFirstChunkIsNotResetByLaterChunks() = runBlocking {
+        val ticks = ArrayDeque(listOf(0L, 0L, 10L, 20L, 30L))
+        val body = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\n\n" +
+            "data: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}\n\n" +
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}\n\n" +
+            "data: [DONE]\n\n"
+        val events = provider(body, RuntimeMonotonicClock { ticks.removeFirst() })
+            .streamChat(config, request).toList()
+        val stats = (events.last() as GenerateEvent.Done).stats
+        assertEquals("AB", events.filterIsInstance<GenerateEvent.Chunk>().joinToString("") { it.text })
+        assertEquals(0L, stats.ttftMs)
+        assertEquals(30L, stats.decodeMs)
+        assertEquals(2_000.0 / 30.0, stats.decodeTps, 0.001)
     }
 
     @Test fun anthropicMergesStartInputCacheAndCumulativeOutput() = runBlocking {
@@ -66,6 +85,52 @@ class CloudTokenUsageTest {
         }
     }
 
+    @Test fun sseKeepsWhitespaceAndLiteralNullDeltasInBothProtocols() = runBlocking {
+        val pieces = listOf("code", "\n", "    ", "null", "\t")
+        for (format in listOf(CloudApiFormat.OPENAI_COMPATIBLE, CloudApiFormat.ANTHROPIC)) {
+            val frames = pieces.flatMap { piece ->
+                if (format == CloudApiFormat.OPENAI_COMPATIBLE) {
+                    listOf(JSONObject().put("choices", JSONArray().put(JSONObject().put("delta",
+                        JSONObject().put("content", piece).put("reasoning_content", piece)))))
+                } else {
+                    listOf(
+                        JSONObject().put("type", "content_block_delta")
+                            .put("delta", JSONObject().put("type", "text_delta").put("text", piece)),
+                        JSONObject().put("type", "content_block_delta")
+                            .put("delta", JSONObject().put("type", "thinking_delta").put("thinking", piece))
+                    )
+                }
+            }
+            val terminal = if (format == CloudApiFormat.OPENAI_COMPATIBLE) "[DONE]"
+                else JSONObject().put("type", "message_stop").toString()
+            val body = frames.joinToString("") { "data: $it\n\n" } + "data: $terminal\n\n"
+            val events = provider(body).streamChat(
+                config.copy(apiFormat = format),
+                request.copy(params = request.params.copy(reasoningMode = ReasoningMode.ADVANCED))
+            ).toList()
+
+            assertEquals(pieces.joinToString(""), events.filterIsInstance<GenerateEvent.Chunk>().joinToString("") { it.text })
+            assertEquals(pieces.joinToString(""), events.filterIsInstance<GenerateEvent.Chunk>().joinToString("") { it.reasoning })
+            assertEquals(1, events.count { it is GenerateEvent.Done })
+        }
+    }
+
+    @Test fun jsonFallbackKeepsWhitespaceBodyInsteadOfChoosingAnAlternateField() = runBlocking {
+        for (content in listOf(" \n\t", "null")) {
+            val bodies = listOf(
+                CloudApiFormat.OPENAI_COMPATIBLE to JSONObject().put("choices", JSONArray().put(
+                    JSONObject().put("message", JSONObject().put("content", content)).put("text", "alternate"))),
+                CloudApiFormat.ANTHROPIC to JSONObject().put("content", JSONArray().put(
+                    JSONObject().put("type", "text").put("text", content)))
+            )
+            for ((format, body) in bodies) {
+                val events = provider(body.toString()).streamChat(config.copy(apiFormat = format), request).toList()
+                assertEquals(content, events.filterIsInstance<GenerateEvent.Chunk>().single().text)
+                assertTrue(events.last() is GenerateEvent.Done)
+            }
+        }
+    }
+
     @Test fun missingUsageIsExplicitlyEstimatedAndIncludesSystemAndRetrievedText() = runBlocking {
         val stats = (provider("""{"choices":[{"message":{"content":"Hi"}}]}""")
             .streamChat(config, request).toList().last() as GenerateEvent.Done).stats
@@ -96,7 +161,7 @@ class CloudTokenUsageTest {
                 response(chain.request(), 200, """{"choices":[{"message":{"content":"OK"}}]}""")
             }
         }.build()
-        val events = OpenAiCompatibleChatProvider(client).streamChat(config, request).toList()
+        val events = OpenAiCompatibleChatProvider(client, fixedClock).streamChat(config, request).toList()
         assertTrue(events.last() is GenerateEvent.Done)
         assertEquals(2, calls)
     }
@@ -108,15 +173,16 @@ class CloudTokenUsageTest {
                 calls++
                 response(chain.request(), code, JSONObject().put("error", JSONObject().put("message", error)).toString())
             }.build()
-            val events = OpenAiCompatibleChatProvider(client).streamChat(config, request).toList()
+            val events = OpenAiCompatibleChatProvider(client, fixedClock).streamChat(config, request).toList()
             assertTrue(events.last() is GenerateEvent.Error)
             assertEquals(1, calls)
         }
     }
 
-    private fun provider(body: String) = OpenAiCompatibleChatProvider(OkHttpClient.Builder().addInterceptor { chain ->
-        response(chain.request(), 200, body)
-    }.build())
+    private fun provider(body: String, clock: RuntimeMonotonicClock = fixedClock) =
+        OpenAiCompatibleChatProvider(OkHttpClient.Builder().addInterceptor { chain ->
+            response(chain.request(), 200, body)
+        }.build(), clock)
 
     private fun response(request: okhttp3.Request, code: Int, body: String): Response = Response.Builder()
         .request(request).protocol(Protocol.HTTP_1_1).code(code).message("test")

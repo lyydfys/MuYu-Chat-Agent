@@ -10,6 +10,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.BackEventCompat
@@ -111,7 +112,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AlertDialog
+import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
@@ -177,6 +178,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role as SemanticsRole
@@ -296,6 +298,13 @@ data class ChatUiState(
     val promptContextUsage: PromptContextUsage? = null,
     val contextCompressionThresholdPercent: Int = 80,
     val contextCompressionPending: Boolean = false,
+    val contextSummaryModelSelection: String = "current",
+    val contextSummaryModels: List<ContextSummaryModelOption> = emptyList(),
+    val contextSummaryHistory: List<ContextSummaryUiItem> = emptyList(),
+    val canUndoContextSummary: Boolean = false,
+    val pendingImageTranslationDraft: ChatImageTranslationDraftUi? = null,
+    val pendingImageActionDraft: ChatImageActionDraftUi? = null,
+    val browserTask: BrowserTask? = null,
     val selectedModelId: String? = null,
     val selectedModelName: String? = null,
     val selectedModelIsCloud: Boolean = false,
@@ -465,7 +474,60 @@ data class AssistantUiItem(
     val repeatPenalty: Float = 1.08f,
     val presencePenalty: Float = 0f,
     val frequencyPenalty: Float = 0.2f,
-    val stopWords: List<String> = emptyList()
+    val stopWords: List<String> = emptyList(),
+    val memorySummaryInterval: Int = 12,
+    val characterCardImported: Boolean = false
+)
+
+data class AssistantMemoryUiItem(
+    val id: String,
+    val assistantId: String,
+    val scope: String,
+    val content: String,
+    val source: String,
+    val createdAt: Long
+)
+
+data class ContextSummaryModelOption(val id: String, val label: String)
+
+data class ContextSummaryUiItem(
+    val version: Int,
+    val source: String,
+    val text: String,
+    val sourceMessageIds: List<String>,
+    val active: Boolean,
+    val createdAt: Long,
+    val coverageLimited: Boolean = false,
+    val evidenceCount: Int = 0,
+    val omittedExcerptCount: Int = 0,
+    val omittedCharacterCount: Int = 0,
+    val modelIdentity: String? = null,
+    val diagnostic: String? = null
+)
+
+data class ContextSummaryEvidenceUiItem(
+    val kind: String,
+    val text: String,
+    val sourceMessageId: String,
+    val sourceOffset: Int
+)
+
+data class ChatImageTranslationDraftUi(
+    val id: String,
+    val originalPositive: String,
+    val originalNegative: String?,
+    val proposedPositive: String,
+    val proposedNegative: String?,
+    val sourceLabel: String
+)
+
+enum class ChatImageActionKind { AMBIGUOUS, CLOUD_TRANSLATION }
+
+data class ChatImageActionDraftUi(
+    val id: String,
+    val sourceText: String,
+    val kind: ChatImageActionKind,
+    val reason: String
 )
 
 data class AssistantEditorDraft(
@@ -488,7 +550,8 @@ data class AssistantEditorDraft(
     val repeatPenalty: Float = 1.08f,
     val presencePenalty: Float = 0f,
     val frequencyPenalty: Float = 0.2f,
-    val stopWords: List<String> = emptyList()
+    val stopWords: List<String> = emptyList(),
+    val memorySummaryInterval: Int = 12
 )
 
 data class ImageAssetUiItem(
@@ -617,6 +680,8 @@ data class ImageGenerationUiJob(
     val chatMessageId: String? = null,
     val imageAssetId: String? = null,
     val imageAssetIds: List<String> = emptyList(),
+    val completedProgressCount: Int = 0,
+    val expectedOutputCount: Int = 1,
     val previewUriString: String? = null,
     val previewMode: String = "",
     val previewStep: Int = 0,
@@ -626,7 +691,8 @@ data class ImageGenerationUiJob(
     val failed: Boolean = false,
     val terminal: Boolean = false,
     val message: String = "",
-    val startedAtMillis: Long = System.currentTimeMillis()
+    val startedAtMillis: Long = System.currentTimeMillis(),
+    val startedAtElapsedMs: Long? = null
 )
 
 internal enum class ImageAssistantCardKind {
@@ -1897,6 +1963,11 @@ fun ChatScreen(
     onDismissStatusMessage: () -> Unit = {},
     onSend: () -> Unit,
     onSendImagePrompt: () -> Unit = onSend,
+    onConfirmImageTranslationDraft: (String, String, String?) -> Unit = { _, _, _ -> },
+    onCancelImageTranslationDraft: (String) -> Unit = {},
+    onResolveImageActionDraft: (String, Boolean, String) -> Unit = { _, _, _ -> },
+    onBrowserTaskEvent: (BrowserTaskEvent) -> Unit = {},
+    onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem> = { emptyList() },
     onSetAssistantImageToolAutoApproval: (Boolean) -> Unit = {},
     onStop: () -> Unit,
     onNewConversation: () -> Unit,
@@ -1908,6 +1979,7 @@ fun ChatScreen(
     onExportConversation: (String) -> Unit,
     onRegenerate: () -> Unit,
     onDeleteMessage: (Int) -> Unit,
+    onTogglePinMessage: (String) -> Unit = {},
     onDeleteLastTurn: () -> Unit = {},
     onUploadFile: (String) -> Unit,
     onUseImageAsset: (String) -> Unit = {},
@@ -1939,6 +2011,7 @@ fun ChatScreen(
     onCancelImageGeneration: () -> Unit = {},
     releaseGenerationImageGrantsIfCoordinatorIdle: ((() -> Unit) -> Boolean),
     onSelectImageModel: (String) -> Unit = {},
+    onChatImageLoraSelectionChange: (List<ImageGenerationUiLoraSelection>?) -> Unit = {},
     onModelBackendChange: (String, String) -> Unit = { _, _ -> },
     onGenerationParamsChange: (GenerationParams) -> Unit = {},
     onReasoningModeChange: (ReasoningMode) -> Unit,
@@ -1946,6 +2019,7 @@ fun ChatScreen(
     onToggleWebSearchForTurn: () -> Unit = {},
     onSelectWebSearchResearchMode: (String) -> Unit = {},
     onOpenWebSearchSettings: () -> Unit = {},
+    onOpenBrowserTask: (BrowserTaskLaunch) -> Unit = {},
     onLoadModel: (String) -> Unit = {},
     onOpenAgent: () -> Unit,
     onOpenModels: () -> Unit,
@@ -1955,8 +2029,13 @@ fun ChatScreen(
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestContextCompression: () -> Unit = {},
+    onUndoContextSummary: () -> Unit = {},
     onSetContextCompressionThreshold: (Int) -> Unit = {},
+    onSetContextSummaryModel: (String) -> Unit = {},
     onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
+    assistantMemories: List<AssistantMemoryUiItem> = emptyList(),
+    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit = { _, _, _, _ -> },
+    onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
     onSelectAssistant: (String) -> Unit = {},
     onDeleteAssistant: (String) -> Unit = {},
     onImportAssistantCard: (String) -> Unit = {},
@@ -2120,6 +2199,37 @@ fun ChatScreen(
     }
     val supportsImageUltraFix = selectedImageModelChoice?.supportsImageUltraFix == true
     val supportsImageLora = selectedImageModelChoice?.supportsImageLora == true
+    LaunchedEffect(
+        state.selectedImageModelId,
+        restoredImageParameterModelId,
+        supportsImageLora,
+        imageLoraDraftJson,
+        imageLoraRestoreWarning,
+        state.imageLoras.map(ImageLoraUiItem::id)
+    ) {
+        val modelId = state.selectedImageModelId
+        if (modelId == null || restoredImageParameterModelId != modelId ||
+            imageLoraRestoreWarning != null
+        ) {
+            onChatImageLoraSelectionChange(null)
+            return@LaunchedEffect
+        }
+        if (!supportsImageLora) {
+            onChatImageLoraSelectionChange(emptyList())
+            return@LaunchedEffect
+        }
+        val drafts = imageLoraDraftsFromJson(imageLoraDraftJson)
+        val availableIds = state.imageLoras.mapTo(hashSetOf(), ImageLoraUiItem::id)
+        val valid = drafts.size <= 8 && drafts.map { it.id }.distinct().size == drafts.size &&
+            drafts.all { draft ->
+                val multiplier = draft.multiplierText.toDoubleOrNull()
+                draft.id in availableIds && multiplier != null && multiplier.isFinite() &&
+                    multiplier in -4.0..4.0 && kotlin.math.abs(multiplier) >= 0.01
+            }
+        onChatImageLoraSelectionChange(if (valid) drafts.map { draft ->
+            ImageGenerationUiLoraSelection(draft.id, requireNotNull(draft.multiplierText.toDoubleOrNull()))
+        } else null)
+    }
     val selectedImagePreviewMode = selectedImageModelChoice?.resolvedImagePreviewMode()
     val supportsImageLivePreview = selectedImagePreviewMode != null
     val selectedImageSupportedSamplers = selectedImageModelChoice
@@ -2999,8 +3109,16 @@ fun ChatScreen(
     val streamingScrollBucket = state.messages.lastOrNull()?.let { message ->
         (message.content.length + message.reasoningContent.length) / STREAMING_SCROLL_CHAR_STEP
     } ?: 0
-    LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket) {
-        if (state.messages.isNotEmpty()) {
+    val browserSearchCardVisible = state.browserTask?.let { task ->
+        task.kind == BrowserTaskKind.SEARCH && !task.windowVisible && task.phase in setOf(
+            BrowserTaskPhase.SEARCHING, BrowserTaskPhase.AWAITING_CONFIRMATION
+        )
+    } == true
+    LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket,
+        state.browserTask?.taskId, state.browserTask?.navigationId, browserSearchCardVisible) {
+        if (browserSearchCardVisible) {
+            listState.scrollToItem(state.messages.size + if (state.messages.isEmpty()) 1 else 0)
+        } else if (state.messages.isNotEmpty()) {
             listState.scrollToItem(state.messages.lastIndex)
         }
     }
@@ -3131,6 +3249,11 @@ fun ChatScreen(
                         }
                         MessageBubble(
                             message = message,
+                            browserSessionId = state.activeConversationId,
+                            characterCardHtml = state.assistants.any { assistant ->
+                                assistant.id == state.selectedAssistantId && assistant.characterCardImported
+                            },
+                            onOpenBrowserTask = onOpenBrowserTask,
                             generatedImageRequest = generatedImageRequest,
                             generatedImageJob = generatedImageJob,
                             generatedImageVisualState = generatedImageVisualState,
@@ -3178,8 +3301,59 @@ fun ChatScreen(
                             },
                             onRegenerate = onRegenerate,
                             onDelete = { onDeleteMessage(index) },
+                            onTogglePinned = { onTogglePinMessage(message.id) },
+                            canTogglePinned = !state.isGenerating,
                             onDeleteLastTurn = onDeleteLastTurn
                         )
+                    }
+                    state.browserTask?.takeIf { task ->
+                        task.kind == BrowserTaskKind.SEARCH && !task.windowVisible && task.phase in setOf(
+                            BrowserTaskPhase.SEARCHING,
+                            BrowserTaskPhase.AWAITING_CONFIRMATION
+                        )
+                    }?.let { task ->
+                        item(key = task.taskId) {
+                            Column(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        task.query.orEmpty(),
+                                        modifier = Modifier.weight(1f),
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                    IconButton(onClick = {
+                                        onBrowserTaskEvent(BrowserTaskEvent(
+                                            task.taskId, task.navigationId, BrowserTaskAction.CANCEL
+                                        ))
+                                    }) { Icon(Icons.Default.Close, contentDescription = "取消检索") }
+                                }
+                                Text(
+                                    if (task.phase == BrowserTaskPhase.SEARCHING) "正在检索来源"
+                                    else "选择来源以在浏览器中打开",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                task.candidateUrls.forEach { url ->
+                                    TextButton(onClick = {
+                                        onBrowserTaskEvent(BrowserTaskEvent(
+                                            task.taskId, task.navigationId,
+                                            BrowserTaskAction.SELECT_RESULT, url = url,
+                                            userInitiated = true
+                                        ))
+                                    }, modifier = Modifier.fillMaxWidth()) {
+                                        Text(url, modifier = Modifier.fillMaxWidth(), maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                                HorizontalDivider()
+                            }
+                        }
                     }
                 }
             }
@@ -3242,6 +3416,101 @@ fun ChatScreen(
                 )
             }
 
+            state.pendingImageTranslationDraft?.let { draft ->
+                var positive by rememberSaveable(draft.id) { mutableStateOf(draft.proposedPositive) }
+                var negative by rememberSaveable(draft.id) {
+                    mutableStateOf(draft.proposedNegative.orEmpty())
+                }
+                AlertDialog(
+                    onDismissRequest = { onCancelImageTranslationDraft(draft.id) },
+                    title = { Text("确认生图提示词") },
+                    text = {
+                        Column(
+                            modifier = Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(draft.sourceLabel, style = MaterialTheme.typography.bodySmall)
+                            Text("原始正向", style = MaterialTheme.typography.labelMedium)
+                            SelectionContainer {
+                                Text(draft.originalPositive, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            draft.originalNegative?.let { original ->
+                                Text("原始负向", style = MaterialTheme.typography.labelMedium)
+                                SelectionContainer {
+                                    Text(original, style = MaterialTheme.typography.bodyMedium)
+                                }
+                            }
+                            OutlinedTextField(
+                                value = positive,
+                                onValueChange = { positive = it },
+                                label = { Text("使用的正向提示词") },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 3,
+                                maxLines = 7
+                            )
+                            OutlinedTextField(
+                                value = negative,
+                                onValueChange = { negative = it },
+                                label = { Text("使用的负向提示词") },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 2,
+                                maxLines = 5
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                onConfirmImageTranslationDraft(
+                                    draft.id,
+                                    positive,
+                                    negative.takeIf { it.isNotEmpty() ||
+                                        draft.originalNegative != null || draft.proposedNegative != null }
+                                )
+                            },
+                            enabled = positive.isNotBlank()
+                        ) { Text("使用提示词") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { onCancelImageTranslationDraft(draft.id) }) {
+                            Text("取消")
+                        }
+                    }
+                )
+            }
+
+            state.pendingImageActionDraft?.let { draft ->
+                var editedText by rememberSaveable(draft.id) { mutableStateOf(draft.sourceText) }
+                AlertDialog(
+                    onDismissRequest = { onResolveImageActionDraft(draft.id, false, editedText) },
+                    title = { Text(if (draft.kind == ChatImageActionKind.AMBIGUOUS) "确认本轮操作" else "确认云端整理") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Text(draft.reason, style = MaterialTheme.typography.bodyMedium)
+                            OutlinedTextField(
+                                value = editedText,
+                                onValueChange = { editedText = it },
+                                label = { Text("原始描述") },
+                                modifier = Modifier.fillMaxWidth(),
+                                minLines = 2,
+                                maxLines = 6
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = { onResolveImageActionDraft(draft.id, true, editedText) },
+                            enabled = editedText.isNotBlank()
+                        ) { Text(if (draft.kind == ChatImageActionKind.AMBIGUOUS) "生成图片" else "使用云端整理") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { onResolveImageActionDraft(draft.id, false, editedText) }) {
+                            Text(if (draft.kind == ChatImageActionKind.AMBIGUOUS) "继续聊天" else "取消")
+                        }
+                    }
+                )
+            }
+
 
             SmoothRightToLeftPage(
                 visible = showAssistants,
@@ -3258,6 +3527,9 @@ fun ChatScreen(
                     selectedModelId = state.selectedModelId,
                     selectedModelIsCloud = state.selectedModelIsCloud,
                     onSaveAssistant = onSaveAssistant,
+                    assistantMemories = assistantMemories,
+                    onUpsertAssistantMemory = onUpsertAssistantMemory,
+                    onDeleteAssistantMemory = onDeleteAssistantMemory,
                     onSelectAssistant = onSelectAssistant,
                     onDeleteAssistant = onDeleteAssistant,
                     onImportAssistantCard = onImportAssistantCard,
@@ -3301,6 +3573,7 @@ fun ChatScreen(
                     loras = state.imageLoras,
                     selectedLoras = imageLoraDraftsFromJson(imageLoraDraftJson),
                     loraRestoreWarning = imageLoraRestoreWarning,
+                    onAcceptLoraRestore = { imageLoraRestoreWarning = null },
                     loraImporting = state.imageLoraImporting,
                     loraMessage = state.imageLoraMessage,
                     textualInversions = imageTextualInversionsForSelectedModel,
@@ -3916,7 +4189,10 @@ fun ChatScreen(
                         onOpenSettings()
                     },
                     onRequestContextCompression = onRequestContextCompression,
+                    onUndoContextSummary = onUndoContextSummary,
+                    onSearchContextSummarySources = onSearchContextSummarySources,
                     onSetContextCompressionThreshold = onSetContextCompressionThreshold,
+                    onSetContextSummaryModel = onSetContextSummaryModel,
                     onOpenImages = {
                         closeMenu()
                         showImages = true
@@ -3975,6 +4251,7 @@ fun ChatScreen(
 @Composable
 private fun AssistantRoleScreen(
     assistants: List<AssistantUiItem>,
+    assistantMemories: List<AssistantMemoryUiItem>,
     worldBooks: List<WorldBookUiItem>,
     knowledgeBases: List<KnowledgeBaseUiItem>,
     statusMessage: String?,
@@ -3984,6 +4261,8 @@ private fun AssistantRoleScreen(
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
     onSaveAssistant: (AssistantEditorDraft) -> Unit,
+    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit,
+    onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit,
     onSelectAssistant: (String) -> Unit,
     onDeleteAssistant: (String) -> Unit,
     onImportAssistantCard: (String) -> Unit,
@@ -4138,6 +4417,7 @@ private fun AssistantRoleScreen(
                 )
                 editingAssistant != null -> AssistantEditorPage(
                     assistant = editingAssistant,
+                    memories = assistantMemories.filter { it.assistantId == editingAssistant.id },
                     onBack = closePage,
                     selectedModelName = selectedModelName,
                     selectedModelId = selectedModelId,
@@ -4150,6 +4430,8 @@ private fun AssistantRoleScreen(
                         onSaveAssistant(it)
                         closePage()
                     },
+                    onUpsertMemory = onUpsertAssistantMemory,
+                    onDeleteMemory = onDeleteAssistantMemory,
                     modifier = pageModifier
                 )
                 importing -> AssistantImportPage(
@@ -4278,12 +4560,15 @@ private fun AssistantListCard(
 @Composable
 private fun AssistantEditorPage(
     assistant: AssistantUiItem?,
+    memories: List<AssistantMemoryUiItem> = emptyList(),
     onBack: () -> Unit,
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
     onDelete: (String) -> Unit,
     onSave: (AssistantEditorDraft) -> Unit,
+    onUpsertMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit = { _, _, _, _ -> },
+    onDeleteMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
     var name by remember(assistant?.id) { mutableStateOf(assistant?.name ?: "") }
@@ -4308,6 +4593,10 @@ private fun AssistantEditorPage(
     var stopWordsText by remember(assistant?.id) { mutableStateOf(JSONArray(assistant?.stopWords.orEmpty()).toString()) }
     var reasoningMode by remember(assistant?.id) { mutableStateOf(assistant?.reasoningMode ?: GenerationParams().reasoningMode) }
     var memoryEnabled by remember(assistant?.id) { mutableStateOf(assistant?.memoryEnabled ?: false) }
+    var memorySummaryIntervalText by remember(assistant?.id) {
+        mutableStateOf((assistant?.memorySummaryInterval ?: 12).coerceIn(2, 100).toString())
+    }
+    var showMemoryManager by remember(assistant?.id) { mutableStateOf(false) }
     var webSearchEnabled by remember(assistant?.id) { mutableStateOf(assistant?.webSearchEnabled ?: false) }
     var fileContextEnabled by remember(assistant?.id) { mutableStateOf(assistant?.fileContextEnabled ?: true) }
     var roleplayPresetMenuExpanded by rememberSaveable { mutableStateOf(false) }
@@ -4375,6 +4664,7 @@ private fun AssistantEditorPage(
             nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 16, 65_536),
             reasoningMode = reasoningMode,
             memoryEnabled = memoryEnabled,
+            memorySummaryInterval = memorySummaryIntervalText.toAssistantInt(assistant?.memorySummaryInterval ?: 12, 2, 100),
             webSearchEnabled = webSearchEnabled,
             fileContextEnabled = fileContextEnabled,
             topK = topKText.toAssistantInt(assistant?.topK ?: GenerationParams().topK, 0, 1000),
@@ -4548,6 +4838,24 @@ private fun AssistantEditorPage(
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         FilterChip(selected = fileContextEnabled, onClick = { fileContextEnabled = !fileContextEnabled }, label = { Text("文件上下文") })
                         FilterChip(selected = false, onClick = {}, enabled = false, label = { Text("本地工具预留") })
+                    }
+                    if (memoryEnabled) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        OutlinedTextField(
+                            value = memorySummaryIntervalText,
+                            onValueChange = { value -> memorySummaryIntervalText = value.filter(Char::isDigit).take(3) },
+                            label = { Text("每几轮总结一次") },
+                            supportingText = { Text("2 - 100 轮") },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    if (assistant != null) {
+                        TextButton(onClick = { showMemoryManager = true }) {
+                            Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("管理记忆")
+                        }
                     }
                 }
                 item {
@@ -4732,6 +5040,163 @@ private fun AssistantEditorPage(
                 }
             }
         }
+        if (showMemoryManager && assistant != null) {
+            AssistantMemoryManagerDialog(
+                assistant = assistant,
+                memories = memories,
+                onDismiss = { showMemoryManager = false },
+                onUpsert = onUpsertMemory,
+                onDelete = onDeleteMemory
+            )
+        }
+}
+
+@Composable
+private fun AssistantMemoryManagerDialog(
+    assistant: AssistantUiItem,
+    memories: List<AssistantMemoryUiItem>,
+    onDismiss: () -> Unit,
+    onUpsert: (assistantId: String, id: String?, scope: String, content: String) -> Unit,
+    onDelete: (assistantId: String, id: String) -> Unit
+) {
+    var selectedScope by rememberSaveable(assistant.id) { mutableStateOf("user_profile") }
+    var editingId by rememberSaveable(assistant.id) { mutableStateOf<String?>(null) }
+    var content by rememberSaveable(assistant.id) { mutableStateOf("") }
+    var pendingDelete by remember { mutableStateOf<AssistantMemoryUiItem?>(null) }
+    val visibleMemories = memories
+        .filter {
+            it.assistantId == assistant.id &&
+                (it.scope == selectedScope || selectedScope == "role_progress" && it.scope == "auto_summary")
+        }
+        .sortedWith(compareByDescending<AssistantMemoryUiItem> { it.createdAt }.thenBy { it.id })
+
+    fun clearEditor() {
+        editingId = null
+        content = ""
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(0.94f).fillMaxHeight(0.88f).widthIn(max = 600.dp),
+            shape = RoundedCornerShape(8.dp),
+            color = MaterialTheme.colorScheme.surface
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("角色记忆", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(assistant.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "关闭记忆管理")
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = selectedScope == "user_profile",
+                        onClick = {
+                            selectedScope = "user_profile"
+                            clearEditor()
+                        },
+                        label = { Text("用户信息") }
+                    )
+                    FilterChip(
+                        selected = selectedScope == "role_progress",
+                        onClick = {
+                            selectedScope = "role_progress"
+                            clearEditor()
+                        },
+                        label = { Text("角色进度") }
+                    )
+                }
+                OutlinedTextField(
+                    value = content,
+                    onValueChange = { content = it.take(4000) },
+                    label = {
+                        Text(if (selectedScope == "user_profile") "用户信息" else "角色进度")
+                    },
+                    minLines = 3,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Button(
+                        onClick = {
+                            onUpsert(assistant.id, editingId, selectedScope, content.trim())
+                            clearEditor()
+                        },
+                        enabled = content.isNotBlank()
+                    ) {
+                        Text(if (editingId == null) "添加记忆" else "保存修改")
+                    }
+                    if (editingId != null) {
+                        TextButton(onClick = ::clearEditor) { Text("取消编辑") }
+                    }
+                }
+                HorizontalDivider()
+                Text(
+                    if (selectedScope == "user_profile") "已保存的用户信息" else "已保存的角色进度",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (visibleMemories.isEmpty()) {
+                        item {
+                            Text("暂无记录", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    items(visibleMemories, key = { it.id }) { memory ->
+                        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    when {
+                                        memory.source.equals("manual", ignoreCase = true) -> "手动"
+                                        memory.source.equals("automatic", ignoreCase = true) -> "自动总结"
+                                        else -> "已保存"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = {
+                                    selectedScope = if (memory.scope == "auto_summary") "role_progress" else memory.scope
+                                    editingId = memory.id
+                                    content = memory.content
+                                }) {
+                                    Icon(Icons.Default.Edit, contentDescription = "编辑记忆")
+                                }
+                                IconButton(onClick = { pendingDelete = memory }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "删除记忆", tint = MaterialTheme.colorScheme.error)
+                                }
+                            }
+                            Text(memory.content, style = MaterialTheme.typography.bodyMedium)
+                            HorizontalDivider()
+                        }
+                    }
+                }
+            }
+        }
+    }
+    pendingDelete?.let { memory ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除记忆？") },
+            text = { Text(memory.content.take(140)) },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(assistant.id, memory.id)
+                    if (editingId == memory.id) clearEditor()
+                    pendingDelete = null
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -5195,6 +5660,7 @@ private fun ImagesWorkspaceScreen(
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
+    onAcceptLoraRestore: () -> Unit,
     loraImporting: Boolean,
     loraMessage: String,
     textualInversions: List<ImageTextualInversionUiItem>,
@@ -5581,6 +6047,7 @@ private fun ImagesWorkspaceScreen(
                 loras = loras,
                 selectedLoras = selectedLoras,
                 loraRestoreWarning = loraRestoreWarning,
+                onAcceptLoraRestore = onAcceptLoraRestore,
                 loraImporting = loraImporting,
                 loraMessage = loraMessage,
                 textualInversions = textualInversions,
@@ -6241,6 +6708,7 @@ private fun ImageGalleryHome(
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
+    onAcceptLoraRestore: () -> Unit,
     loraImporting: Boolean,
     loraMessage: String,
     textualInversions: List<ImageTextualInversionUiItem>,
@@ -6342,6 +6810,7 @@ private fun ImageGalleryHome(
     val titleColor = if (darkTheme) MaterialTheme.colorScheme.onBackground else Color(0xFF202124)
     LazyColumn(
         modifier = Modifier
+            .testTag("image.gallery")
             .fillMaxSize()
             .padding(horizontal = 18.dp),
         contentPadding = PaddingValues(top = 24.dp, bottom = 118.dp),
@@ -6375,6 +6844,7 @@ private fun ImageGalleryHome(
                 loras = loras,
                 selectedLoras = selectedLoras,
                 loraRestoreWarning = loraRestoreWarning,
+                onAcceptLoraRestore = onAcceptLoraRestore,
                 loraImporting = loraImporting,
                 loraMessage = loraMessage,
                 textualInversions = textualInversions,
@@ -7086,6 +7556,7 @@ private fun ImageInputOptionsPanel(
     loras: List<ImageLoraUiItem>,
     selectedLoras: List<ImageGenerationUiLoraDraft>,
     loraRestoreWarning: String?,
+    onAcceptLoraRestore: () -> Unit,
     loraImporting: Boolean,
     loraMessage: String,
     textualInversions: List<ImageTextualInversionUiItem>,
@@ -7395,6 +7866,22 @@ private fun ImageInputOptionsPanel(
                     color = MaterialTheme.colorScheme.error,
                     style = MaterialTheme.typography.bodySmall
                 )
+            }
+            loraRestoreWarning?.let { warning ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        warning,
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    TextButton(onClick = onAcceptLoraRestore) {
+                        Text(if (supportsLora) "按当前选择继续" else "继续不带 LoRA")
+                    }
+                }
             }
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(
@@ -7709,7 +8196,7 @@ private fun ImageInputOptionsPanel(
                             fontWeight = FontWeight.SemiBold
                         )
                         Text(
-                            "最多选择 8 个；倍率可为负值，不能为 0。",
+                            "图像页与聊天生图共用选择；最多 8 个，倍率不能为 0。",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -7719,13 +8206,6 @@ private fun ImageInputOptionsPanel(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (loraImporting) "导入中…" else "导入")
                     }
-                }
-                loraRestoreWarning?.let { warning ->
-                    Text(
-                        warning,
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodySmall
-                    )
                 }
                 if (loraMessage.isNotBlank()) {
                     val isError = loraMessage.contains("失败") || loraMessage.contains("无效")
@@ -8492,6 +8972,7 @@ private fun ImageAssistantResultCard(
     onCancelGeneration: () -> Unit,
     onUseImageAsset: (String) -> Unit
 ) {
+    val fallbackStartedAtElapsedMs = remember(job?.id) { SystemClock.elapsedRealtime() }
     Column(horizontalAlignment = Alignment.Start, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         when (imageAssistantCardKind(job, image)) {
             ImageAssistantCardKind.FAILURE -> ImageGenerationFailureCard(
@@ -8510,7 +8991,7 @@ private fun ImageAssistantResultCard(
             ImageAssistantCardKind.CREATING -> ImageCreatingPlaceholder(
                 statusText = job?.statusLabel ?: "正在创建图片",
                 statusMessage = job?.message.orEmpty(),
-                startedAtMillis = job?.startedAtMillis ?: System.currentTimeMillis(),
+                startedAtElapsedMs = job?.startedAtElapsedMs ?: fallbackStartedAtElapsedMs,
                 previewUriString = job?.previewUriString,
                 previewStep = job?.previewStep ?: 0,
                 previewRevision = job?.previewRevision ?: 0L,
@@ -8524,7 +9005,7 @@ private fun ImageAssistantResultCard(
 private fun ImageCreatingPlaceholder(
     statusText: String,
     statusMessage: String,
-    startedAtMillis: Long,
+    startedAtElapsedMs: Long,
     previewUriString: String?,
     previewStep: Int,
     previewRevision: Long,
@@ -8573,12 +9054,12 @@ private fun ImageCreatingPlaceholder(
         animationSpec = infiniteRepeatable(animation = tween(900), repeatMode = RepeatMode.Reverse),
         label = "image-create-pulse"
     )
-    var elapsedSeconds by remember(startedAtMillis) {
-        mutableStateOf(((System.currentTimeMillis() - startedAtMillis) / 1000L).coerceAtLeast(0L))
+    var elapsedSeconds by remember(startedAtElapsedMs) {
+        mutableStateOf(((SystemClock.elapsedRealtime() - startedAtElapsedMs) / 1000L).coerceAtLeast(0L))
     }
-    LaunchedEffect(startedAtMillis) {
+    LaunchedEffect(startedAtElapsedMs) {
         while (true) {
-            elapsedSeconds = ((System.currentTimeMillis() - startedAtMillis) / 1000L).coerceAtLeast(0L)
+            elapsedSeconds = ((SystemClock.elapsedRealtime() - startedAtElapsedMs) / 1000L).coerceAtLeast(0L)
             delay(1000)
         }
     }
@@ -9183,6 +9664,13 @@ private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
+                if (job.expectedOutputCount > 1 && job.completedProgressCount > 0) {
+                    Text(
+                        "已完成 ${job.completedProgressCount}/${job.expectedOutputCount} 张",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 if (job.message.isNotBlank()) {
                     Text(
                         job.message,
@@ -9215,6 +9703,7 @@ private fun ImageAssetTile(
     val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 384)
     Box(
         modifier = modifier
+            .testTag("image.asset.${image.id}")
             .clip(RoundedCornerShape(2.dp))
             .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
             .then(
@@ -9358,6 +9847,7 @@ private fun ImageAssetPreviewOverlay(
     val sourceUpscaleRunning = upscaleJob?.running == true && upscaleJob.sourceImageId == image.id
     Box(
         modifier = modifier
+            .testTag("image.preview.${image.id}")
             .fillMaxSize()
             .background(Color.Black.copy(alpha = 0.92f))
     ) {
@@ -9506,6 +9996,7 @@ private fun ImageAssetPreviewOverlay(
                 contentDescription = image.name,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
+                    .testTag("image.preview.bitmap.${image.id}")
                     .align(Alignment.Center)
                     .fillMaxWidth()
                     .fillMaxHeight(0.82f)
@@ -10790,7 +11281,10 @@ private fun McaAppMenuPage(
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestContextCompression: () -> Unit,
+    onUndoContextSummary: () -> Unit,
+    onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem>,
     onSetContextCompressionThreshold: (Int) -> Unit,
+    onSetContextSummaryModel: (String) -> Unit,
     onOpenImages: () -> Unit,
     onOpenAssistants: () -> Unit,
     onClearHistory: () -> Unit,
@@ -10798,6 +11292,8 @@ private fun McaAppMenuPage(
 ) {
     var confirmClear by remember { mutableStateOf(false) }
     var chooseCompressionThreshold by remember { mutableStateOf(false) }
+    var chooseSummaryModel by remember { mutableStateOf(false) }
+    var showSummaryHistory by remember { mutableStateOf(false) }
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -10898,7 +11394,7 @@ private fun McaAppMenuPage(
             AppMenuCard {
                 AppMenuRow(
                     icon = { Icon(Icons.Default.Replay, null) },
-                    title = if (state.contextCompressionPending) "已安排压缩" else "立即压缩上下文",
+                    title = if (state.contextCompressionPending) "已安排压缩" else "下次发送时压缩",
                     subtitle = if (state.contextCompressionPending) {
                         "下一次发送时执行，保留角色设定和最近消息"
                     } else {
@@ -10911,6 +11407,21 @@ private fun McaAppMenuPage(
                     title = "自动压缩阈值 · ${state.contextCompressionThresholdPercent}%",
                     subtitle = "达到模型上下文窗口的该比例后自动压缩",
                     onClick = { chooseCompressionThreshold = true }
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Folder, null) },
+                    title = "摘要历史",
+                    subtitle = if (state.contextSummaryHistory.isEmpty()) "当前对话尚无摘要" else
+                        "${state.contextSummaryHistory.size} 个版本 · ${if (state.canUndoContextSummary) "有生效摘要" else "已撤销"}",
+                    onClick = { showSummaryHistory = true }
+                )
+                AppMenuRow(
+                    icon = { Icon(Icons.Default.Settings, null) },
+                    title = "摘要模型",
+                    subtitle = state.contextSummaryModels.firstOrNull {
+                        it.id == state.contextSummaryModelSelection
+                    }?.label ?: "所选模型当前不可用",
+                    onClick = { chooseSummaryModel = true }
                 )
             }
 
@@ -10986,6 +11497,144 @@ private fun McaAppMenuPage(
                 TextButton(onClick = { chooseCompressionThreshold = false }) {
                     Text("取消")
                 }
+            }
+        )
+    }
+    if (chooseSummaryModel) {
+        AlertDialog(
+            onDismissRequest = { chooseSummaryModel = false },
+            title = { Text("摘要模型") },
+            text = {
+                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                    state.contextSummaryModels.forEach { option ->
+                        Row(
+                            Modifier.fillMaxWidth().clickable(enabled = !state.isGenerating) {
+                                onSetContextSummaryModel(option.id)
+                                chooseSummaryModel = false
+                            }.padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            androidx.compose.material3.RadioButton(
+                                selected = option.id == state.contextSummaryModelSelection,
+                                onClick = null,
+                                enabled = !state.isGenerating
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(option.label, modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { chooseSummaryModel = false }) { Text("关闭") }
+            }
+        )
+    }
+    if (showSummaryHistory) {
+        var summarySourceQuery by rememberSaveable(state.activeConversationId) { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showSummaryHistory = false },
+            title = { Text("摘要历史") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = summarySourceQuery,
+                        onValueChange = { summarySourceQuery = it },
+                        label = { Text("查找摘要事实或来源") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    if (summarySourceQuery.isNotBlank()) {
+                        val sourceHits = onSearchContextSummarySources(summarySourceQuery)
+                        if (sourceHits.isEmpty()) {
+                            Text("当前有效摘要没有匹配的来源。", style = MaterialTheme.typography.bodySmall)
+                        }
+                        sourceHits.forEach { hit ->
+                            SelectionContainer {
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(hit.text, style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        "${hit.kind} · 来源 ${hit.sourceMessageId} · 位置 ${hit.sourceOffset}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                        HorizontalDivider()
+                    }
+                    if (state.contextSummaryHistory.isEmpty()) {
+                        Text("当前对话尚无摘要。", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    state.contextSummaryHistory.sortedByDescending(ContextSummaryUiItem::version)
+                        .forEach { summary ->
+                            val date = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                                .format(java.util.Date(summary.createdAt))
+                            Text(
+                                "版本 ${summary.version} · ${if (summary.active) "生效中" else "已撤销"} · $date",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Text(
+                                "来源：${when (summary.source) {
+                                    "DETERMINISTIC" -> "规则整理"
+                                    "LOCAL_MODEL" -> "本地模型"
+                                    "CLOUD_MODEL" -> "云端模型"
+                                    else -> summary.source
+                                }} · " +
+                                    "原始消息 ${summary.sourceMessageIds.size} 条",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            summary.modelIdentity?.let { Text("模型：$it", style = MaterialTheme.typography.bodySmall) }
+                            summary.diagnostic?.let { Text("诊断：$it", style = MaterialTheme.typography.bodySmall) }
+                            if (summary.coverageLimited) {
+                                Text(
+                                    "覆盖有限：保留 ${summary.evidenceCount} 条来源摘录，" +
+                                        "未纳入 ${summary.omittedExcerptCount} 条片段；" +
+                                        "另有 ${summary.omittedCharacterCount} 字符超出扫描上限。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            SelectionContainer {
+                                Text(summary.text, style = MaterialTheme.typography.bodyMedium)
+                            }
+                            if (summary.sourceMessageIds.isNotEmpty()) {
+                                SelectionContainer {
+                                    Text(
+                                        "来源消息 ID：${summary.sourceMessageIds.joinToString()}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            HorizontalDivider()
+                        }
+                }
+            },
+            confirmButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            onUndoContextSummary()
+                            showSummaryHistory = false
+                        },
+                        enabled = state.canUndoContextSummary && !state.isGenerating
+                    ) { Text("撤销") }
+                    TextButton(
+                        onClick = {
+                            onRequestContextCompression()
+                            showSummaryHistory = false
+                        },
+                        enabled = state.activeConversationId != null && !state.isGenerating
+                    ) { Text("下次发送时重建") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSummaryHistory = false }) { Text("关闭") }
             }
         )
     }
@@ -11267,16 +11916,18 @@ private fun ReasoningPanel(
 
 @Composable
 private fun PendingReasoningPanel(
-    startedAt: Long,
+    ownerCreatedAt: Long,
     phase: GenerationPhase?,
     tokenProgress: TokenProgress?,
     persistProgress: PersistProgress?,
     modifier: Modifier = Modifier
 ) {
-    var elapsedMs by remember(startedAt) { mutableStateOf(0L) }
-    LaunchedEffect(startedAt) {
+    // UI-visible waiting time is separate from runtime timing and persisted UTC.
+    val startedAtElapsedMs = remember(ownerCreatedAt) { SystemClock.elapsedRealtime() }
+    var elapsedMs by remember(ownerCreatedAt) { mutableStateOf(0L) }
+    LaunchedEffect(startedAtElapsedMs) {
         while (true) {
-            elapsedMs = (System.currentTimeMillis() - startedAt).coerceAtLeast(0L)
+            elapsedMs = (SystemClock.elapsedRealtime() - startedAtElapsedMs).coerceAtLeast(0L)
             delay(1000)
         }
     }
@@ -11507,9 +12158,15 @@ private fun cacheEvidenceLabel(stats: RuntimeStats): String? {
     val inMemoryReason = stats.cacheReuseReason
         ?.takeUnless { it in setOf("not_attempted", "model_unloaded") }
     return when {
+        stats.persistentPrefixCacheHit && stats.cacheReuseReason == "persistent_session_hit" ->
+            "会话快照命中 · 复用 ${stats.persistentPrefixCacheTokens} tokens"
+        persistentReason == "session_state_saved" ->
+            "会话快照已保存 · ${stats.persistentPrefixCacheTokens} tokens"
         stats.persistentPrefixCacheHit ->
             "\u56fa\u5b9a\u524d\u7f00\u7f13\u5b58\u547d\u4e2d \u00b7 \u590d\u7528 ${stats.persistentPrefixCacheTokens} tokens"
+        persistentReason?.startsWith("session_") == true -> "会话快照未命中 · $persistentReason"
         persistentReason != null -> "\u56fa\u5b9a\u524d\u7f00\u7f13\u5b58\u672a\u547d\u4e2d \u00b7 $persistentReason"
+        stats.cacheReuseReason == "unknown" -> "上下文 KV：未知"
         stats.cacheReuseHit -> "\u4e0a\u4e0b\u6587 KV \u547d\u4e2d \u00b7 \u590d\u7528 ${stats.cacheReusedTokens} tokens"
         stats.cacheReusedTokens > 0 -> "\u4e0a\u4e0b\u6587 KV \u590d\u7528 ${stats.cacheReusedTokens} tokens"
         inMemoryReason != null -> "\u4e0a\u4e0b\u6587 KV \u672a\u547d\u4e2d \u00b7 $inMemoryReason"
@@ -13599,7 +14256,7 @@ private fun ChatInputBar(
                                 lineHeight = 20.sp
                             ),
                             cursorBrush = SolidColor(McaPrimaryBlue),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier.fillMaxWidth().testTag("chat.editor")
                         )
                     }
                 }
@@ -14334,6 +14991,9 @@ private fun AttachmentPreview(
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    browserSessionId: String?,
+    characterCardHtml: Boolean,
+    onOpenBrowserTask: (BrowserTaskLaunch) -> Unit,
     generatedImageRequest: ChatGeneratedImageRequest?,
     generatedImageJob: ImageGenerationUiJob?,
     generatedImageVisualState: ChatGeneratedImageUiState?,
@@ -14355,6 +15015,8 @@ private fun MessageBubble(
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
+    onTogglePinned: () -> Unit,
+    canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit
 ) {
     val clipboard = LocalClipboard.current
@@ -14369,6 +15031,8 @@ private fun MessageBubble(
         if (isUser) {
             UserMessageBubble(
                 message = message,
+                onTogglePinned = onTogglePinned,
+                canTogglePinned = canTogglePinned,
                 onCopy = {
                     val copyText = displayInputWithoutAttachment(message.content)
                     if (copyText.isNotBlank()) {
@@ -14385,6 +15049,9 @@ private fun MessageBubble(
             AssistantMessageBlock(
                 modifier = Modifier.fillMaxWidth(),
                 message = message,
+                browserSessionId = browserSessionId,
+                characterCardHtml = characterCardHtml,
+                onOpenBrowserTask = onOpenBrowserTask,
                 generatedImageRequest = generatedImageRequest,
                 generatedImageJob = generatedImageJob,
                 generatedImageVisualState = generatedImageVisualState,
@@ -14406,6 +15073,8 @@ private fun MessageBubble(
                 generationStats = generationStats,
                 onRegenerate = onRegenerate,
                 onDelete = onDelete,
+                onTogglePinned = onTogglePinned,
+                canTogglePinned = canTogglePinned,
                 onDeleteLastTurn = onDeleteLastTurn,
                 onCopy = {
                     scope.launch {
@@ -14422,6 +15091,8 @@ private fun MessageBubble(
 @Composable
 private fun UserMessageBubble(
     message: ChatMessage,
+    onTogglePinned: () -> Unit,
+    canTogglePinned: Boolean,
     onCopy: () -> Unit
 ) {
     val context = LocalContext.current
@@ -14507,7 +15178,14 @@ private fun UserMessageBubble(
                 }
             }
         }
-        if (copyableContent.isNotBlank()) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.PushPin,
+                    contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                    modifier = Modifier.size(17.dp),
+                    tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (copyableContent.isNotBlank()) {
             IconButton(
                 onClick = onCopy,
                 modifier = Modifier.size(32.dp)
@@ -14518,6 +15196,7 @@ private fun UserMessageBubble(
                     modifier = Modifier.size(17.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
                 )
+            }
             }
         }
     }
@@ -14606,10 +15285,19 @@ private fun GenerationParamsQuickDialog(
     )
 }
 
+private data class CharacterHtmlProjection(
+    val messageId: String,
+    val source: String,
+    val preview: String?
+)
+
 @Composable
 private fun AssistantMessageBlock(
     modifier: Modifier = Modifier,
     message: ChatMessage,
+    browserSessionId: String?,
+    characterCardHtml: Boolean,
+    onOpenBrowserTask: (BrowserTaskLaunch) -> Unit,
     generatedImageRequest: ChatGeneratedImageRequest?,
     generatedImageJob: ImageGenerationUiJob?,
     generatedImageVisualState: ChatGeneratedImageUiState?,
@@ -14631,9 +15319,35 @@ private fun AssistantMessageBlock(
     generationStats: RuntimeStats?,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
+    onTogglePinned: () -> Unit,
+    canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit,
     onCopy: () -> Unit
 ) {
+    val contextTrace = remember(message.id, message.contextAssemblyTraceJson) {
+        parseContextAssemblyTrace(message.contextAssemblyTraceJson)
+    }
+    var showContextTrace by remember(message.id) { mutableStateOf(false) }
+    val htmlProjection by produceState<CharacterHtmlProjection?>(
+        initialValue = null,
+        key1 = message.id,
+        key2 = message.content,
+        key3 = characterCardHtml
+    ) {
+        val preview = if (characterCardHtml) {
+            withContext(Dispatchers.Default) { characterHtmlPreview(message.content) }
+        } else {
+            null
+        }
+        value = CharacterHtmlProjection(message.id, message.content, preview)
+    }
+    val htmlCandidate = remember(message.content, characterCardHtml) {
+        characterCardHtml && characterHtmlMayNeedPreview(message.content)
+    }
+    val currentProjection = htmlProjection?.takeIf { it.messageId == message.id }
+    val visibleHtmlPreview = currentProjection?.preview?.takeIf { htmlCandidate }
+    val previewPending = htmlCandidate && currentProjection?.source != message.content && visibleHtmlPreview == null
+    var showHtmlSource by remember(message.id) { mutableStateOf(false) }
     Surface(
         color = Color.Transparent,
         shape = RoundedCornerShape(0.dp),
@@ -14678,7 +15392,7 @@ private fun AssistantMessageBlock(
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         PendingReasoningPanel(
-                            startedAt = message.createdAt,
+                            ownerCreatedAt = message.createdAt,
                             phase = generationPhase,
                             tokenProgress = generationTokenProgress,
                             persistProgress = generationPersistProgress,
@@ -14689,8 +15403,23 @@ private fun AssistantMessageBlock(
                     Spacer(modifier = Modifier.height(18.dp))
                 }
             } else if (message.content.isNotBlank() && generatedImageRequest == null) {
-                SelectionContainer {
-                    PagedAssistantRichText(message.content)
+                if (visibleHtmlPreview != null) {
+                    Column {
+                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                            TextButton(onClick = { showHtmlSource = !showHtmlSource }) {
+                                Text(if (showHtmlSource) "返回预览" else "查看原文")
+                            }
+                        }
+                        SelectionContainer {
+                            PagedAssistantRichText(if (showHtmlSource) message.content else visibleHtmlPreview)
+                        }
+                    }
+                } else if (previewPending) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                } else {
+                    SelectionContainer {
+                        PagedAssistantRichText(message.content)
+                    }
                 }
             }
             if (generatedImageRequest != null && generatedImageVisualState != null) {
@@ -14723,8 +15452,22 @@ private fun AssistantMessageBlock(
             if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
                 WebSearchSourcesRow(
                     sources = message.sourceReferences,
-                    trace = message.webSearchTrace
+                    trace = message.webSearchTrace,
+                    sessionId = browserSessionId,
+                    messageId = message.id,
+                    onOpenBrowserTask = onOpenBrowserTask
                 )
+            }
+            if (contextTrace != null) {
+                TextButton(
+                    onClick = { showContextTrace = true },
+                    modifier = Modifier.testTag("context-trace-${message.id}"),
+                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
+                ) {
+                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("上下文来源", style = MaterialTheme.typography.labelMedium)
+                }
             }
             if (showActions) {
                 AssistantActionRow(
@@ -14732,10 +15475,27 @@ private fun AssistantMessageBlock(
                     onRegenerate = onRegenerate,
                     onDelete = onDelete,
                     onDeleteLastTurn = onDeleteLastTurn,
-                    onCopy = onCopy
+                    onCopy = onCopy,
+                    pinned = message.pinned,
+                    canTogglePinned = canTogglePinned,
+                    onTogglePinned = onTogglePinned
                 )
+            } else {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
+                        Icon(
+                            Icons.Default.PushPin,
+                            contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                            modifier = Modifier.size(16.dp),
+                            tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
         }
+    }
+    if (showContextTrace && contextTrace != null) {
+        ContextAssemblyTraceDialog(contextTrace, onDismiss = { showContextTrace = false })
     }
 }
 
@@ -14829,7 +15589,8 @@ private fun ChatGeneratedImageContent(
                     ImageCreatingPlaceholder(
                         statusText = job.statusLabel.ifBlank { "生成中" },
                         statusMessage = job.message.ifBlank { request.message },
-                        startedAtMillis = job.startedAtMillis,
+                        startedAtElapsedMs = job.startedAtElapsedMs
+                            ?: remember(job.id) { SystemClock.elapsedRealtime() },
                         previewUriString = job.previewUriString,
                         previewStep = job.previewStep,
                         previewRevision = job.previewRevision,
@@ -15093,6 +15854,182 @@ private fun ChatGeneratedImageContent(
     }
 }
 
+private data class ContextTraceSource(
+    val sourceId: String,
+    val ownerId: String,
+    val scope: String?,
+    val excerpt: String,
+    val estimatedTokens: Int,
+    val reason: String,
+    val lexicalScore: Int? = null,
+    val excerptTruncated: Boolean = false,
+    val excerptSha256: String? = null
+)
+
+private data class ContextTraceDetail(
+    val rolePromptHash: String,
+    val assembledHash: String,
+    val tokenBudget: Int,
+    val retrievalType: String,
+    val selectedWorldBooks: List<ContextTraceSource>,
+    val skippedWorldBooks: List<ContextTraceSource>,
+    val selectedKnowledge: List<ContextTraceSource>,
+    val skippedKnowledge: List<ContextTraceSource>,
+    val omittedSourceCount: Int = 0
+)
+
+private fun JSONObject.traceText(key: String): String =
+    (get(key) as? String)?.takeIf(String::isNotBlank) ?: error("Invalid context trace field: $key")
+
+private fun JSONObject.traceCount(key: String): Int =
+    ((get(key) as? Number)?.toInt() ?: error("Invalid context trace field: $key"))
+        .also { require(it >= 0) }
+
+private fun parseContextAssemblyTrace(raw: String?): ContextTraceDetail? {
+    if (raw.isNullOrBlank() || raw.length > 4_000_000) return null
+    return runCatching {
+        val root = JSONObject(raw)
+        require(root.traceCount("schemaVersion") == 1)
+        fun worldSources(key: String): List<ContextTraceSource> {
+            val array = root.getJSONArray(key)
+            require(array.length() <= 4096)
+            return List(array.length()) { index ->
+                val source = array.getJSONObject(index)
+                ContextTraceSource(
+                    sourceId = source.traceText("entryId"),
+                    ownerId = source.traceText("bookId"),
+                    scope = source.traceText("scope"),
+                    excerpt = source.traceText("excerpt"),
+                    estimatedTokens = source.traceCount("estimatedTokens"),
+                    reason = source.traceText("reason"),
+                    excerptTruncated = source.optBoolean("excerptTruncated", false),
+                    excerptSha256 = source.optString("excerptSha256").takeIf(String::isNotBlank)
+                )
+            }
+        }
+        fun knowledgeSources(key: String): List<ContextTraceSource> {
+            val array = root.getJSONArray(key)
+            require(array.length() <= 4096)
+            return List(array.length()) { index ->
+                val source = array.getJSONObject(index)
+                ContextTraceSource(
+                    sourceId = source.traceText("chunkId"),
+                    ownerId = source.traceText("knowledgeBaseId"),
+                    scope = source.traceText("documentId"),
+                    excerpt = source.traceText("excerpt"),
+                    estimatedTokens = source.traceCount("estimatedTokens"),
+                    reason = source.traceText("reason"),
+                    lexicalScore = source.traceCount("lexicalScore"),
+                    excerptTruncated = source.optBoolean("excerptTruncated", false),
+                    excerptSha256 = source.optString("excerptSha256").takeIf(String::isNotBlank)
+                )
+            }
+        }
+        ContextTraceDetail(
+            rolePromptHash = root.traceText("rolePromptHash"),
+            assembledHash = root.traceText("assembledHash"),
+            tokenBudget = root.traceCount("tokenBudget"),
+            retrievalType = root.traceText("retrievalType"),
+            selectedWorldBooks = worldSources("selectedWorldBookSources"),
+            skippedWorldBooks = worldSources("skippedWorldBookSources"),
+            selectedKnowledge = knowledgeSources("selectedKnowledgeSources"),
+            skippedKnowledge = knowledgeSources("skippedKnowledgeSources"),
+            omittedSourceCount = root.optInt("omittedSourceCount", 0).coerceAtLeast(0)
+        )
+    }.getOrNull()
+}
+
+@Composable
+private fun ContextAssemblyTraceDialog(trace: ContextTraceDetail, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("本轮上下文来源") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                contentPadding = PaddingValues(bottom = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("检索方式：${if (trace.retrievalType == "lexical") "词法匹配 (lexical)" else trace.retrievalType}",
+                            style = MaterialTheme.typography.bodySmall)
+                        Text("动态上下文预算：${trace.tokenBudget} tokens", style = MaterialTheme.typography.bodySmall)
+                        if (trace.omittedSourceCount > 0) {
+                            Text("另有 ${trace.omittedSourceCount} 条来源未保存详情", style = MaterialTheme.typography.bodySmall)
+                        }
+                        SelectionContainer {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("角色提示词 SHA-256：${trace.rolePromptHash}", style = MaterialTheme.typography.labelSmall)
+                                Text("组装上下文 SHA-256：${trace.assembledHash}", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
+                contextTraceSection("世界书 · 已选", trace.selectedWorldBooks, isKnowledge = false)
+                contextTraceSection("世界书 · 已跳过", trace.skippedWorldBooks, isKnowledge = false)
+                contextTraceSection("知识库 · 已选", trace.selectedKnowledge, isKnowledge = true)
+                contextTraceSection("知识库 · 已跳过", trace.skippedKnowledge, isKnowledge = true)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+    )
+}
+
+private fun androidx.compose.foundation.lazy.LazyListScope.contextTraceSection(
+    label: String,
+    sources: List<ContextTraceSource>,
+    isKnowledge: Boolean
+) {
+    item {
+        HorizontalDivider(modifier = Modifier.padding(top = 4.dp))
+        Text("$label (${sources.size})", modifier = Modifier.padding(top = 8.dp),
+            style = MaterialTheme.typography.titleSmall)
+    }
+    if (sources.isEmpty()) {
+        item {
+            Text("无", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    } else {
+        items(sources) { source ->
+            Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(if (isKnowledge) "知识块 ${source.sourceId}" else "条目 ${source.sourceId}",
+                    style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+                SelectionContainer {
+                    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text(if (isKnowledge) "知识库：${source.ownerId} · 文档：${source.scope}" else
+                            "世界书：${source.ownerId} · 范围：${source.scope}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("原因：${contextTraceReasonLabel(source.reason)} (${source.reason}) · " +
+                            "估算 ${source.estimatedTokens} tokens" +
+                            (source.lexicalScore?.let { " · 词法分数 $it" } ?: ""),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(source.excerpt, style = MaterialTheme.typography.bodySmall)
+                        if (source.excerptTruncated) {
+                            Text("节选已截断 · 完整内容 SHA-256：${source.excerptSha256.orEmpty()}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun contextTraceReasonLabel(reason: String): String = when (reason) {
+    "constant" -> "常驻条目"
+    "keyword" -> "关键词命中"
+    "budget" -> "预算不足"
+    "lexical_match" -> "词法匹配"
+    "budget_or_limit" -> "预算或条数限制"
+    else -> "来源判定"
+}
+
 /** Displays every asset from a batch in the chat event itself. */
 @Composable
 private fun ChatGeneratedImageGrid(
@@ -15172,18 +16109,25 @@ private fun ChatGeneratedImageGrid(
 @Composable
 private fun WebSearchSourcesRow(
     sources: List<ChatSourceReference>,
-    trace: ChatWebSearchTrace?
+    trace: ChatWebSearchTrace?,
+    sessionId: String?,
+    messageId: String,
+    onOpenBrowserTask: (BrowserTaskLaunch) -> Unit
 ) {
     var selectedUrl by remember(sources) { mutableStateOf<String?>(null) }
-    var browserUrl by remember(sources) { mutableStateOf<String?>(null) }
     val selectedSource = sources.firstOrNull { it.url == selectedUrl }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (trace?.hasContent == true) {
             WebSearchTraceCard(
                 trace = trace,
                 onOpenBrowser = { query ->
-                    val encoded = java.net.URLEncoder.encode(query, Charsets.UTF_8.name())
-                    browserUrl = "https://www.google.com/search?q=$encoded"
+                    InternalBrowserUrlPolicy.buildSearchUrl("https://www.google.com/search?q={query}", query)?.let { url ->
+                        onOpenBrowserTask(BrowserTaskLaunch(
+                            owner = "chat:$sessionId:$messageId", initialUrl = url,
+                            kind = BrowserTaskKind.SEARCH, sessionId = sessionId,
+                            messageId = messageId, query = query
+                        ))
+                    }
                 }
             )
         }
@@ -15292,20 +16236,14 @@ private fun WebSearchSourcesRow(
                 WebSearchSourceDetailCard(
                     source = source,
                     onOpen = {
-                        // Opening a source is an explicit user action. Keep it
-                        // inside MCA so a result cannot silently hand off to an
-                        // arbitrary external intent or browser.
-                        browserUrl = source.url
+                        onOpenBrowserTask(BrowserTaskLaunch(
+                            owner = "chat:$sessionId:$messageId", initialUrl = source.url,
+                            sessionId = sessionId, messageId = messageId
+                        ))
                     },
                     onClose = { selectedUrl = null }
                 )
             }
-        }
-        browserUrl?.let { url ->
-            InternalBrowserDialog(
-                initialUrl = url,
-                onDismiss = { browserUrl = null }
-            )
         }
     }
 }
@@ -15697,7 +16635,10 @@ private fun AssistantActionRow(
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
     onDeleteLastTurn: () -> Unit,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    pinned: Boolean,
+    canTogglePinned: Boolean,
+    onTogglePinned: () -> Unit
 ) {
     val tint = MaterialTheme.colorScheme.onSurfaceVariant
     var menuOpen by remember { mutableStateOf(false) }
@@ -15753,6 +16694,15 @@ private fun AssistantActionRow(
                     onClick = {
                         menuOpen = false
                         onCopy()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text(if (pinned) "取消固定上下文" else "固定到上下文") },
+                    leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
+                    enabled = canTogglePinned,
+                    onClick = {
+                        menuOpen = false
+                        onTogglePinned()
                     }
                 )
                 DropdownMenuItem(
@@ -15835,7 +16785,7 @@ private fun PagedAssistantRichText(content: String) {
         content.safePrefix(visibleCharacters)
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AssistantRichText(visibleContent)
+        AssistantRichText(visibleContent, fullContent = content)
         if (visibleContent.length < content.length) {
             TextButton(
                 onClick = {
@@ -15850,13 +16800,12 @@ private fun PagedAssistantRichText(content: String) {
 }
 
 @Composable
-private fun AssistantRichText(content: String) {
-    val displayContent = remember(content) { cleanAssistantContentForDisplay(content) }
-    val blocks = remember(displayContent) { parseMarkdownBlocks(displayContent) }
+private fun AssistantRichText(content: String, fullContent: String = content) {
+    val blocks = remember(content, fullContent) { parseMarkdownBlocks(content, fullContent) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         blocks.forEach { block ->
             when (block) {
-                is MarkdownBlock.Code -> CodeBlock(block.language, block.code)
+                is MarkdownBlock.Code -> CodeBlock(block.language, block.code, block.fileName, block.copyCode)
                 is MarkdownBlock.Heading -> HeadingBlock(block.text, block.level)
                 is MarkdownBlock.Paragraph -> ParagraphBlock(block.text)
                 is MarkdownBlock.BulletList -> ListBlock(block.items, ordered = false)
@@ -15975,7 +16924,7 @@ private fun QuoteBlock(text: String) {
 }
 
 @Composable
-private fun CodeBlock(language: String?, code: String) {
+private fun CodeBlock(language: String?, code: String, fileName: String? = null, copyCode: String = code) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
@@ -15999,7 +16948,7 @@ private fun CodeBlock(language: String?, code: String) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    language?.ifBlank { null } ?: "代码",
+                    listOfNotNull(fileName, language?.ifBlank { null }).joinToString(" · ").ifBlank { "代码" },
                     color = Color.White.copy(alpha = 0.72f),
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.weight(1f),
@@ -16010,7 +16959,7 @@ private fun CodeBlock(language: String?, code: String) {
                     onClick = {
                         scope.launch {
                             clipboard.setClipEntry(
-                                ClipEntry(ClipData.newPlainText("MCA code", code.trimEnd()))
+                                ClipEntry(ClipData.newPlainText("MCA code", copyCode))
                             )
                             copied = true
                         }
@@ -16033,7 +16982,7 @@ private fun CodeBlock(language: String?, code: String) {
                 }
             }
             Text(
-                text = code.trimEnd(),
+                text = code,
                 color = Color.White,
                 fontFamily = FontFamily.Monospace,
                 style = MaterialTheme.typography.bodySmall.copy(fontSize = 13.sp, lineHeight = 19.sp),
@@ -16107,27 +17056,43 @@ private sealed class MarkdownBlock {
     data class BulletList(val items: List<String>) : MarkdownBlock()
     data class NumberedList(val items: List<OrderedMarkdownItem>) : MarkdownBlock()
     data class Quote(val text: String) : MarkdownBlock()
-    data class Code(val language: String?, val code: String) : MarkdownBlock()
+    data class Code(
+        val language: String?,
+        val code: String,
+        val fileName: String? = null,
+        val copyCode: String = code
+    ) : MarkdownBlock()
     data class Table(val rows: List<List<String>>) : MarkdownBlock()
     data object Divider : MarkdownBlock()
 }
 
-private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
+private fun parseMarkdownBlocks(content: String, fullContent: String = content): List<MarkdownBlock> {
+    val completeCode = parseChatMarkdownSource(fullContent).filterIsInstance<ChatMarkdownSource.Code>()
+    var codeIndex = 0
+    return parseChatMarkdownSource(content).flatMap { source ->
+        when (source) {
+            is ChatMarkdownSource.Code -> {
+                val complete = completeCode.getOrNull(codeIndex++)
+                listOf(MarkdownBlock.Code(source.language, source.code, source.fileName, complete?.code ?: source.code))
+            }
+            is ChatMarkdownSource.Text -> parsePlainMarkdownBlocks(source.raw)
+        }
+    }
+}
+
+private fun parsePlainMarkdownBlocks(content: String): List<MarkdownBlock> {
     val blocks = mutableListOf<MarkdownBlock>()
     val paragraph = mutableListOf<String>()
     val listItems = mutableListOf<String>()
     val orderedListItems = mutableListOf<OrderedMarkdownItem>()
     var listOrdered = false
-    val codeBuffer = StringBuilder()
     val plainCodeLines = mutableListOf<String>()
     val tableLines = mutableListOf<String>()
-    var inCode = false
-    var codeLanguage: String? = null
 
     fun flushParagraph() {
-        val value = paragraph.joinToString(" ").trim()
-        if (value.isNotBlank()) {
-            splitReadableParagraphs(value).forEach { blocks += MarkdownBlock.Paragraph(it) }
+        val value = paragraph.joinToString("")
+        if (value.isNotEmpty()) {
+            blocks += MarkdownBlock.Paragraph(value)
         }
         paragraph.clear()
     }
@@ -16149,10 +17114,10 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
         if (shouldRenderAsCode) {
             blocks += MarkdownBlock.Code(
                 language = detectCodeLanguage(nonBlank),
-                code = plainCodeLines.joinToString("\n")
+                code = plainCodeLines.joinToString("")
             )
         } else {
-            paragraph += nonBlank.joinToString(" ").trim()
+            paragraph += plainCodeLines.joinToString("")
         }
         plainCodeLines.clear()
     }
@@ -16169,42 +17134,22 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
         tableLines.clear()
     }
 
-    fun flushCode() {
-        blocks += MarkdownBlock.Code(codeLanguage, repairCodeText(codeBuffer.toString(), codeLanguage))
-        codeBuffer.clear()
-        codeLanguage = null
-    }
-
-    normalizeChatText(content).lines().forEach { rawLine ->
-        val line = rawLine.trimEnd()
-        if (line.trimStart().startsWith("```")) {
-            if (inCode) {
-                flushCode()
-                inCode = false
-            } else {
-                flushParagraph()
-                flushList()
-                inCode = true
-                val header = parseCodeFenceHeader(line)
-                codeLanguage = header.language
-                // A few local models emit the opening fence and the first code
-                // token on one line (for example ```html<!DOCTYPE html> or
-                // ```json{"key":1}). Keep that token in the code buffer
-                // instead of treating it as part of the language label.
-                header.inlineCode?.let { codeBuffer.appendLine(it) }
-            }
-        } else if (inCode) {
-            codeBuffer.appendLine(line)
-        } else if (line.isTableLine()) {
+    chatSourceLines(content).forEach { rawLine ->
+        val line = rawLine.removeSuffix("\n").removeSuffix("\r")
+        if (line.isTableLine()) {
             flushPlainCode()
             flushParagraph()
             flushList()
             tableLines += line
         } else if (line.isBlank()) {
             flushTable()
-            flushPlainCode()
-            flushParagraph()
-            flushList()
+            if (plainCodeLines.isNotEmpty()) {
+                plainCodeLines += rawLine
+            } else {
+                paragraph += rawLine
+                flushParagraph()
+                flushList()
+            }
         } else if (line.isHorizontalRule()) {
             flushTable()
             flushPlainCode()
@@ -16215,7 +17160,7 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
             flushTable()
             flushParagraph()
             flushList()
-            plainCodeLines += line
+            plainCodeLines += rawLine
         } else if (line.trimStart().startsWith("#")) {
             flushTable()
             flushPlainCode()
@@ -16247,310 +17192,16 @@ private fun parseMarkdownBlocks(content: String): List<MarkdownBlock> {
             flushTable()
             flushPlainCode()
             flushList()
-            paragraph += line.trim()
+            paragraph += rawLine
         }
     }
-    if (inCode) flushCode()
     flushTable()
     flushPlainCode()
     flushParagraph()
     flushList()
-    return blocks.ifEmpty { listOf(MarkdownBlock.Paragraph(content.trim())) }
+    return blocks.ifEmpty { listOf(MarkdownBlock.Paragraph(content)) }
 }
 
-private fun normalizeChatText(content: String): String =
-    content
-        .repairInlineCodeFences()
-        .repairCompactArithmeticRows()
-        .replace("\r\n", "\n")
-        .replace("\r", "\n")
-        // Keep ordered rows emitted by local models as list items even when they use
-        // Chinese punctuation or omit the conventional space (`1、标题`, `2.内容`).
-        .let(::splitEmbeddedOrderedMarkdownRows)
-        .replace(Regex("""\s+(?=[-*]\s+)"""), "\n")
-
-internal fun String.repairCompactArithmeticRows(): String {
-    // ARITHMETIC_EXPRESSION_PATTERN is deliberately anchored for single-row
-    // classification.  Counting it with findAll() therefore misses compact
-    // rows embedded in a paragraph (the common "1×1=1 2×2=4" output).  Use an
-    // unanchored candidate pattern for the guard, then keep the stricter
-    // boundary-aware replacement below so decimals and prose are untouched.
-    val compactRowCandidates = Regex(
-        """(?<![A-Za-z0-9_])\d+\s*[×x*＋+−-]\s*\d+\s*=\s*\d+(?![A-Za-z0-9_])"""
-    ).findAll(this).count()
-    if (compactRowCandidates < 2) return this
-    // Small models often emit a multiplication table as one whitespace
-    // separated line. Split only at a boundary followed by another complete
-    // arithmetic row, so ordinary prose containing numbers is left alone.
-    return replace(
-        Regex("""(?<=\d)\s+(?=\d+\s*[×x*＋+−-]\s*\d+\s*=\s*\d+)"""),
-        "\n"
-    )
-}
-
-private fun String.repairInlineCodeFences(): String {
-    val withFenceBreaks = replace(Regex("""([^\n])\s*```"""), "$1\n```")
-    return CODE_FENCE_LANGUAGE_WITH_CODE_PATTERN.replace(withFenceBreaks) { match ->
-        "```${match.groupValues[1]}\n"
-    }
-}
-
-private data class CodeFenceHeader(
-    val language: String?,
-    val inlineCode: String?
-)
-
-/**
- * Parses an opening Markdown fence without losing compact first-line code.
- *
- * Markdown normally uses ` ```python` followed by a newline, but small local
- * models frequently emit ` ```pythonprint(...)` or ` ```html<!DOCTYPE ...>`.
- * The old parser fed the whole suffix to [codeLanguage], so the UI displayed
- * the first code token as a language and rendered an empty block.
- */
-private fun parseCodeFenceHeader(line: String): CodeFenceHeader {
-    val tail = line.trimStart().removePrefix("```")
-    if (tail.isBlank()) return CodeFenceHeader(null, null)
-
-    val compact = tail.trimStart()
-    val knownLanguages = listOf(
-        "typescript", "javascript", "kotlin", "python", "markdown", "json",
-        "html", "shell", "bash", "yaml", "java", "cpp", "c++", "css",
-        "sql", "xml", "text", "plain", "ts", "js", "py", "sh", "yml", "md", "c"
-    ).sortedByDescending { it.length }
-    val lower = compact.lowercase()
-    val compactLanguage = knownLanguages.firstOrNull { language ->
-        lower.startsWith(language) && compact.length > language.length
-    }
-    if (compactLanguage != null) {
-        val suffix = compact.substring(compactLanguage.length)
-        // A space after the language is the normal info-string form. It is
-        // still safe to treat the suffix as inline code when it clearly starts
-        // a payload; otherwise preserve the standard language-only header.
-        val payload = suffix.trimStart()
-        if (payload.isNotBlank() && looksLikeInlineCodePayload(payload, suffix)) {
-            return CodeFenceHeader(compactLanguage, payload)
-        }
-        return CodeFenceHeader(compactLanguage, null)
-    }
-
-    // Standard fences with a separated language/info string. Unknown language
-    // names are retained for display, while any payload after whitespace is
-    // intentionally not promoted to code because it may be an info string.
-    val language = compact.takeWhile { !it.isWhitespace() }.ifBlank { null }
-    return CodeFenceHeader(language, null)
-}
-
-private fun looksLikeInlineCodePayload(payload: String, originalSuffix: String): Boolean {
-    if (originalSuffix.isNotEmpty() && !originalSuffix.first().isWhitespace()) return true
-    if (payload.first() in "<{[\"'#/0123456789") return true
-    return Regex(
-        """^(import|from|def|class|if|elif|else|for|while|try|except|return|print|const|let|var|val|fun|function|public|private|select|insert|update|create)\b""",
-        RegexOption.IGNORE_CASE
-    ).containsMatchIn(payload)
-}
-
-internal fun repairCodeText(value: String, language: String?): String {
-    val inferredLanguage = language ?: detectCodeLanguage(
-        value.lines().filter { it.isNotBlank() }
-    )
-    val normalizedLanguage = inferredLanguage?.lowercase().orEmpty()
-    // A number of local models emit Python without any leading whitespace even
-    // though the block structure is present (`def f():` followed by `return`).
-    // Repair only the unindented form; if the model supplied deliberate
-    // indentation, preserve it byte-for-byte.
-    if (normalizedLanguage in setOf("python", "py") && value.lineSequence().count() > 1) {
-        return normalizePythonCodeIndentation(value)
-    }
-    if (value.lineSequence().count() > 1) {
-        // Keep deliberate Python/Markdown indentation untouched.  For brace languages, however,
-        // local models frequently emit every line at column zero; derive only the structural
-        // indentation so copied code is readable and executable without rewriting its tokens.
-        if (normalizedLanguage in BRACE_CODE_LANGUAGES && value.contains('{') && value.contains('}')) {
-            return normalizeBraceCodeIndentation(value)
-        }
-        return value
-    }
-    if (normalizedLanguage in setOf("python", "py")) {
-        return value
-        .replace(Regex("""(?<=[A-Za-z0-9_)\]])(?=(?:import|from|def|class|if|elif|else|for|while|try|except|finally|return|print)\b)"""), "\n")
-        .replace(Regex("""(?<=[A-Za-z0-9_)\]])(?=#)"""), "\n")
-        .replace(Regex("""(?<=[0-9)\]])(?=[A-Z_]{2,}\s*=)"""), "\n")
-        .trimStart('\n')
-    }
-    if (normalizedLanguage !in COMPACT_CODE_LANGUAGES) return value
-    return formatCompactStructuredCode(value)
-}
-
-/**
- * Adds four-space indentation to an otherwise flat Python block.
- *
- * This is a conservative display repair, not a Python formatter.  It runs
- * only when every non-empty source line starts at column zero and at least one
- * block header is present.  Existing indentation, strings, and tokens are
- * therefore left untouched.
- */
-internal fun normalizePythonCodeIndentation(value: String): String {
-    val lines = value.replace("\r\n", "\n").replace('\r', '\n').lines()
-    val nonBlank = lines.filter { it.isNotBlank() }
-    if (nonBlank.isEmpty() || nonBlank.any { it.first().isWhitespace() }) return value
-    val hasBlockHeader = nonBlank.any { line ->
-        val trimmed = line.trim()
-        trimmed.endsWith(":") &&
-            Regex("^(?:def|class|if|elif|else|for|while|try|except|finally|with|match|case)\\b")
-                .containsMatchIn(trimmed)
-    }
-    if (!hasBlockHeader) return value
-
-    var depth = 0
-    return lines.joinToString("\n") { rawLine ->
-        val trimmed = rawLine.trim()
-        if (trimmed.isBlank()) {
-            ""
-        } else {
-            val topLevelDeclaration = trimmed.matches(Regex("^(?:def|class)\\b.*"))
-            if (topLevelDeclaration) depth = 0
-            val dedent = when {
-                Regex("^(?:elif|else|except|finally|case)\\b").containsMatchIn(trimmed) -> 1
-                else -> 0
-            }
-            val lineDepth = (depth - dedent).coerceAtLeast(0)
-            val formatted = "    ".repeat(lineDepth) + trimmed
-            if (trimmed.endsWith(":")) {
-                depth = lineDepth + 1
-            } else if (dedent > 0) {
-                depth = lineDepth
-            }
-            formatted
-        }
-    }
-}
-
-private val BRACE_CODE_LANGUAGES = setOf(
-    "javascript", "js", "typescript", "ts", "java", "kotlin", "kt", "kts",
-    "c", "cpp", "c++", "csharp", "cs", "go", "rust", "swift", "php", "dart",
-    "shell", "bash", "sh", "css", "html", "xml"
-)
-
-internal fun normalizeBraceCodeIndentation(value: String): String {
-    val result = mutableListOf<String>()
-    var depth = 0
-    value.replace("\r\n", "\n").replace('\r', '\n').lines().forEach { raw ->
-        val trimmed = raw.trim()
-        if (trimmed.isBlank()) {
-            result += ""
-            return@forEach
-        }
-        val depthBefore = depth
-        val closesBefore = trimmed.takeWhile { it == '}' }.count()
-        result += "    ".repeat((depthBefore - closesBefore).coerceAtLeast(0)) + trimmed
-        // Count only structural braces outside simple quoted strings. This is intentionally
-        // conservative; full language parsing would risk altering user text on malformed output.
-        var quote: Char? = null
-        var escaped = false
-        var opens = 0
-        var closes = 0
-        trimmed.forEach { ch ->
-            if (quote != null) {
-                if (escaped) escaped = false else if (ch == '\\') escaped = true else if (ch == quote) quote = null
-            } else if (ch == '\'' || ch == '"' || ch == '`') {
-                quote = ch
-            } else if (ch == '{') {
-                opens++
-            } else if (ch == '}') {
-                closes++
-            }
-        }
-        depth = (depthBefore + opens - closes).coerceAtLeast(0)
-    }
-    return result.joinToString("\n").replace(Regex("\n{3,}"), "\n\n")
-}
-
-private val COMPACT_CODE_LANGUAGES = setOf(
-    "javascript", "js", "typescript", "ts", "java", "kotlin", "kt", "kts",
-    "c", "cpp", "c++", "csharp", "cs", "go", "rust", "swift", "php", "dart",
-    "shell", "bash", "sh", "sql", "css", "html", "xml"
-)
-
-/** Recovers readable lines from models that emit a whole program in one line. */
-private fun formatCompactStructuredCode(value: String): String {
-    val lines = mutableListOf<String>()
-    val current = StringBuilder()
-    var quote: Char? = null
-    var escaped = false
-    var parenDepth = 0
-    var indent = 0
-
-    fun flush() {
-        val text = current.toString().trim()
-        if (text.isNotEmpty()) lines += "    ".repeat(indent.coerceAtLeast(0)) + text
-        current.clear()
-    }
-
-    value.forEach { char ->
-        if (quote != null) {
-            current.append(char)
-            if (escaped) escaped = false
-            else if (char == '\\') escaped = true
-            else if (char == quote) quote = null
-            return@forEach
-        }
-        when {
-            char == '\'' || char == '"' || char == '`' -> {
-                quote = char
-                current.append(char)
-            }
-            char == '(' || char == '[' -> {
-                parenDepth++
-                current.append(char)
-            }
-            char == ')' || char == ']' -> {
-                parenDepth = (parenDepth - 1).coerceAtLeast(0)
-                current.append(char)
-            }
-            char == '{' -> {
-                current.append(char)
-                flush()
-                indent++
-            }
-            char == '}' -> {
-                flush()
-                indent = (indent - 1).coerceAtLeast(0)
-                current.append(char)
-                if (current.length > 1) flush()
-            }
-            char == ';' && parenDepth == 0 -> {
-                current.append(char)
-                flush()
-            }
-            else -> current.append(char)
-        }
-    }
-    flush()
-    return lines.joinToString("\n").replace(Regex("\n{3,}"), "\n\n")
-}
-
-private fun splitReadableParagraphs(value: String): List<String> {
-    if (value.length <= 140) return listOf(value)
-    val sentences = Regex("""[^。！？!?；;]+[。！？!?；;]?""")
-        .findAll(value)
-        .map { it.value.trim() }
-        .filter { it.isNotBlank() }
-        .toList()
-    if (sentences.size <= 2) return listOf(value)
-    val result = mutableListOf<String>()
-    val current = StringBuilder()
-    sentences.forEach { sentence ->
-        if (current.isNotEmpty() && current.length + sentence.length > 110) {
-            result += current.toString()
-            current.clear()
-        }
-        if (current.isNotEmpty()) current.append(' ')
-        current.append(sentence)
-    }
-    if (current.isNotEmpty()) result += current.toString()
-    return result
-}
 
 private fun String.isBulletLine(): Boolean {
     val trimmed = trimStart()
@@ -16689,13 +17340,6 @@ private fun cleanReasoningForDisplay(value: String): String {
         .replace(Regex("""\n{3,}"""), "\n\n")
         .trim()
 }
-
-private fun cleanAssistantContentForDisplay(value: String): String =
-    value
-        .replace(Regex("""(?is)<think>.*?</think>"""), "")
-        .replace(Regex("""(?i)(?:\bnull\b\s*){3,}"""), "")
-        .replace("\u0000", "")
-        .trim()
 
 private fun String.removeEnglishReasoningScaffold(): String {
     val parts = split(Regex("""(?=\s*\*\s+)"""))
@@ -16874,14 +17518,6 @@ private fun buildInlineMarkdown(
 
 private val MARKDOWN_LINK_PATTERN = Regex("""\[(.+?)]\((https?://[^)\s]+)\)""")
 private val URL_PATTERN = Regex("""https?://[^\s)）]+""")
-private val CODE_FENCE_LANGUAGE_WITH_CODE_PATTERN = Regex(
-    // Some local models emit the language tag and the first code token without a
-    // newline (for example ```html<!DOCTYPE html>). Treat a markup opener as
-    // code as well, otherwise the renderer shows `html<!DOCTYPE...` in the
-    // language label and the whole block is parsed as prose.
-    """```(python|py|kotlin|java|javascript|js|typescript|ts|cpp|c\+\+|c|html|css|sql|json|bash|sh)(?=(?:import|from|def|class|#|//|<|[A-Za-z_][A-Za-z0-9_]*\s*=))""",
-    RegexOption.IGNORE_CASE
-)
 private const val REASONING_COLLAPSED_MAX_LINES = 4
 private const val REASONING_PREVIEW_MAX_CHARS = 520
 private val REASONING_LEADING_MARKERS = listOf(
@@ -16947,22 +17583,7 @@ private val REASONING_SCAFFOLD_SEGMENT_SPLIT = Regex(
     option = RegexOption.IGNORE_CASE
 )
 
-private fun wrapForDisplay(value: String): String {
-    val out = StringBuilder(value.length + value.length / 24)
-    var runLength = 0
-    value.forEach { ch ->
-        out.append(ch)
-        runLength = if (ch.isWhitespace()) 0 else runLength + 1
-        if (ch == '/' || ch == '\\' || ch == '_' || ch == '-' || ch == '.' || ch == '=' || ch == '&' || ch == '?') {
-            out.append('\u200B')
-            runLength = 0
-        } else if (runLength >= 18 && !ch.isCjkLike()) {
-            out.append('\u200B')
-            runLength = 0
-        }
-    }
-    return out.toString()
-}
+private fun wrapForDisplay(value: String): String = value
 
 private fun String.safePrefix(maxCharacters: Int): String {
     if (length <= maxCharacters) return this

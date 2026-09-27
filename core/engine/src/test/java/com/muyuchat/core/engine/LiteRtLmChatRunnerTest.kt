@@ -1,5 +1,7 @@
 package com.muyuchat.core.engine
 
+import com.google.ai.edge.litertlm.Backend
+import com.google.ai.edge.litertlm.EngineConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -9,6 +11,55 @@ import java.io.File
 import java.nio.file.Files
 
 class LiteRtLmChatRunnerTest {
+    @Test
+    fun componentBackendDefaultsAreNotInheritedFromTheRequestedLlmBackend() {
+        val config = EngineConfig(modelPath = "/models/vision.litertlm", backend = Backend.NPU("/runtime"))
+        val components = liteRtComponentBackends(config)
+        val llm = components.getJSONObject("llm")
+        assertEquals("npu", llm.getString("requested"))
+        assertEquals("npu", llm.getString("selected"))
+        assertEquals("engine_config_submission", llm.getString("selectionSource"))
+        for (name in listOf("vision", "audio")) {
+            val component = components.getJSONObject(name)
+            assertTrue(component.has("requested") && component.isNull("requested"))
+            assertTrue(component.has("selected") && component.isNull("selected"))
+            assertEquals("sdk_model_default", component.getString("selectionSource"))
+        }
+        for (name in listOf("llm", "vision", "audio")) {
+            assertEquals("unknown", components.getJSONObject(name).getString("actual"))
+        }
+    }
+
+    @Test
+    fun explicitDifferentComponentSelectionsRemainSubmissionEvidence() {
+        val config = EngineConfig(
+            modelPath = "/models/vision.litertlm",
+            backend = Backend.NPU("/runtime"),
+            visionBackend = Backend.GPU(),
+            audioBackend = Backend.CPU(threadCount = 2)
+        )
+        val components = liteRtComponentBackends(config)
+        for ((name, submitted) in listOf("llm" to "npu", "vision" to "gpu", "audio" to "cpu")) {
+            val component = components.getJSONObject(name)
+            assertEquals(submitted, component.getString("requested"))
+            assertEquals(submitted, component.getString("selected"))
+            assertEquals("engine_config_submission", component.getString("selectionSource"))
+            assertEquals("unknown", component.getString("actual"))
+        }
+    }
+
+    @Test
+    fun missingEngineSubmissionDoesNotClaimInitializedComponentDefaults() {
+        val components = liteRtComponentBackends(null)
+        for (name in listOf("llm", "vision", "audio")) {
+            val component = components.getJSONObject(name)
+            assertTrue(component.has("requested") && component.isNull("requested"))
+            assertTrue(component.has("selected") && component.isNull("selected"))
+            assertEquals("not_submitted", component.getString("selectionSource"))
+            assertEquals("unknown", component.getString("actual"))
+        }
+    }
+
     @Test
     fun assistantAndModelRolesShareTheLiteRtHistorySpelling() {
         assertEquals("model", canonicalLiteRtMessageRole(" assistant "))
@@ -170,6 +221,32 @@ class LiteRtLmChatRunnerTest {
 
         assertNull(liteRtSamplerValuesFor(params, "npu"))
         assertNull(liteRtSamplerValuesFor(params, "google_tensor"))
+    }
+
+    @Test
+    fun liteRtParameterTraceSeparatesUnsupportedAndSubmittedFields() {
+        val params = GenerationParams(
+            temperature = 0.2f,
+            topK = 7,
+            topP = 0.4f,
+            minP = 0.2f,
+            seed = 9,
+            reasoningMode = ReasoningMode.OFF
+        )
+        val trace = liteRtGenerationParameterApplication(
+            params.toJson(),
+            "npu",
+            liteRtGenerationConfiguration(params, "npu")
+        )
+        val fields = trace.getJSONArray("fields")
+        fun field(name: String): org.json.JSONObject = (0 until fields.length())
+            .map { fields.getJSONObject(it) }
+            .first { it.getString("field") == name }
+
+        assertEquals("ignored", field("min_p").getString("disposition"))
+        assertEquals("ignored", field("temperature").getString("disposition"))
+        assertEquals("submitted", field("repeat_penalty").getString("disposition"))
+        assertTrue(field("temperature").isNull("nativeAcknowledged"))
     }
 
     @Test

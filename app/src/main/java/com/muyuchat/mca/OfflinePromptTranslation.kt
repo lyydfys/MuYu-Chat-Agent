@@ -109,8 +109,8 @@ internal data class OfflinePromptTranslationProvenance(
         require(sourceRevision.matches(Regex("[0-9a-f]{40}"))) {
             "Translation provenance revision must be a lowercase Git SHA-1."
         }
-        require(license == OfflinePromptTranslationContract.MODEL_LICENSE) {
-            "Translation provenance license must be MIT."
+        require(license in setOf("MIT", "Apache-2.0")) {
+            "Translation provenance license must be MIT or Apache-2.0."
         }
     }
 }
@@ -131,6 +131,10 @@ internal data class OfflinePromptTranslationNotice(
 }
 
 /** Identity pinned by compiled artifact anchors and by the verified local bytes. */
+internal enum class OfflineTranslatorFamily { M2M100, HY_MT2 }
+
+internal enum class OfflineTranslationRuntimeKind { CRISP_ASR_M2M100, LLAMA_CPP }
+
 internal data class OfflinePromptTranslationBundleIdentity(
     val model: OfflinePromptTranslationProvenance,
     val runtime: OfflinePromptTranslationProvenance,
@@ -143,9 +147,29 @@ internal data class OfflinePromptTranslationBundleIdentity(
     val modelSha256: String,
     val modelSizeBytes: Long,
     val nativeLibraryFileName: String,
-    val notices: List<OfflinePromptTranslationNotice>
+    val notices: List<OfflinePromptTranslationNotice>,
+    val translatorFamily: OfflineTranslatorFamily = OfflineTranslatorFamily.M2M100,
+    val runtimeKind: OfflineTranslationRuntimeKind = OfflineTranslationRuntimeKind.CRISP_ASR_M2M100
 ) {
     init {
+        if (translatorFamily == OfflineTranslatorFamily.HY_MT2) {
+            require(runtimeKind == OfflineTranslationRuntimeKind.LLAMA_CPP)
+            require(model == HyMt2PromptTranslationContract.modelProvenance)
+            require(runtime == HyMt2PromptTranslationContract.runtimeProvenance)
+            require(modelArchitecture == HyMt2PromptTranslationContract.ARCHITECTURE)
+            require(modelQuantization == "Q4_K_M")
+            require(modelSha256 == HyMt2PromptTranslationContract.MODEL_SHA256)
+            require(modelSizeBytes == HyMt2PromptTranslationContract.MODEL_BYTES)
+            require(nativeLibraryFileName == HyMt2PromptTranslationContract.NATIVE_LIBRARY)
+            require(notices.map { it.sha256 } == listOf(
+                HyMt2PromptTranslationContract.MODEL_NOTICE_SHA256,
+                OfflinePromptTranslationContract.RUNTIME_NOTICE_ARTIFACT_SHA256
+            ))
+            require(sourceLanguage == OfflinePromptTranslationLanguage.ZH_HANS)
+            require(targetLanguage == OfflinePromptTranslationLanguage.ENGLISH)
+            require(sourceM2m100LanguageCode == "zh" && targetM2m100LanguageCode == "en")
+        } else {
+        require(runtimeKind == OfflineTranslationRuntimeKind.CRISP_ASR_M2M100)
         require(model.sourceId == OfflinePromptTranslationContract.MODEL_SOURCE_ID)
         require(model.sourceRevision == OfflinePromptTranslationContract.MODEL_SOURCE_REVISION)
         require(model.license == OfflinePromptTranslationContract.MODEL_LICENSE)
@@ -167,6 +191,7 @@ internal data class OfflinePromptTranslationBundleIdentity(
             require(notice.provenance == expectation.provenance)
             require(notice.sha256 == expectation.sha256)
             require(notice.sizeBytes == expectation.sizeBytes)
+        }
         }
     }
 
@@ -190,7 +215,9 @@ internal data class OfflinePromptTranslationBundleIdentity(
                     modelSha256,
                     modelSizeBytes.toString(),
                     nativeLibraryFileName
-                ) + notices.flatMap { notice ->
+                ) + (if (translatorFamily == OfflineTranslatorFamily.HY_MT2) {
+                    listOf(translatorFamily.name, runtimeKind.name)
+                } else emptyList()) + notices.flatMap { notice ->
                     listOf(
                         notice.relativePath,
                         notice.provenance.sourceId,
@@ -257,8 +284,7 @@ internal sealed interface OfflinePromptTranslationBundleVerification {
 }
 
 /**
- * Verifies a self-contained package with one M2M100 model and the two required MIT notices.
- * It deliberately accepts no alternate model family, source revision, filename, or runtime.
+ * Verifies either pinned translation package without relaxing the legacy M2M100 trust anchors.
  */
 internal object OfflinePromptTranslationBundleVerifier {
     fun verify(bundleRoot: File?): OfflinePromptTranslationBundleVerification {
@@ -304,6 +330,11 @@ internal object OfflinePromptTranslationBundleVerifier {
             root,
             OfflinePromptTranslationContract.TRANSLATION_DIRECTORY
         )
+        val selectedManifest = requireDirectRegularFile(translationDirectory, OfflinePromptTranslationContract.MANIFEST_FILE_NAME)
+        val selectedJson = JSONObject(readUtf8File(selectedManifest, OfflinePromptTranslationContract.MAX_MANIFEST_BYTES))
+        if (selectedJson.optString("translatorFamily") == OfflineTranslatorFamily.HY_MT2.name) {
+            return verifyHyMt2OrThrow(root, translationDirectory, selectedManifest, selectedJson)
+        }
         requireExactDirectoryEntries(
             translationDirectory,
             setOf(
@@ -379,6 +410,73 @@ internal object OfflinePromptTranslationBundleVerifier {
             modelFile = modelFile,
             identity = identity
         )
+    }
+
+    private fun verifyHyMt2OrThrow(
+        root: File,
+        translationDirectory: File,
+        manifestFile: File,
+        json: JSONObject
+    ): VerifiedOfflinePromptTranslationBundle {
+        json.requireExactlyKeys("manifest", setOf("kind", "contractVersion", "translatorFamily", "runtimeKind", "model", "runtime"))
+        if (json.requireString("manifest", "kind") != OfflinePromptTranslationContract.MANIFEST_KIND ||
+            json.requireInt("manifest", "contractVersion") != 2 ||
+            json.requireString("manifest", "runtimeKind") != OfflineTranslationRuntimeKind.LLAMA_CPP.name
+        ) fail(OfflinePromptTranslationBundleRejectionCode.MANIFEST_INVALID, "Unsupported Hy-MT2 translation contract.")
+        val model = json.requireObject("manifest", "model")
+        val runtime = json.requireObject("manifest", "runtime")
+        model.requireExactlyKeys("model", setOf("sourceId", "sourceRevision", "license", "fileName", "sha256", "sizeBytes", "architecture", "quantization"))
+        runtime.requireExactlyKeys("runtime", setOf("sourceId", "sourceRevision", "license", "nativeLibraryFileName"))
+        if (model.requireString("model", "sourceId") != HyMt2PromptTranslationContract.SOURCE_ID ||
+            model.requireString("model", "sourceRevision") != HyMt2PromptTranslationContract.SOURCE_REVISION ||
+            model.requireString("model", "license") != "Apache-2.0" ||
+            model.requireString("model", "fileName") != HyMt2PromptTranslationContract.MODEL_FILE ||
+            model.requireString("model", "sha256") != HyMt2PromptTranslationContract.MODEL_SHA256 ||
+            model.requirePositiveLong("model", "sizeBytes", OfflinePromptTranslationContract.MAX_MODEL_BYTES) != HyMt2PromptTranslationContract.MODEL_BYTES ||
+            model.requireString("model", "architecture") != HyMt2PromptTranslationContract.ARCHITECTURE ||
+            model.requireString("model", "quantization") != "Q4_K_M" ||
+            runtime.requireString("runtime", "sourceId") != HyMt2PromptTranslationContract.RUNTIME_SOURCE_ID ||
+            runtime.requireString("runtime", "sourceRevision") != HyMt2PromptTranslationContract.RUNTIME_REVISION ||
+            runtime.requireString("runtime", "license") != "MIT" ||
+            runtime.requireString("runtime", "nativeLibraryFileName") != HyMt2PromptTranslationContract.NATIVE_LIBRARY
+        ) fail(OfflinePromptTranslationBundleRejectionCode.PROVENANCE_MISMATCH, "Hy-MT2 model or llama.cpp provenance does not match the pinned contract.")
+        requireExactDirectoryEntries(translationDirectory, setOf(
+            OfflinePromptTranslationContract.MANIFEST_FILE_NAME, HyMt2PromptTranslationContract.MODEL_FILE,
+            HyMt2PromptTranslationContract.MODEL_NOTICE, HyMt2PromptTranslationContract.RUNTIME_NOTICE
+        ))
+        val modelFile = requireDirectRegularFile(translationDirectory, HyMt2PromptTranslationContract.MODEL_FILE)
+        verifyFileIntegrity(modelFile, HyMt2PromptTranslationContract.MODEL_SHA256, HyMt2PromptTranslationContract.MODEL_BYTES,
+            OfflinePromptTranslationContract.MAX_MODEL_BYTES, false)
+        val metadata = com.muyuchat.core.modelstore.GgufMetadataReader.read(modelFile)
+        if (!metadata.isGguf || metadata.architecture != HyMt2PromptTranslationContract.ARCHITECTURE) {
+            fail(OfflinePromptTranslationBundleRejectionCode.PROVENANCE_MISMATCH, "Pinned translation artifact is not a hunyuan-dense GGUF.")
+        }
+        val noticeSpecs = listOf(
+            Triple(HyMt2PromptTranslationContract.MODEL_NOTICE, HyMt2PromptTranslationContract.MODEL_NOTICE_SHA256, 11_639L),
+            Triple(HyMt2PromptTranslationContract.RUNTIME_NOTICE, OfflinePromptTranslationContract.RUNTIME_NOTICE_ARTIFACT_SHA256, 1_099L)
+        )
+        val notices = noticeSpecs.mapIndexed { index, (name, hash, bytes) ->
+            val file = requireDirectRegularFile(translationDirectory, name)
+            verifyFileIntegrity(file, hash, bytes, OfflinePromptTranslationContract.MAX_NOTICE_BYTES.toLong(), false)
+            OfflinePromptTranslationNotice("translation/$name", file,
+                if (index == 0) HyMt2PromptTranslationContract.modelProvenance else HyMt2PromptTranslationContract.runtimeProvenance,
+                hash, bytes)
+        }
+        return VerifiedOfflinePromptTranslationBundle(root, manifestFile, modelFile, OfflinePromptTranslationBundleIdentity(
+            model = HyMt2PromptTranslationContract.modelProvenance,
+            runtime = HyMt2PromptTranslationContract.runtimeProvenance,
+            modelArchitecture = HyMt2PromptTranslationContract.ARCHITECTURE,
+            modelQuantization = "Q4_K_M",
+            sourceLanguage = OfflinePromptTranslationLanguage.ZH_HANS,
+            targetLanguage = OfflinePromptTranslationLanguage.ENGLISH,
+            sourceM2m100LanguageCode = "zh", targetM2m100LanguageCode = "en",
+            modelSha256 = HyMt2PromptTranslationContract.MODEL_SHA256,
+            modelSizeBytes = HyMt2PromptTranslationContract.MODEL_BYTES,
+            nativeLibraryFileName = HyMt2PromptTranslationContract.NATIVE_LIBRARY,
+            notices = notices,
+            translatorFamily = OfflineTranslatorFamily.HY_MT2,
+            runtimeKind = OfflineTranslationRuntimeKind.LLAMA_CPP
+        ))
     }
 
     private fun parseManifest(text: String): OfflinePromptTranslationManifest {
@@ -1125,9 +1223,8 @@ internal data class OfflinePromptTranslationResult internal constructor(
 }
 
 /**
- * Isolated native boundary. Implementations must use only the verified M2M100 bundle and a
- * separately packaged libmca_translation_native.so. They must never route to V4, a chat LLM,
- * MNN, llama, cloud translation, or any heuristic substitute.
+ * Isolated native boundary. Each adapter must match the verified bundle's explicit model family
+ * and runtime kind. It cannot borrow an active chat context or implicitly use cloud translation.
  */
 internal interface OfflinePromptTranslationRuntime {
     val nativeLibraryFileName: String
@@ -1230,7 +1327,7 @@ internal object OfflinePromptTranslationFallbackMessages {
 internal class OfflinePromptTranslationService(
     private val runtimeProvider: OfflinePromptTranslationRuntimeProvider =
         DefaultOfflinePromptTranslationRuntimeProvider,
-    private val timeoutMs: Long = DEFAULT_OFFLINE_PROMPT_TRANSLATION_TIMEOUT_MS
+    private val timeoutMs: Long? = null
 ) {
     /**
      * M2M100 is a heavyweight native session.  Do not let two image requests race the same
@@ -1241,7 +1338,7 @@ internal class OfflinePromptTranslationService(
     private val invocationGate = Mutex()
 
     init {
-        require(timeoutMs > 0L) { "Offline prompt translation timeout must be positive." }
+        require(timeoutMs == null || timeoutMs > 0L) { "Offline prompt translation timeout must be positive." }
     }
 
     suspend fun translate(
@@ -1296,7 +1393,10 @@ internal class OfflinePromptTranslationService(
         }
 
         val outcome = try {
-            withTimeout(timeoutMs) { runtime.translate(bundle, request) }
+            val deadline = timeoutMs ?: if (bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2) {
+                HyMt2PromptTranslationContract.TIMEOUT_MS
+            } else DEFAULT_OFFLINE_PROMPT_TRANSLATION_TIMEOUT_MS
+            withTimeout(deadline) { runtime.translate(bundle, request) }
         } catch (_: TimeoutCancellationException) {
             return fallback(
                 request = request,
@@ -1354,7 +1454,7 @@ internal class OfflinePromptTranslationService(
         }
         val positiveTokens = extractOfflinePromptProtectedTokens(request.sourceText)
         val negativeTokens = extractOfflinePromptProtectedTokens(request.negativePrompt)
-        val positiveMissing = positiveTokens.filterNot { token -> result.translatedText.contains(token) }
+        val positiveMissing = positiveTokens != extractOfflinePromptProtectedTokens(result.translatedText)
         val translatedNegative = result.translatedNegativePrompt
             ?: if (request.negativePrompt.containsHanForOfflineTranslation()) {
                 return fallback(
@@ -1366,8 +1466,8 @@ internal class OfflinePromptTranslationService(
             } else {
                 request.negativePrompt
             }
-        val negativeMissing = negativeTokens.filterNot { token -> translatedNegative.contains(token) }
-        if (positiveMissing.isEmpty() && negativeMissing.isEmpty()) {
+        val negativeMissing = negativeTokens != extractOfflinePromptProtectedTokens(translatedNegative)
+        if (!positiveMissing && !negativeMissing) {
             return OfflinePromptTranslationResolution.Translated(
                 originalPrompt = request.sourceText,
                 translatedPrompt = result.translatedText,
@@ -1378,51 +1478,11 @@ internal class OfflinePromptTranslationService(
             )
         }
 
-        // Preserve user-authored control syntax in its original positive/negative field. If a
-        // non-ASCII protected token cannot be safely appended, fall back instead of dropping it.
-        val appendedPositive = listOf(result.translatedText, positiveMissing.joinToString(", "))
-            .filter(String::isNotBlank)
-            .joinToString(", ")
-        val appendedNegative = listOf(translatedNegative, negativeMissing.joinToString(", "))
-            .filter(String::isNotBlank)
-            .joinToString(", ")
-        if (appendedPositive.length > request.maxOutputChars ||
-            !appendedPositive.isSafeAsciiDiffusionPrompt() ||
-            (appendedNegative.isNotBlank() &&
-                (appendedNegative.length > request.maxOutputChars ||
-                    !appendedNegative.isSafeAsciiDiffusionPrompt()))
-        ) {
-            return fallback(
-                request = request,
-                protectedTokens = protectedTokens,
-                reason = OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST,
-                message = OfflinePromptTranslationFallbackMessages.PROTECTED_SYNTAX_LOST
-            )
-        }
-        val repaired = try {
-            result.withTranslatedText(appendedPositive)
-                .let { safe ->
-                    if (appendedNegative.isBlank() || appendedNegative == result.translatedNegativePrompt) {
-                        safe
-                    } else {
-                        safe.withTranslatedNegativePrompt(appendedNegative)
-                    }
-                }
-        } catch (_: IllegalArgumentException) {
-            return fallback(
-                request = request,
-                protectedTokens = protectedTokens,
-                reason = OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST,
-                message = OfflinePromptTranslationFallbackMessages.PROTECTED_SYNTAX_LOST
-            )
-        }
-        return OfflinePromptTranslationResolution.Translated(
-            originalPrompt = request.sourceText,
-            translatedPrompt = repaired.translatedText,
-            originalNegativePrompt = request.negativePrompt,
-            effectiveNegativePrompt = repaired.translatedNegativePrompt ?: request.negativePrompt,
-            result = repaired,
-            protectedTokens = protectedTokens
+        return fallback(
+            request = request,
+            protectedTokens = protectedTokens,
+            reason = OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST,
+            message = OfflinePromptTranslationFallbackMessages.PROTECTED_SYNTAX_LOST
         )
     }
 
@@ -1465,8 +1525,7 @@ internal class OfflinePromptTranslationService(
 
 /**
  * Extracts syntax owned by the user rather than by the translator. The list is metadata for the
- * caller and is also used to repair a translated positive prompt. Negative prompt text itself is
- * always copied unchanged by [OfflinePromptTranslationResolution].
+ * caller and validates the exact fragment order and multiplicity in each translated branch.
  */
 internal fun extractOfflinePromptProtectedTokens(prompt: String): List<String> {
     val patterns = listOf(
@@ -1474,16 +1533,11 @@ internal fun extractOfflinePromptProtectedTokens(prompt: String): List<String> {
         Regex("(?i)(?:lora|lyco|embedding):[A-Za-z0-9_+./-]{1,120}(?::[+-]?\\d+(?:\\.\\d+)?)?"),
         Regex("\\([^\\r\\n()]{1,160}:[+-]?\\d+(?:\\.\\d+)?\\)")
     )
-    val tokens = buildList {
-        patterns.forEach { pattern ->
-            pattern.findAll(prompt).forEach { match ->
-                if (match.value !in this) add(match.value)
-            }
-        }
-    }
-    return tokens.filterNot { token ->
-        tokens.any { other -> other != token && other.length > token.length && other.contains(token) }
-    }
+    val matches = patterns.flatMap { it.findAll(prompt).toList() }.sortedBy { it.range.first }
+    return matches.filterNot { match ->
+        matches.any { other -> other.range != match.range &&
+            other.range.first <= match.range.first && other.range.last >= match.range.last }
+    }.distinctBy { it.range }.map { it.value }
 }
 
 /**

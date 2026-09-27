@@ -9,6 +9,13 @@ import org.junit.Test
 
 class ContextCompressionPolicyTest {
     @Test
+    fun memoryMarkerIsLiteralAndOrdinaryProseIsNotPinned() {
+        assertTrue(isContextMemoryMessage(ChatMessage(Role.USER, "$CONTEXT_MEMORY_KEEP_MARKER exact memory")))
+        assertFalse(isContextMemoryMessage(ChatMessage(Role.USER, "old question about memory")))
+        assertFalse(isContextMemoryMessage(ChatMessage(Role.ASSISTANT, "Maybe we should continue")))
+    }
+
+    @Test
     fun automaticCompressionKeepsSystemRoleCardAndRecentTurns() {
         val request = requestOf(
             ChatMessage(Role.SYSTEM, "role card: always speak as Ada"),
@@ -240,6 +247,54 @@ class ContextCompressionPolicyTest {
         assertTrue(result.request.messages.any { it.content == "latest question" })
         assertFalse(result.request.messages.any { it.content.startsWith("old question") })
         assertTrue(localContextWindowAdmission(result.request).isAccepted)
+    }
+
+    @Test
+    fun protectedStableIdAndPinnedTurnSurviveCompressionAndFinalAdmission() {
+        val pinned = ChatMessage(Role.USER, "relationship: Ada is my sister", pinned = true, id = "pinned")
+        val protected = ChatMessage(Role.USER, "preference: use concise answers", id = "protected")
+        val old = ChatMessage(Role.ASSISTANT, "long history " + "x".repeat(1_000), id = "old")
+        val latest = ChatMessage(Role.USER, "latest", id = "latest")
+        val request = requestOf(pinned, protected, old, latest).copy(
+            params = GenerationParams(nCtx = 512, nPredict = 8, systemPrompt = ""),
+            protectedMessageIds = setOf("protected")
+        )
+        val result = compressChatRequestContext(
+            request,
+            ContextCompressionSettings(keepRecentMessages = 1, minimumMessagesToCompress = 1),
+            ContextCompressionTrigger.MANUAL
+        )
+
+        assertEquals(ContextCompressionStatus.COMPRESSED, result.status)
+        assertTrue(result.request.messages.any { it.id == "pinned" })
+        assertTrue(result.request.messages.any { it.id == "protected" })
+        assertFalse("pinned" in result.summarySourceMessageIds)
+        assertFalse("protected" in result.summarySourceMessageIds)
+        assertTrue(localContextWindowAdmission(result.request).isAccepted)
+    }
+
+    @Test
+    fun deterministicSummaryFindsLatePreferenceAndReportsCoverageLimits() {
+        val old = ChatMessage(
+            Role.USER,
+            "background " + "x".repeat(700) + ". I prefer short answers. Need to call Ada tomorrow.",
+            id = "old",
+            createdAt = 10L
+        )
+        val input = ContextSummaryInput(
+            messages = listOf(old), historicalMessageIndices = listOf(0), maxChars = 600
+        )
+        val structured = deterministicContextEvidence(input)
+        val text = DeterministicContextSummarizer.summarize(input)
+
+        assertTrue(structured.evidence.any {
+            it.kind == ContextSummaryKind.PREFERENCE && "prefer short answers" in it.text &&
+                it.sourceOffset > 420 && it.sourceMessageIds == listOf("old")
+        })
+        assertTrue(structured.evidence.any { it.kind == ContextSummaryKind.OPEN_TASK })
+        assertTrue(structured.coverageLimited)
+        assertTrue(text.contains("[覆盖有限"))
+        assertTrue(old.content.contains(structured.evidence.first { it.kind == ContextSummaryKind.PREFERENCE }.text))
     }
 
     private fun requestOf(vararg messages: ChatMessage): ChatRequest =
