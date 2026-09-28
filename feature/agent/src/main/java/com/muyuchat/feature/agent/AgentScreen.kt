@@ -1569,7 +1569,7 @@ private fun AdvancedParamsCard(
 
             ParameterLayerTitle(
                 title = "助手 / 会话生成参数",
-                description = "sampling、系统提示词和最大输出只影响生成，不触发模型重载。智能调参只能给出建议，绝不会静默改写用户设置。"
+                description = "采样参数和最大输出只影响生成，不触发模型重载。智能调参只能给出建议。"
             )
             CompactIntSlider("最大输出 n_predict", params.nPredict, 128f..65536f) {
                 onParamsChange(params.copy(nPredict = it))
@@ -1595,14 +1595,6 @@ private fun AdvancedParamsCard(
             CompactFloatSlider("频率惩罚", params.frequencyPenalty, -2f..2f) {
                 onParamsChange(params.copy(frequencyPenalty = it))
             }
-            OutlinedTextField(
-                value = params.systemPrompt,
-                onValueChange = { onParamsChange(params.copy(systemPrompt = it)) },
-                modifier = Modifier.fillMaxWidth(),
-                minLines = 3,
-                label = { Text("系统提示词（助手 / 会话）") },
-                supportingText = { Text("保存到助手或会话生成层，不写入模型执行 Profile。") }
-            )
         }
     }
 }

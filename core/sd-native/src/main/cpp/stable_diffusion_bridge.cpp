@@ -141,6 +141,9 @@ constexpr uint32_t kStageMaskImageDecoded = 1u << 8u;
 constexpr uint32_t kStageControlImageDecoded = 1u << 9u;
 constexpr uint32_t kStageLoraValidated = 1u << 10u;
 constexpr uint32_t kStageTextualInversionValidated = 1u << 11u;
+constexpr uint32_t kStageQwenTextConditionEncoded = 1u << 12u;
+constexpr uint32_t kStageQwenTextContextReleased = 1u << 13u;
+constexpr uint32_t kStageQwenDiffusionContextReady = 1u << 14u;
 
 constexpr size_t kMaxInputImageBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxInputImageSide = 8192u;
@@ -598,6 +601,15 @@ struct StableDiffusionExecutionContract {
     std::string prompt;
     std::string negative_prompt;
     std::string family;
+    std::string variant;
+    // Explicit Qwen Image 2.1 Viggle schedules.  The field is optional on the
+    // wire so the ordinary 20-step Qwen profile keeps its existing scheduler.
+    std::string qwen_turbo_schedule;
+    std::vector<float> qwen_raw_sigmas;
+    std::vector<float> qwen_shifted_sigmas;
+    std::vector<float> qwen_custom_sigmas;
+    double qwen_sigma_mu = 0.0;
+    int qwen_sigma_image_seq_len = 0;
     int threads = 0;
     double distilled_guidance = 0.0;
     bool distilled_guidance_specified = false;
@@ -682,6 +694,101 @@ float backend_denoising_strength(const StableDiffusionExecutionContract &contrac
     // tail count, while retaining the user value as product evidence.
     return (static_cast<float>(effective_steps) - 0.5f) /
             static_cast<float>(contract.steps);
+}
+
+void resolve_qwen_turbo_schedule(StableDiffusionExecutionContract &contract) {
+    if (contract.qwen_turbo_schedule.empty()) {
+        return;
+    }
+    if (contract.variant != "QWEN_IMAGE_21") {
+        unsupported_contract(
+                "qwenTurboSchedule",
+                "Viggle schedules are supported only for variant=QWEN_IMAGE_21");
+    }
+    if (contract.loras.size() != 1u) {
+        invalid_contract(
+                "qwenTurboSchedule",
+                "Viggle v0.2.1 schedule requires exactly one selected LoRA adapter");
+    }
+    const ContractLoraAdapter &adapter = contract.loras.front();
+    if (adapter.sha256 != "bafb91d0047df3f9b8a5a850b0c967f051164314d8aad778dfa34d9c24ec345b" &&
+        adapter.sha256 != "2a0148f5c73abbed5f97da5ea356e439318aadb281d01fce4af39cdf43728803") {
+        invalid_contract(
+                "qwenTurboSchedule",
+                "Viggle v0.2.1 schedule requires the publisher's exact r128 or r256 adapter");
+    }
+    if (adapter.multiplier != 1.0) {
+        invalid_contract(
+                "loras.multiplier",
+                "Viggle v0.2.1 schedule requires the published LoRA strength 1.0");
+    }
+    if (std::fabs(contract.cfg_scale - 1.0) > 1e-12 || contract.use_cfg ||
+        !contract.negative_prompt.empty()) {
+        invalid_contract(
+                "qwenTurboSchedule",
+                "Viggle schedules require cfgScale=1, useCfg=false, and an empty negativePrompt");
+    }
+    if (contract.scheduler_wire != "FLOW_MATCH" ||
+        contract.prediction_wire != "FLOW" ||
+        contract.sample_method != EULER_SAMPLE_METHOD ||
+        contract.task_mode != "text_to_image" ||
+        contract.flow_shift >= 0.0) {
+        invalid_contract(
+                "qwenTurboSchedule",
+                "Viggle schedules require Qwen text-to-image Euler Flow with dynamic flow shift");
+    }
+
+    if (contract.qwen_turbo_schedule == "viggle_v021_4") {
+        contract.qwen_raw_sigmas = {1.0f, 0.75f, 0.5f, 0.25f};
+    } else if (contract.qwen_turbo_schedule == "viggle_v021_5") {
+        contract.qwen_raw_sigmas = {1.0f, 0.875f, 0.75f, 0.5f, 0.25f};
+    } else if (contract.qwen_turbo_schedule == "viggle_v021_6") {
+        contract.qwen_raw_sigmas = {1.0f, 0.9375f, 0.875f, 0.75f, 0.5f, 0.25f};
+    } else if (contract.qwen_turbo_schedule == "viggle_v021_7") {
+        contract.qwen_raw_sigmas = {1.0f, 0.9583f, 0.9167f, 0.875f, 0.75f, 0.5f, 0.25f};
+    } else if (contract.qwen_turbo_schedule == "viggle_v021_8") {
+        // The publisher offers this denser eight-step sequence for text-heavy prompts.
+        contract.qwen_raw_sigmas = {1.0f, 0.9375f, 0.875f, 0.75f, 0.625f, 0.5f, 0.25f, 0.125f};
+    } else {
+        invalid_contract(
+                "qwenTurboSchedule",
+                "unknown Viggle v0.2.1 schedule; expected viggle_v021_4 through viggle_v021_8");
+    }
+    const int expected_steps = static_cast<int>(contract.qwen_raw_sigmas.size());
+    if (contract.steps != expected_steps || contract.timetable_count != expected_steps) {
+        invalid_contract(
+                "steps",
+                "Viggle schedules require the exact step count declared by the schedule");
+    }
+
+    // Qwen Image 2.1 uses a 16x spatial compression for the DiT sequence.  The
+    // Viggle scheduler maps that sequence length to a logit shift, then applies
+    // the same exponential time shift to each published raw sigma.
+    const int image_seq_len = (contract.height / 16) * (contract.width / 16);
+    if (image_seq_len <= 0) {
+        invalid_contract("qwenTurboSchedule", "image dimensions produce no Qwen latent tokens");
+    }
+    constexpr double base_image_seq_len = 256.0;
+    constexpr double max_image_seq_len = 8192.0;
+    constexpr double base_shift = 0.5;
+    constexpr double max_shift = 0.9;
+    const double mu = base_shift +
+            (max_shift - base_shift) *
+                    (static_cast<double>(image_seq_len) - base_image_seq_len) /
+                    (max_image_seq_len - base_image_seq_len);
+    const double exp_mu = std::exp(mu);
+    contract.qwen_sigma_mu = mu;
+    contract.qwen_sigma_image_seq_len = image_seq_len;
+    contract.qwen_shifted_sigmas.reserve(contract.qwen_raw_sigmas.size());
+    for (const float raw_sigma : contract.qwen_raw_sigmas) {
+        const double raw = static_cast<double>(raw_sigma);
+        const double shifted = raw <= 0.0
+                ? 0.0
+                : exp_mu / (exp_mu + (1.0 / raw - 1.0));
+        contract.qwen_shifted_sigmas.push_back(static_cast<float>(shifted));
+    }
+    contract.qwen_custom_sigmas = contract.qwen_shifted_sigmas;
+    contract.qwen_custom_sigmas.push_back(0.0f);
 }
 
 void resolve_sampler_contract(StableDiffusionExecutionContract &contract) {
@@ -874,6 +981,11 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
                 "negativePrompt cannot affect pixels when useCfg=false");
     }
     contract.family = required_string(params, "family");
+    contract.variant = optional_string(params, "variant", "");
+    const auto qwen_turbo_schedule = params.find("qwenTurboSchedule");
+    if (qwen_turbo_schedule != params.end()) {
+        contract.qwen_turbo_schedule = required_string(params, "qwenTurboSchedule");
+    }
     contract.threads = required_int32(params, "threads");
     if (contract.threads < 1 || contract.threads > 64) {
         invalid_contract("threads", "must be in [1, 64]; native does not clamp it");
@@ -1354,6 +1466,7 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
                 "resolved timetableCount must match the exact native img2img/inpaint strength schedule");
     }
     resolve_sampler_contract(contract);
+    resolve_qwen_turbo_schedule(contract);
     return contract;
 }
 
@@ -3187,7 +3300,8 @@ std::string make_context_key(
         const ComponentPaths &paths,
         const std::vector<ContractTextualInversion> &textual_inversions,
         int threads,
-        const std::string& execution_asset_composite) {
+        const std::string& execution_asset_composite,
+        sd_qwen_image_21_phase_t qwen_phase = SD_QWEN_IMAGE_21_PHASE_FULL) {
     std::ostringstream key;
     key << paths.model << "|"
         << paths.diffusion << "|"
@@ -3203,6 +3317,7 @@ std::string make_context_key(
         << paths.control_net << "|"
         << paths.selection_mode << "|"
         << paths.tokenizer_path << "|"
+        << "qwenPhase:" << static_cast<int>(qwen_phase) << "|"
         << threads << "|"
         << sd_runtime_backend_label() << "|assets:"
         << execution_asset_composite;
@@ -3218,7 +3333,9 @@ std::string make_context_key(
 sd_ctx_t *ensure_context(const ComponentPaths &paths,
                          const std::vector<ContractTextualInversion> &textual_inversions,
                          const std::string &ctx_key,
-                         int threads) {
+                         int threads,
+                         bool unload_after_stages = false,
+                         sd_qwen_image_21_phase_t qwen_phase = SD_QWEN_IMAGE_21_PHASE_FULL) {
     if (g_ctx != nullptr && g_ctx_key == ctx_key) return g_ctx;
     g_last_sd_error.clear();
     if (g_ctx != nullptr) {
@@ -3241,8 +3358,11 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
     params.llm_vision_path = paths.llm_vision.empty() ? nullptr : paths.llm_vision.c_str();
     params.embeddings_connectors_path = paths.embeddings_connectors.empty() ? nullptr : paths.embeddings_connectors.c_str();
     params.control_net_path = paths.control_net.empty() ? nullptr : paths.control_net.c_str();
-    params.vae_decode_only = false;
-    params.free_params_immediately = false;
+    // The staged Qwen diffusion phase is text-to-image only: it never encodes
+    // an init/control image, so keep only the VAE decoder resident.
+    params.vae_decode_only = qwen_phase == SD_QWEN_IMAGE_21_PHASE_DIFFUSION_VAE;
+    params.free_params_immediately = unload_after_stages;
+    params.qwen_image_21_phase = qwen_phase;
     params.n_threads = threads;
     params.enable_mmap = true;
     params.rng_type = CPU_RNG;
@@ -3274,10 +3394,18 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
                        : "stable-diffusion.cpp failed to create context: " + g_last_sd_error);
         return nullptr;
     }
-    if (!sd_ctx_supports_image_generation(g_ctx)) {
+    if (qwen_phase != SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER &&
+        !sd_ctx_supports_image_generation(g_ctx)) {
         free_sd_ctx(g_ctx);
         g_ctx = nullptr;
         set_last_error("selected local model does not support image generation");
+        return nullptr;
+    }
+    if (qwen_phase == SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER &&
+        !sd_ctx_is_qwen_image_2_1(g_ctx)) {
+        free_sd_ctx(g_ctx);
+        g_ctx = nullptr;
+        set_last_error("selected text encoder is incompatible with Qwen Image 2.1");
         return nullptr;
     }
     g_ctx_key = ctx_key;
@@ -3593,13 +3721,46 @@ std::string generate_impl(const std::string &model_path,
         }
         const std::string selected_components_json = component_selection_json(paths);
         set_progress_component_selection(selected_components_json);
-        const std::string ctx_key = make_context_key(
-                paths,
+        const bool split_qwen_image_21 = contract.variant == "QWEN_IMAGE_21";
+        ComponentPaths text_encoder_paths = paths;
+        ComponentPaths diffusion_vae_paths = paths;
+        if (split_qwen_image_21) {
+            // The first context owns only the Qwen3-VL text encoder. The second
+            // context owns the Qwen Image DiT/VAE graph, so their parameter
+            // buffers never overlap during initialization.
+            text_encoder_paths.model.clear();
+            text_encoder_paths.diffusion.clear();
+            text_encoder_paths.high_noise_diffusion.clear();
+            text_encoder_paths.vae.clear();
+            text_encoder_paths.clip_l.clear();
+            text_encoder_paths.clip_g.clear();
+            text_encoder_paths.clip_vision.clear();
+            text_encoder_paths.t5xxl.clear();
+            text_encoder_paths.llm_vision.clear();
+            text_encoder_paths.embeddings_connectors.clear();
+            text_encoder_paths.control_net.clear();
+
+            diffusion_vae_paths.model.clear();
+            diffusion_vae_paths.high_noise_diffusion.clear();
+            diffusion_vae_paths.clip_l.clear();
+            diffusion_vae_paths.clip_g.clear();
+            diffusion_vae_paths.clip_vision.clear();
+            diffusion_vae_paths.t5xxl.clear();
+            diffusion_vae_paths.llm.clear();
+            diffusion_vae_paths.llm_vision.clear();
+            diffusion_vae_paths.embeddings_connectors.clear();
+            diffusion_vae_paths.control_net.clear();
+        }
+        std::string ctx_key = make_context_key(
+                split_qwen_image_21 ? text_encoder_paths : paths,
                 validated_textual_inversions,
                 contract.threads,
                 has_execution_asset_binding
                     ? execution_asset_binding.composite_sha256
-                    : std::string());
+                    : std::string(),
+                split_qwen_image_21
+                    ? SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER
+                    : SD_QWEN_IMAGE_21_PHASE_FULL);
         set_progress(
                 "loading",
                 "loading stable-diffusion.cpp context",
@@ -3610,10 +3771,14 @@ std::string generate_impl(const std::string &model_path,
                 contract.height,
                 contract.threads);
         sd_ctx_t *ctx = ensure_context(
-                paths,
+                split_qwen_image_21 ? text_encoder_paths : paths,
                 validated_textual_inversions,
                 ctx_key,
-                contract.threads);
+                contract.threads,
+                split_qwen_image_21,
+                split_qwen_image_21
+                    ? SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER
+                    : SD_QWEN_IMAGE_21_PHASE_FULL);
         if (ctx == nullptr) {
             set_progress(
                     "failed",
@@ -3625,6 +3790,136 @@ std::string generate_impl(const std::string &model_path,
                     contract.height,
                     contract.threads);
             return runtime_failure("NATIVE_CONTEXT_LOAD_FAILED", g_last_error).dump();
+        }
+        // Stage-unloaded contexts cannot be reused for another request. Release on
+        // every exit, including cancellation/contract failures, after evidence is read.
+        struct StageContextRelease {
+            bool enabled;
+            ~StageContextRelease() {
+                if (enabled && g_ctx != nullptr) {
+                    free_sd_ctx(g_ctx);
+                    g_ctx = nullptr;
+                    g_ctx_key.clear();
+                }
+            }
+        } stage_context_release{contract.variant == "QWEN_IMAGE_21"};
+        bool actual_qwen_image_21 = sd_ctx_is_qwen_image_2_1(ctx);
+        std::string actual_model_version = sd_ctx_model_version_name(ctx);
+        if (contract.variant == "QWEN_IMAGE_21" && !actual_qwen_image_21) {
+            execution_mismatch("variant", "QWEN_IMAGE_21 requested but checkpoint tensor schema is " + actual_model_version);
+        }
+        if (actual_qwen_image_21 && contract.task_mode != "text_to_image") {
+            unsupported_contract("taskMode", "this Qwen Image 2.1 runtime provides text-to-image; reference conditioning requires the deepstack vision implementation");
+        }
+        if (actual_qwen_image_21 && (contract.width % 32 != 0 || contract.height % 32 != 0)) {
+            invalid_contract("width,height", "Qwen Image 2.1 tensor geometry requires multiples of 32");
+        }
+
+        std::vector<sd_lora_t> native_loras;
+        native_loras.reserve(contract.loras.size());
+        for (size_t index = 0; index < contract.loras.size(); ++index) {
+            sd_lora_t native_lora{};
+            native_lora.is_high_noise = false;
+            native_lora.multiplier = static_cast<float>(contract.loras[index].multiplier);
+            native_lora.path = canonical_lora_paths[index].c_str();
+            native_loras.push_back(native_lora);
+        }
+
+        sd_qwen_image_21_condition_t *qwen_condition = nullptr;
+        struct QwenConditionRelease {
+            sd_qwen_image_21_condition_t *condition;
+            ~QwenConditionRelease() {
+                if (condition != nullptr) {
+                    sd_free_qwen_image_21_condition(condition);
+                }
+            }
+        } qwen_condition_release{nullptr};
+        if (split_qwen_image_21) {
+            set_progress(
+                    "encoding",
+                    "encoding prompt with Qwen3-VL",
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            sd_img_gen_params_t prompt_generation;
+            sd_img_gen_params_init(&prompt_generation);
+            prompt_generation.prompt = contract.prompt.c_str();
+            prompt_generation.negative_prompt = contract.use_cfg
+                    ? contract.negative_prompt.c_str() : nullptr;
+            prompt_generation.width = contract.width;
+            prompt_generation.height = contract.height;
+            prompt_generation.seed = contract.seed;
+            prompt_generation.clip_skip = contract.clip_skip;
+            prompt_generation.loras = native_loras.empty() ? nullptr : native_loras.data();
+            prompt_generation.lora_count = static_cast<uint32_t>(native_loras.size());
+            prompt_generation.sample_params.guidance.txt_cfg =
+                    static_cast<float>(contract.cfg_scale);
+            prompt_generation.sample_params.guidance.distilled_guidance =
+                    static_cast<float>(contract.distilled_guidance);
+            qwen_condition = sd_qwen_image_21_encode_prompt(ctx, &prompt_generation);
+            qwen_condition_release.condition = qwen_condition;
+            if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+            }
+            if (qwen_condition == nullptr) {
+                return runtime_failure(
+                        "QWEN_TEXT_ENCODER_FAILED",
+                        "Qwen3-VL could not encode the positive and negative prompt").dump();
+            }
+            mark_generation_stage(kStageQwenTextConditionEncoded);
+
+            // Release the text encoder before loading the multi-gigabyte DiT/VAE
+            // context. The opaque condition owns host tensors and remains valid
+            // after this context is destroyed.
+            if (g_ctx != nullptr) {
+                free_sd_ctx(g_ctx);
+                g_ctx = nullptr;
+                g_ctx_key.clear();
+            }
+            mark_generation_stage(kStageQwenTextContextReleased);
+            if (g_cancel_requested.load(std::memory_order_relaxed)) {
+                return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
+            }
+
+            ctx_key = make_context_key(
+                    diffusion_vae_paths,
+                    validated_textual_inversions,
+                    contract.threads,
+                    has_execution_asset_binding
+                        ? execution_asset_binding.composite_sha256
+                        : std::string(),
+                    SD_QWEN_IMAGE_21_PHASE_DIFFUSION_VAE);
+            set_progress(
+                    "loading",
+                    "loading Qwen Image DiT and VAE context",
+                    0,
+                    contract.steps,
+                    0.0f,
+                    contract.width,
+                    contract.height,
+                    contract.threads);
+            ctx = ensure_context(
+                    diffusion_vae_paths,
+                    validated_textual_inversions,
+                    ctx_key,
+                    contract.threads,
+                    true,
+                    SD_QWEN_IMAGE_21_PHASE_DIFFUSION_VAE);
+            if (ctx == nullptr) {
+                return runtime_failure("NATIVE_CONTEXT_LOAD_FAILED", g_last_error).dump();
+            }
+            actual_qwen_image_21 = sd_ctx_is_qwen_image_2_1(ctx);
+            actual_model_version = sd_ctx_model_version_name(ctx);
+            if (!actual_qwen_image_21) {
+                execution_mismatch(
+                        "variant",
+                        "QWEN_IMAGE_21 diffusion/VAE phase resolved checkpoint schema as " +
+                        actual_model_version);
+            }
+            mark_generation_stage(kStageQwenDiffusionContextReady);
         }
         mark_generation_stage(kStageContextReady);
 
@@ -3647,7 +3942,7 @@ std::string generate_impl(const std::string &model_path,
         if (dynamic_flow_shift && contract.flow_shift >= 0.0) {
             unsupported_contract(
                     "flowShift",
-                    "the loaded Flux2 checkpoint derives flow shift from step count and image sequence length");
+                    "the loaded checkpoint derives flow shift from its sampling schedule and image sequence length");
         }
         if (contract.distilled_guidance_specified && !distilled_guidance_capable) {
             unsupported_contract(
@@ -3675,15 +3970,6 @@ std::string generate_impl(const std::string &model_path,
 
         sd_img_gen_params_t gen;
         sd_img_gen_params_init(&gen);
-        std::vector<sd_lora_t> native_loras;
-        native_loras.reserve(contract.loras.size());
-        for (size_t index = 0; index < contract.loras.size(); ++index) {
-            sd_lora_t native_lora{};
-            native_lora.is_high_noise = false;
-            native_lora.multiplier = static_cast<float>(contract.loras[index].multiplier);
-            native_lora.path = canonical_lora_paths[index].c_str();
-            native_loras.push_back(native_lora);
-        }
         gen.loras = native_loras.empty() ? nullptr : native_loras.data();
         gen.lora_count = static_cast<uint32_t>(native_loras.size());
         gen.prompt = contract.prompt.c_str();
@@ -3721,8 +4007,18 @@ std::string generate_impl(const std::string &model_path,
         if (contract.flow_shift >= 0.0) {
             gen.sample_params.flow_shift = static_cast<float>(contract.flow_shift);
         }
+        std::vector<float> qwen_custom_sigmas = contract.qwen_custom_sigmas;
+        if (!contract.qwen_custom_sigmas.empty()) {
+            gen.sample_params.custom_sigmas = qwen_custom_sigmas.data();
+            gen.sample_params.custom_sigmas_count =
+                    static_cast<int>(qwen_custom_sigmas.size());
+            // The public API accepts the denoiser's multiplicative shift.  The
+            // Viggle schedule publishes the corresponding logit mu, so pass
+            // exp(mu) to keep native flow-shift evidence aligned with it.
+            gen.sample_params.flow_shift = static_cast<float>(std::exp(contract.qwen_sigma_mu));
+        }
         gen.sample_params.sample_method = contract.sample_method;
-        gen.sample_params.scheduler = contract.native_scheduler;
+        gen.sample_params.scheduler = actual_qwen_image_21 ? FLUX_SCHEDULER : contract.native_scheduler;
         const bool input_image_wired = task_uses_init_image(contract) &&
                 gen.init_image.data != nullptr && gen.init_image.width > 0u && gen.init_image.height > 0u;
         const bool mask_image_wired = task_uses_mask_image(contract) &&
@@ -3803,6 +4099,11 @@ std::string generate_impl(const std::string &model_path,
                 ultrafix.vae_tiling_params = gen.vae_tiling_params;
                 ultrafix.source_fit = SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER;
                 images = sd_generate_ultrafix(ctx, &ultrafix, &ultrafix_evidence);
+            } else if (split_qwen_image_21) {
+                images = sd_generate_image_with_qwen_image_21_condition(
+                        ctx,
+                        &gen,
+                        qwen_condition);
             } else {
                 images = generate_image(ctx, &gen);
             }
@@ -3811,6 +4112,11 @@ std::string generate_impl(const std::string &model_path,
             throw;
         }
         sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
+        if (qwen_condition != nullptr) {
+            sd_free_qwen_image_21_condition(qwen_condition);
+            qwen_condition = nullptr;
+            qwen_condition_release.condition = nullptr;
+        }
         if (g_cancel_requested.load(std::memory_order_relaxed)) {
             free_generated_images(images, contract.batch_count);
             set_progress(
@@ -4597,6 +4903,37 @@ std::string generate_impl(const std::string &model_path,
                 actual_prompt_weight_fingerprint,
                 actual_width,
                 actual_height);
+        native_effective["actualModelVersion"] = actual_model_version;
+        native_effective["actualModelVariant"] = actual_qwen_image_21 ? "QWEN_IMAGE_21" : "";
+        native_effective["nativeScheduler"] = sd_scheduler_name(gen.sample_params.scheduler);
+        if (!contract.qwen_turbo_schedule.empty()) {
+            native_effective["qwenTurboSchedule"] = contract.qwen_turbo_schedule;
+            native_effective["qwenRawSigmas"] = contract.qwen_raw_sigmas;
+            native_effective["qwenShiftedSigmas"] = contract.qwen_custom_sigmas;
+            native_effective["qwenSigmaImageSeqLen"] = contract.qwen_sigma_image_seq_len;
+            native_effective["qwenSigmaMu"] = contract.qwen_sigma_mu;
+        }
+        const uint32_t stage_mask =
+                g_generation_stage_mask.load(std::memory_order_relaxed);
+        const bool qwen_text_encoded =
+                (stage_mask & kStageQwenTextConditionEncoded) != 0u;
+        const bool qwen_text_released =
+                (stage_mask & kStageQwenTextContextReleased) != 0u;
+        const bool qwen_diffusion_ready =
+                (stage_mask & kStageQwenDiffusionContextReady) != 0u;
+        native_effective["stageParametersReleased"] =
+                split_qwen_image_21 && qwen_text_released;
+        native_effective["qwenTwoStage"] =
+                split_qwen_image_21 && qwen_text_encoded &&
+                qwen_text_released && qwen_diffusion_ready;
+        native_effective["qwenTextEncoderPhase"] =
+                split_qwen_image_21 && qwen_text_encoded;
+        native_effective["qwenTextConditionEncoded"] =
+                split_qwen_image_21 && qwen_text_encoded;
+        native_effective["qwenTextEncoderReleasedBeforeDiffusion"] =
+                split_qwen_image_21 && qwen_text_released && qwen_diffusion_ready;
+        native_effective["qwenDiffusionVaePhase"] =
+                split_qwen_image_21 && qwen_diffusion_ready;
         native_effective["inputImagePath"] = input_image_wired
                 ? input_image.canonical_path : "";
         native_effective["maskImagePath"] = mask_image_wired

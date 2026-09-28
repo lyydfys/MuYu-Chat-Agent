@@ -10,11 +10,14 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -344,6 +347,94 @@ class McaInferenceServicePhaseEventTest {
     }
 
     @Test
+    fun leasedUnloadKeepsNewModelLoadsWaitingUntilTheOwnerReleases() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner, io = Dispatchers.Unconfined)
+        val lease = service.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
+        val unloadCallsBefore = runner.unloadCalls.get()
+        val loadCallsBefore = runner.loadCalls.get()
+        val stopsBefore = runner.requestStopCalls.get()
+        try {
+            // A lease-aware unload must complete without trying to lock its own mutex again.
+            withTimeout(5_000L) { service.unloadModel(lease = lease) }
+            assertEquals(unloadCallsBefore + 1, runner.unloadCalls.get())
+            assertEquals(stopsBefore, runner.requestStopCalls.get())
+            assertFalse(service.stats.value.loaded)
+
+            // Unconfined IO and an undispatched start reach the real lifecycle mutex before
+            // this returns, so the assertion does not depend on a sleep or scheduler timing.
+            val nextLoad = async(start = CoroutineStart.UNDISPATCHED) {
+                service.loadModel(
+                    modelPath = "/models/next/config.json",
+                    runtime = LocalChatRuntime.MNN_CPU,
+                    params = LoadParams(nCtx = 4096, nThreads = 2)
+                ).getOrThrow()
+            }
+            try {
+                assertFalse(nextLoad.isCompleted)
+                assertEquals(loadCallsBefore, runner.loadCalls.get())
+            } finally {
+                lease.release()
+            }
+            assertTrue(withTimeout(5_000L) { nextLoad.await() }.loaded)
+            assertEquals(loadCallsBefore + 1, runner.loadCalls.get())
+        } finally {
+            lease.release()
+        }
+    }
+
+    @Test
+    fun leasedUnloadDoesNotConnectAnUntouchedRunner() = runBlocking {
+        val mnn = PhaseRunner()
+        val llama = PhaseRunner(LocalChatRuntime.LLAMA_CPP)
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(mnn.runtime to mnn, llama.runtime to llama),
+            io = Dispatchers.Unconfined
+        )
+        val lease = service.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
+        try {
+            withTimeout(5_000L) { service.unloadModel(lease = lease) }
+            assertEquals(0, mnn.unloadCalls.get())
+            assertEquals(0, llama.unloadCalls.get())
+            assertEquals(0, mnn.requestStopCalls.get())
+            assertEquals(0, llama.requestStopCalls.get())
+            assertFalse(service.stats.value.loaded)
+        } finally {
+            lease.release()
+        }
+    }
+
+    @Test
+    fun leasedUnloadStillReleasesARetainedSessionProjectedAsUnloaded() = runBlocking {
+        val runner = PhaseRunner()
+        val service = loadedService(runner, io = Dispatchers.Unconfined)
+        runner.sessionKnownLost = true
+        assertFalse(requireNotNull(service.tryRuntimeHealthSnapshot()).runtimeStats.loaded)
+        val unloadCallsBefore = runner.unloadCalls.get()
+        val lease = service.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
+        try {
+            withTimeout(5_000L) { service.unloadModel(lease = lease) }
+            assertEquals(unloadCallsBefore + 1, runner.unloadCalls.get())
+            assertFalse(service.stats.value.loaded)
+        } finally {
+            lease.release()
+        }
+    }
+
+    @Test
+    fun explicitUnloadPreservesNativeCleanupForAnUnloadedEngine() = runBlocking {
+        val runner = PhaseRunner()
+        val service = McaInferenceService(
+            context = FakeContext(),
+            runners = mapOf(runner.runtime to runner),
+            io = Dispatchers.Unconfined
+        )
+        service.unloadModel()
+        assertEquals(1, runner.unloadCalls.get())
+    }
+
+    @Test
     fun lostWorkerHealthIsProjectedAsUnloadedWhileKeepingRecoveryPossible() = runBlocking {
         val runner = PhaseRunner()
         val service = loadedService(runner)
@@ -442,13 +533,15 @@ class McaInferenceServicePhaseEventTest {
     private suspend fun loadedService(
         runner: PhaseRunner,
         prefillProgressPollIntervalMs: Long = 5L,
-        clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
+        clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock,
+        io: CoroutineDispatcher = Dispatchers.IO
     ): McaInferenceService {
         val service = McaInferenceService(
             context = FakeContext(),
             runners = mapOf(runner.runtime to runner),
             prefillProgressPollIntervalMs = prefillProgressPollIntervalMs,
-            clock = clock
+            clock = clock,
+            io = io
         )
         service.loadModel(
             modelPath = if (runner.runtime == LocalChatRuntime.LLAMA_CPP) {
@@ -499,6 +592,8 @@ class McaInferenceServicePhaseEventTest {
         var resetPrefillProgressCalls = 0
             private set
         val requestStopCalls = AtomicInteger(0)
+        val loadCalls = AtomicInteger(0)
+        val unloadCalls = AtomicInteger(0)
         @Volatile
         private var blockedGenerateEntered: CountDownLatch? = null
         @Volatile
@@ -514,12 +609,15 @@ class McaInferenceServicePhaseEventTest {
         override fun initBackends(nativeLibDir: String) = Unit
 
         override fun loadModel(modelPath: String, paramsJson: String): Int {
+            loadCalls.incrementAndGet()
             onLoad?.invoke()
             statsJson = loadedStatsJson(runtime, paramsJson)
             return 0
         }
 
-        override fun unloadModel() = Unit
+        override fun unloadModel() {
+            unloadCalls.incrementAndGet()
+        }
 
         override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
             timeline += "begin"

@@ -713,8 +713,13 @@ enum class LocalImageModelFamily(val label: String) {
     CUSTOM("自定义");
 
     companion object {
-        fun from(value: String?): LocalImageModelFamily =
-            entries.firstOrNull { it.name == value } ?: CUSTOM
+        fun from(value: String?): LocalImageModelFamily {
+            val normalized = value?.trim()?.uppercase()
+            return when (normalized) {
+                "QWEN_IMAGE_21", "QWEN-IMAGE-2.1", "QWEN_IMAGE_2_1" -> QWEN_IMAGE
+                else -> entries.firstOrNull { it.name == normalized } ?: CUSTOM
+            }
+        }
 
         fun infer(fileName: String): LocalImageModelFamily {
             val lower = fileName.lowercase()
@@ -2972,6 +2977,20 @@ class LocalImageProvider(context: Context) {
             activeRequestId?.let { requestId ->
                 activeQwenImage21RequestId.compareAndSet(requestId, null)
             }
+            // Qwen-Image-2.1 keeps nearly 10 GB of native state resident after a successful
+            // generation. Release it before the disposable image worker returns so the chat
+            // runtime can be loaded without waiting for a later image request.
+            val releaseResidentRuntime = qwenImage21RuntimeResident.compareAndSet(true, false)
+            withContext(NonCancellable + Dispatchers.IO) {
+                if (releaseResidentRuntime) {
+                    runCatching { qwenImage21Worker.unload() }
+                        .onFailure { runCatching { qwenImage21Worker.disconnect() } }
+                } else {
+                    // A failed load can still leave the Binder connection alive even though no
+                    // resident handle was published; always drop that connection at the boundary.
+                    runCatching { qwenImage21Worker.disconnect() }
+                }
+            }
             runCatching { outputFile.delete() }
         }
     }
@@ -4591,15 +4610,40 @@ class LocalImageProvider(context: Context) {
         val bundleRoot = File(componentSelection.bundleRoot).takeIf(File::isDirectory)
             ?: error("stable-diffusion.cpp requires a complete model bundle directory.")
         val fallbackSeed = (System.currentTimeMillis() and Int.MAX_VALUE.toLong()).toInt()
-        val effectiveOptions = options.copy(seed = options.seed ?: fallbackSeed)
+        var effectiveOptions = options.copy(seed = options.seed ?: fallbackSeed)
             .normalizedForPromptExecutionProfile(LocalImageRuntime.STABLE_DIFFUSION_CPP)
-        val profileResolution = resolveLocalImageExecutionProfile(
+        var profileResolution = resolveLocalImageExecutionProfile(
             model = model,
             options = effectiveOptions,
             bundleRoot = bundleRoot,
             familyOverride = effectiveFamily,
             captureTextualInversionExecutionAssets = true
         )
+        // Only the resolved 2.1 GGUF graph may use Viggle's distilled timetable. The
+        // optional adapter changes recommended defaults, never an explicit step choice.
+        val selectedViggle = profileResolution.profile.profileId == "sdcpp.qwen-image-2.1" &&
+            options.loras.size == 1 &&
+            QwenImage21TurboSchedule.isOfficialV021(options.loras.single())
+        val viggleSteps = if (selectedViggle) options.steps ?: 6 else options.steps
+        val useViggleTimetable = selectedViggle &&
+            viggleSteps?.let { it in 4..8 } == true &&
+            QwenImage21TurboSchedule.acceptsControls(options)
+        if (useViggleTimetable) {
+            effectiveOptions = options.copy(
+                seed = effectiveOptions.seed,
+                steps = viggleSteps,
+                cfgScale = options.cfgScale ?: 1.0,
+                useCfg = options.useCfg ?: false,
+                negativePrompt = options.negativePrompt ?: ""
+            ).normalizedForPromptExecutionProfile(LocalImageRuntime.STABLE_DIFFUSION_CPP)
+            profileResolution = resolveLocalImageExecutionProfile(
+                model = model,
+                options = effectiveOptions,
+                bundleRoot = bundleRoot,
+                familyOverride = effectiveFamily,
+                captureTextualInversionExecutionAssets = true
+            )
+        }
         val profile = profileResolution.profile
         validateLocalImageProfileProductOptions(profile, effectiveOptions)
         textualInversionLease = effectiveOptions.textualInversionIds
@@ -4661,7 +4705,8 @@ class LocalImageProvider(context: Context) {
             defaultWidth = resolved.width,
             defaultHeight = resolved.height,
             requestedWidth = resolved.width,
-            requestedHeight = resolved.height
+            requestedHeight = resolved.height,
+            dimensionMultiple = if (profile.variant == ImageModelVariant.QWEN_IMAGE_21) 32 else 64
         )
         val steps = resolved.steps
         val threads = resolveStableDiffusionThreads(effectiveOptions.threads, defaultLocalImageThreads())
@@ -4719,6 +4764,12 @@ class LocalImageProvider(context: Context) {
             .put("sampleMethod", sampleMethod)
             .put("backendMode", backendMode)
         effectiveOptions.putProductInputNativeParams(params)
+        val qwenTurboSchedule = if (useViggleTimetable) {
+            QwenImage21TurboSchedule.selectedFor(profile, effectiveOptions.loras, steps)
+        } else {
+            null
+        }
+        qwenTurboSchedule?.let { params.put("qwenTurboSchedule", it) }
         textualInversionLease?.let { lease ->
             val nativeTextualInversionParams = TextualInversionContract.run {
                 lease.selection.toNativeJson(rootPath = lease.rootPath)
@@ -4762,6 +4813,10 @@ class LocalImageProvider(context: Context) {
             throwLocalImageNativeFailure(json, "stable-diffusion.cpp image generation failed.")
         }
         ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
+        if (profile.variant == ImageModelVariant.QWEN_IMAGE_21) {
+            requireQwenImage21GgufExecutionEvidence(json)
+            QwenImage21TurboSchedule.verifyNativeEcho(json, qwenTurboSchedule)
+        }
         require(json.optInt("width", -1) == width && json.optInt("height", -1) == height) {
             "stable-diffusion.cpp did not execute the requested ${width}x${height} dimensions."
         }
@@ -7625,7 +7680,14 @@ internal fun LocalImageModelRecord.hasCurrentLocalImageExecutionFailure(): Boole
     verificationStatus == LocalImageVerificationStatus.FAILED &&
         verificationMessage.isNotBlank() &&
         verifiedAt > 0L &&
+        !hasLegacyQwenMemoryEstimateFailure() &&
         localImageStructuralReadinessMessage() == null
+
+/** Old APKs persisted this preflight estimate as FAILED before calling the native graph. */
+private fun LocalImageModelRecord.hasLegacyQwenMemoryEstimateFailure(): Boolean =
+    runtime == LocalImageRuntime.MNN_DIFFUSION &&
+        verificationMessage.trim().startsWith("Qwen-Image-2.1 预计需要约 ") &&
+        verificationMessage.contains("可用内存，但当前只有约")
 
 /** Advisory text only; callers must never use this value to block selection or execution. */
 fun LocalImageModelRecord.localImageVerificationDiagnosticMessage(): String? {
@@ -7638,7 +7700,9 @@ fun LocalImageModelRecord.localImageVerificationDiagnosticMessage(): String? {
     return when (verificationStatus) {
         LocalImageVerificationStatus.UNKNOWN ->
             "$runtimeName 尚未记录真实运行结果，可直接尝试；本次 native 执行结果将作为诊断依据。"
-        LocalImageVerificationStatus.FAILED -> if (hasCurrentLocalImageExecutionFailure()) {
+        LocalImageVerificationStatus.FAILED -> if (hasLegacyQwenMemoryEstimateFailure()) {
+            "旧版本曾因内存估算中止准备，这不是真实推理失败。现已允许按所选尺寸重新运行，以本次实际分配和执行结果为准。"
+        } else if (hasCurrentLocalImageExecutionFailure()) {
             "$runtimeName 上次真实执行失败：${verificationMessage.trim()}；仍可直接重试，以本次执行结果为准。"
         } else {
             "$runtimeName 的历史失败状态没有当前执行证据，不会阻止使用；可直接重新尝试。"
@@ -8794,15 +8858,17 @@ internal fun resolveStableDiffusionDimensions(
     defaultWidth: Int,
     defaultHeight: Int,
     requestedWidth: Int?,
-    requestedHeight: Int?
+    requestedHeight: Int?,
+    dimensionMultiple: Int = 64
 ): Pair<Int, Int> {
+    require(dimensionMultiple == 32 || dimensionMultiple == 64)
     val width = requestedWidth ?: defaultWidth
     val height = requestedHeight ?: defaultHeight
-    require(width in 256..1536 && width % 64 == 0) {
-        "stable-diffusion.cpp width must be a multiple of 64 between 256 and 1536."
+    require(width in 256..1536 && width % dimensionMultiple == 0) {
+        "stable-diffusion.cpp width must be a multiple of $dimensionMultiple between 256 and 1536."
     }
-    require(height in 256..1536 && height % 64 == 0) {
-        "stable-diffusion.cpp height must be a multiple of 64 between 256 and 1536."
+    require(height in 256..1536 && height % dimensionMultiple == 0) {
+        "stable-diffusion.cpp height must be a multiple of $dimensionMultiple between 256 and 1536."
     }
     return width to height
 }
@@ -9329,8 +9395,25 @@ internal fun defaultCfgFor(family: LocalImageModelFamily): Double =
         LocalImageModelFamily.CUSTOM -> 7.0
     }
 
+internal fun requireQwenImage21GgufExecutionEvidence(result: JSONObject) {
+    val native = result.optJSONObject("nativeEffective")
+        ?: error("Qwen-Image-2.1 GGUF did not report native execution metadata.")
+    require(native.optString("actualModelVariant") == "QWEN_IMAGE_21" &&
+        native.optString("nativeScheduler") == "flux") {
+        "Qwen-Image-2.1 GGUF requires its detected 2.1 architecture and resolution-aware flow schedule."
+    }
+    require(native.optBoolean("qwenTwoStage") &&
+        native.optBoolean("qwenTextEncoderPhase") &&
+        native.optBoolean("qwenTextConditionEncoded") &&
+        native.optBoolean("qwenTextEncoderReleasedBeforeDiffusion") &&
+        native.optBoolean("qwenDiffusionVaePhase")) {
+        "Qwen-Image-2.1 GGUF did not complete text encoding and diffusion in separate native contexts."
+    }
+}
+
 internal fun defaultStableDiffusionFlowShiftFor(profile: ImageExecutionProfile): Double {
     if (profile.scheduler.predictionType != ImagePredictionType.FLOW) return -1.0
+    if (profile.variant == ImageModelVariant.QWEN_IMAGE_21) return -1.0
     return when (profile.family) {
         LocalImageModelFamily.FLUX -> -1.0
         LocalImageModelFamily.Z_IMAGE,

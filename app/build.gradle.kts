@@ -427,6 +427,7 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation(libs.okhttp)
+    implementation("com.google.re2j:re2j:1.8")
     ksp(libs.androidx.room.compiler)
 
     implementation(platform(libs.androidx.compose.bom))

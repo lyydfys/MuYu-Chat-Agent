@@ -26,6 +26,45 @@ import org.junit.Test
 
 class McaRoomMigrationExecutionTest {
     @Test
+    fun migration26To27KeepsTranscriptAndSummaryWhileAddingMixedHistoryFlag() {
+        Class.forName("org.sqlite.JDBC")
+        JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->
+            database.execSQL(
+                "CREATE TABLE chat_sessions (id TEXT NOT NULL PRIMARY KEY, assistantId TEXT, " +
+                    "assistantSnapshotJson TEXT, contextSummariesJson TEXT)"
+            )
+            database.execSQL(
+                "CREATE TABLE chat_messages (sessionId TEXT NOT NULL, position INTEGER NOT NULL, " +
+                    "content TEXT NOT NULL, PRIMARY KEY(sessionId, position))"
+            )
+            database.execSQL(
+                "INSERT INTO chat_sessions VALUES ('chat-a', 'role-a', '{\"assistantId\":\"role-a\"}', 'summary-a')"
+            )
+            database.execSQL("INSERT INTO chat_messages VALUES ('chat-a', 0, 'original reply')")
+
+            val migration = migration("MIGRATION_26_27")
+            migration.migrate(database)
+
+            assertEquals(26, migration.startVersion)
+            assertEquals(27, migration.endVersion)
+            database.query(
+                "SELECT assistantId, assistantSnapshotJson, contextSummariesJson, mixedAssistantHistory " +
+                    "FROM chat_sessions WHERE id = 'chat-a'"
+            ).use { row ->
+                assertTrue(row.moveToFirst())
+                assertEquals("role-a", row.getString(0))
+                assertEquals("{\"assistantId\":\"role-a\"}", row.getString(1))
+                assertEquals("summary-a", row.getString(2))
+                assertEquals(0, row.getInt(3))
+            }
+            database.query("SELECT content FROM chat_messages WHERE sessionId = 'chat-a'").use { row ->
+                assertTrue(row.moveToFirst())
+                assertEquals("original reply", row.getString(0))
+            }
+        }
+    }
+
+    @Test
     fun migration25To26PreservesRolesAndMemoriesAndAddsPendingTurnStore() {
         Class.forName("org.sqlite.JDBC")
         JdbcSupportSQLiteDatabase(DriverManager.getConnection("jdbc:sqlite::memory:")).use { database ->

@@ -278,7 +278,7 @@ class WorldBookStoreTest {
     }
 
     @Test
-    fun keepsSelectiveKeywordTriggersAndIgnoresLegacyRegexTriggers() {
+    fun keepsSelectiveKeywordAndRegexTriggers() {
         val book = worldBook(
             name = "advanced",
             entries = listOf(
@@ -306,11 +306,11 @@ class WorldBookStoreTest {
             tokenBudget = 128
         )
 
-        assertEquals(listOf("selective"), selection.selectedEntryIds)
+        assertEquals(setOf("selective", "regex"), selection.selectedEntryIds.toSet())
     }
 
     @Test
-    fun tavernImportSkipsRegexOnlyEntriesAndReportsTheSkippedCount() {
+    fun tavernImportKeepsRegexEntriesAndReportsUnsupportedPatterns() {
         val result = WorldBookCodec.parse(
             rawJson = """
                 {
@@ -325,8 +325,41 @@ class WorldBookStoreTest {
         )
 
         assertTrue(result.isSuccess)
-        assertEquals(listOf("keyword"), requireNotNull(result.book).entries.map { it.id })
-        assertTrue(result.warnings.single().contains("1 条正则触发条目未导入"))
+        assertEquals(setOf("regex", "keyword"), requireNotNull(result.book).entries.map { it.id }.toSet())
+        assertTrue(result.warnings.isEmpty())
+        val selection = WorldBookResolver.select(
+            books = listOf(requireNotNull(result.book)),
+            messages = listOf(ChatMessage(Role.USER, "dragon and " + "a".repeat(20_000) + "!")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("keyword"), selection.selectedEntryIds)
+    }
+
+    @Test
+    fun regexOnlyCharacterBookKeepsTavernLiteralFlagsAndDoesNotRequireDistinctPrompt() {
+        val result = WorldBookCodec.parse(
+            rawJson = """
+                {"name":"角色世界书","entries":[
+                  {"uid":"regex","key":["/hello, world/i"],"content":"触发词内容","use_regex":true},
+                  {"uid":"unsupported","key":["(hello)\\1"],"content":"保留原文","use_regex":true}
+                ]}
+            """.trimIndent(),
+            scope = WorldBookScope.ASSISTANT,
+            assistantId = "assistant"
+        )
+        assertTrue(result.isSuccess)
+        assertEquals(2, requireNotNull(result.book).entries.size)
+        assertTrue(result.warnings.single().contains("1 条正则触发条目"))
+        val selection = WorldBookResolver.select(
+            books = listOf(requireNotNull(result.book)),
+            messages = listOf(ChatMessage(Role.USER, "HELLO, WORLD")),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        )
+        assertEquals(listOf("regex"), selection.selectedEntryIds)
     }
 
     @Test

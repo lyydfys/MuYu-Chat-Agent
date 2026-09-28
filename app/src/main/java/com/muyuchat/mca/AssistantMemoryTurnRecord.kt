@@ -20,6 +20,8 @@ data class AssistantMemoryTurnRecord(
 internal fun List<ChatSessionRecord>.containsCompletedMemoryTurn(turn: AssistantMemoryTurnRecord): Boolean =
     any { session ->
         session.id == turn.sessionId &&
-            (session.assistantSnapshot?.assistantId ?: session.assistantId) == turn.assistantId &&
+            !session.mixedAssistantHistory &&
+            session.assistantId == turn.assistantId &&
+            session.assistantSnapshot?.assistantId == turn.assistantId &&
             session.messages.any { message -> message.id == turn.id && message.role == Role.ASSISTANT }
     }

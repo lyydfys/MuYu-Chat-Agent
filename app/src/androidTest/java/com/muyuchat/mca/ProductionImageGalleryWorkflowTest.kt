@@ -70,7 +70,7 @@ class ProductionImageGalleryWorkflowTest {
                         ChatScreen(
                             state = state,
                             onInputChange = { state = state.copy(input = it) },
-                            onSend = {}, onStop = {}, onNewConversation = {},
+                            onSend = {}, onStop = {}, onCreateConversationForAssistant = {},
                             onSelectConversation = {}, onDeleteConversation = {}, onClearHistory = {},
                             onRenameConversation = { _, _ -> }, onTogglePinConversation = {}, onExportConversation = {},
                             onRegenerate = {}, onDeleteMessage = {}, onUploadFile = {},

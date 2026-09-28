@@ -63,7 +63,7 @@ class LocalModelMemoryAdmissionPolicyTest {
     }
 
     @Test
-    fun filenameScaleWithoutGgufMoeArchitectureDoesNotBypassDenseAdmission() {
+    fun filenameScaleWithoutGgufMoeArchitectureRemainsAnAdvisoryEstimate() {
         val result = LocalModelMemoryAdmissionPolicy.evaluate(
             model = model(
                 name = "renamed-35B-A3B.gguf",
@@ -73,12 +73,13 @@ class LocalModelMemoryAdmissionPolicyTest {
             device = device(totalGiB = 12, availableGiB = 6)
         )
 
-        assertFalse(result.allowed)
-        assertEquals(LocalModelMemoryAdmissionMode.DENY, result.mode)
+        assertTrue(result.allowed)
+        assertEquals(LocalModelMemoryAdmissionMode.ALLOW, result.mode)
+        assertTrue(result.advisory.orEmpty().contains("原生 mmap"))
     }
 
     @Test
-    fun sameSizeDenseModelRemainsBlocked() {
+    fun sameSizeDenseModelIsAttemptedAndReportsPressure() {
         val result = LocalModelMemoryAdmissionPolicy.evaluate(
             model = model(
                 name = "Dense-35B-IQ2_XXS.gguf",
@@ -88,9 +89,9 @@ class LocalModelMemoryAdmissionPolicyTest {
             device = device(totalGiB = 12, availableGiB = 6)
         )
 
-        assertFalse(result.allowed)
-        assertEquals(LocalModelMemoryAdmissionMode.DENY, result.mode)
-        assertTrue(result.blocker.orEmpty().contains("总内存"))
+        assertTrue(result.allowed)
+        assertEquals(LocalModelMemoryAdmissionMode.ALLOW, result.mode)
+        assertTrue(result.advisory.orEmpty().contains("本机总内存"))
     }
 
     @Test

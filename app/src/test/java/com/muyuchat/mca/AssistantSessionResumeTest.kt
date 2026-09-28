@@ -18,7 +18,7 @@ class AssistantSessionResumeTest {
     }
 
     @Test
-    fun capturedRoleIdentityWinsOverLegacySessionBinding() {
+    fun conflictingRoleIdentityDoesNotBecomeARoleResumeCandidate() {
         val captured = session("captured", "legacy-role", 20L).copy(
             assistantSnapshot = AssistantConversationSnapshot(
                 assistantId = "role-a", name = "Role A", systemPrompt = "Persona",
@@ -27,7 +27,7 @@ class AssistantSessionResumeTest {
             )
         )
 
-        assertEquals("captured", listOf(captured).latestSessionForAssistant("role-a")?.id)
+        assertNull(listOf(captured).latestSessionForAssistant("role-a"))
         assertNull(listOf(captured).latestSessionForAssistant("legacy-role"))
     }
 
@@ -62,6 +62,25 @@ class AssistantSessionResumeTest {
     }
 
     @Test
+    fun roleWithoutGreetingGetsOwnedEmptyConversation() {
+        val silent = AssistantRecord(id = "silent", systemPrompt = "Stay in character")
+        val session = silent.newConversationSession("local", "model", "empty-chat", 42L)
+
+        assertEquals("empty-chat", session.id)
+        assertEquals(emptyList<com.muyuchat.core.engine.ChatMessage>(), session.messages)
+        assertEquals("silent", session.assistantId)
+        assertEquals("silent", session.assistantSnapshot?.assistantId)
+        assertEquals("empty-chat", listOf(session).latestSessionForAssistant("silent")?.id)
+    }
+
+    @Test
+    fun mixedConversationIsNotResumedAutomatically() {
+        val mixed = session("mixed", "role-a", 30L).copy(mixedAssistantHistory = true)
+        val safe = session("safe", "role-a", 10L)
+        assertEquals("safe", listOf(mixed, safe).latestSessionForAssistant("role-a")?.id)
+    }
+
+    @Test
     fun legacyImportedPersonaPromptIsNotRewrittenWhenItsGreetingIsRecovered() {
         val rawCard = """{"spec":"chara_card_v2","data":{"name":"Guide","first_mes":"Hello."}}"""
         val existing = AssistantRecord(
@@ -78,6 +97,11 @@ class AssistantSessionResumeTest {
     private fun session(id: String, assistantId: String, updatedAt: Long, pinned: Boolean = false) =
         ChatSessionRecord(
             id = id, title = id, messages = emptyList(), pinned = pinned,
-            updatedAt = updatedAt, assistantId = assistantId
+            updatedAt = updatedAt, assistantId = assistantId,
+            assistantSnapshot = AssistantConversationSnapshot(
+                assistantId = assistantId, name = assistantId, systemPrompt = "Persona",
+                memoryEnabled = false, webSearchEnabled = false,
+                fileContextEnabled = true, capturedAt = updatedAt
+            )
         )
 }

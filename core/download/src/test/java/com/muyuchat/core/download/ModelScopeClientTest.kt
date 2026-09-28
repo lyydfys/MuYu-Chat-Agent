@@ -156,7 +156,7 @@ class ModelScopeClientTest {
     fun includesDefaultRecommendedModels() {
         val recommendations = client.recommendedModels()
 
-        assertEquals(49, recommendations.size)
+        assertEquals(50, recommendations.size)
         assertEquals(ModelScopeRecommendedGroup.LIGHT_CHAT, recommendations[0].group)
         val qwen35ExperimentalMnn = recommendations.first { it.id == "qwen35_08b_uncensored_mnn" }
         assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
@@ -953,6 +953,7 @@ class ModelScopeClientTest {
         listOf(
             "z_image_turbo_q4",
             "flux2_klein_4b_q4",
+            "qwen_image_21_q4_k_m",
             "qwen_image_2512_q2",
             "longcat_image_q4"
         ).forEach { id ->
@@ -967,6 +968,7 @@ class ModelScopeClientTest {
         val splitStableDiffusionCppIds = setOf(
             "z_image_turbo_q4",
             "flux2_klein_4b_q4",
+            "qwen_image_21_q4_k_m",
             "qwen_image_2512_q2",
             "longcat_image_q4"
         )
@@ -985,8 +987,9 @@ class ModelScopeClientTest {
         models.filter { it.imageEngineBundle?.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP }
             .forEach { model ->
                 val profile = requireNotNull(model.imageEngineBundle?.executionProfile)
-                assertTrue("${model.id} native conditioner applies token weights", profile.tokenizer.supportsPromptWeighting)
-                assertTrue("${model.id} must expose its native prompt weighting", profile.capabilities.supportsPromptWeighting)
+                val supportsPromptWeighting = model.id != "qwen_image_21_q4_k_m"
+                assertEquals("${model.id} native conditioner token weights", supportsPromptWeighting, profile.tokenizer.supportsPromptWeighting)
+                assertEquals("${model.id} native prompt weighting", supportsPromptWeighting, profile.capabilities.supportsPromptWeighting)
                 assertEquals(ImageEngineTask.TEXT_TO_IMAGE, profile.task)
                 assertFalse(profile.capabilities.requiresControlImage)
                 assertFalse(profile.capabilities.requiresInputImage)
@@ -1204,7 +1207,7 @@ class ModelScopeClientTest {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(40, recommendations.size)
+        assertEquals(41, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
@@ -1225,7 +1228,7 @@ class ModelScopeClientTest {
 
         assertEquals(14, cpuChat.size)
         assertEquals(7, npuChat.size)
-        assertEquals(7, cpuImage.size)
+        assertEquals(8, cpuImage.size)
         assertEquals(1, gpuImage.size)
         assertEquals(11, npuImage.size)
 
@@ -1283,6 +1286,7 @@ class ModelScopeClientTest {
                 "mnn_sana_edit_v2",
                 "flux2_klein_4b_q4",
                 "z_image_turbo_q4",
+                "qwen_image_21_q4_k_m",
                 "qwen_image_2512_q2",
                 "longcat_image_q4"
             ),
@@ -1504,6 +1508,143 @@ class ModelScopeClientTest {
 
         assertEquals("split_files/vae/qwen_image_vae.safetensors", qwenVae.fileName)
         assertEquals("qwen_image_vae.safetensors", qwenVae.relativePath)
+    }
+
+    @Test
+    fun qwenImage21GgufPinsCompleteModelScopeBundleAndRemainsAnExperimentalCpuOption() {
+        val recommendation = client.recommendedModels().single { it.id == "qwen_image_21_q4_k_m" }
+        val bundle = requireNotNull(recommendation.imageEngineBundle)
+
+        assertEquals("unsloth/Qwen-Image-2.1-GGUF", recommendation.repoId)
+        assertEquals("master", recommendation.revision)
+        assertEquals(ModelRepositoryProvider.MODELSCOPE, recommendation.provider)
+        assertEquals("qwen-image-2.1-Q4_K_M.gguf", recommendation.recommendedFileName)
+        assertEquals(RecommendedModelSection.CPU_IMAGE, recommendation.section)
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, recommendation.status)
+        assertEquals(RecommendedModelDownloadPolicy.ALL_DEVICES, recommendation.downloadPolicy)
+        assertTrue(recommendation.visibleInRecommendations)
+        assertTrue(recommendation.downloadable)
+        assertNull(recommendation.downloadBlockReason)
+        assertTrue(recommendation.supportedChipsetCodes.isEmpty())
+        assertEquals(ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP, bundle.runtime)
+        assertEquals(ImageEngineAccelerator.CPU, bundle.accelerator)
+        assertEquals(ImageEngineMinDeviceTier.ANY, bundle.minDeviceTier)
+        assertEquals(ImageEngineTask.TEXT_TO_IMAGE, bundle.task)
+        assertTrue(bundle.requiresSmokeTest)
+        assertEquals(bundle.components, bundle.requiredComponents)
+        assertTrue(bundle.components.all { it.downloadByDefault })
+        assertTrue(bundle.components.all { it.provider == ModelRepositoryProvider.MODELSCOPE && it.revision == "master" })
+        assertEquals(
+            listOf(
+                "DIFFUSION|unsloth/Qwen-Image-2.1-GGUF|qwen-image-2.1-Q4_K_M.gguf|4199565024|631d532e7ca71e8d90a87c71d3699761a812039d22e3370e87498d87754660fe",
+                "TEXT_ENCODER|unsloth/Qwen3-VL-8B-Instruct-GGUF|Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf|5148699488|e3d1a6e87c5cb31e054f2c3bc0dd82ffde052f613de5eef3665b7bd33c9b703e",
+                "VAE|unsloth/Qwen-Image-2.1-FP8|vae/qwen_image_2.1_vae_bf16.safetensors|675508656|71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"
+            ),
+            bundle.components.map { "${it.role.name}|${it.repoId}|${it.fileName}|${it.expectedSizeBytes}|${it.sha256}" }
+        )
+        assertEquals(10_023_773_168L, bundle.components.sumOf { requireNotNull(it.expectedSizeBytes) })
+        assertEquals(
+            listOf("qwen-image-2.1-Q4_K_M.gguf", "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", "qwen_image_2.1_vae_bf16.safetensors"),
+            bundle.components.map { it.relativePath }
+        )
+        assertTrue(recommendation.description.contains("Qwen Research License"))
+        assertTrue(recommendation.description.contains("非商业"))
+        assertTrue(recommendation.description.contains("下载大小不代表运行内存需求"))
+        assertTrue(recommendation.description.contains("https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE"))
+        listOf("", "UNKNOWN", "MT6989", "SM8550").forEach { chipset ->
+            val eligibility = recommendation.downloadEligibilityFor(chipset, deviceIsSnapdragon = false)
+            assertTrue(eligibility.canDownload)
+            assertNull(eligibility.blockedReason)
+        }
+        listOf("qwen_image_21_mnn_opencl", "qwen_image_2512_q2").forEach { otherId ->
+            val other = client.recommendedModels().single { it.id == otherId }.imageEngineBundle!!
+            assertNotEquals(other.id, bundle.id)
+            assertNotEquals(other.executionProfile!!.profileId, bundle.executionProfile!!.profileId)
+        }
+    }
+
+    @Test
+    fun qwenImage21GgufDeclaresQwen3ConditioningAndNativeRgbaVaeWithoutUnsupportedExtensions() {
+        val bundle = client.recommendedModels().single { it.id == "qwen_image_21_q4_k_m" }.imageEngineBundle!!
+        val profile = requireNotNull(bundle.executionProfile)
+        val capabilities = profile.capabilities
+
+        assertEquals(3, profile.profileRevision)
+        assertEquals(ImageEngineTokenizerBackend.SDCPP_NATIVE, profile.tokenizer.backend)
+        assertNull(profile.tokenizer.bosId)
+        assertNull(profile.tokenizer.eosId)
+        assertNull(profile.tokenizer.padId)
+        assertEquals(ImageEngineClipPadRule.MODEL_DECLARED, profile.tokenizer.clip1PadRule)
+        assertEquals(512, profile.tokenizer.maxLength)
+        assertEquals(listOf(1, 512), profile.conditioning.textEncoderInputShape)
+        assertEquals(listOf(listOf(1, 512, 4_096)), profile.conditioning.textEncoderOutputShapes)
+        assertEquals(listOf("negative", "positive"), profile.conditioning.concatenationOrder)
+        assertEquals(ImageEngineEmbeddingDataType.RUNTIME_NATIVE, profile.conditioning.diskDataType)
+        assertEquals(ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE, profile.conditioning.conversionStrategy)
+        assertEquals(listOf(1, 64, 32, 32), profile.vae.inputShape)
+        assertEquals(listOf(1, 4, 512, 512), profile.vae.outputShape)
+        assertEquals(ImageEngineTensorLayout.RUNTIME_NATIVE, profile.vae.inputLayout)
+        assertEquals(ImageEngineTensorLayout.RUNTIME_NATIVE, profile.vae.outputLayout)
+        assertEquals(ImageEnginePixelRange.RUNTIME_NATIVE, profile.vae.outputRange)
+        assertEquals(ImageEngineChannelOrder.RUNTIME_NATIVE, profile.vae.channelOrder)
+        assertEquals("Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf", profile.graph.textEncoder)
+        assertEquals("qwen-image-2.1-Q4_K_M.gguf", profile.graph.unet)
+        assertEquals("qwen_image_2.1_vae_bf16.safetensors", profile.graph.vae)
+        assertNull(profile.graph.vaeEncoder)
+        assertEquals(256, capabilities.minWidth)
+        assertEquals(1_536, capabilities.maxWidth)
+        assertEquals(256, capabilities.minHeight)
+        assertEquals(1_536, capabilities.maxHeight)
+        assertEquals(32, capabilities.widthMultiple)
+        assertEquals(32, capabilities.heightMultiple)
+        assertTrue(capabilities.supportsNegativePrompt)
+        assertTrue(capabilities.supportsVaeTiling)
+        assertFalse(capabilities.supportsPromptWeighting)
+        assertFalse(capabilities.supportsTextualInversion)
+        assertTrue(capabilities.supportsLora)
+        assertFalse(capabilities.supportsClipSkip)
+        assertFalse(capabilities.supportsMask)
+        assertFalse(capabilities.supportsUltraFix)
+        assertFalse(capabilities.supportsLivePreview)
+        assertEquals(1, capabilities.maxBatchCount)
+    }
+
+    @Test
+    fun qwenImage21GgufDownloadPlanResolvesAllThreeRepositoriesWithoutMmprojOrEditingAssets() {
+        val recommendation = client.recommendedModels().single { it.id == "qwen_image_21_q4_k_m" }
+        val bundle = requireNotNull(recommendation.imageEngineBundle)
+        val requestedRepositories = mutableListOf<String>()
+        val fakeClient = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val request = chain.request()
+                assertEquals("master", request.url.queryParameter("Revision"))
+                val repoId = request.url.encodedPath.substringAfter("/api/v1/models/").substringBefore("/repo/files")
+                requestedRepositories += repoId
+                val component = bundle.components.single { it.repoId == repoId }
+                val body = JSONObject().put("Data", JSONObject().put("Files", JSONArray().apply {
+                    put(JSONObject().put("Path", component.fileName)
+                        .put("Size", component.expectedSizeBytes).put("Sha256", component.sha256))
+                    put(JSONObject().put("Path", "mmproj-Qwen3-VL-8B-Instruct.gguf").put("Size", 100))
+                    put(JSONObject().put("Path", "vae_encoder.safetensors").put("Size", 100))
+                })).toString()
+                Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                    .body(body.toResponseBody("application/json".toMediaType())).build()
+            }
+            .build()
+
+        val files = ModelScopeClient(client = fakeClient, endpoints = listOf("https://modelscope.invalid"))
+            .recommendedImageBundleFiles(recommendation)
+
+        assertEquals(bundle.components.map { it.repoId }, requestedRepositories)
+        assertEquals(bundle.components.map { it.role }, files.map { it.bundleRole })
+        assertEquals(bundle.components.map { it.fileName }, files.map { it.path })
+        assertEquals(bundle.components.map { it.relativePath }, files.map { it.relativePath })
+        assertEquals(bundle.components.map { it.expectedSizeBytes }, files.map { it.sizeBytes })
+        assertEquals(bundle.components.map { it.sha256 }, files.map { it.sha256 })
+        assertEquals(
+            bundle.components.map { "https://modelscope.invalid/models/${it.repoId}/resolve/master/${it.fileName}" },
+            files.map { it.downloadUrl }
+        )
     }
 
     @Test
@@ -2391,6 +2532,13 @@ class ModelScopeClientTest {
             tokenizerMaxLength = 512,
             clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED
         ),
+        "qwen_image_21_q4_k_m" to ExpectedImageProfile(
+            "sdcpp.qwen-image-2.1", ImageEngineModelFamily.QWEN_IMAGE, ImageEngineModelVariant.QWEN_IMAGE_21,
+            20, 6.0, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 512, 512,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512,
+            clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED
+        ),
         "qwen_image_2512_q2" to ExpectedImageProfile(
             "sdcpp.qwen-image", ImageEngineModelFamily.QWEN_IMAGE, ImageEngineModelVariant.QWEN_IMAGE,
             40, 2.5, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
@@ -2418,6 +2566,7 @@ class ModelScopeClientTest {
         "sdxl_base_qnn228" -> RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT
         "cyberrealisticxl_qnn228" -> RecommendedImageDefaults.CYBERREALISTIC_XL_NEGATIVE_PROMPT
         "mnn_sana_edit_v2" -> RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT
+        "qwen_image_21_q4_k_m" -> ""
         "qwen_image_2512_q2" -> RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT
         "longcat_image_q4" -> RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
         in conditionalOnlyImageIds -> null

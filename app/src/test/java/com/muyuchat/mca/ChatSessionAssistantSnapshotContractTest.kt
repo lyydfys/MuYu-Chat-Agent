@@ -25,7 +25,9 @@ class ChatSessionAssistantSnapshotContractTest {
 
         assertTrue(functionBody(source, "sendPreparedMessage")
             .contains("sendPreparedMessageAsync(state, preparedInput)"))
-        assertTrue(startGeneration.contains("val assistantSnapshot = initialState.activeAssistantSnapshot()"))
+        assertTrue(startGeneration.contains("val frozenSession = initialState.chatSessions.first"))
+        assertTrue(startGeneration.contains("val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)"))
+        assertTrue(startGeneration.contains("val assistantSnapshot = frozenAssistantSnapshot"))
         assertTrue(startGeneration.contains("val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams"))
         assertTrue(startGeneration.contains("assistantId = assistantSnapshot?.assistantId"))
         assertTrue(startGeneration.contains("persistentLlamaPrefix"))
@@ -38,9 +40,11 @@ class ChatSessionAssistantSnapshotContractTest {
         val source = sourceFile("MainViewModel.kt")
 
         assertTrue(functionBody(source, "selectAssistant")
+            .contains("newChatForAssistant(assistant, bindDefaultModel = true)"))
+        assertTrue(functionBody(source, "newChatForAssistant")
             .contains("markLocalConversationContextInvalid()"))
         assertTrue(functionBody(source, "finishCharacterCardImport")
-            .contains("markLocalConversationContextInvalid()"))
+            .contains("selectAssistant(assistant.id)"))
     }
 
     @Test
@@ -48,7 +52,9 @@ class ChatSessionAssistantSnapshotContractTest {
         val body = functionBody(sourceFile("MainViewModel.kt"), "saveAssistantProfile")
 
         assertTrue(body.contains("val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId"))
-        assertTrue(body.contains("val applyToActiveConversation = shouldSelectAssistant && state.activeChatSessionId != null"))
+        assertTrue(body.contains("val applyToActiveConversation = existing != null && shouldSelectAssistant &&"))
+        assertTrue(body.contains("activeSession?.assistantId == assistant.id"))
+        assertTrue(body.contains("activeSession?.mixedAssistantHistory == false"))
         assertTrue(body.contains("if (applyToActiveConversation)"))
     }
 

@@ -1873,6 +1873,7 @@ class ModelScopeClient(
                 supportsNegativePrompt = false
             )
             "qwen_image_21_mnn_opencl" -> qwenImage21MnnExecutionProfile()
+            "qwen_image_21_q4_k_m" -> qwenImage21GgufExecutionProfile()
             "qwen_image_2512_q2" -> stableDiffusionCppExecutionProfile(
                 maxPromptTokens = 512,
                 profileId = "sdcpp.qwen-image",
@@ -2297,6 +2298,64 @@ class ModelScopeClient(
                     "cedce3e0dfab7639df57935aa056953a8e033b697c5a108b14cfea4276ee7b55",
                     required = false,
                     downloadByDefault = false
+                )
+            )
+        }
+
+        private fun qwenImage21GgufExecutionProfile(): ImageEngineExecutionProfileSpec {
+            val base = stableDiffusionCppExecutionProfile(
+                profileId = "sdcpp.qwen-image-2.1",
+                family = ImageEngineModelFamily.QWEN_IMAGE,
+                variant = ImageEngineModelVariant.QWEN_IMAGE_21,
+                steps = 20,
+                cfgScale = 6.0,
+                algorithm = ImageEngineSchedulerAlgorithm.FLOW_MATCH,
+                size = 512,
+                defaultNegativePrompt = "",
+                maxPromptTokens = 512
+            )
+            return base.copy(
+                profileRevision = 3,
+                tokenizer = base.tokenizer.copy(
+                    bosId = null,
+                    eosId = null,
+                    padId = null,
+                    clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED,
+                    supportsPromptWeighting = false
+                ),
+                conditioning = imageConditioning(
+                    ImageEngineEmbeddingDataType.RUNTIME_NATIVE,
+                    ImageEngineEmbeddingConversionStrategy.RUNTIME_NATIVE,
+                    width = 4_096,
+                    maxLength = 512
+                ),
+                vae = ImageEngineVaeContractSpec(
+                    scalingLocation = ImageEngineVaeScalingLocation.RUNTIME_NATIVE,
+                    scalingFactor = 1.0,
+                    inputShape = listOf(1, 64, 32, 32),
+                    outputShape = listOf(1, 4, 512, 512),
+                    inputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+                    outputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+                    outputRange = ImageEnginePixelRange.RUNTIME_NATIVE,
+                    channelOrder = ImageEngineChannelOrder.RUNTIME_NATIVE
+                ),
+                graph = ImageEngineGraphContractSpec(
+                    textEncoder = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",
+                    unet = "qwen-image-2.1-Q4_K_M.gguf",
+                    vae = "qwen_image_2.1_vae_bf16.safetensors",
+                    workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS
+                ),
+                capabilities = ImageEngineGenerationCapabilitiesSpec(
+                    supportedSchedulers = setOf(ImageEngineSchedulerAlgorithm.FLOW_MATCH),
+                    minWidth = 256,
+                    maxWidth = 1_536,
+                    minHeight = 256,
+                    maxHeight = 1_536,
+                    widthMultiple = 32,
+                    heightMultiple = 32,
+                    supportsNegativePrompt = true,
+                    supportsVaeTiling = true,
+                    supportsLora = true
                 )
             )
         }
@@ -3769,6 +3828,66 @@ class ModelScopeClient(
                     requiresSmokeTest = true,
                     smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 20, timeoutSeconds = 1_500),
                     executionProfile = recommendedImageExecutionProfile("qwen_image_21_mnn_opencl")
+                )
+            ),
+            ModelScopeRecommendedModel(
+                id = "qwen_image_21_q4_k_m",
+                title = "Qwen-Image-2.1 · Q4_K_M GGUF",
+                repoId = "unsloth/Qwen-Image-2.1-GGUF",
+                description = "Qwen-Image-2.1 文生图的 stable-diffusion.cpp CPU 实验路径。完整包约 10.024 GB，包含 Q4_K_M 主模型、Qwen3-VL-8B 文本编码器和 BF16 VAE；下载大小不代表运行内存需求。移动端默认 512×512、20 步、CFG 6，使用 Euler Flow 和按分辨率自动选择的 flow shift；宽高可在 256–1536 内按 32 的倍数选择，保留用户指定尺寸。仅文生图，不包含图像编辑或 mmproj。所有兼容设备均可下载试运行，实际结果由原生加载和执行决定。Qwen 图像权重遵循 Qwen Research License（研究用途，非商业使用限制适用）；文本编码器遵循 Apache-2.0，后者不改变图像权重许可。模型来源：https://modelscope.cn/models/unsloth/Qwen-Image-2.1-GGUF；使用前请阅读许可：https://huggingface.co/Qwen/Qwen-Image-2.1/blob/main/LICENSE",
+                recommendedFileName = "qwen-image-2.1-Q4_K_M.gguf",
+                parameterScale = "7B",
+                quant = "Q4_K_M",
+                minRamGb = 12,
+                tags = listOf("本地生图", "Qwen-Image-2.1", "GGUF", "CPU 实验", "ModelScope", "Qwen Research License"),
+                priority = 3,
+                kind = ModelScopeRecommendedKind.IMAGE,
+                status = RecommendedModelStatus.EXPERIMENTAL,
+                provider = ModelRepositoryProvider.MODELSCOPE,
+                downloadable = true,
+                downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+                downloadBlockReason = null,
+                localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
+                imageEngineBundle = ImageEngineBundleSpec(
+                    id = "qwen_image_21_q4_k_m_bundle",
+                    title = "Qwen-Image-2.1 Q4_K_M GGUF 引擎包",
+                    recommendationId = "qwen_image_21_q4_k_m",
+                    runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
+                    accelerator = ImageEngineAccelerator.CPU,
+                    minDeviceTier = ImageEngineMinDeviceTier.ANY,
+                    requiresSmokeTest = true,
+                    smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 20, timeoutSeconds = 1_500),
+                    components = listOf(
+                        ImageEngineBundleComponentSpec(
+                            role = ImageEngineBundleComponentRole.DIFFUSION,
+                            repoId = "unsloth/Qwen-Image-2.1-GGUF",
+                            revision = "master",
+                            provider = ModelRepositoryProvider.MODELSCOPE,
+                            fileName = "qwen-image-2.1-Q4_K_M.gguf",
+                            expectedSizeBytes = 4_199_565_024L,
+                            sha256 = "631d532e7ca71e8d90a87c71d3699761a812039d22e3370e87498d87754660fe"
+                        ),
+                        ImageEngineBundleComponentSpec(
+                            role = ImageEngineBundleComponentRole.TEXT_ENCODER,
+                            repoId = "unsloth/Qwen3-VL-8B-Instruct-GGUF",
+                            revision = "master",
+                            provider = ModelRepositoryProvider.MODELSCOPE,
+                            fileName = "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",
+                            expectedSizeBytes = 5_148_699_488L,
+                            sha256 = "e3d1a6e87c5cb31e054f2c3bc0dd82ffde052f613de5eef3665b7bd33c9b703e"
+                        ),
+                        ImageEngineBundleComponentSpec(
+                            role = ImageEngineBundleComponentRole.VAE,
+                            repoId = "unsloth/Qwen-Image-2.1-FP8",
+                            revision = "master",
+                            provider = ModelRepositoryProvider.MODELSCOPE,
+                            fileName = "vae/qwen_image_2.1_vae_bf16.safetensors",
+                            expectedSizeBytes = 675_508_656L,
+                            sha256 = "71879ffd5321e6d10c3c87513e2b474b1252efa7f3dec2969214a9bf06a6dd5c"
+                        )
+                    ),
+                    executionProfile = recommendedImageExecutionProfile("qwen_image_21_q4_k_m"),
+                    modelFamily = "QWEN_IMAGE"
                 )
             ),
             ModelScopeRecommendedModel(

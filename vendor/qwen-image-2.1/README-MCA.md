@@ -24,7 +24,7 @@ headers only**. It does not contain, fetch, or redistribute any model weights.
   runtime rebuilt from the pinned MNN submodule with a unique SONAME.
   SHA-256 is maintained in `SHA256SUMS.txt` and `arm64-v8a/runtime-manifest.json`.
 - `arm64-v8a/libqwenimage21_jni.so` is the matching arm64 JNI build snapshot.
-  SHA-256: `65511FB88C64439B46D1DF8C74F14F943D9ADBB8509A6A38DB5EDBC68A9D9545`.
+  SHA-256: `86E761B061A7A40B80B9995E96A301FCF0FF47E8A1F76C502EE51FE7FAE3DAC2`.
 - `arm64-v8a/libc++_shared.so` is the C++ runtime from Android NDK
   `29.0.14206865`, at
   `toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so`.
@@ -103,9 +103,14 @@ The script rejects any MNN revision other than
 `OUTPUT_NAME mca_qwenimage21_mnn`. It was exercised against all 754 Ninja build
 steps on 2026-09-24. NDK `llvm-readelf -d` verified the output SONAME is
 `libmca_qwenimage21_mnn.so`; its `DT_NEEDED` contains no second MNN library.
-That build produced the pinned hash above. The JNI bridge was then rebuilt
+The JNI bridge was then rebuilt
 against it; the new `DT_NEEDED` points to `libmca_qwenimage21_mnn.so`, verified
 with `llvm-readelf -d`.
+
+On 2026-09-28, the Qwen-only MNN runtime and JNI bridge were rebuilt with the
+advisory memory policy described below. The build and ELF checks passed; the
+current hashes are recorded in the runtime manifest and `SHA256SUMS.txt`.
+This rebuild does not by itself establish successful device image generation.
 
 `patches/mnn/qwen-image21-runtime-adaptation.patch` is the MCA-owned delta on
 top of that exact upstream commit. The build script applies it once to
@@ -115,7 +120,11 @@ and output names with the model graph's packed `past_kv` / `present_kv`
 contract, verifies that the returned cache omits the masked prefill sentinel,
 and derives the denoise attention-mask length from the returned cache. It
 reclaims free executor and Android heap pages at the text-encoder/DiT stage
-boundary while preserving the existing memory reserve. It also rejects fewer
+boundary. Stage memory estimates and the 400 MB margin are advisory reclaim
+targets; they never reject text encoding, DiT, or VAE execution. A low
+`MemAvailable` reading is not proof of an allocation failure, and a failed
+stage is reported as a runtime failure unless a concrete allocation failure
+was caught. An earlier detailed stage error is preserved. It also rejects fewer
 than two flow-matching steps (one step produces a non-finite schedule) and
 aborts immediately if sigma or denoising latents become non-finite.
 
@@ -132,9 +141,10 @@ All dimensions are multiples of 32 and are bounded by the memory-safe
 256--672 pixel envelope, but an arbitrary 32-aligned pair is still rejected
 unless it is in this grid. The upstream model README's 2K examples require a
 separate high-resolution export and must not be inferred to work with this
-Android package. The runtime does not lower the reserve or change model
-precision. A successful build or graph load is not proof of image generation;
-retain real-device PNG evidence for each runtime update.
+Android package. The runtime retains the requested model precision and image
+dimensions while reclaiming only free/cached allocations. A successful build or
+graph load is not proof of image generation; retain real-device PNG evidence
+for each runtime update.
 
 `libc++_shared.so` is copied from the exact NDK revision above and its SHA is
 recorded in `SHA256SUMS.txt`; `licenses/NDK-29-toolchain-NOTICE.txt` is copied

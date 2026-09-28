@@ -44,6 +44,7 @@ class QwenImage21WorkerService : Service() {
     @Volatile private var lastErrorMessage: String? = null
     @Volatile private var lastCancelledRequestId: String? = null
     @Volatile private var lastAvailableMemoryMb: Int = -1
+    @Volatile private var lastMemoryAdvisory: QwenImage21MemoryAdmission? = null
 
     private val binder = object : IQwenImage21Worker.Stub() {
         override fun load(requestJson: String, callback: IQwenImage21WorkerCallback) {
@@ -112,27 +113,17 @@ class QwenImage21WorkerService : Service() {
                         threads = request.threads
                     )
                     checkNotCancelled(next)
-                    // The native text encoder/DiT transition is the peak-memory
-                    // boundary. Reject before entering it when the worker can
-                    // measure that the observed reserve is unavailable.
+                    // This is a snapshot of system availability after loading, not total
+                    // device RAM or an allocation limit. The peak estimate includes already
+                    // resident model memory, so only real native execution can decide success.
                     lastAvailableMemoryMb = runCatching { QwenImage21.availableMemoryMB() }.getOrDefault(-1)
                     val admission = QwenImage21MemoryAdmissionPolicy.evaluate(
                         availableMemoryMb = lastAvailableMemoryMb,
                         width = request.width,
                         height = request.height
                     )
-                    if (!admission.allowed) {
-                        // Do not leave the already-loaded text/DiT handle resident after an
-                        // admission failure; otherwise the user cannot recover simply by
-                        // closing the chat model or choosing a smaller canvas.
-                        releaseNativeHandle()
-                        clearLoadedIdentity()
-                        state = STATE_FAILED
-                        throw QwenNativeException(
-                            "out_of_memory",
-                            admission.message.orEmpty()
-                        )
-                    }
+                    lastMemoryAdvisory = admission
+                    admission.message?.let { Log.w(TAG, "memory_advisory $it") }
                     if (output.exists()) require(output.delete()) { "Cannot replace the existing output image." }
                     next.outputPath = output.absolutePath
                     handleForGeneration = nativeHandle
@@ -524,6 +515,9 @@ class QwenImage21WorkerService : Service() {
         .put("lastErrorCode", lastErrorCode.orEmpty())
         .put("lastErrorMessage", lastErrorMessage.orEmpty())
         .put("availableMemoryMb", lastAvailableMemoryMb)
+        .put("estimatedPeakMemoryMb", lastMemoryAdvisory?.requiredMemoryMb ?: -1)
+        .put("memoryEstimateAdvisoryOnly", true)
+        .put("memoryAdvisory", lastMemoryAdvisory?.message.orEmpty())
 
     private fun executionAudit(
         request: GenerateRequest,

@@ -21,7 +21,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
-/** Persistent main-process bridge. Keep the binding while a Qwen model is resident. */
+/** Main-process bridge for the disposable Qwen runtime service. */
 internal class QwenImage21WorkerClient(context: Context) {
     private val appContext = context.applicationContext
     private val operationMutex = Mutex()

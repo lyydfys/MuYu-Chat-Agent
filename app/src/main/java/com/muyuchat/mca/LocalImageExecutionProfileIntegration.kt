@@ -1124,7 +1124,11 @@ private fun modelExecutionFingerprint(
         "Image model file is missing or empty: ${file.path}"
     }
     val actual = file.sha256ForProfile()
-    require(manifestFingerprint == null || manifestFingerprint == actual) {
+    val knownQwenLegacyProfile = manifestProfile?.variant == ImageModelVariant.QWEN_IMAGE_21 &&
+        manifestProfile.provenance.recommendationId == "qwen_image_21_mnn_opencl" &&
+        manifestFingerprint != null &&
+        isQwenImage21LegacyVaeProfileFingerprint(manifestFingerprint)
+    require(manifestFingerprint == null || manifestFingerprint == actual || knownQwenLegacyProfile) {
         "Image model content does not match the execution profile fingerprint."
     }
     return actual

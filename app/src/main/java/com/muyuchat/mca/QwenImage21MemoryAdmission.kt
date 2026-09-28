@@ -1,7 +1,7 @@
 package com.muyuchat.mca
 
 /**
- * Conservative admission check for the Android MNN Qwen-Image-2.1 bundle.
+ * Advisory peak-memory estimate for the Android MNN Qwen-Image-2.1 bundle.
  *
  * The native graph can allocate a large DiT working set after the text encoder
  * has already been loaded.  Checking only the model file size is therefore not
@@ -13,9 +13,12 @@ internal data class QwenImage21MemoryAdmission(
     val requiredMemoryMb: Int,
     val width: Int,
     val height: Int,
-    val allowed: Boolean,
     val message: String? = null
-)
+) {
+    // An estimate cannot establish that a native allocation will fail. Keep this
+    // compatibility property read-only so a warning cannot become a rejection.
+    val allowed: Boolean get() = true
+}
 
 internal object QwenImage21MemoryAdmissionPolicy {
     // Observed on the pinned Android MNN conversion at 512x512.  Keep this
@@ -47,7 +50,6 @@ internal object QwenImage21MemoryAdmissionPolicy {
                 requiredMemoryMb = required,
                 width = width,
                 height = height,
-                allowed = true,
                 message = null
             )
         }
@@ -56,13 +58,12 @@ internal object QwenImage21MemoryAdmissionPolicy {
             requiredMemoryMb = required,
             width = width,
             height = height,
-            allowed = true,
-            message = if (availableMemoryMb >= required) null else failureMessage(availableMemoryMb, required, width, height)
+            message = if (availableMemoryMb >= required) null else advisoryMessage(availableMemoryMb, required, width, height)
         )
     }
 
-    fun failureMessage(availableMemoryMb: Int, requiredMemoryMb: Int, width: Int, height: Int): String =
-        "Qwen-Image-2.1 内存估算约需 ${requiredMemoryMb} MB，当前报告约 " +
-            "${availableMemoryMb.coerceAtLeast(0)} MB（${width}×${height}）。" +
-            "可先释放聊天模型和后台应用，或改用 384×384 / Tiny 尺寸；仍可尝试真实生成。"
+    private fun advisoryMessage(availableMemoryMb: Int, requiredMemoryMb: Int, width: Int, height: Int): String =
+        "Qwen-Image-2.1 在 ${width}×${height} 的峰值内存估算约 ${requiredMemoryMb} MB，" +
+            "系统当前报告可用内存约 ${availableMemoryMb.coerceAtLeast(0)} MB（并非手机总内存）。" +
+            "估算仅作提示，将按所选尺寸尝试真实生成；如真实分配失败，可先释放聊天模型和后台应用后重试。"
 }

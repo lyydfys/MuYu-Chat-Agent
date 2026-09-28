@@ -48,7 +48,9 @@ internal object LocalVisionInputPreparer {
         nowMillis: () -> Long = { System.currentTimeMillis() },
         idSuffix: () -> String = { UUID.randomUUID().toString().take(8) },
         remoteImageFetcher: (String) -> RemoteImage = ::downloadRemoteImage,
-        diagnosticSink: (String, JSONObject) -> Unit = LocalChatRunnerDebug::emit
+        diagnosticSink: (String, JSONObject) -> Unit = LocalChatRunnerDebug::emit,
+        /** Reports completed image preparations and the total work item count. */
+        onProgress: ((completed: Int, total: Int) -> Unit)? = null
     ): ChatRequest {
         if (request.messages.sumOf { it.imageAttachments.size } > MAX_REQUEST_IMAGES) {
             throw LocalVisionInputException(
@@ -58,6 +60,11 @@ internal object LocalVisionInputPreparer {
         }
         val createdFiles = mutableListOf<File>()
         val sourceAttachments = mutableListOf<ChatImageAttachment>()
+        val totalAttachments = request.messages.sumOf { message ->
+            message.imageAttachments.deduplicateVisionAttachments().size
+        }
+        var completedAttachments = 0
+        if (totalAttachments > 0) onProgress?.invoke(0, totalAttachments)
         return try {
             val prepared = request.copy(
                 messages = request.messages.mapIndexed { messageIndex, message ->
@@ -80,8 +87,16 @@ internal object LocalVisionInputPreparer {
                                     }
                                     sourceAttachments += staged
                                     validateAttachmentBudget(sourceAttachments)
-                                    val prepared = normalizeJpegExifOrientation(
+                                    val oriented = normalizeJpegExifOrientation(
                                         staged, cacheDir, nowMillis, idSuffix
+                                    )
+                                    if (oriented.uriString != staged.uriString) {
+                                        // Keep intermediate EXIF-normalized files on the same
+                                        // request cleanup path when a second downsample pass follows.
+                                        createdFiles += File(oriented.uriString)
+                                    }
+                                    val prepared = downsampleForNativeVision(
+                                        oriented, cacheDir, nowMillis, idSuffix
                                     )
                                     if (prepared.uriString != staged.uriString) {
                                         createdFiles += File(prepared.uriString)
@@ -90,7 +105,7 @@ internal object LocalVisionInputPreparer {
                                         original = attachment,
                                         prepared = prepared,
                                         preprocessing = if (prepared.uriString != staged.uriString) {
-                                            "exif_orientation_normalized"
+                                            "native_vision_staged"
                                         } else {
                                             "passthrough"
                                         },
@@ -99,6 +114,8 @@ internal object LocalVisionInputPreparer {
                                         attachmentIndex = attachmentIndex,
                                         sink = diagnosticSink
                                     )
+                                    completedAttachments += 1
+                                    onProgress?.invoke(completedAttachments, totalAttachments)
                                     prepared
                                 } catch (error: Throwable) {
                                     emitFailureDiagnostic(
@@ -612,6 +629,63 @@ internal object LocalVisionInputPreparer {
         }
     }
 
+    /**
+     * Camera-resolution pixels create a large temporary tensor in mtmd without improving the
+     * projector result. Keep the original file for history, but give native vision a bounded
+     * RGB JPEG when the source exceeds the 4MP staging budget.
+     */
+    private fun downsampleForNativeVision(
+        attachment: ChatImageAttachment,
+        cacheDir: File,
+        nowMillis: () -> Long,
+        idSuffix: () -> String
+    ): ChatImageAttachment {
+        val source = File(attachment.uriString)
+        // Keep JVM/unit-test and older codec paths compatible: if Android cannot expose decoded
+        // bounds, the existing header validation remains authoritative and native can consume the
+        // original file.
+        val bounds = readAndroidImageBounds(source) ?: return attachment
+        val pixels = bounds.width.toLong() * bounds.height.toLong()
+        if (bounds.width <= 0 || bounds.height <= 0 || pixels <= MAX_NATIVE_VISION_PIXELS) return attachment
+
+        var sampleSize = 1
+        while (pixels / (sampleSize.toLong() * sampleSize.toLong()) > MAX_NATIVE_VISION_PIXELS) {
+            sampleSize *= 2
+        }
+        val bitmap = BitmapFactory.decodeFile(source.absolutePath, BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+        }) ?: throw LocalVisionInputException(
+            LocalVisionInputFailureCode.IMAGE_DECODE_FAILED,
+            "Image cannot be decoded for native vision staging."
+        )
+        val outputDir = File(cacheDir, "engine_vision_inputs").apply { mkdirs() }
+        val output = File(outputDir, "vision-sampled-${nowMillis()}-${idSuffix()}.jpg")
+        var outputCreated = false
+        try {
+            check(output.createNewFile()) { "Prepared image file already exists; retry this request." }
+            outputCreated = true
+            output.outputStream().buffered().use { stream ->
+                check(bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, stream)) {
+                    "Native vision image staging failed."
+                }
+            }
+            validateNativeReadableImage(output, "image/jpeg")
+            return attachment.copy(
+                uriString = output.absolutePath,
+                mimeType = "image/jpeg",
+                width = bitmap.width,
+                height = bitmap.height,
+                sizeBytes = output.length()
+            )
+        } catch (error: Throwable) {
+            if (outputCreated) output.delete()
+            throw error
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun List<ChatImageAttachment>.deduplicatePreparedVisionAttachments(): List<ChatImageAttachment> {
         if (size < 2) return this
         val seen = LinkedHashSet<String>(size)
@@ -880,4 +954,5 @@ internal object LocalVisionInputPreparer {
     )
 
     private const val MAX_VALIDATION_DECODE_PIXELS = 4L * 1024L * 1024L
+    private const val MAX_NATIVE_VISION_PIXELS = 4L * 1024L * 1024L
 }

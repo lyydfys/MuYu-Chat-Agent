@@ -49,12 +49,18 @@ class AssistantMemoryPersistenceTest {
         )
         val reply = ChatMessage(id = turn.id, role = Role.ASSISTANT, content = turn.assistantText)
         val session = ChatSessionRecord(
-            id = turn.sessionId, title = "Chat", messages = listOf(reply), assistantId = turn.assistantId
+            id = turn.sessionId, title = "Chat", messages = listOf(reply), assistantId = turn.assistantId,
+            assistantSnapshot = AssistantConversationSnapshot(
+                assistantId = turn.assistantId, name = "Role 1", systemPrompt = "Persona",
+                memoryEnabled = true, webSearchEnabled = false,
+                fileContextEnabled = true, capturedAt = 1L
+            )
         )
 
         assertTrue(listOf(session).containsCompletedMemoryTurn(turn))
         assertFalse(emptyList<ChatSessionRecord>().containsCompletedMemoryTurn(turn))
         assertFalse(listOf(session.copy(assistantId = "role-2")).containsCompletedMemoryTurn(turn))
+        assertFalse(listOf(session.copy(mixedAssistantHistory = true)).containsCompletedMemoryTurn(turn))
         assertFalse(listOf(session.copy(messages = emptyList())).containsCompletedMemoryTurn(turn))
         assertFalse(listOf(session.copy(messages = listOf(reply.copy(role = Role.USER))))
             .containsCompletedMemoryTurn(turn))
@@ -63,11 +69,22 @@ class AssistantMemoryPersistenceTest {
     @Test
     fun storageGateRejectsDeletedSessionWrongRoleAndRemovedReply() = withMemoryDatabase { database ->
         database.createStatement().use { statement ->
-            statement.execute("INSERT INTO chat_sessions VALUES ('session-1', 'role-1')")
+            statement.execute(
+                "INSERT INTO chat_sessions(id, assistantId, assistantSnapshotJson) " +
+                    "VALUES ('session-1', 'role-1', '{\"assistantId\":\"role-1\"}')"
+            )
             statement.execute("INSERT INTO chat_messages VALUES ('session-1', 'reply-1', 'ASSISTANT')")
         }
         assertTrue(canAppendTurn(database, "session-1", "role-1", "reply-1"))
         assertFalse(canAppendTurn(database, "session-1", "role-2", "reply-1"))
+
+        database.createStatement().use {
+            it.execute("UPDATE chat_sessions SET mixedAssistantHistory = 1 WHERE id = 'session-1'")
+        }
+        assertFalse(canAppendTurn(database, "session-1", "role-1", "reply-1"))
+        database.createStatement().use {
+            it.execute("UPDATE chat_sessions SET mixedAssistantHistory = 0 WHERE id = 'session-1'")
+        }
 
         database.createStatement().use { it.execute("DELETE FROM chat_messages WHERE messageId = 'reply-1'") }
         assertFalse(canAppendTurn(database, "session-1", "role-1", "reply-1"))
@@ -109,7 +126,10 @@ class AssistantMemoryPersistenceTest {
     @Test
     fun persistedTailRemovalPrunesOnlyUnbackedPendingTurns() = withMemoryDatabase { database ->
         database.createStatement().use { statement ->
-            statement.execute("INSERT INTO chat_sessions VALUES ('session-1', 'role-1')")
+            statement.execute(
+                "INSERT INTO chat_sessions(id, assistantId, assistantSnapshotJson) " +
+                    "VALUES ('session-1', 'role-1', '{\"assistantId\":\"role-1\"}')"
+            )
             statement.execute("INSERT INTO chat_messages VALUES ('session-1', 'kept', 'ASSISTANT')")
             statement.execute("INSERT INTO chat_messages VALUES ('session-1', 'removed', 'ASSISTANT')")
         }
@@ -124,10 +144,33 @@ class AssistantMemoryPersistenceTest {
         assertEquals(listOf("kept", "legacy"), turnIds(database))
     }
 
+    @Test
+    fun mixedHistoryKeepsPendingEvidenceWithoutAdmittingItToMemory() = withMemoryDatabase { database ->
+        database.createStatement().use { statement ->
+            statement.execute(
+                "INSERT INTO chat_sessions(id, assistantId, assistantSnapshotJson, mixedAssistantHistory) " +
+                    "VALUES ('session-1', 'role-a', '{\"assistantId\":\"role-a\"}', 1)"
+            )
+            statement.execute("INSERT INTO chat_messages VALUES ('session-1', 'reply-1', 'ASSISTANT')")
+        }
+        insertTurn(database, "reply-1", "role-b", "session-1", summarized = false)
+
+        database.createStatement().use {
+            assertEquals(0, it.executeUpdate(DELETE_STALE_PENDING_MEMORY_TURNS_SQL))
+        }
+        assertEquals(listOf("reply-1"), turnIds(database))
+        assertFalse(canAppendTurn(database, "session-1", "role-a", "reply-1"))
+        assertFalse(canAppendTurn(database, "session-1", "role-b", "reply-1"))
+    }
+
     private fun withMemoryDatabase(block: (Connection) -> Unit) {
         DriverManager.getConnection("jdbc:sqlite::memory:").use { database ->
             database.createStatement().use { statement ->
-                statement.execute("CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, assistantId TEXT)")
+                statement.execute(
+                    "CREATE TABLE chat_sessions (id TEXT PRIMARY KEY, assistantId TEXT, " +
+                        "assistantSnapshotJson TEXT, " +
+                        "mixedAssistantHistory INTEGER NOT NULL DEFAULT 0)"
+                )
                 statement.execute(
                     "CREATE TABLE chat_messages (sessionId TEXT, messageId TEXT, role TEXT)"
                 )

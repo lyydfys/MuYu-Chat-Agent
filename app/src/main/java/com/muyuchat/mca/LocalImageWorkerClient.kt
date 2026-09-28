@@ -21,6 +21,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS = 500L
 
@@ -53,6 +54,8 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     private var activeRequest: ActiveRequest? = null
     /** The service is disposable and self-terminates after unbind; avoid binding its retiring PID. */
     private var lastBindingReleaseAtElapsedMs: Long = 0L
+    /** Retiring bindings stay tracked until their own Binder death, including across batches. */
+    private val releasedWorkerExits = mutableMapOf<IBinder, CompletableDeferred<Unit>>()
 
     @Volatile
     var lastWorkerPid: Int = -1
@@ -120,6 +123,22 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
     fun cancel(expectedRequestId: String): Boolean {
         if (expectedRequestId.isBlank()) return false
         return cancelInternal(expectedRequestId = expectedRequestId, scoped = true)
+    }
+
+    /**
+     * Waits for the worker process belonging to the last request to actually die. Unbinding or
+     * receiving a successful cancel RPC only relinquishes the client lease and is not a native
+     * memory release proof.
+     */
+    suspend fun awaitOwnedWorkerRelease(timeoutMs: Long = WORKER_EXIT_CONFIRM_TIMEOUT_MS) {
+        require(timeoutMs > 0L) { "timeoutMs must be positive" }
+        val waiters = synchronized(stateLock) { releasedWorkerExits.values.toList() }
+        if (withTimeoutOrNull(timeoutMs) { waiters.forEach { it.await() }; true } != true) {
+            throw LocalImageWorkerRemoteException(
+                code = "image_worker_exit_unconfirmed",
+                message = "The local image worker did not exit within ${timeoutMs}ms; native memory release is unconfirmed."
+            )
+        }
     }
 
     private fun cancelInternal(expectedRequestId: String?, scoped: Boolean): Boolean {
@@ -623,6 +642,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
                 return
             }
             session = current
+            armReleasedWorkerExitWaiterLocked(remoteBinder)
             unlinkRemoteDeathRecipientLocked()
             remote = null
             remoteBinder = null
@@ -666,6 +686,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             ) {
                 return@synchronized null
             }
+            armReleasedWorkerExitWaiterLocked(remoteBinder)
             bindingSession = null
             lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
             unlinkRemoteDeathRecipientLocked()
@@ -702,6 +723,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
             releasedSession = if (expectedSession != null && current === expectedSession &&
                 bindingLifecycle.release(expectedSession.lease)
             ) {
+                armReleasedWorkerExitWaiterLocked(remoteBinder)
                 bindingSession = null
                 lastBindingReleaseAtElapsedMs = SystemClock.elapsedRealtime()
                 unlinkRemoteDeathRecipientLocked()
@@ -725,6 +747,23 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
         synchronized(stateLock) {
             if (activeRequest === request) activeRequest = null
+        }
+    }
+
+    /** Must be called while [stateLock] is held, before the live binder is cleared. */
+    private fun armReleasedWorkerExitWaiterLocked(binder: IBinder?) {
+        if (binder == null || !binder.isBinderAlive || binder in releasedWorkerExits) return
+        val waiter = CompletableDeferred<Unit>()
+        val recipient = IBinder.DeathRecipient {
+            waiter.complete(Unit)
+            synchronized(stateLock) { releasedWorkerExits.remove(binder) }
+        }
+        releasedWorkerExits[binder] = waiter
+        try {
+            binder.linkToDeath(recipient, 0)
+        } catch (_: RemoteException) {
+            waiter.complete(Unit)
+            releasedWorkerExits.remove(binder)
         }
     }
 
@@ -1066,6 +1105,7 @@ class LocalImageWorkerClient(context: Context) : AutoCloseable {
 
     companion object {
         private const val WATCHDOG_POLL_INTERVAL_MS = 1_000L
+        private const val WORKER_EXIT_CONFIRM_TIMEOUT_MS = 10_000L
     }
 }
 

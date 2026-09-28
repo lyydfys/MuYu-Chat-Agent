@@ -41,6 +41,17 @@ class AssistantStoreTest {
     }
 
     @Test
+    fun distinctTavernCardsMayShareTheSamePrompt() {
+        val fallback = AssistantRecord.default(systemPrompt = "shared prompt")
+        val first = AssistantRecord(id = "card-a", name = "角色甲", systemPrompt = "shared prompt")
+        val second = AssistantRecord(id = "card-b", name = "角色乙", systemPrompt = "shared prompt")
+
+        val normalized = normalizeAssistantRecords(listOf(first, second), fallback)
+
+        assertEquals(setOf("card-a", "card-b"), normalized.map { it.id }.toSet() - fallback.id)
+    }
+
+    @Test
     fun normalizeAssistantRecordsReturnsFallbackForEmptyInput() {
         val fallback = AssistantRecord.default(systemPrompt = "fallback prompt")
 
@@ -226,8 +237,9 @@ class AssistantStoreTest {
         assertEquals("writer persona", requireNotNull(snapshots[0].assistantSnapshot).systemPrompt)
         assertEquals(9L, snapshots[0].assistantSnapshot?.capturedAt)
         assertEquals(existingSnapshot, snapshots[1].assistantSnapshot)
-        assertEquals("default persona", snapshots[2].assistantSnapshot?.systemPrompt)
+        assertEquals(null, snapshots[2].assistantSnapshot)
         assertEquals("deleted", snapshots[2].assistantId)
+        assertEquals(true, snapshots[2].mixedAssistantHistory)
     }
 
     @Test

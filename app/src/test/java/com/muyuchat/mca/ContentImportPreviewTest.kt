@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -57,7 +58,7 @@ class ContentImportPreviewTest {
     }
 
     @Test
-    fun worldBookPreviewRetainsRawSourceAndReportsSkippedRegexEntries() {
+    fun worldBookPreviewRetainsRawSourceAndRegexEntries() {
         val raw = """
             {"name":"规则","entries":[
               {"uid":"regex","key":"^secret$","use_regex":true,"content":"不要导入"},
@@ -71,8 +72,29 @@ class ContentImportPreviewTest {
         val preview = worldBookPreview(raw, result, owner, WorldBookScope.GLOBAL)
 
         assertEquals(raw, preview.rawSource)
-        assertEquals(1, preview.fields.single { it.first == "entries" }.second.toInt())
-        assertTrue(preview.warnings.any { it.contains("正则") })
+        assertEquals(2, preview.fields.single { it.first == "entries" }.second.toInt())
         assertEquals(owner, preview.owner)
+    }
+
+    @Test
+    fun tavernV3PreviewKeepsEmbeddedRegexEntries() {
+        val raw = """
+            {"spec":"chara_card_v3","spec_version":"3.0","data":{
+              "name":"同提示词角色","system_prompt":"shared prompt",
+              "character_book":{"entries":[
+                {"uid":1,"keys":["^v[0-9]+$"],"content":"版本","use_regex":true},
+                {"uid":2,"keys":["foo.*"],"content":"Foo","use_regex":true},
+                {"uid":3,"keys":["bar|baz"],"content":"Bar","use_regex":true},
+                {"uid":4,"keys":["[a-z]+"],"content":"Letters","use_regex":true}
+              ]}
+            }}
+        """.trimIndent()
+
+        val card = CharacterCardCodec.parseJson(raw) as CharacterCardParseResult.Success
+        val preview = characterCardPreview(card, owner)
+
+        assertEquals("4", preview.fields.single { it.first == "character_book" }.second)
+        assertFalse(preview.warnings.any { it.contains("未导入") })
+        assertEquals(raw, preview.rawSource)
     }
 }

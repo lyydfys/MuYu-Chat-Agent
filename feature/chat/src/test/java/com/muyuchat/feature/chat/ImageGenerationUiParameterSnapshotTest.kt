@@ -166,9 +166,67 @@ class ImageGenerationUiParameterSnapshotTest {
         )
 
         assertEquals(expected, actual)
-        assertEquals(9, expected.toJson().getInt("version"))
+        assertEquals(10, expected.toJson().getInt("version"))
         assertEquals("vae", expected.toJson().getString("livePreviewMode"))
         assertTrue(expected.toJson().getBoolean("ultraFixTileSizeExplicit"))
+    }
+
+    @Test
+    fun viggleSelectionChangesOnlyUntouchedQwenNativeDefaults() {
+        val model = ChatModelChoice(
+            id = "qwen21-gguf",
+            displayName = "Qwen-Image-2.1 GGUF",
+            isQwenImage21Gguf = true,
+            imageDefaultSteps = 20,
+            imageDefaultCfgScale = 3.5
+        )
+        val initial = ImageViggleUiControls(stepsText = "20", cfgScaleText = "3.5")
+        val selected = imageViggleUiControlsForSelection(initial, model, selected = true)
+        assertEquals("6", selected.stepsText)
+        assertEquals("1", selected.cfgScaleText)
+        assertTrue(selected.autoSteps)
+        assertTrue(selected.autoCfg)
+        assertEquals(initial, imageViggleUiControlsForSelection(selected, model, selected = false))
+
+        val userChangedSteps = selected.copy(
+            stepsText = "4", autoSteps = false, stepsEditedByUser = true
+        )
+        val withoutLora = imageViggleUiControlsForSelection(userChangedSteps, model, selected = false)
+        assertEquals("4", withoutLora.stepsText)
+        assertEquals("3.5", withoutLora.cfgScaleText)
+        assertFalse(withoutLora.autoCfg)
+
+        val custom = imageViggleUiControlsForSelection(
+            ImageViggleUiControls("20", "3.5", stepsEditedByUser = true, cfgEditedByUser = true),
+            model,
+            selected = true
+        )
+        assertEquals("20", custom.stepsText)
+        assertEquals("3.5", custom.cfgScaleText)
+    }
+
+    @Test
+    fun viggleAutoDefaultsSurviveSnapshotRoundTrip() {
+        val snapshot = ImageGenerationUiParameterSnapshot(
+            taskModeName = ImageGenerationUiTaskMode.TEXT_TO_IMAGE.name,
+            strengthText = "0.75",
+            controlStrengthText = "1.0",
+            negativePrompt = "",
+            disableModelNegativePrompt = false,
+            clipSkipText = "",
+            vaeTilingEnabled = false,
+            batchCount = 1,
+            widthText = "512",
+            heightText = "512",
+            stepsText = "6",
+            cfgScaleText = "1",
+            viggleAutoSteps = true,
+            viggleAutoCfg = true,
+            seedText = "",
+            sampler = "euler"
+        )
+        val restored = ImageGenerationUiParameterSnapshot.fromJsonOrNull(snapshot.toJson().toString())
+        assertEquals(snapshot, restored)
     }
 
     @Test

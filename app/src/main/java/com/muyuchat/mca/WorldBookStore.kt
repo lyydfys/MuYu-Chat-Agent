@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import com.google.re2j.Pattern
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -11,10 +12,11 @@ import java.nio.file.StandardCopyOption
 import java.text.Normalizer
 import java.util.UUID
 
+private const val MAX_WORLD_BOOK_REGEX_CHARS = 512
+
 /**
- * A deliberately small, deterministic subset of the Tavern World Info format.
- * Imported books are data only: macros, regexes and executable extensions are
- * retained nowhere and are never evaluated by MCA.
+ * Tavern World Info entries are stored as data. Regex triggers use RE2/J's
+ * bounded linear-time matcher; macros and executable extensions are not run.
  */
 enum class WorldBookScope(val wireName: String) {
     GLOBAL("global"),
@@ -163,10 +165,7 @@ object WorldBookCodec {
             else -> emptyList()
         }
         val entries = parsedEntries.mapNotNull(ParsedWorldBookEntry::entry)
-        val skippedRegexEntries = parsedEntries.count(ParsedWorldBookEntry::regexSkipped)
-        if (entries.isEmpty() && skippedRegexEntries > 0) {
-            error("世界书只包含正则触发条目；为避免无界正则导致卡顿，MCA 不导入这类条目。请改用普通关键词。")
-        }
+        val unsupportedRegexEntries = parsedEntries.count(ParsedWorldBookEntry::regexUnsupported)
         require(entries.isNotEmpty()) {
             "世界书没有可用条目。请检查 entries 中是否有非空 content，并为普通条目设置关键词。"
         }
@@ -179,8 +178,8 @@ object WorldBookCodec {
             .trim()
             .take(96)
         val warnings = buildList {
-            if (skippedRegexEntries > 0) {
-                add("有 $skippedRegexEntries 条正则触发条目未导入；MCA 使用普通关键词，避免不受信任正则造成卡顿。")
+            if (unsupportedRegexEntries > 0) {
+                add("有 $unsupportedRegexEntries 条正则触发条目含不受支持的表达式；条目已保留，但这些表达式不会触发。")
             }
         }
         return WorldBookImportResult(
@@ -198,7 +197,7 @@ object WorldBookCodec {
 
     private data class ParsedWorldBookEntry(
         val entry: WorldBookEntry?,
-        val regexSkipped: Boolean = false
+        val regexUnsupported: Boolean = false
     )
 
     /** Accepts Tavern JSON exports plus entry-oriented JSON arrays and JSONL files. */
@@ -275,8 +274,9 @@ object WorldBookCodec {
             .trim()
         if (content.isBlank()) return null
         require(content.length <= MAX_ENTRY_CHARS) { "单条世界书内容超过 64 KiB，请拆分条目后重试。" }
+        val useRegex = source.optBoolean("use_regex", source.optBoolean("useRegex", false))
         val keys = readStringValues(source, listOf("key", "keys"))
-            .flatMap { it.split(',', '\n') }
+            .flatMap { if (useRegex) listOf(it) else it.split(',', '\n') }
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
@@ -285,7 +285,7 @@ object WorldBookCodec {
             source,
             listOf("secondary_keys", "secondaryKeys", "keysecondary", "keySecondary")
         )
-            .flatMap { it.split(',', '\n') }
+            .flatMap { if (useRegex) listOf(it) else it.split(',', '\n') }
             .map { it.trim() }
             .filter { it.isNotBlank() }
             .distinct()
@@ -297,11 +297,7 @@ object WorldBookCodec {
         }
         val constant = source.optBoolean("constant", false)
         val selective = source.optBoolean("selective", false)
-        val useRegex = source.optBoolean("use_regex", source.optBoolean("useRegex", false))
         val caseSensitive = source.optBoolean("case_sensitive", source.optBoolean("caseSensitive", false))
-        if (useRegex && !constant && enabled) {
-            return ParsedWorldBookEntry(entry = null, regexSkipped = true)
-        }
         if (!constant && keys.isEmpty()) return null
         return ParsedWorldBookEntry(
             entry = WorldBookEntry(
@@ -318,9 +314,13 @@ object WorldBookCodec {
                     source.optInt("insertion_order", source.optInt("insertionOrder", source.optInt("priority", 0)))
                 ),
                 selective = selective,
-                useRegex = false,
+                useRegex = useRegex,
                 caseSensitive = caseSensitive
-            )
+            ),
+            regexUnsupported = useRegex && !constant &&
+                (keys + if (selective) secondaryKeys else emptyList()).any {
+                    compileWorldBookRegex(it, caseSensitive) == null
+                }
         )
     }
 
@@ -351,6 +351,22 @@ object WorldBookCodec {
             optString(index).trim().takeIf { it.isNotBlank() }?.let(block)
         }
     }
+}
+
+private fun compileWorldBookRegex(trigger: String, caseSensitive: Boolean): Pattern? {
+    if (trigger.isBlank() || trigger.length > MAX_WORLD_BOOK_REGEX_CHARS) return null
+    val lastSlash = if (trigger.startsWith('/')) trigger.lastIndexOf('/') else -1
+    val literal = lastSlash > 0 && trigger.substring(lastSlash + 1).all { it in "gimsuy" }
+    val expression = if (literal) trigger.substring(1, lastSlash) else trigger
+    val flags = if (literal) trigger.substring(lastSlash + 1) else ""
+    val modifiers = buildString {
+        if (!caseSensitive || 'i' in flags) append('i')
+        if ('m' in flags) append('m')
+        if ('s' in flags) append('s')
+    }
+    return runCatching {
+        Pattern.compile(if (modifiers.isEmpty()) expression else "(?$modifiers)$expression")
+    }.getOrNull()
 }
 
 class WorldBookStore private constructor(
@@ -652,7 +668,11 @@ object WorldBookResolver {
                     scope = candidate.book.scope,
                     excerpt = candidate.entry.content,
                     estimatedTokens = estimateTokens(candidate.entry.content),
-                    reason = if (candidate.entry.constant) "constant" else "keyword"
+                    reason = when {
+                        candidate.entry.constant -> "constant"
+                        candidate.entry.useRegex -> "regex"
+                        else -> "keyword"
+                    }
                 )
             },
             skippedSources = skipped.map { candidate ->
@@ -713,11 +733,10 @@ object WorldBookResolver {
 
     private fun matchesTrigger(trigger: String, entry: WorldBookEntry, scanText: String): Boolean {
         if (trigger.isBlank()) return false
-        // Java regular expressions have no execution timeout and can block the
-        // generation preflight on a crafted imported world-book trigger.
-        // Tavern regex-only entries are skipped during import; legacy records
-        // with this flag are inert as well.
-        if (entry.useRegex) return false
+        if (entry.useRegex) {
+            return compileWorldBookRegex(trigger, entry.caseSensitive)
+                ?.matcher(scanText)?.find() == true
+        }
         val normalizedTrigger = if (entry.caseSensitive) {
             Normalizer.normalize(trigger, Normalizer.Form.NFKC)
         } else {

@@ -15,6 +15,17 @@ import kotlin.concurrent.thread
 
 class ResumableDownloaderTest {
     @Test
+    fun rateEstimatorDampensSingleChunkSpikes() {
+        val estimator = DownloadRateEstimator()
+        val first = estimator.update(bytes = 1_000_000L, elapsedMs = 1_000L)
+        val spike = estimator.update(bytes = 1_000_000L, elapsedMs = 100L)
+
+        assertEquals(1_000_000L, first)
+        assertTrue("The displayed rate should be smoothed", spike < 10_000_000L)
+        assertTrue("The displayed rate should still react to faster transfer", spike > first)
+    }
+
+    @Test
     fun progressSpeedUsesMonotonicElapsedTime() = runBlocking {
         val bytes = ByteArray(1024 * 1024 + 1024) { 0x41 }
         FixedContentServer(bytes).use { server ->
@@ -39,7 +50,10 @@ class ResumableDownloaderTest {
                     }
                 }
 
-                assertEquals(listOf(1_048_576L), speeds)
+                assertEquals(1, speeds.size)
+                // The HTTP test server may satisfy the read with either the
+                // 1 MiB progress boundary or the full 1 MiB + 1 KiB body.
+                assertTrue(speeds.single() >= 1_048_576L)
             } finally {
                 tempDir.deleteRecursively()
             }

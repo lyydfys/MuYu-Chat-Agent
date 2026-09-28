@@ -8,6 +8,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
 import org.json.JSONObject
+import com.muyuchat.core.engine.PrefixCacheKey
 import java.util.UUID
 
 data class AssistantRecord(
@@ -229,12 +230,17 @@ data class AssistantConversationSnapshot(
     val memoryEnabled: Boolean,
     val webSearchEnabled: Boolean,
     val fileContextEnabled: Boolean,
-    val capturedAt: Long
+    val capturedAt: Long,
+    /** Earlier prompt versions explicitly applied to this same role and conversation. */
+    val priorSystemPromptHashes: List<String> = emptyList()
 ) {
     init {
         require(assistantId.isNotBlank()) { "Assistant snapshot requires an assistant id." }
         require(systemPrompt.isNotBlank()) { "Assistant snapshot requires a system prompt." }
         require(capturedAt >= 0L) { "Assistant snapshot capture time must not be negative." }
+        require(priorSystemPromptHashes.size <= 32 && priorSystemPromptHashes.all(PrefixCacheKey::isSha256Hex)) {
+            "Invalid earlier prompt fingerprints."
+        }
     }
 
     fun applyTo(params: GenerationParams): GenerationParams =
@@ -250,6 +256,7 @@ data class AssistantConversationSnapshot(
         .put("webSearchEnabled", webSearchEnabled)
         .put("fileContextEnabled", fileContextEnabled)
         .put("capturedAt", capturedAt)
+        .put("priorSystemPromptHashes", JSONArray(priorSystemPromptHashes))
         .toString()
 
     companion object {
@@ -305,7 +312,12 @@ data class AssistantConversationSnapshot(
                     webSearchEnabled = json.optBoolean("webSearchEnabled", false),
                     fileContextEnabled = !json.has("fileContextEnabled") ||
                         json.optBoolean("fileContextEnabled", true),
-                    capturedAt = json.optLong("capturedAt", 0L).coerceAtLeast(0L)
+                    capturedAt = json.optLong("capturedAt", 0L).coerceAtLeast(0L),
+                    priorSystemPromptHashes = json.optJSONArray("priorSystemPromptHashes")?.let { values ->
+                        (0 until values.length().coerceAtMost(32)).mapNotNull { index ->
+                            values.optString(index).takeIf(PrefixCacheKey::isSha256Hex)
+                        }.distinct()
+                    }.orEmpty()
                 )
             }.getOrNull()
         }
@@ -320,29 +332,27 @@ internal fun AssistantRecord.toConversationSnapshot(
 ): AssistantConversationSnapshot = AssistantConversationSnapshot.fromAssistant(this, capturedAt)
 
 /**
- * Backfills durable persona snapshots for conversations created before the
- * snapshot schema.  A missing or removed assistant falls back to the default
- * assistant only for that legacy migration; existing snapshots are untouched.
+ * Backfills a legacy conversation only when its recorded assistant still exists.
+ * Unknown owners stay mixed and viewable; existing snapshots are untouched.
  */
 internal fun List<ChatSessionRecord>.withBackfilledAssistantSnapshots(
     assistants: List<AssistantRecord>
 ): List<ChatSessionRecord> {
-    val fallback = assistants.firstOrNull { it.id == AssistantRecord.DEFAULT_ID }
-        ?: assistants.firstOrNull()
-        ?: return this
     return map { session ->
         if (session.assistantSnapshot != null) {
             session
         } else {
             val assistant = session.assistantId
                 ?.let { assistantId -> assistants.firstOrNull { it.id == assistantId } }
-                ?: fallback
-            session.copy(
-                assistantId = session.assistantId ?: assistant.id,
-                assistantSnapshot = assistant.toConversationSnapshot(
-                    capturedAt = session.updatedAt.coerceAtLeast(0L)
+            if (assistant == null) {
+                session.copy(mixedAssistantHistory = true)
+            } else {
+                session.copy(
+                    assistantSnapshot = assistant.toConversationSnapshot(
+                        capturedAt = session.updatedAt.coerceAtLeast(0L)
+                    )
                 )
-            )
+            }
         }
     }
 }
@@ -494,3 +504,20 @@ private val LEGACY_EXECUTION_INT_FIELDS: List<Pair<String, List<String>>> = list
     "n_ctx" to listOf("n_ctx", "nCtx"),
     "n_threads" to listOf("n_threads", "nThreads")
 )
+
+internal fun AssistantRecord.newConversationSession(
+    modelMode: String?,
+    modelId: String?,
+    sessionId: String = UUID.randomUUID().toString(),
+    capturedAt: Long = System.currentTimeMillis()
+): ChatSessionRecord = initialGreetingSession(modelMode, modelId, sessionId, capturedAt)
+    ?: ChatSessionRecord(
+        id = sessionId,
+        title = "新对话",
+        messages = emptyList(),
+        updatedAt = capturedAt,
+        assistantId = id,
+        assistantSnapshot = toConversationSnapshot(capturedAt),
+        modelMode = modelMode,
+        modelId = modelId
+    )

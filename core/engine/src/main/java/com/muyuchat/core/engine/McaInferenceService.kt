@@ -25,6 +25,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
@@ -722,13 +723,21 @@ class McaInferenceService(
         }
     }
 
-    suspend fun unloadModel() = withContext(io) {
-        stopGeneration()
-        mutex.withLock {
+    /** Keeps an optional exclusive owner in place while releasing the active native model. */
+    suspend fun unloadModel(lease: EngineLifecycleLease? = null) = withContext(io) {
+        // The lease already owns the generation boundary. Do not issue an unowned stop or
+        // reacquire the non-reentrant mutex while an image operation holds that boundary.
+        if (lease == null) stopGeneration()
+        withLifecycleLock(lease) {
             invalidateGenerationStopTargetAfterLifecycleTransition()
             val unloadedRuntime = activeRuntime
             val dryRunWitness = qairtDryRunWitness
-            runnerFor(unloadedRuntime).unloadModel()
+            // An untouched isolated runner would bind a new process just to unload it. Keep
+            // ordinary explicit unload behavior and release retained sessions even when a
+            // worker-loss projection has already marked their stats as unloaded.
+            if (lease == null || activeLoadSession != null || _stats.value.loaded) {
+                runnerFor(unloadedRuntime).unloadModel()
+            }
             parameterCoordinator.markUnloaded()
             if (unloadedRuntime == LocalChatRuntime.GENIEX_QAIRT && dryRunWitness != null) {
                 val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
@@ -804,15 +813,6 @@ class McaInferenceService(
                 return@lifecycle
             }
             val memoryBeforeGenerate = telemetry.memorySnapshotDetailed()
-            if (memoryBeforeGenerate.availMemKb in 1 until LOW_MEMORY_START_GUARD_KB) {
-                val message = "当前可用内存过低（约 ${formatMb(memoryBeforeGenerate.availMemKb)}），已拦截本轮生成。请关闭后台应用、降低上下文或换更小模型。"
-                val errorStats = current.copy(
-                    lastError = message
-                ).withMemory(memoryBeforeGenerate)
-                _stats.value = errorStats
-                emit(GenerateEvent.Error(message, errorStats))
-                return@lifecycle
-            }
 
             val deviceClockContext = if (executionContext.includeDeviceClockContext) {
                 deviceClockContextProvider.contextFor(request.messages)
@@ -971,15 +971,45 @@ class McaInferenceService(
                     emit(GenerateEvent.Error(message, errorStats))
                     return@lifecycle
                 }
+                // Image staging/decoding has no token count yet. Give the UI a distinct phase
+                // so large photos do not look stuck at 0% of text prefill.
+                emit(GenerateEvent.Phase(GenerationPhase.PREPROCESS, _stats.value))
                 runCatching {
-                    withContext(io) {
-                        LocalVisionInputPreparer.prepare(
-                            request = contextSafeRequest,
-                            cacheDir = appContext.cacheDir,
-                            diagnosticSink = { stage, details ->
-                                dispatchVisionDiagnostic(executionContext, stage, details)
+                    coroutineScope {
+                        val progress = Channel<TokenProgress>(capacity = Channel.UNLIMITED)
+                        val preparation = async(io) {
+                            try {
+                                LocalVisionInputPreparer.prepare(
+                                    request = contextSafeRequest,
+                                    cacheDir = appContext.cacheDir,
+                                    diagnosticSink = { stage, details ->
+                                        dispatchVisionDiagnostic(executionContext, stage, details)
+                                    },
+                                    onProgress = { completed, total ->
+                                        progress.trySend(TokenProgress(completed, total))
+                                    }
+                                )
+                            } finally {
+                                progress.close()
                             }
-                        )
+                        }
+                        try {
+                            // Consume updates while decoding/staging is still running. Reusing
+                            // TokenProgress keeps the event contract stable; the PREPROCESS phase
+                            // makes the values mean images rather than prompt tokens to the UI.
+                            for (imageProgress in progress) {
+                                emit(
+                                    GenerateEvent.Phase(
+                                        GenerationPhase.PREPROCESS,
+                                        _stats.value,
+                                        imageProgress
+                                    )
+                                )
+                            }
+                            preparation.await()
+                        } finally {
+                            if (!preparation.isCompleted) preparation.cancel()
+                        }
                     }
                 }.getOrElse { error ->
                     val message = "本地图片预处理失败：${error.message ?: "无法读取图片"}"
@@ -1019,10 +1049,25 @@ class McaInferenceService(
                 var downstreamPrefillEmissionFailed = false
                 return try {
                     val runtimeParamsJson = JSONObject(paramsJson).apply {
-                        put("conversationOwnerId", activeRequest.persistentSessionId
-                            ?.takeIf(String::isNotBlank) ?: "request:${executionContext.requestId}")
-                        activeRequest.conversationContextRevision?.takeIf(String::isNotBlank)?.let {
-                            put("conversationContextRevision", it)
+                        val sessionId = activeRequest.persistentSessionId?.trim()
+                            ?.takeIf(String::isNotBlank)
+                        val roleId = activeRequest.persistentRoleId?.trim()
+                            ?.takeIf(String::isNotBlank)
+                        put("conversationOwnerId", when {
+                            sessionId == null -> "request:${executionContext.requestId}"
+                            roleId == null -> sessionId
+                            else -> PrefixCacheKey.sha256Utf8("native-owner-v1\n$sessionId\n$roleId")
+                        })
+                        val contextIdentity = listOf(
+                            activeLoadSession?.runtimeIdentity?.identityHash.orEmpty(),
+                            activeRequest.persistentRoleCardVersion.orEmpty(),
+                            activeRequest.persistentMemoryVersion.orEmpty(),
+                            activeRequest.conversationContextRevision.orEmpty()
+                        )
+                        if (contextIdentity.any(String::isNotBlank)) {
+                            put("conversationContextRevision", PrefixCacheKey.sha256Utf8(
+                                contextIdentity.joinToString("\n")
+                            ))
                         }
                     }.toString()
                     activePersistentPrefix?.let { previous ->
@@ -1449,17 +1494,6 @@ class McaInferenceService(
                     ).withMemory(latestMemory)
                     if (shouldSampleStats) {
                         _stats.value = finalStats
-                    }
-                    if (latestMemory.availMemKb in 1 until LOW_MEMORY_RUNTIME_STOP_KB) {
-                        val message = "生成过程中可用内存降到 ${formatMb(latestMemory.availMemKb)}，已停止生成以避免系统回收或崩溃。建议降低 n_ctx / n_predict 或关闭后台应用。"
-                        mnnGenerationWasInterrupted = shouldRefreshMnnAfterRequest
-                        runner.requestStop()
-                        val errorStats = finalStats.copy(lastError = message)
-                        _stats.value = errorStats
-                        emitPersistPhase(errorStats)
-                        writeLog(errorStats, activeRequest.params, error = message)
-                        emitGenerated(GenerateEvent.Error(message, errorStats))
-                        return@lifecycle
                     }
                     val filtered = reasoningFilter.filter(chunk)
                     if (filtered.visible.any { !it.isWhitespace() }) {
@@ -2878,13 +2912,22 @@ class McaInferenceService(
             modelFingerprint = digest("model\n${identity.identityHash}"),
             tokenizerFingerprint = digest("tokenizer\n${identity.tokenizerFingerprint}"),
             templateFingerprint = digest("template\n$templateBinding"),
-            systemPromptFingerprint = digest(fixedSystemPrompt),
+            systemPromptFingerprint = digest(buildList {
+                add("role-bound-prompt-v1")
+                add(fixedSystemPrompt)
+                add(request.persistentRoleId.orEmpty())
+                add(request.persistentRoleCardVersion.orEmpty())
+                if (sessionId != null) {
+                    add(request.persistentMemoryVersion.orEmpty())
+                    add(request.conversationContextRevision.orEmpty())
+                }
+            }.joinToString("\n")),
             runtimeFingerprint = digest("runtime\n$runtimeBinding"),
             prefixFingerprint = digest(
                 if (sessionId != null) {
                     "full-session-prefix-v1\n$sessionId"
                 } else {
-                    "fixed-system-prefix\n$fixedSystemPrompt"
+                    "fixed-system-prefix\n$fixedSystemPrompt\n${request.persistentRoleId.orEmpty()}"
                 }
             )
         )
@@ -2966,8 +3009,6 @@ class McaInferenceService(
         private const val ISOLATED_WORKER_SESSION_LOST_FIELD = "workerSessionLost"
         private const val CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
-        private const val LOW_MEMORY_START_GUARD_KB = 384L * 1024L
-        private const val LOW_MEMORY_RUNTIME_STOP_KB = 256L * 1024L
         private const val HIDDEN_REASONING_PROGRESS_STEP_TOKENS = 16
         private const val STATS_SAMPLE_INTERVAL_MS = 250L
         private const val MEMORY_SAMPLE_INTERVAL_MS = 1000L

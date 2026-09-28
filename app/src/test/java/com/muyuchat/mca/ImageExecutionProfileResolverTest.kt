@@ -32,7 +32,7 @@ class ImageExecutionProfileResolverTest {
     )
 
     @Test
-    fun `all nineteen recommendation ids resolve to their target profiles`() {
+    fun `all recommendation ids resolve to their target profiles`() {
         val expected = linkedMapOf(
             "cyberrealistic_sd15_qnn228" to "community.sd15.qnn228",
             "realisticvisionhyper_sd15_qnn228" to "community.sd15.hyper.qnn228",
@@ -51,6 +51,7 @@ class ImageExecutionProfileResolverTest {
             "z_image_turbo_q4" to "sdcpp.z-image-turbo",
             "flux2_klein_4b_q4" to "sdcpp.flux2-klein",
             "qwen_image_2512_q2" to "sdcpp.qwen-image",
+            "qwen_image_21_q4_k_m" to "sdcpp.qwen-image-2.1",
             "qwen_image_21_mnn_opencl" to "mnn.qwen-image-2.1.opencl",
             "longcat_image_q4" to "sdcpp.longcat-image"
         )
@@ -71,7 +72,7 @@ class ImageExecutionProfileResolverTest {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
-        assertEquals(19, models.size)
+        assertEquals(20, models.size)
         models.forEach { model ->
             val catalogProfile = requireNotNull(
                 materializeDownloadedImageExecutionProfile(
@@ -117,7 +118,7 @@ class ImageExecutionProfileResolverTest {
     fun `every fixed recommended image profile fixes capabilities to its configured default size`() {
         ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
-            .filterNot { it.id == "qwen_image_21_mnn_opencl" }
+            .filterNot { it.id in setOf("qwen_image_21_mnn_opencl", "qwen_image_21_q4_k_m") }
             .forEach { model ->
                 val profile = resolve(model.id).profile
                 assertEquals("${model.id} fixed width", profile.defaults.width, profile.capabilities.minWidth)
@@ -143,7 +144,7 @@ class ImageExecutionProfileResolverTest {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
 
-        assertEquals(19, models.size)
+        assertEquals(20, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val primary = bundle.requiredComponents.first {
@@ -1307,6 +1308,23 @@ class ImageExecutionProfileResolverTest {
 
     @Test
     fun `modern stable diffusion builtins retain model-specific flow defaults`() {
+        val qwen21 = resolve("qwen_image_21_q4_k_m").profile
+        assertEquals(ImageModelVariant.QWEN_IMAGE_21, qwen21.variant)
+        assertEquals(LocalImageRuntime.STABLE_DIFFUSION_CPP, qwen21.runtime)
+        assertEquals(20, qwen21.defaults.steps)
+        assertEquals(6.0, qwen21.defaults.cfgScale, 0.0)
+        assertEquals(64, qwen21.latent.channels)
+        assertEquals(16, qwen21.latent.downsampleFactor)
+        assertEquals(32, qwen21.capabilities.widthMultiple)
+        assertEquals(256, qwen21.capabilities.minWidth)
+        assertEquals(1536, qwen21.capabilities.maxWidth)
+        assertTrue(qwen21.capabilities.supportsNegativePrompt)
+        assertFalse(qwen21.capabilities.supportsLora)
+        assertFalse(qwen21.capabilities.supportsLivePreview)
+        assertEquals(-1.0, defaultStableDiffusionFlowShiftFor(qwen21), 0.0)
+        assertEquals(480 to 320, resolveStableDiffusionDimensions(512, 512, 480, 320, 32))
+        assertInvalid { resolveStableDiffusionDimensions(512, 512, 480, 320) }
+
         val flux = resolve("flux2_klein_4b_q4").profile
         assertEquals(4, flux.defaults.steps)
         assertEquals(1.0, flux.defaults.cfgScale, 0.0)

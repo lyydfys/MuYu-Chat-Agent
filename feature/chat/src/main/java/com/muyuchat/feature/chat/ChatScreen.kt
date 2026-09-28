@@ -289,6 +289,7 @@ data class ChatUiState(
     val files: List<FileAssetUiItem> = emptyList(),
     val imageJobs: List<ImageGenerationUiJob> = emptyList(),
     val activeConversationId: String? = null,
+    val conversationReadOnly: Boolean = false,
     val input: String = "",
     val isGenerating: Boolean = false,
     val generationPhase: GenerationPhase? = null,
@@ -362,7 +363,8 @@ data class ImageLoraUiItem(
     val name: String,
     val sizeText: String,
     val sha256: String,
-    val inUse: Boolean = false
+    val inUse: Boolean = false,
+    val isQwenImage21ViggleV021: Boolean = false
 )
 
 data class ImageTextualInversionUiItem(
@@ -882,7 +884,7 @@ internal fun imageGenerationUltraFixStrengthForDenoisingSteps(
 
 internal const val IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS = 20
 internal const val IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS = 10
-private const val IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION = 9
+private const val IMAGE_GENERATION_UI_PARAMETER_SNAPSHOT_VERSION = 10
 
 internal data class ImageGenerationUiParameterSnapshot(
     val taskModeName: String,
@@ -897,6 +899,11 @@ internal data class ImageGenerationUiParameterSnapshot(
     val heightText: String,
     val stepsText: String,
     val cfgScaleText: String,
+    /** Only values inserted by the Viggle preset are reverted when the adapter is removed. */
+    val viggleAutoSteps: Boolean = false,
+    val viggleAutoCfg: Boolean = false,
+    val stepsEditedByUser: Boolean = false,
+    val cfgEditedByUser: Boolean = false,
     val seedText: String,
     val sampler: String,
     val loras: List<ImageGenerationUiLoraDraft> = emptyList(),
@@ -934,6 +941,10 @@ internal data class ImageGenerationUiParameterSnapshot(
         .put("heightText", heightText)
         .put("stepsText", stepsText)
         .put("cfgScaleText", cfgScaleText)
+        .put("viggleAutoSteps", viggleAutoSteps)
+        .put("viggleAutoCfg", viggleAutoCfg)
+        .put("stepsEditedByUser", stepsEditedByUser)
+        .put("cfgEditedByUser", cfgEditedByUser)
         .put("seedText", seedText)
         .put("sampler", sampler)
         .put("livePreviewEnabled", livePreviewEnabled)
@@ -986,6 +997,10 @@ internal data class ImageGenerationUiParameterSnapshot(
                     heightText = json.getString("heightText"),
                     stepsText = json.getString("stepsText"),
                     cfgScaleText = json.getString("cfgScaleText"),
+                    viggleAutoSteps = version >= 10 && json.optBoolean("viggleAutoSteps", false),
+                    viggleAutoCfg = version >= 10 && json.optBoolean("viggleAutoCfg", false),
+                    stepsEditedByUser = version >= 10 && json.optBoolean("stepsEditedByUser", false),
+                    cfgEditedByUser = version >= 10 && json.optBoolean("cfgEditedByUser", false),
                     seedText = json.getString("seedText"),
                     sampler = json.getString("sampler"),
                     loras = if (version >= 3) {
@@ -1102,6 +1117,39 @@ private fun imageLoraDraftsFromJson(raw: String): List<ImageGenerationUiLoraDraf
 private fun imageLoraDraftsToJson(drafts: List<ImageGenerationUiLoraDraft>): String {
     require(drafts.size <= 8) { "At most 8 LoRA adapters may be selected." }
     return JSONArray().apply { drafts.forEach { put(it.toJson()) } }.toString()
+}
+
+internal data class ImageViggleUiControls(
+    val stepsText: String,
+    val cfgScaleText: String,
+    val autoSteps: Boolean = false,
+    val autoCfg: Boolean = false,
+    val stepsEditedByUser: Boolean = false,
+    val cfgEditedByUser: Boolean = false
+)
+
+internal fun imageViggleUiControlsForSelection(
+    current: ImageViggleUiControls,
+    model: ChatModelChoice,
+    selected: Boolean
+): ImageViggleUiControls {
+    val defaultCfgText = model.imageDefaultCfgScale.toString().trimEnd('0').trimEnd('.')
+    if (!selected) return current.copy(
+        stepsText = if (current.autoSteps) model.imageDefaultSteps.toString() else current.stepsText,
+        cfgScaleText = if (current.autoCfg) defaultCfgText else current.cfgScaleText,
+        autoSteps = false,
+        autoCfg = false
+    )
+    val applySteps = !current.stepsEditedByUser &&
+        current.stepsText.toIntOrNull() == model.imageDefaultSteps
+    val applyCfg = !current.cfgEditedByUser &&
+        current.cfgScaleText.toDoubleOrNull() == model.imageDefaultCfgScale
+    return current.copy(
+        stepsText = if (applySteps) "6" else current.stepsText,
+        cfgScaleText = if (applyCfg) "1" else current.cfgScaleText,
+        autoSteps = current.autoSteps || applySteps,
+        autoCfg = current.autoCfg || applyCfg
+    )
 }
 
 private fun imageTextualInversionIdsFromJson(raw: String): List<String> = runCatching {
@@ -1545,6 +1593,7 @@ data class ChatModelChoice(
         IMAGE_TEXTUAL_INVERSION_ALL_FORMATS,
     val supportsImageUltraFix: Boolean = false,
     val supportsImageLora: Boolean = false,
+    val isQwenImage21Gguf: Boolean = false,
     val maxImageBatchCount: Int = 1,
     val imageDefaultWidth: Int = 512,
     val imageDefaultHeight: Int = 512,
@@ -1948,11 +1997,15 @@ internal fun ImageGenerationUiParameterSnapshot.normalizedForImageModel(
 data class ChatHistoryItem(
     val id: String,
     val title: String,
+    val displayName: String = title,
+    val summary: String = "",
+    val assistantId: String? = null,
     val updatedAtText: String,
     val updatedAtMillis: Long,
     val messageCount: Int,
     val pinned: Boolean,
-    val selected: Boolean
+    val selected: Boolean,
+    val mixedAssistantHistory: Boolean = false
 )
 
 @Composable
@@ -1970,8 +2023,9 @@ fun ChatScreen(
     onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem> = { emptyList() },
     onSetAssistantImageToolAutoApproval: (Boolean) -> Unit = {},
     onStop: () -> Unit,
-    onNewConversation: () -> Unit,
+    onCreateConversationForAssistant: (String) -> Unit,
     onSelectConversation: (String) -> Unit,
+    onBranchMixedConversation: (String, String) -> Unit = { _, _ -> },
     onDeleteConversation: (String) -> Unit,
     onClearHistory: () -> Unit,
     onRenameConversation: (String, String) -> Unit,
@@ -1990,6 +2044,7 @@ fun ChatScreen(
     onImportImageLibraryBackup: (String) -> Unit = {},
     onCancelImageLibraryBackup: () -> Unit = {},
     onImportImageLora: (String) -> Unit = {},
+    onDownloadOfficialViggleLora: () -> Unit = {},
     onDeleteImageLora: (String) -> Unit = {},
     onImportImageTextualInversion: (String, String) -> Unit = { _, _ -> },
     onDeleteImageTextualInversion: (String) -> Unit = {},
@@ -2118,6 +2173,12 @@ fun ChatScreen(
     val generationImageGrantMutex = remember { Mutex() }
     var showImages by rememberSaveable { mutableStateOf(false) }
     var showAssistants by rememberSaveable { mutableStateOf(false) }
+    var showNewConversationPicker by rememberSaveable { mutableStateOf(false) }
+    var newConversationAssistantId by rememberSaveable { mutableStateOf<String?>(null) }
+    val requestNewConversation: () -> Unit = {
+        newConversationAssistantId = null
+        showNewConversationPicker = true
+    }
     var showQuickStart by rememberSaveable { mutableStateOf(false) }
     var showFileLibrary by rememberSaveable { mutableStateOf(false) }
     var showBackgroundSettings by rememberSaveable { mutableStateOf(false) }
@@ -2156,6 +2217,11 @@ fun ChatScreen(
     var imageUltraFixTargetHeightText by rememberSaveable { mutableStateOf("512") }
     var imageStepsText by rememberSaveable { mutableStateOf("20") }
     var imageCfgScaleText by rememberSaveable { mutableStateOf("7") }
+    var imageViggleAutoSteps by rememberSaveable { mutableStateOf(false) }
+    var imageViggleAutoCfg by rememberSaveable { mutableStateOf(false) }
+    var imageStepsEditedByUser by rememberSaveable { mutableStateOf(false) }
+    var imageCfgEditedByUser by rememberSaveable { mutableStateOf(false) }
+    var imageViggleSelected by rememberSaveable { mutableStateOf(false) }
     var imageSeedText by rememberSaveable { mutableStateOf("") }
     var imageSampler by rememberSaveable { mutableStateOf("euler") }
     var imageLoraDraftJson by rememberSaveable { mutableStateOf("[]") }
@@ -2305,6 +2371,7 @@ fun ChatScreen(
             restoredImageParameterModelId = null
             imageInputRestoreWarning = null
             imageLoraRestoreWarning = null
+            imageViggleSelected = false
             return@LaunchedEffect
         }
         val snapshot = ImageGenerationUiParameterSnapshot.fromJsonOrNull(
@@ -2382,6 +2449,11 @@ fun ChatScreen(
         )
         imageCfgScaleText = snapshot?.cfgScaleText
             ?: model.imageDefaultCfgScale.toString().trimEnd('0').trimEnd('.')
+        imageViggleAutoSteps = snapshot?.viggleAutoSteps ?: false
+        imageViggleAutoCfg = snapshot?.viggleAutoCfg ?: false
+        imageStepsEditedByUser = snapshot?.stepsEditedByUser ?: false
+        imageCfgEditedByUser = snapshot?.cfgEditedByUser ?: false
+        imageViggleSelected = false
         imageSeedText = snapshot?.seedText.orEmpty()
         imageSampler = normalizedImageSamplerForCapabilities(
             current = snapshot?.sampler ?: model.imageDefaultSampler,
@@ -2419,6 +2491,45 @@ fun ChatScreen(
     }
     LaunchedEffect(
         state.selectedImageModelId,
+        restoredImageParameterModelId,
+        selectedImageModelChoice?.isQwenImage21Gguf,
+        selectedImageModelChoice?.imageDefaultSteps,
+        selectedImageModelChoice?.imageDefaultCfgScale,
+        imageLoraDraftJson,
+        imageViggleSelected,
+        imageViggleAutoSteps,
+        imageViggleAutoCfg,
+        state.imageLoras.map { it.id to it.isQwenImage21ViggleV021 }
+    ) {
+        val model = selectedImageModelChoice ?: return@LaunchedEffect
+        if (restoredImageParameterModelId != model.id) return@LaunchedEffect
+        val drafts = imageLoraDraftsFromJson(imageLoraDraftJson)
+        val selectedViggle = model.isQwenImage21Gguf && drafts.size == 1 &&
+            drafts.single().multiplierText.toDoubleOrNull() == 1.0 &&
+            state.imageLoras.any { it.id == drafts.single().id && it.isQwenImage21ViggleV021 }
+        if (selectedViggle == imageViggleSelected &&
+            (selectedViggle || (!imageViggleAutoSteps && !imageViggleAutoCfg))
+        ) return@LaunchedEffect
+        val next = imageViggleUiControlsForSelection(
+            current = ImageViggleUiControls(
+                stepsText = imageStepsText,
+                cfgScaleText = imageCfgScaleText,
+                autoSteps = imageViggleAutoSteps,
+                autoCfg = imageViggleAutoCfg,
+                stepsEditedByUser = imageStepsEditedByUser,
+                cfgEditedByUser = imageCfgEditedByUser
+            ),
+            model = model,
+            selected = selectedViggle
+        )
+        imageStepsText = next.stepsText
+        imageCfgScaleText = next.cfgScaleText
+        imageViggleAutoSteps = next.autoSteps
+        imageViggleAutoCfg = next.autoCfg
+        imageViggleSelected = selectedViggle
+    }
+    LaunchedEffect(
+        state.selectedImageModelId,
         selectedImageModelChoice,
         restoredImageParameterModelId,
         imageTaskModeName,
@@ -2436,6 +2547,10 @@ fun ChatScreen(
         imageHeightText,
         imageStepsText,
         imageCfgScaleText,
+        imageViggleAutoSteps,
+        imageViggleAutoCfg,
+        imageStepsEditedByUser,
+        imageCfgEditedByUser,
         imageSeedText,
         imageSampler,
         imageLoraDraftJson,
@@ -2475,6 +2590,10 @@ fun ChatScreen(
             heightText = if (imageUltraFixEnabled) imageNormalHeightText else imageHeightText,
             stepsText = imageStepsText,
             cfgScaleText = imageCfgScaleText,
+            viggleAutoSteps = imageViggleAutoSteps,
+            viggleAutoCfg = imageViggleAutoCfg,
+            stepsEditedByUser = imageStepsEditedByUser,
+            cfgEditedByUser = imageCfgEditedByUser,
             seedText = imageSeedText,
             sampler = imageSampler,
             loras = imageLoraDraftsFromJson(imageLoraDraftJson),
@@ -3150,7 +3269,7 @@ fun ChatScreen(
                 state = state,
                 onClose = { scope.launch { drawerState.close() } },
                 onNewConversation = {
-                    onNewConversation()
+                    requestNewConversation()
                     scope.launch { drawerState.close() }
                 },
                 onOpenAppMenu = {
@@ -3163,6 +3282,10 @@ fun ChatScreen(
                 },
                 onSelectConversation = { id ->
                     onSelectConversation(id)
+                    scope.launch { drawerState.close() }
+                },
+                onBranchMixedConversation = { id, assistantId ->
+                    onBranchMixedConversation(id, assistantId)
                     scope.launch { drawerState.close() }
                 },
                 onDeleteConversation = onDeleteConversation,
@@ -3191,7 +3314,7 @@ fun ChatScreen(
                 ChatStatusBar(
                     state = state,
                     onOpenHistory = { scope.launch { drawerState.open() } },
-                    onNewConversation = onNewConversation,
+                    onNewConversation = requestNewConversation,
                     onLoadModel = onLoadModel,
                     onModelBackendChange = onModelBackendChange,
                     generationParams = state.generationParams,
@@ -3255,6 +3378,7 @@ fun ChatScreen(
                         }
                         MessageBubble(
                             message = message,
+                            readOnly = state.conversationReadOnly,
                             browserSessionId = state.activeConversationId,
                             characterCardHtml = state.assistants.any { assistant ->
                                 assistant.id == state.selectedAssistantId && assistant.characterCardImported
@@ -3283,7 +3407,7 @@ fun ChatScreen(
                             onUseImageAsset = onUseImageAsset,
                             onDeleteImageAsset = onDeleteImageAsset,
                             showAssistantActions = index == lastAssistantIndex && message.role == Role.ASSISTANT,
-                            canRegenerate = !state.isGenerating,
+                            canRegenerate = !state.isGenerating && !state.conversationReadOnly,
                             isGenerating = state.isGenerating && index == lastAssistantIndex,
                             generationPhase = if (state.isGenerating && index == lastAssistantIndex) {
                                 state.generationPhase
@@ -3308,7 +3432,7 @@ fun ChatScreen(
                             onRegenerate = onRegenerate,
                             onDelete = { onDeleteMessage(index) },
                             onTogglePinned = { onTogglePinMessage(message.id) },
-                            canTogglePinned = !state.isGenerating,
+                            canTogglePinned = !state.isGenerating && !state.conversationReadOnly,
                             onDeleteLastTurn = onDeleteLastTurn
                         )
                     }
@@ -3364,7 +3488,15 @@ fun ChatScreen(
                 }
             }
 
-            ChatInputBar(
+            if (state.conversationReadOnly) {
+                Text(
+                    "此会话仅供查看。可从历史菜单创建角色分支。",
+                    modifier = Modifier.align(Alignment.BottomCenter)
+                        .fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else ChatInputBar(
                 onOpenModels = onOpenModels,
                 input = state.input,
                 isGenerating = state.isGenerating,
@@ -4080,8 +4212,16 @@ fun ChatScreen(
                             imageNormalHeightText = value
                         }
                     },
-                    onStepsTextChange = { imageStepsText = it },
-                    onCfgScaleTextChange = { imageCfgScaleText = it },
+                    onStepsTextChange = {
+                        imageStepsText = it
+                        imageViggleAutoSteps = false
+                        imageStepsEditedByUser = true
+                    },
+                    onCfgScaleTextChange = {
+                        imageCfgScaleText = it
+                        imageViggleAutoCfg = false
+                        imageCfgEditedByUser = true
+                    },
                     onSeedTextChange = { imageSeedText = it },
                     onSamplerChange = { imageSampler = it },
                     onSelectImageModel = onSelectImageModel,
@@ -4257,6 +4397,31 @@ fun ChatScreen(
             }
 
         }
+    }
+    if (showNewConversationPicker) {
+        NewConversationAssistantDialog(
+            assistants = state.assistants,
+            history = state.history,
+            selectedAssistantId = newConversationAssistantId,
+            onSelectAssistant = { assistantId ->
+                if (state.history.any { it.assistantId == assistantId }) {
+                    newConversationAssistantId = assistantId
+                } else {
+                    onCreateConversationForAssistant(assistantId)
+                    showNewConversationPicker = false
+                }
+            },
+            onResume = { sessionId ->
+                onSelectConversation(sessionId)
+                showNewConversationPicker = false
+            },
+            onCreate = { assistantId ->
+                onCreateConversationForAssistant(assistantId)
+                showNewConversationPicker = false
+            },
+            onBack = { newConversationAssistantId = null },
+            onDismiss = { showNewConversationPicker = false }
+        )
     }
 }
 
@@ -5476,7 +5641,7 @@ private fun ContextLibraryPage(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text("世界书：把设定写成条目。常驻条目每轮都会加入上下文；普通条目需要聊天消息命中关键词才会加入。导入时可选全局、当前角色或当前对话。")
-                    Text("Tavern 兼容：读取 World Info JSON 的 entries 对象/数组和角色卡 v2/v3 的 character_book；支持常驻、关键词、二级关键词、优先级和大小写选项。position/probability/depth 等高级触发条件暂不应用。宏和脚本不执行；正则条目会跳过并显示原因，请改用普通关键词。")
+                    Text("Tavern 兼容：读取 World Info JSON 和角色卡 v2/v3 的 character_book；支持常驻、关键词、正则、二级关键词、优先级和大小写选项。不支持的正则会保留并提示，宏和脚本不执行。")
                     Text("知识库：先创建知识库，再点文件夹图标导入文本文件。导入后默认选中；取消勾选后该库不会参与检索。它按关键词找相关片段，不会把整份文档常驻塞进提示词，也不会训练模型。")
                     Text("确认生效：提问时使用资料里的专有名词或关键词；回答下方的上下文详情会显示世界书/知识库命中与跳过情况。")
                     Text("目前不直接导入 PDF、Word 或压缩包；请先另存为 TXT/Markdown。单个文件上限 1 MiB。")
@@ -5746,6 +5911,7 @@ private fun ImagesWorkspaceScreen(
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
+    onDownloadOfficialViggleLora: () -> Unit = {},
     onDeleteLora: (String) -> Unit,
     onToggleTextualInversion: (String) -> Unit,
     onImportTextualInversion: () -> Unit,
@@ -6134,6 +6300,7 @@ private fun ImagesWorkspaceScreen(
                 onToggleLora = onToggleLora,
                 onLoraMultiplierChange = onLoraMultiplierChange,
                 onImportLora = onImportLora,
+                onDownloadOfficialViggleLora = onDownloadOfficialViggleLora,
                 onDeleteLora = onDeleteLora,
                 onToggleTextualInversion = onToggleTextualInversion,
                 onImportTextualInversion = onImportTextualInversion,
@@ -6860,6 +7027,7 @@ private fun ImageGalleryHome(
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
+    onDownloadOfficialViggleLora: () -> Unit = {},
     onDeleteLora: (String) -> Unit,
     onToggleTextualInversion: (String) -> Unit,
     onImportTextualInversion: () -> Unit,
@@ -7002,6 +7170,7 @@ private fun ImageGalleryHome(
                 onToggleLora = onToggleLora,
                 onLoraMultiplierChange = onLoraMultiplierChange,
                 onImportLora = onImportLora,
+                onDownloadOfficialViggleLora = onDownloadOfficialViggleLora,
                 onDeleteLora = onDeleteLora,
                 onToggleTextualInversion = onToggleTextualInversion,
                 onImportTextualInversion = onImportTextualInversion,
@@ -7717,6 +7886,7 @@ private fun ImageInputOptionsPanel(
     onToggleLora: (String) -> Unit,
     onLoraMultiplierChange: (String, String) -> Unit,
     onImportLora: () -> Unit,
+    onDownloadOfficialViggleLora: () -> Unit = {},
     onDeleteLora: (String) -> Unit,
     onToggleTextualInversion: (String) -> Unit,
     onImportTextualInversion: () -> Unit,
@@ -8263,6 +8433,32 @@ private fun ImageInputOptionsPanel(
                         modifier = Modifier.weight(1f)
                     )
                 }
+                if (executionModel.isQwenImage21Gguf) {
+                    val viggleIncluded = selectedLoras.any { selection ->
+                        loras.any { adapter ->
+                            adapter.id == selection.id && adapter.isQwenImage21ViggleV021
+                        }
+                    }
+                    val viggleSelected = viggleIncluded && selectedLoras.size == 1 &&
+                        selectedLoras.single().multiplierText.toDoubleOrNull() == 1.0
+                    Text(
+                        when {
+                            !viggleIncluded -> "未启用 Viggle LoRA：使用基座原生步数与调度。"
+                            !viggleSelected ->
+                                "Viggle LoRA 已启用；仅单独选用且倍率为 1 时使用其蒸馏调度，当前使用原生调度。"
+                            cfgScaleText.toDoubleOrNull() != 1.0 ->
+                                "Viggle LoRA 已启用；蒸馏调度要求 CFG 1，当前使用原生调度。"
+                            stepsText.toIntOrNull() == 4 ->
+                                "Viggle v0.2.1 四步调度已选；四步可能减少细节与多样性，建议先用六步比较。"
+                            stepsText.toIntOrNull()?.let { it in 5..8 } == true ->
+                                "Viggle v0.2.1 蒸馏调度已选；六步为官方推荐，可自行调整为四至八步。"
+                            else ->
+                                "Viggle LoRA 已启用；当前步数使用基座原生调度。四至八步才启用蒸馏调度。"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
                 Text("采样器", style = MaterialTheme.typography.labelMedium)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(executionModel.imageSupportedSamplersForTask(taskMode)) { method ->
@@ -8309,6 +8505,16 @@ private fun ImageInputOptionsPanel(
                         Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (loraImporting) "导入中…" else "导入")
+                    }
+                    if (executionModel?.isQwenImage21Gguf == true) {
+                        TextButton(
+                            onClick = onDownloadOfficialViggleLora,
+                            enabled = !loraImporting
+                        ) {
+                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("下载 Viggle v0.2.1")
+                        }
                     }
                 }
                 if (loraMessage.isNotBlank()) {
@@ -8363,6 +8569,15 @@ private fun ImageInputOptionsPanel(
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.Medium
                                     )
+                                    if (executionModel?.isQwenImage21Gguf == true &&
+                                        adapter.isQwenImage21ViggleV021
+                                    ) {
+                                        Text(
+                                            "Viggle v0.2.1 · 推荐六步 / CFG 1",
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
                                     Text(
                                         "${adapter.sizeText} · ${adapter.sha256.take(10)}…",
                                         maxLines = 1,
@@ -11504,6 +11719,7 @@ private fun McaAppMenuPage(
                     } else {
                         "压缩较早对话，减少长上下文占用"
                     },
+                    enabled = !state.conversationReadOnly,
                     onClick = onRequestContextCompression
                 )
                 AppMenuRow(
@@ -11726,14 +11942,14 @@ private fun McaAppMenuPage(
                             onUndoContextSummary()
                             showSummaryHistory = false
                         },
-                        enabled = state.canUndoContextSummary && !state.isGenerating
+                        enabled = state.canUndoContextSummary && !state.isGenerating && !state.conversationReadOnly
                     ) { Text("撤销") }
                     TextButton(
                         onClick = {
                             onRequestContextCompression()
                             showSummaryHistory = false
                         },
-                        enabled = state.activeConversationId != null && !state.isGenerating
+                        enabled = state.activeConversationId != null && !state.isGenerating && !state.conversationReadOnly
                     ) { Text("下次发送时重建") }
                 }
             },
@@ -11761,6 +11977,7 @@ private fun AppMenuRow(
     title: String,
     subtitle: String,
     contentColor: Color? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val rowContentColor = contentColor ?: MaterialTheme.colorScheme.onSurface
@@ -11768,7 +11985,7 @@ private fun AppMenuRow(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 52.dp)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -12038,7 +12255,11 @@ private fun PendingReasoningPanel(
     val seconds = elapsedMs.div(1000).coerceAtLeast(0)
     val phaseTitle = generationPhaseLabel(phase)
     val progressText = tokenProgress?.let { progress ->
-        "\u5df2\u5904\u7406 ${progress.completedTokens}/${progress.totalTokens} tokens"
+        if (phase == GenerationPhase.PREPROCESS) {
+            "\u5df2\u5904\u7406 ${progress.completedTokens}/${progress.totalTokens} \u5f20\u56fe\u7247"
+        } else {
+            "\u5df2\u5904\u7406 ${progress.completedTokens}/${progress.totalTokens} tokens"
+        }
     }
     val persist = persistProgress?.takeIf { it.isActive }
     val persistTitle = persist?.let {
@@ -12214,6 +12435,7 @@ private fun MutableList<String>.appendIdDecision(label: String, ids: List<String
 
 private fun generationPhaseLabel(phase: GenerationPhase?): String = when (phase) {
     GenerationPhase.LOAD -> "\u6b63\u5728\u52a0\u8f7d\u8fd0\u884c\u65f6"
+    GenerationPhase.PREPROCESS -> "\u6b63\u5728\u51c6\u5907\u56fe\u7247"
     GenerationPhase.TOKENIZE -> "\u6b63\u5728\u5206\u8bcd"
     GenerationPhase.PREFILL -> "\u6b63\u5728\u9884\u5904\u7406\u4e0a\u4e0b\u6587"
     GenerationPhase.DECODE -> "\u6b63\u5728\u751f\u6210\u56de\u7b54"
@@ -12426,6 +12648,8 @@ private fun ChatStatusBar(
             )
         }
         Spacer(modifier = Modifier.width(12.dp))
+        ChatDeviceStatusMenu(state = state)
+        Spacer(modifier = Modifier.width(8.dp))
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
@@ -12440,6 +12664,200 @@ private fun ChatStatusBar(
                 }
                 IconButton(onClick = onOpenAppMenu, modifier = Modifier.size(38.dp)) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
+                }
+            }
+        }
+    }
+}
+
+internal data class ChatDeviceStatusItem(
+    val key: String,
+    val label: String,
+    val value: String,
+    val detail: String,
+    val active: Boolean,
+    val known: Boolean = true
+)
+
+/**
+ * Converts the native runtime evidence already present in [ChatUiState] into
+ * concise status rows. Unknown GPU/NPU evidence stays visibly unknown; it is
+ * never presented as a device rejection.
+ */
+internal fun ChatUiState.deviceStatusItems(): List<ChatDeviceStatusItem> {
+    val backend = stats.backend.trim().lowercase()
+    val runtime = listOfNotNull(
+        backend,
+        stats.backendDevices,
+        selectedModelRuntimeLabel
+    ).joinToString(" ").lowercase()
+    val runtimeTokens = runtime.split(Regex("[^a-z0-9]+"))
+        .filter(String::isNotBlank)
+        .toSet()
+    val npuActive = runtimeTokens.any { it in setOf("npu", "htp", "qnn", "qairt", "litert") }
+    val gpuActive = stats.hasVerifiedGpuExecution ||
+        (stats.loaded && (backend.contains("gpu") || backend.contains("opencl") ||
+            runtime.contains("adreno")))
+    val gpuKnown = selectedModelIsCloud || stats.gpuOffloadSupported != null || stats.loaded
+    val gpuValue = when {
+        selectedModelIsCloud -> "未使用"
+        stats.hasVerifiedGpuExecution || gpuActive -> "运行中"
+        stats.gpuOffloadSupported == false -> "不可用"
+        stats.gpuOffloadSupported == true -> "可用"
+        else -> "待检测"
+    }
+    val gpuDetail = when {
+        stats.hasVerifiedGpuExecution && stats.gpuOffloadLayersKnown ->
+            "${stats.gpuOffloadLayers} 层已验证"
+        stats.hasVerifiedGpuExecution -> "已完成原生执行验证"
+        stats.gpuOffloadSupported == false -> "当前运行时未报告 GPU 后端"
+        stats.gpuOffloadSupported == true -> "可在模型加载时使用"
+        else -> "加载模型后检测"
+    }
+    val npuValue = when {
+        selectedModelIsCloud -> "未使用"
+        npuActive && stats.loaded -> "运行中"
+        npuActive -> "可用"
+        else -> "未使用"
+    }
+    val memoryTotal = stats.totalMemKb
+    val memoryAvailable = stats.availMemKb.coerceAtLeast(0L)
+    val memoryUsed = (memoryTotal - memoryAvailable).coerceAtLeast(0L)
+    val memoryValue = if (memoryTotal > 0L) {
+        "${formatMemoryMb(memoryUsed)} / ${formatMemoryMb(memoryTotal)}"
+    } else {
+        "待检测"
+    }
+    val memoryDetail = if (memoryTotal > 0L) {
+        "可用 ${formatMemoryMb(memoryAvailable)}"
+    } else {
+        "系统内存数据尚未返回"
+    }
+    return listOf(
+        ChatDeviceStatusItem(
+            key = "cpu",
+            label = "CPU",
+            value = if (stats.loaded && backend.contains("cpu")) "运行中" else "在线",
+            detail = "系统线程与回退执行",
+            active = stats.loaded && backend.contains("cpu")
+        ),
+        ChatDeviceStatusItem(
+            key = "gpu",
+            label = "GPU",
+            value = gpuValue,
+            detail = gpuDetail,
+            active = gpuActive,
+            known = gpuKnown
+        ),
+        ChatDeviceStatusItem(
+            key = "npu",
+            label = "NPU",
+            value = npuValue,
+            detail = if (npuActive) "当前后端：${stats.backend.ifBlank { "native" }}" else "当前模型未使用 NPU",
+            active = npuActive && stats.loaded,
+            known = npuActive || selectedModelIsCloud || stats.loaded
+        ),
+        ChatDeviceStatusItem(
+            key = "memory",
+            label = "内存",
+            value = memoryValue,
+            detail = memoryDetail,
+            active = stats.isLowMemory,
+            known = memoryTotal > 0L
+        )
+    )
+}
+
+private fun formatMemoryMb(kb: Long): String {
+    val mb = kb / 1024.0
+    return if (mb >= 1024.0) {
+        "%.1f GB".format(java.util.Locale.US, mb / 1024.0)
+    } else {
+        "%.0f MB".format(java.util.Locale.US, mb)
+    }
+}
+
+@Composable
+private fun ChatDeviceStatusMenu(
+    state: ChatUiState,
+    modifier: Modifier = Modifier
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val items = state.deviceStatusItems()
+    val hasActive = items.any { it.active }
+    val statusSummary = items.joinToString("，") { "${it.label}${it.value}" }
+    Box(modifier = modifier) {
+        Surface(
+            modifier = Modifier
+                .size(44.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = if (expanded) {
+                        "收起设备状态（$statusSummary）"
+                    } else {
+                        "设备状态：$statusSummary，点击展开"
+                    }
+                    role = SemanticsRole.Button
+                    stateDescription = if (hasActive) "有运行中的硬件" else "设备状态"
+                }
+                .clickable { expanded = !expanded },
+            color = MaterialTheme.colorScheme.surface,
+            shape = CircleShape,
+            shadowElevation = 6.dp
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                McaLogoMark(size = 28.dp, cornerRadius = 14.dp)
+                if (hasActive) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 7.dp, end = 7.dp)
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF34A853))
+                    )
+                }
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            shape = RoundedCornerShape(20.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 2.dp,
+            shadowElevation = 12.dp,
+            modifier = Modifier.widthIn(min = 232.dp, max = 280.dp)
+        ) {
+            Text(
+                "设备状态",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            items.forEach { item ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("chat-device-status-${item.key}")
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(item.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(modifier = Modifier.weight(1f))
+                        Text(
+                            item.value,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (item.active) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        item.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -13318,6 +13736,95 @@ private fun ReasoningMode.shortLabel(): String = when (this) {
 }
 
 @Composable
+private fun NewConversationAssistantDialog(
+    assistants: List<AssistantUiItem>,
+    history: List<ChatHistoryItem>,
+    selectedAssistantId: String?,
+    onSelectAssistant: (String) -> Unit,
+    onResume: (String) -> Unit,
+    onCreate: (String) -> Unit,
+    onBack: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val selected = assistants.firstOrNull { it.id == selectedAssistantId }
+    val previous = history.filter { it.assistantId == selected?.id }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (selected == null) "选择角色卡" else selected.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                if (selected == null) {
+                    if (assistants.isEmpty()) Text("暂无角色卡")
+                    assistants.sortedByDescending { it.selected }.forEach { assistant ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                                .clickable { onSelectAssistant(assistant.id) },
+                            color = Color.Transparent,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                AssistantAvatar(assistant.name, assistant.avatar, selected = assistant.selected)
+                                Spacer(Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(assistant.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    if (assistant.tag.isNotBlank()) {
+                                        Text(
+                                            assistant.tag,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text("返回已有会话", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    previous.forEach { item ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
+                                .clickable { onResume(item.id) },
+                            color = if (item.selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Column(modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
+                                Text(item.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    item.summary.ifBlank { item.updatedAtText },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (selected != null) {
+                TextButton(onClick = { onCreate(selected.id) }) { Text("创建新会话") }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = if (selected == null) onDismiss else onBack) {
+                Text(if (selected == null) "取消" else "返回角色卡")
+            }
+        }
+    )
+}
+
+@Composable
 private fun ChatHistoryDrawer(
     state: ChatUiState,
     onClose: () -> Unit,
@@ -13325,6 +13832,7 @@ private fun ChatHistoryDrawer(
     onOpenAppMenu: () -> Unit,
     onOpenImages: () -> Unit,
     onSelectConversation: (String) -> Unit,
+    onBranchMixedConversation: (String, String) -> Unit,
     onDeleteConversation: (String) -> Unit,
     onClearHistory: () -> Unit,
     onRenameConversation: (String, String) -> Unit,
@@ -13334,6 +13842,7 @@ private fun ChatHistoryDrawer(
     var query by remember { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var renameTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
+    var branchTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var renameText by remember { mutableStateOf("") }
     var clearAllRequested by remember { mutableStateOf(false) }
     val filteredHistory = remember(state.history, query) {
@@ -13343,6 +13852,8 @@ private fun ChatHistoryDrawer(
         } else {
             state.history.filter { item ->
                 item.title.contains(keyword, ignoreCase = true) ||
+                    item.displayName.contains(keyword, ignoreCase = true) ||
+                    item.summary.contains(keyword, ignoreCase = true) ||
                     item.updatedAtText.contains(keyword, ignoreCase = true)
             }
         }
@@ -13424,6 +13935,7 @@ private fun ChatHistoryDrawer(
                                         renameText = item.title
                                     },
                                     onTogglePin = { onTogglePinConversation(item.id) },
+                                    onBranch = { branchTarget = item },
                                     onDelete = { deleteTarget = item }
                                 )
                             }
@@ -13463,7 +13975,7 @@ private fun ChatHistoryDrawer(
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
             title = { Text("删除对话") },
-            text = { Text("确定删除“${item.title}”吗？此操作不会删除模型文件。") },
+            text = { Text("确定删除“${item.displayName}”吗？此操作不会删除模型文件。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -13479,6 +13991,34 @@ private fun ChatHistoryDrawer(
                     Text("取消")
                 }
             }
+        )
+    }
+
+    branchTarget?.let { item ->
+        AlertDialog(
+            onDismissRequest = { branchTarget = null },
+            title = { Text("选择分支角色") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text("原始记录保持只读，新分支从空对话开始。")
+                    state.assistants.forEach { assistant ->
+                        TextButton(
+                            onClick = {
+                                onBranchMixedConversation(item.id, assistant.id)
+                                branchTarget = null
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(assistant.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { branchTarget = null }) { Text("取消") } }
         )
     }
 
@@ -13627,6 +14167,7 @@ private fun HistoryRow(
     onClick: () -> Unit,
     onRename: () -> Unit,
     onTogglePin: () -> Unit,
+    onBranch: () -> Unit,
     onDelete: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -13655,7 +14196,7 @@ private fun HistoryRow(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        item.title,
+                        item.displayName,
                         style = MaterialTheme.typography.bodyMedium.copy(fontSize = 13.sp, lineHeight = 16.sp),
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
@@ -13677,6 +14218,20 @@ private fun HistoryRow(
                             )
                         }
                     }
+                    if (item.mixedAssistantHistory) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("混合", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                if (item.summary.isNotBlank()) {
+                    Text(
+                        "（${item.summary}）",
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp, lineHeight = 14.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 Text(
                     "${item.updatedAtText} · ${item.messageCount} 条消息",
@@ -13729,6 +14284,16 @@ private fun HistoryRow(
                                 onTogglePin()
                             }
                         )
+                        if (item.mixedAssistantHistory) {
+                            HistoryMenuItem(
+                                text = "创建角色分支",
+                                icon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                onClick = {
+                                    menuExpanded = false
+                                    onBranch()
+                                }
+                            )
+                        }
                         HorizontalDivider(
                             modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                             color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
@@ -15095,6 +15660,7 @@ private fun AttachmentPreview(
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    readOnly: Boolean,
     browserSessionId: String?,
     characterCardHtml: Boolean,
     onOpenBrowserTask: (BrowserTaskLaunch) -> Unit,
@@ -15135,6 +15701,7 @@ private fun MessageBubble(
         if (isUser) {
             UserMessageBubble(
                 message = message,
+                readOnly = readOnly,
                 onTogglePinned = onTogglePinned,
                 canTogglePinned = canTogglePinned,
                 onCopy = {
@@ -15153,6 +15720,7 @@ private fun MessageBubble(
             AssistantMessageBlock(
                 modifier = Modifier.fillMaxWidth(),
                 message = message,
+                readOnly = readOnly,
                 browserSessionId = browserSessionId,
                 characterCardHtml = characterCardHtml,
                 onOpenBrowserTask = onOpenBrowserTask,
@@ -15195,6 +15763,7 @@ private fun MessageBubble(
 @Composable
 private fun UserMessageBubble(
     message: ChatMessage,
+    readOnly: Boolean,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
     onCopy: () -> Unit
@@ -15283,11 +15852,13 @@ private fun UserMessageBubble(
             }
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
-                Icon(Icons.Default.PushPin,
-                    contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
-                    modifier = Modifier.size(17.dp),
-                    tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
+            if (!readOnly) {
+                IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.PushPin,
+                        contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                        modifier = Modifier.size(17.dp),
+                        tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
             if (copyableContent.isNotBlank()) {
             IconButton(
@@ -15400,6 +15971,7 @@ private data class CharacterHtmlProjection(
 private fun AssistantMessageBlock(
     modifier: Modifier = Modifier,
     message: ChatMessage,
+    readOnly: Boolean,
     browserSessionId: String?,
     characterCardHtml: Boolean,
     onOpenBrowserTask: (BrowserTaskLaunch) -> Unit,
@@ -15547,6 +16119,7 @@ private fun AssistantMessageBlock(
                     job = generatedImageJob,
                     visualState = generatedImageVisualState,
                     images = generatedImages,
+                    readOnly = readOnly,
                     onRetry = onRetryChatImage,
                     onCancel = onCancelChatImage,
                     onApprove = onApproveChatImage,
@@ -15590,6 +16163,7 @@ private fun AssistantMessageBlock(
             }
             if (showActions) {
                 AssistantActionRow(
+                    readOnly = readOnly,
                     canRegenerate = canRegenerate,
                     onRegenerate = onRegenerate,
                     onDelete = onDelete,
@@ -15599,7 +16173,7 @@ private fun AssistantMessageBlock(
                     canTogglePinned = canTogglePinned,
                     onTogglePinned = onTogglePinned
                 )
-            } else {
+            } else if (!readOnly) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
                         Icon(
@@ -15624,6 +16198,7 @@ private fun ChatGeneratedImageContent(
     job: ImageGenerationUiJob?,
     visualState: ChatGeneratedImageUiState,
     images: List<ImageAssetUiItem>,
+    readOnly: Boolean,
     onRetry: () -> Unit,
     onCancel: () -> Unit,
     onApprove: () -> Unit,
@@ -15681,9 +16256,11 @@ private fun ChatGeneratedImageContent(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = onApprove) { Text("同意生成") }
-                        TextButton(onClick = onReject) { Text("拒绝") }
+                    if (!readOnly) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = onApprove) { Text("同意生成") }
+                            TextButton(onClick = onReject) { Text("拒绝") }
+                        }
                     }
                 }
             }
@@ -15704,7 +16281,9 @@ private fun ChatGeneratedImageContent(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (job != null) {
+                if (readOnly) {
+                    Text(request.message, style = MaterialTheme.typography.bodySmall)
+                } else if (job != null) {
                     ImageCreatingPlaceholder(
                         statusText = job.statusLabel.ifBlank { "生成中" },
                         statusMessage = job.message.ifBlank { request.message },
@@ -15842,10 +16421,12 @@ private fun ChatGeneratedImageContent(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(onClick = { previewImageId = selectedImage.id }) { Text("查看") }
-                        TextButton(onClick = { onUseImageAsset(selectedImage.id) }) { Text("编辑") }
-                        TextButton(onClick = onRetry) { Text("再生成") }
-                        TextButton(onClick = { onDeleteImageAsset(selectedImage.id) }) { Text("删除") }
-                        if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
+                        if (!readOnly) {
+                            TextButton(onClick = { onUseImageAsset(selectedImage.id) }) { Text("编辑") }
+                            TextButton(onClick = onRetry) { Text("再生成") }
+                            TextButton(onClick = { onDeleteImageAsset(selectedImage.id) }) { Text("删除") }
+                        }
+                        if (!readOnly && request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
                             request.toolContinuationStatus in setOf(
                                 ChatImageToolContinuationStatus.NOT_STARTED,
                                 ChatImageToolContinuationStatus.FAILED
@@ -15904,7 +16485,7 @@ private fun ChatGeneratedImageContent(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (!readOnly) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(onClick = onRetry) { Text("重试") }
                         TextButton(onClick = onOpenImageModels) { Text("生图模型") }
                         if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
@@ -16750,6 +17331,7 @@ private fun ChatSourceReference.webSearchTrustColor(): Color =
 
 @Composable
 private fun AssistantActionRow(
+    readOnly: Boolean,
     canRegenerate: Boolean,
     onRegenerate: () -> Unit,
     onDelete: () -> Unit,
@@ -16766,17 +17348,19 @@ private fun AssistantActionRow(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(
-            onClick = onRegenerate,
-            enabled = canRegenerate,
-            modifier = Modifier.size(32.dp)
-        ) {
-            Icon(
-                Icons.Default.Replay,
-                contentDescription = "重新生成",
-                modifier = Modifier.size(17.dp),
-                tint = tint.copy(alpha = if (canRegenerate) 0.78f else 0.32f)
-            )
+        if (!readOnly) {
+            IconButton(
+                onClick = onRegenerate,
+                enabled = canRegenerate,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    Icons.Default.Replay,
+                    contentDescription = "重新生成",
+                    modifier = Modifier.size(17.dp),
+                    tint = tint.copy(alpha = if (canRegenerate) 0.78f else 0.32f)
+                )
+            }
         }
         IconButton(
             onClick = onCopy,
@@ -16789,7 +17373,7 @@ private fun AssistantActionRow(
                 tint = tint.copy(alpha = 0.78f)
             )
         }
-        Box {
+        if (!readOnly) Box {
             IconButton(
                 onClick = { menuOpen = true },
                 modifier = Modifier.size(32.dp)

@@ -507,6 +507,9 @@ private fun McaApp(
             ) {
                 viewModel.chatImageToolPermissionUiState()
             }
+            val sessionPresentations = remember(state.chatSessions, state.assistants) {
+                state.chatSessions.assistantSessionPresentations(state.assistants)
+            }
             ChatScreen(
                 state = ChatUiState(
                     pendingImageTranslationDraft = state.pendingChatImageTranslationDraft,
@@ -520,15 +523,20 @@ private fun McaApp(
                     },
                     messages = state.messages,
                     history = state.chatSessions.map { session ->
+                        val presentation = sessionPresentations[session.id]
                         ChatHistoryItem(
                             id = session.id,
                             title = session.title,
+                            displayName = presentation?.name ?: session.title,
+                            summary = presentation?.summary.orEmpty(),
+                            assistantId = presentation?.assistantId,
                             updatedAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
                                 .format(java.util.Date(session.updatedAt)),
                             updatedAtMillis = session.updatedAt,
                             messageCount = session.messages.size,
                             pinned = session.pinned,
-                            selected = session.id == state.activeChatSessionId
+                            selected = session.id == state.activeChatSessionId,
+                            mixedAssistantHistory = session.mixedAssistantHistory
                         )
                     },
                     localModels = buildList {
@@ -660,6 +668,7 @@ private fun McaApp(
                                             imageCapabilities.supportedTextualInversionFormats,
                                         supportsImageUltraFix = imageCapabilities.supportsUltraFix,
                                         supportsImageLora = imageCapabilities.supportsLora,
+                                        isQwenImage21Gguf = imageCapabilities.isQwenImage21Gguf,
                                         supportsImageLivePreview = imageCapabilities.supportsLivePreview,
                                         imagePreviewMode = imageCapabilities.previewMode,
                                         imageDefaultPreviewInterval = imageCapabilities.defaultPreviewInterval,
@@ -880,7 +889,9 @@ private fun McaApp(
                             name = adapter.name,
                             sizeText = formatAssetBytes(adapter.sizeBytes),
                             sha256 = adapter.sha256,
-                            inUse = adapter.id in state.activeLocalImageLoraIds
+                            inUse = adapter.id in state.activeLocalImageLoraIds,
+                            isQwenImage21ViggleV021 =
+                                QwenImage21TurboSchedule.isOfficialV021Sha256(adapter.sha256)
                         )
                     },
                     imageLoraImporting = state.localImageLoraImporting,
@@ -970,6 +981,11 @@ private fun McaApp(
                         )
                     },
                     activeConversationId = state.activeChatSessionId,
+                    conversationReadOnly = activeChatSession?.let { session ->
+                        session.mixedAssistantHistory || session.assistantId == null ||
+                            session.assistantSnapshot?.assistantId != session.assistantId ||
+                            state.assistants.none { it.id == session.assistantId }
+                    } ?: false,
                     input = state.input,
                     isGenerating = state.isGenerating,
                     generationPhase = state.generationPhase,
@@ -1108,8 +1124,9 @@ private fun McaApp(
                 onCancelChatImageGeneration = viewModel::cancelChatImageGeneration,
                 onContinueAssistantImageTurn = viewModel::continueAssistantImageTurn,
                 onStop = viewModel::stopGeneration,
-                onNewConversation = viewModel::newChat,
+                onCreateConversationForAssistant = viewModel::createChatForAssistant,
                 onSelectConversation = viewModel::selectChatSession,
+                onBranchMixedConversation = viewModel::branchMixedChatSession,
                 onDeleteConversation = viewModel::deleteChatSession,
                 onClearHistory = viewModel::clearChatHistory,
                 onRenameConversation = viewModel::renameChatSession,
@@ -1128,6 +1145,7 @@ private fun McaApp(
                 onImportImageLibraryBackup = viewModel::importImageLibraryBackup,
                 onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
                 onImportImageLora = viewModel::importLocalImageLora,
+                onDownloadOfficialViggleLora = viewModel::downloadOfficialViggleLora,
                 onDeleteImageLora = viewModel::deleteLocalImageLora,
                 onImportImageTextualInversion = viewModel::importLocalImageTextualInversion,
                 onDeleteImageTextualInversion = viewModel::deleteLocalImageTextualInversion,

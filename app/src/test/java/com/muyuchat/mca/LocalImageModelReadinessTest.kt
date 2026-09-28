@@ -69,7 +69,7 @@ class LocalImageModelReadinessTest {
     fun everyRecommendedImagePersistsItsCatalogExecutionProfileBoundToPrimaryBytes() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
-        assertEquals(19, models.size)
+        assertEquals(20, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val source = requireNotNull(bundle.executionProfile)
@@ -614,6 +614,13 @@ class LocalImageModelReadinessTest {
         assertNotNull(diagnostic)
         assertTrue(diagnostic!!.contains("UNet smoke 未通过"))
         assertTrue(diagnostic.contains("直接重试"))
+
+        val legacyEstimate = record.copy(verificationMessage =
+            "Qwen-Image-2.1 预计需要约 6041 MB 可用内存，但当前只有约 3966 MB (512×512)。请先释放聊天模型和后台应用，或改用 384×384 / Tiny 尺寸后重试。")
+        assertFalse(legacyEstimate.hasCurrentLocalImageExecutionFailure())
+        assertNull(legacyEstimate.localImageReadinessMessage())
+        assertEquals("可直接尝试", legacyEstimate.localImageReadinessLabel())
+        assertTrue(legacyEstimate.localImageVerificationDiagnosticMessage()!!.contains("不是真实推理失败"))
     }
 
     @Test

@@ -1,5 +1,5 @@
 diff --git a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
-index 1f0b7d54..0a3d85a5 100644
+index 1f0b7d54..21cb9250 100644
 --- a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
 +++ b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
 @@ -38,10 +38,11 @@ public:
@@ -18,7 +18,7 @@ index 1f0b7d54..0a3d85a5 100644
                   std::function<void(int)> progressCallback);
      // Image editing: one condition image (also chosen by run(..., inputImagePath)). Output keeps the input's
      // aspect ratio at the configured pixel area.
-@@ -69,9 +70,8 @@ private:
+@@ -69,15 +70,15 @@ private:
      std::shared_ptr<Module> loadModule(const std::string& file, const std::vector<std::string>& inputs,
                                         const std::vector<std::string>& outputs,
                                         std::shared_ptr<Executor::RuntimeManager> rt);
@@ -30,8 +30,16 @@ index 1f0b7d54..0a3d85a5 100644
                     const std::vector<float>& mask);
      VARP embedText(VARP textHidden);
      VARP encodeEditPrompt(const std::string& prompt, VARP bgr, int w, int h, std::vector<char>& isPad);
+     VARP encodeImage(VARP rgb, int w, int h);
+     void editSize(int srcW, int srcH, int& w, int& h) const;
+-    // Returns false and records kOutOfMemory when the device has less than needMB (+margin) available.
++    // Logs an advisory estimate and always permits the actual native stage to run.
++    // Only a concrete allocation/execution failure may fail the request.
+     bool ensureMemory(const char* stage, int needMB);
+     bool fail(int code, const std::string& message);
+     bool failStage(const char* stage);
 diff --git a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
-index 04edf969..d18db2d0 100644
+index 04edf969..7efc216f 100644
 --- a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
 +++ b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
 @@ -10,8 +10,15 @@
@@ -251,7 +259,39 @@ index 04edf969..d18db2d0 100644
          if (mBackendType == MNN_FORWARD_OPENCL) {
              ExecutorScope::Current()->gc(Executor::PART);
          }
-@@ -608,6 +662,64 @@ bool QwenImage21Diffusion::ensureMemory(const char* stage, int needMB) {
+@@ -561,11 +615,13 @@ void QwenImage21Diffusion::setImageSize(int width, int height) {
+ }
+
+ bool QwenImage21Diffusion::failStage(const char* stage) {
++    // Preserve a concrete failure already reported by the stage (for example,
++    // non-finite latents). MemAvailable alone cannot establish an allocation failure.
++    if (mErrorCode != kOk) return false;
+     int avail = availableMemoryMB();
+-    bool oom = avail >= 0 && avail < 1500;
+     char buf[256];
+-    snprintf(buf, sizeof(buf), "%s failed%s (available memory %d MB)", stage, oom ? ": out of memory" : "", avail);
+-    return fail(oom ? kOutOfMemory : kRuntimeError, buf);
++    snprintf(buf, sizeof(buf), "%s failed (available memory %d MB; see native runtime logs for the cause)", stage, avail);
++    return fail(kRuntimeError, buf);
+ }
+
+ bool QwenImage21Diffusion::fail(int code, const std::string& message) {
+@@ -598,16 +654,74 @@ int vaeEncodeNeedMB(int w, int h) { return (int)(1200.0 * w * h / 262144.0); }
+ bool QwenImage21Diffusion::ensureMemory(const char* stage, int needMB) {
+     const int marginMB = 400;
+     int avail = availableMemoryMB();
+-    MNN_PRINT("[QwenImage21] %s: needs ~%d MB, available %d MB\n", stage, needMB, avail);
++    MNN_PRINT("[QwenImage21] %s: estimated peak ~%d MB, available %d MB (advisory only)\n", stage, needMB, avail);
+     if (avail >= 0 && avail < needMB + marginMB) {
+-        char buf[256];
+-        snprintf(buf, sizeof(buf), "Out of memory before %s: needs about %d MB, only %d MB available", stage, needMB,
+-                 avail);
+-        return fail(kOutOfMemory, buf);
++        MNN_PRINT("[QwenImage21] memory advisory before %s: below estimated peak plus %d MB margin; "
++                  "continuing with the requested graph\n", stage, marginMB);
+     }
++    // Peaks from another run/device are not allocation limits. Keep the requested
++    // graph, precision and dimensions; real load/execution failures are reported by run().
      return true;
  }
  
@@ -290,8 +330,8 @@ index 04edf969..d18db2d0 100644
 +    int stableSamples = 0;
 +    if (settledMB < requiredMB) {
 +        // Releasing the CPU text encoder can return several gigabytes to Android asynchronously.
-+        // Sample at a stage boundary so the existing reserve is enforced against settled memory,
-+        // without starting the large DiT allocation while those pages are still being reclaimed.
++        // Allow a bounded settling period before the next allocation. The estimate is only
++        // a reclaim target: falling short does not reject the requested DiT execution.
 +        for (int elapsedMs = 0; elapsedMs < kMaxWaitMs; elapsedMs += kPollIntervalMs) {
 +            std::this_thread::sleep_for(std::chrono::milliseconds(kPollIntervalMs));
 +            waitedMs += kPollIntervalMs;
@@ -308,7 +348,7 @@ index 04edf969..d18db2d0 100644
 +    }
 +    MNN_PRINT(
 +        "[QwenImage21] memory reclaim before %s: available %d MB, after_gc %d MB, after_purge %d MB, settled %d MB, "
-+        "required %d MB, waited %d ms, mallopt api=%d option=%d result=%d full_option=%d full_result=%d\n",
++        "advisory_target %d MB, waited %d ms, mallopt api=%d option=%d result=%d full_option=%d full_result=%d\n",
 +        stage, beforeMB, afterGcMB, afterPurgeMB, settledMB, requiredMB, waitedMs, purgeApiLevel, purgeOption,
 +        purgeResult, purgeAllOption, purgeAllResult);
 +}
@@ -316,7 +356,7 @@ index 04edf969..d18db2d0 100644
  // ---------------------------------------------------------------------------------------------- edit
  
  void QwenImage21Diffusion::editSize(int srcW, int srcH, int& w, int& h) const {
-@@ -804,11 +916,11 @@ bool QwenImage21Diffusion::runEdit(const std::string& prompt, const std::string&
+@@ -804,11 +918,11 @@ bool QwenImage21Diffusion::runEdit(const std::string& prompt, const std::string&
      dump("edit_cond_h", condH->readMap<float>(), (size_t)nc * kDim);
      dump("edit_prefix", prefix.data(), prefix.size());
      auto kv = runPrefix(hostTensor({1, P, kDim}, prefix.data()), cosP, sinP, mask);
@@ -331,7 +371,7 @@ index 04edf969..d18db2d0 100644
      if (latents.get() == nullptr) return failStage("DiT denoising");
      if (!ensureMemory("VAE decoder", vaeDecodeNeedMB(w, h))) return false;
      auto image = decode(latents);
-@@ -830,6 +942,9 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+@@ -830,6 +944,9 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
      mError.clear();
      try {
          if (iterNum < 1) iterNum = 20;
@@ -341,7 +381,7 @@ index 04edf969..d18db2d0 100644
          if (iterNum > 100) iterNum = 100;
          int seed = randomSeed < 0 ? (int)(nowUs() & 0x7fffffff) : randomSeed;
          if (!inputImagePath.empty()) {
-@@ -845,15 +960,17 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+@@ -845,15 +962,17 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
          int L = text->getInfo()->dim[1];
          MNN_PRINT("[QwenImage21] text encoder done: %.2f s\n", (nowUs() - st) / 1e6);
          if (progressCallback) progressCallback(5);

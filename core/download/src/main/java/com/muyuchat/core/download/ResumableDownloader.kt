@@ -17,6 +17,7 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToLong
 
 class ResumableDownloader(
     private val client: OkHttpClient = defaultClient(),
@@ -84,6 +85,7 @@ class ResumableDownloader(
         var downloaded = tempFile.takeIf { it.exists() }?.length() ?: 0L
         val request = request(remote.downloadUrl, downloaded)
         var lastProgressAt = monotonicNanos()
+        val rateEstimator = DownloadRateEstimator()
 
         val downloadContext = currentCoroutineContext()
         val call = client.newCall(request)
@@ -141,7 +143,7 @@ class ResumableDownloader(
                         downloaded += read
                         if (downloaded - lastProgressBytes >= PROGRESS_STEP_BYTES) {
                             val now = monotonicNanos()
-                            val speed = speedBytes(
+                            val speed = rateEstimator.update(
                                 downloaded - lastProgressBytes,
                                 ((now - lastProgressAt) / 1_000_000L).coerceAtLeast(0L)
                             )
@@ -237,14 +239,11 @@ class ResumableDownloader(
         status = status
     )
 
-    private fun speedBytes(bytes: Long, elapsedMs: Long): Long {
-        if (bytes <= 0L || elapsedMs <= 0L) return 0L
-        return (bytes * 1000L / elapsedMs).coerceAtLeast(0L)
-    }
-
     private fun remainingSeconds(expectedLength: Long, downloaded: Long, speedBytesPerSecond: Long): Long? {
         if (expectedLength <= 0L || speedBytesPerSecond <= 0L || downloaded >= expectedLength) return null
-        return ((expectedLength - downloaded) / speedBytesPerSecond).coerceAtLeast(0L)
+        val remaining = expectedLength - downloaded
+        // Round up so the UI never reports "0 seconds" while bytes are still pending.
+        return ((remaining + speedBytesPerSecond - 1L) / speedBytesPerSecond).coerceAtLeast(1L)
     }
 
     private fun retryMessage(
@@ -331,5 +330,39 @@ class ResumableDownloader(
             .writeTimeout(90, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)
             .build()
+    }
+}
+
+/**
+ * Smooths per-chunk transfer rates before they reach the progress UI.  A 1 MB
+ * chunk is small enough that a single delayed socket read can otherwise make
+ * the displayed rate jump by several times between adjacent callbacks.
+ */
+internal class DownloadRateEstimator(
+    private val smoothingFactor: Double = DEFAULT_SMOOTHING_FACTOR
+) {
+    private var smoothedBytesPerSecond = 0L
+
+    init {
+        require(smoothingFactor in 0.0..1.0) { "smoothingFactor must be between 0 and 1" }
+    }
+
+    fun update(bytes: Long, elapsedMs: Long): Long {
+        if (bytes <= 0L || elapsedMs <= 0L) return smoothedBytesPerSecond
+        val instantaneous = (bytes.toDouble() * 1_000.0 / elapsedMs.toDouble())
+            .roundToLong()
+            .coerceAtLeast(1L)
+        smoothedBytesPerSecond = if (smoothedBytesPerSecond <= 0L) {
+            instantaneous
+        } else {
+            (smoothedBytesPerSecond * (1.0 - smoothingFactor) + instantaneous * smoothingFactor)
+                .roundToLong()
+                .coerceAtLeast(1L)
+        }
+        return smoothedBytesPerSecond
+    }
+
+    companion object {
+        private const val DEFAULT_SMOOTHING_FACTOR = 0.25
     }
 }

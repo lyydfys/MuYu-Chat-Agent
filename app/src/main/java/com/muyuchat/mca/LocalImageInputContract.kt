@@ -702,9 +702,14 @@ internal fun validateLocalImageProfileProductOptions(
     options: LocalImageGenerationOptions
 ) {
     val capabilities = profile.capabilities
+    val qwen21TextOnly = profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
+        profile.variant == ImageModelVariant.QWEN_IMAGE_21
+    if (qwen21TextOnly && options.taskMode != LocalImageTaskMode.TEXT_TO_IMAGE) {
+        rejectProductInput("task_mode_execution_unsupported", "Qwen-Image-2.1 GGUF 当前原生引擎仅接入文生图，未包含图像编辑编码器执行链。")
+    }
     val sharedQnnVaePreview = profile.hasSharedQnnVaePreviewTopology()
     val runtimeHasNativePreview =
-        profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP ||
+        (profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && !qwen21TextOnly) ||
             sharedQnnVaePreview
     if (profile.runtime == LocalImageRuntime.QNN_HTP &&
         options.taskMode != LocalImageTaskMode.TEXT_TO_IMAGE

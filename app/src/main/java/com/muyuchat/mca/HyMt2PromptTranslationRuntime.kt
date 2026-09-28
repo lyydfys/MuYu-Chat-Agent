@@ -1,12 +1,12 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import android.content.Intent
+import android.os.Process
 import com.muyuchat.core.engine.LocalChatRuntime
 import java.io.File
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.concurrent.thread
-import kotlin.coroutines.resume
-import kotlinx.coroutines.suspendCancellableCoroutine
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -35,6 +35,16 @@ class OfflineTranslationWorkerService : LocalChatWorkerService() {
     override val journalScope: String get() = "offline_translation"
     override val foregroundNotificationId: Int get() = 11439
     override val nativeOperationTimeoutLimitMs: Long get() = HyMt2PromptTranslationContract.TIMEOUT_MS
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        try {
+            return super.onUnbind(intent)
+        } finally {
+            // This service has one disposable translation owner. Last-unbind retires native
+            // allocations and queued stop callbacks together, including after failed unload.
+            Process.killProcess(Process.myPid())
+        }
+    }
 }
 
 internal class AppOfflinePromptTranslationRuntimeProvider(context: Context) : OfflinePromptTranslationRuntimeProvider {
@@ -49,7 +59,9 @@ internal class AppOfflinePromptTranslationRuntimeProvider(context: Context) : Of
 
 internal class HyMt2IsolatedPromptTranslationRuntime(private val appContext: Context) : OfflinePromptTranslationRuntime {
     override val nativeLibraryFileName = HyMt2PromptTranslationContract.NATIVE_LIBRARY
-    private val running = AtomicBoolean(false)
+    private val workerSlot = OfflinePromptTranslationWorkerSlot<RemoteLocalChatRunner> { runner ->
+        !runner.isAvailable && runner.isConnectedWorkerReleased()
+    }
 
     override suspend fun translate(
         bundle: VerifiedOfflinePromptTranslationBundle,
@@ -66,55 +78,64 @@ internal class HyMt2IsolatedPromptTranslationRuntime(private val appContext: Con
             OfflinePromptTranslationUnavailableReason.NATIVE_LIBRARY_NOT_PACKAGED,
             "Required native translation component is missing: $nativeLibraryFileName"
         )
-        if (!running.compareAndSet(false, true)) {
-            return OfflinePromptTranslationRuntimeOutcome.Failed("The offline translation worker is still finishing its previous request.")
-        }
         val runner = RemoteLocalChatRunner(
             appContext, LocalChatRuntime.LLAMA_CPP,
             OfflineTranslationWorkerService::class.java, "offline_translation"
         )
-        val cancelled = AtomicBoolean(false)
-        return suspendCancellableCoroutine { continuation ->
-            continuation.invokeOnCancellation {
-                cancelled.set(true)
-                // Binder stop is independent of a blocked load/prefill call. The existing
-                // worker watchdog reclaims its own process if native does not acknowledge it.
-                thread(isDaemon = true, name = "mca-translation-stop") {
-                    runCatching { runner.requestStop() }
-                }
-            }
-            thread(isDaemon = true, name = "mca-hymt2-translation") {
-                val outcome = try {
-                    val verified = OfflinePromptTranslationBundleVerifier.requireVerified(bundle.rootDirectory)
-                    check(verified.identity.fingerprint == bundle.identity.fingerprint) { "Translation package changed before model load." }
-                    check(!cancelled.get()) { "Translation was cancelled before load." }
-                    runner.initBackends(appContext.applicationInfo.nativeLibraryDir)
-                    val params = JSONObject()
-                        .put("n_ctx", 8192).put("n_predict", 2048)
-                        .put("n_threads", Runtime.getRuntime().availableProcessors().coerceIn(1, 8))
-                        .put("n_gpu_layers", 0).put("mmap", true).put("mlock", false)
-                        .put("temperature", 0.7).put("top_p", 0.6).put("top_k", 20)
-                        .put("repeat_penalty", 1.05).put("frequency_penalty", 0.0)
-                        .put("presence_penalty", 0.0).put("reasoning_mode", "off")
-                        .put("system_prompt", "").put("chat_template_mode", "auto")
-                    val loaded = runner.loadModel(verified.modelFile.absolutePath, params.toString())
-                    check(loaded == 0) { "Hy-MT2 native load failed: code=$loaded, stats=${runner.getRuntimeStatsJson()}" }
-                    val positive = translateBranch(runner, params, request.sourceText, request.maxOutputChars, cancelled)
-                    val negative = if (request.negativePrompt.isBlank()) null else {
-                        runner.invalidateConversationContext()
-                        translateBranch(runner, params, request.negativePrompt, request.maxOutputChars, cancelled)
+        if (!workerSlot.tryAcquire(runner)) {
+            runner.close()
+            throw OfflinePromptTranslationCleanupException()
+        }
+        val loadStarted = AtomicBoolean(false)
+        return runOfflinePromptTranslationWorker(
+            requestStop = runner::requestStop,
+            release = {
+                var unloadFailure: Throwable? = null
+                try {
+                    if (loadStarted.get() && !runner.isConnectedWorkerReleased()) {
+                        unloadFailure = runCatching { runner.unloadModel() }.exceptionOrNull()
                     }
-                    OfflinePromptTranslationRuntimeOutcome.Translated(verified.createResult(request, positive, negative))
-                } catch (error: Throwable) {
-                    OfflinePromptTranslationRuntimeOutcome.Failed(error.message ?: "Hy-MT2 native translation failed.")
                 } finally {
-                    // The native call has returned before unload. Cancellation never frees a
-                    // context while the worker is still executing it.
-                    runCatching { runner.unloadModel() }
                     runner.close()
-                    running.set(false)
                 }
-                if (continuation.isActive) continuation.resume(outcome)
+                // close only detaches. The dedicated service exits on its final unbind, and
+                // the retained Binder proves that all of this session's native state is gone.
+                val startedAt = System.nanoTime()
+                val budgetNanos = TimeUnit.MILLISECONDS.toNanos(OFFLINE_PROMPT_TRANSLATION_CLEANUP_TIMEOUT_MS)
+                while (!runner.isConnectedWorkerReleased() && System.nanoTime() - startedAt < budgetNanos) {
+                    Thread.sleep(25L)
+                }
+                if (!runner.isConnectedWorkerReleased()) {
+                    throw OfflinePromptTranslationCleanupException(unloadFailure)
+                }
+            },
+            onReleased = { workerSlot.release(runner) }
+        ) { cancelled ->
+            try {
+                val verified = OfflinePromptTranslationBundleVerifier.requireVerified(bundle.rootDirectory)
+                check(verified.identity.fingerprint == bundle.identity.fingerprint) { "Translation package changed before model load." }
+                check(!cancelled.get()) { "Translation was cancelled before load." }
+                runner.initBackends(appContext.applicationInfo.nativeLibraryDir)
+                val params = JSONObject()
+                    .put("n_ctx", 8192).put("n_predict", 2048)
+                    .put("n_threads", Runtime.getRuntime().availableProcessors().coerceIn(1, 8))
+                    .put("n_gpu_layers", 0).put("mmap", true).put("mlock", false)
+                    .put("temperature", 0.7).put("top_p", 0.6).put("top_k", 20)
+                    .put("repeat_penalty", 1.05).put("frequency_penalty", 0.0)
+                    .put("presence_penalty", 0.0).put("reasoning_mode", "off")
+                    .put("system_prompt", "").put("chat_template_mode", "auto")
+                check(!cancelled.get()) { "Translation was cancelled before load." }
+                loadStarted.set(true)
+                val loaded = runner.loadModel(verified.modelFile.absolutePath, params.toString())
+                check(loaded == 0) { "Hy-MT2 native load failed: code=$loaded, stats=${runner.getRuntimeStatsJson()}" }
+                val positive = translateBranch(runner, params, request.sourceText, request.maxOutputChars, cancelled)
+                val negative = if (request.negativePrompt.isBlank()) null else {
+                    runner.invalidateConversationContext()
+                    translateBranch(runner, params, request.negativePrompt, request.maxOutputChars, cancelled)
+                }
+                OfflinePromptTranslationRuntimeOutcome.Translated(verified.createResult(request, positive, negative))
+            } catch (error: Throwable) {
+                OfflinePromptTranslationRuntimeOutcome.Failed(error.message ?: "Hy-MT2 native translation failed.")
             }
         }
     }

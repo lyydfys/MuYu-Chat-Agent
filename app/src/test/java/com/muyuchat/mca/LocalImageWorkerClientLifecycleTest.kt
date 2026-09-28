@@ -361,6 +361,22 @@ class LocalImageWorkerClientLifecycleTest {
     }
 
     @Test
+    fun releasedWorkerRequiresBinderDeathProofBeforeMemoryCanBeReused() {
+        val source = localImageWorkerClientSource()
+        val awaitRelease = functionBody(source, "suspend fun awaitOwnedWorkerRelease(")
+        val release = functionBody(source, "private fun releaseBindingAfterRequest(")
+        val arm = functionBody(source, "private fun armReleasedWorkerExitWaiterLocked(")
+
+        assertTrue(awaitRelease.contains("image_worker_exit_unconfirmed"))
+        assertTrue(awaitRelease.contains("withTimeoutOrNull(timeoutMs)"))
+        assertTrue(release.contains("armReleasedWorkerExitWaiterLocked(remoteBinder)"))
+        assertTrue(arm.contains("binder.linkToDeath(recipient, 0)"))
+        assertTrue(arm.contains("releasedWorkerExits[binder] = waiter"))
+        assertFalse(functionBody(source, "private fun handleConnectionLoss(")
+            .contains(".complete(Unit)"))
+    }
+
+    @Test
     fun successfulDeliveryCommitsPublicationBeforeClientUnbindCanDestroyTheService() {
         val source = localImageWorkerServiceSource()
         val job = functionBody(source, "val job = scope.launch {")

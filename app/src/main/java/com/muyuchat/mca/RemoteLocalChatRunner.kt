@@ -34,6 +34,8 @@ internal class RemoteLocalChatRunner(
     private var connection: ServiceConnection? = null
     private var bound = false
     private var remote: ILocalChatWorker? = null
+    /** Retained after detach so a one-shot client can confirm its own process has exited. */
+    private var lastConnectedBinder: IBinder? = null
     private var nativeLibDir: String = ""
     private var modelLoadedInWorker = false
     private var workerSessionLost = false
@@ -330,6 +332,15 @@ internal class RemoteLocalChatRunner(
     /** Detaches this client without unloading the process-wide resident model. */
     override fun close() = detach()
 
+    /**
+     * Read-only evidence for a disposable worker owner. A never-connected runner could not
+     * issue a native request; otherwise only death of its exact Binder confirms release.
+     * Detach alone is deliberately insufficient. This never binds or reads native stats.
+     */
+    internal fun isConnectedWorkerReleased(): Boolean = synchronized(stateLock) {
+        lastConnectedBinder?.isBinderAlive != true
+    }
+
     private fun detach() {
         // Deliberately no Binder shutdown here: ViewModel.onCleared() calls
         // close() on the main thread, and another owner may already be bound.
@@ -434,6 +445,7 @@ internal class RemoteLocalChatRunner(
                     ) {
                         attempt.binder = service
                         attempt.deathRecipient = deathRecipient
+                        lastConnectedBinder = service
                         remote = endpoint
                         confirmedWorkerDeath = false
                         workerSessionEpoch += 1L

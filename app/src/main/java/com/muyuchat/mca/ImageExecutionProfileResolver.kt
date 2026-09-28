@@ -217,6 +217,7 @@ internal object ImageExecutionProfileResolver {
         BuiltInImageProfileTarget("z_image_turbo_q4", "sdcpp.z-image-turbo"),
         BuiltInImageProfileTarget("flux2_klein_4b_q4", "sdcpp.flux2-klein"),
         BuiltInImageProfileTarget("qwen_image_2512_q2", "sdcpp.qwen-image"),
+        BuiltInImageProfileTarget("qwen_image_21_q4_k_m", "sdcpp.qwen-image-2.1"),
         BuiltInImageProfileTarget("qwen_image_21_mnn_opencl", "mnn.qwen-image-2.1.opencl"),
         BuiltInImageProfileTarget("longcat_image_q4", "sdcpp.longcat-image")
     )
@@ -369,6 +370,12 @@ internal object ImageExecutionProfileResolver {
             repositories = setOf("unsloth/Qwen-Image-2512-GGUF"),
             artifacts = setOf("qwen-image-2512-Q2_K.gguf"),
             fingerprints = setOf("176678f0d4e6c613c5a318014f16d829438b8feec9454bde7b3070a520bf1728")
+        ),
+        identityRule(
+            "qwen_image_21_q4_k_m",
+            repositories = setOf("unsloth/Qwen-Image-2.1-GGUF"),
+            artifacts = setOf("qwen-image-2.1-Q4_K_M.gguf"),
+            fingerprints = setOf("631d532e7ca71e8d90a87c71d3699761a812039d22e3370e87498d87754660fe")
         ),
         identityRule(
             "qwen_image_21_mnn_opencl",
@@ -1533,6 +1540,7 @@ internal object ImageExecutionProfileResolver {
         "sdcpp.z-image-turbo" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.Z_IMAGE, ImageModelVariant.Z_IMAGE_TURBO, 8, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, supportsNegativePrompt = false, maxPromptTokens = 512)
         "sdcpp.flux2-klein" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.FLUX, ImageModelVariant.FLUX2_KLEIN, 4, 1.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, supportsNegativePrompt = false, maxPromptTokens = 512)
         "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 40, 2.5, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT, maxPromptTokens = 512)
+        "sdcpp.qwen-image-2.1" -> qwenImage21GgufProfile(profileId, fingerprint)
         "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 5.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT, maxPromptTokens = 512)
         else -> error("Unknown built-in image profile target: $profileId")
     }
@@ -1937,6 +1945,42 @@ internal object ImageExecutionProfileResolver {
         ),
         profileRevision = QWEN_IMAGE_21_EXECUTION_PROFILE_REVISION
     )
+
+    private fun qwenImage21GgufProfile(profileId: String, fingerprint: String): ImageExecutionProfile {
+        val base = sdcppProfile(
+            profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE_21,
+            20, 6.0, ImageSchedulerAlgorithm.FLOW_MATCH, 512, defaultNegativePrompt = "", maxPromptTokens = 512
+        )
+        return base.copy(
+            profileRevision = 3,
+            tokenizer = base.tokenizer.copy(
+                bosId = null, eosId = null, padId = null, lowercase = false,
+                supportsPromptWeighting = false, clip1PadRule = ImageClipPadRule.MODEL_DECLARED
+            ),
+            conditioning = conditioning(ImageEmbeddingDiskDataType.RUNTIME_NATIVE, ImageEmbeddingConversionStrategy.RUNTIME_NATIVE, 4096, maxLength = 512),
+            latent = ImageLatentContract(64, 16, ImageTensorLayout.NCHW, ImageTensorLayout.NCHW, listOf(1, 64, 32, 32)),
+            vae = base.vae.copy(
+                inputShape = listOf(1, 64, 32, 32),
+                outputShape = listOf(1, 4, 512, 512),
+                inputLayout = ImageTensorLayout.RUNTIME_NATIVE,
+                outputLayout = ImageTensorLayout.RUNTIME_NATIVE,
+                outputRange = ImagePixelRange.RUNTIME_NATIVE,
+                channelOrder = ImageChannelOrder.RUNTIME_NATIVE
+            ),
+            graph = ImageGraphContract(
+                textEncoder = ImageGraphArtifactContract("Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"),
+                unet = ImageGraphArtifactContract("qwen-image-2.1-Q4_K_M.gguf"),
+                vae = ImageGraphArtifactContract("qwen_image_2.1_vae_bf16.safetensors"),
+                workerStrategy = ImageWorkerStrategy.IN_PROCESS
+            ),
+            capabilities = base.capabilities.copy(
+                minWidth = 256, maxWidth = 1536, minHeight = 256, maxHeight = 1536,
+                widthMultiple = 32, heightMultiple = 32,
+                supportsPromptWeighting = false, supportsLora = true,
+                supportsLivePreview = false, supportsUltraFix = false, maxBatchCount = 1
+            )
+        )
+    }
 
     private fun sdcppProfile(
         profileId: String,
@@ -2402,3 +2446,9 @@ internal object ImageExecutionProfileResolver {
             value.seed != null ||
             value.negativePromptSpecified
 }
+
+internal fun isQwenImage21LegacyVaeProfileFingerprint(value: String): Boolean =
+    value.trim().equals(
+        "2525485bba44d4d8176d05522fa7e8b4b1080c9e7b7df18dfde7d58e667ff055",
+        ignoreCase = true
+    )

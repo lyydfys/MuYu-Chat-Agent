@@ -43,6 +43,7 @@ internal data class LocalImageUiExecutionDefaults(
  */
 internal data class LocalImageUiCapabilitiesSnapshot(
     val supportedTaskModes: Set<ImageGenerationUiTaskMode>,
+    val isQwenImage21Gguf: Boolean,
     val supportsNegativePrompt: Boolean,
     val supportsClipSkip: Boolean,
     val supportsVaeTiling: Boolean,
@@ -95,9 +96,10 @@ internal data class LocalImageUiPreviewTopology(
 internal fun localImagePreviewTopologyForUi(
     runtime: LocalImageRuntime,
     task: ImageTask?,
-    hasSharedQnnVaePreviewTopology: Boolean
+    hasSharedQnnVaePreviewTopology: Boolean,
+    hasStableDiffusionPreviewTopology: Boolean = true
 ): LocalImageUiPreviewTopology = when {
-    runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP -> LocalImageUiPreviewTopology(
+    runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && hasStableDiffusionPreviewTopology -> LocalImageUiPreviewTopology(
         previewMode = ImageGenerationUiPreviewMode.PROJECTION,
         defaultPreviewInterval = 1
     )
@@ -171,6 +173,7 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         hasSharedQnnVaePreviewTopology = resolution
             ?.profile
             ?.hasSharedQnnVaePreviewTopology() == true,
+        hasStableDiffusionPreviewTopology = resolution?.profile?.variant != ImageModelVariant.QWEN_IMAGE_21,
     )
     val supportsLora = resolvedCapabilities?.supportsLora
         ?: legacyStableDiffusionCpp
@@ -185,6 +188,7 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         ?: legacyExecutionDefaultsForUi()
     return LocalImageUiCapabilitiesSnapshot(
         supportedTaskModes = supportedTaskModes,
+        isQwenImage21Gguf = resolution?.profile?.profileId == "sdcpp.qwen-image-2.1",
         supportsNegativePrompt = supportsNegativePrompt,
         supportsClipSkip = supportsClipSkip,
         supportsVaeTiling = supportsVaeTiling,
@@ -228,7 +232,7 @@ private fun LocalImageModelRecord.taskModesFromResolvedProfileForUi(
     ImageTask.IMAGE_EDIT -> setOf(ImageGenerationUiTaskMode.EDIT)
     ImageTask.TEXT_TO_IMAGE -> buildSet {
         add(ImageGenerationUiTaskMode.TEXT_TO_IMAGE)
-        if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
+        if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && profile.variant != ImageModelVariant.QWEN_IMAGE_21) {
             // The public stable-diffusion.cpp generation API consumes init images and masks through
             // the same loaded image context. A package need not expose a separate VAE-encoder file:
             // monolithic checkpoints carry that capability internally, while split packages resolve

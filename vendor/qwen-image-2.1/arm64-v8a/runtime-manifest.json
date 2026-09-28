@@ -8,13 +8,13 @@
     },
     {
       "file": "libmca_qwenimage21_mnn.so",
-      "sizeBytes": 8539008,
-      "sha256": "bc7aa0c41193109239b2a88af263ee064dd61786e9c6dc06e985317a1a28d3cd"
+      "sizeBytes": 8540672,
+      "sha256": "3bc124e3d0cb22c75ac07e388818c578e63f3bb4437622825500e0f194ea13e8"
     },
     {
       "file": "libqwenimage21_jni.so",
-      "sizeBytes": 276880,
-      "sha256": "65511fb88c64439b46d1df8c74f14f943d9adbb8509a6a38db5edbc68a9d9545"
+      "sizeBytes": 276816,
+      "sha256": "86e761b061a7a40b80b9995e96a301fcf0ff47e8a1f76c502ee51fe7fae3dac2"
     }
   ]
 }

@@ -491,6 +491,30 @@ class LocalVisionInputPreparerTest {
     }
 
     @Test
+    fun reportsDeterministicImageProgressForEachAttachment() {
+        val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
+        val first = File(cacheDir, "first.png").apply { writeBytes(pngHeader(320, 240)) }
+        val second = File(cacheDir, "second.png").apply { writeBytes(pngHeader(640, 480)) }
+        val request = ChatRequest(messages = listOf(ChatMessage(
+            role = Role.USER,
+            content = "Compare",
+            imageAttachments = listOf(
+                ChatImageAttachment(uriString = first.absolutePath, mimeType = "image/png"),
+                ChatImageAttachment(uriString = second.absolutePath, mimeType = "image/png")
+            )
+        )))
+        val progress = mutableListOf<Pair<Int, Int>>()
+
+        LocalVisionInputPreparer.prepare(
+            request,
+            cacheDir,
+            onProgress = { completed, total -> progress += completed to total }
+        )
+
+        assertEquals(listOf(0 to 2, 1 to 2, 2 to 2), progress)
+    }
+
+    @Test
     fun requestWithoutImagesIsUnchangedAndEmitsNoDiagnostics() {
         val cacheDir = Files.createTempDirectory("mca-vision-test").toFile()
         val request = ChatRequest(messages = listOf(ChatMessage(Role.USER, "Hello")))

@@ -1978,6 +1978,24 @@ private fun DownloadProgressPanel(
             } else {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
             }
+            val transferSummary = buildString {
+                if (state.downloadSpeedBytesPerSecond > 0L) {
+                    append(formatBytes(state.downloadSpeedBytesPerSecond)).append("/s")
+                }
+                state.downloadRemainingSeconds?.let { seconds ->
+                    if (isNotEmpty()) append(" · ")
+                    append("剩余约 ").append(formatDuration(seconds))
+                }
+            }
+            if (transferSummary.isNotEmpty() && state.downloadStatus == DownloadStatus.RUNNING) {
+                Text(
+                    transferSummary,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             if (state.downloadStatus == DownloadStatus.FAILED) {
                 Text(
                     listOfNotNull(state.downloadFailureSource?.label, state.statusMessage)

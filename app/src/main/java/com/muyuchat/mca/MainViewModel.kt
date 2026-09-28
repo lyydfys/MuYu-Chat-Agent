@@ -302,6 +302,8 @@ data class ChatSessionRecord(
     val assistantId: String? = null,
     /** Immutable persona contract captured when this conversation chose an assistant. */
     val assistantSnapshot: AssistantConversationSnapshot? = null,
+    /** Historical ownership could not be proved; keep its messages viewable but isolated. */
+    val mixedAssistantHistory: Boolean = false,
     val modelMode: String? = null,
     val modelId: String? = null,
     /** Optional per-conversation override. Null inherits the role/global appearance. */
@@ -311,7 +313,10 @@ data class ChatSessionRecord(
 
 internal fun List<ChatSessionRecord>.latestSessionForAssistant(assistantId: String): ChatSessionRecord? =
     asSequence()
-        .filter { (it.assistantSnapshot?.assistantId ?: it.assistantId) == assistantId }
+        .filter {
+            !it.mixedAssistantHistory && it.assistantId == assistantId &&
+                it.assistantSnapshot?.assistantId == assistantId
+        }
         .maxWithOrNull(compareBy<ChatSessionRecord> { it.updatedAt }.thenBy { it.id })
 
 internal data class ChatImageToolPermissionUiState(
@@ -2534,9 +2539,16 @@ class MainViewModel @JvmOverloads constructor(
     }
     private val initialGlobalChatAppearance = globalChatAppearanceStore.load()
     private val loadedChatSessions = chatSessionStore.load()
+    private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
     private val initialChatSessions = loadedChatSessions
         .withInterruptedChatImageRequests()
         .withBackfilledAssistantSnapshots(initialAssistants)
+        .let { sessions ->
+            val selected = initialAssistants.firstOrNull { it.id == initialStoredSelectedAssistantId }
+            if (selected != null && sessions.latestSessionForAssistant(selected.id) == null) {
+                listOf(selected.newConversationSession(modelMode = null, modelId = null)) + sessions
+            } else sessions
+        }
         .also { snapshots ->
             if (snapshots != loadedChatSessions) {
                 runCatching { chatSessionStore.save(snapshots) }
@@ -2544,7 +2556,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     private val initialWorldBooks = worldBookStore.load()
     private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
-    private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
     private val initialStartupSession = initialChatSessions
         .latestSessionForAssistant(initialStoredSelectedAssistantId)
         ?: initialChatSessions.firstOrNull()
@@ -4327,6 +4338,7 @@ class MainViewModel @JvmOverloads constructor(
      */
     fun requestContextCompression() {
         val state = _uiState.value
+        if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
             _uiState.update { it.copy(statusMessage = "当前正在生成，请完成或停止后再压缩上下文。") }
             return
@@ -4352,10 +4364,11 @@ class MainViewModel @JvmOverloads constructor(
     fun toggleMessagePinned(messageId: String) {
         val owner = _uiState.value
         val sessionId = owner.activeChatSessionId ?: return
-        if (owner.isGenerating) return
+        if (owner.isGenerating || !owner.canWriteToActiveAssistantSession()) return
         var changed = false
         _uiState.update { state ->
             if (state.isGenerating || state.activeChatSessionId != sessionId ||
+                !state.canWriteToActiveAssistantSession() ||
                 state.messages.none { it.id == messageId }
             ) return@update state
             val messages = state.messages.map { message ->
@@ -4379,7 +4392,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun undoContextSummary() {
         val state = _uiState.value
-        if (state.isGenerating) return
+        if (state.isGenerating || !state.canWriteToActiveAssistantSession()) return
         val sessionId = state.activeChatSessionId ?: return
         val assistantSnapshot = state.activeAssistantSnapshot()
             ?: state.selectedAssistant()?.toConversationSnapshot()
@@ -4471,9 +4484,19 @@ class MainViewModel @JvmOverloads constructor(
     ): com.muyuchat.core.engine.ContextCompressionResult {
         fun ownerCurrent(): Boolean {
             val current = _uiState.value
+            val expectedSession = initialState.chatSessions.firstOrNull {
+                it.id == initialState.activeChatSessionId
+            }
+            val actualSession = current.chatSessions.firstOrNull {
+                it.id == initialState.activeChatSessionId
+            }
             return generationRunSequence.get() == generationRunId &&
                 current.activeChatSessionId == initialState.activeChatSessionId &&
-                current.messages == initialState.messages
+                current.messages == initialState.messages &&
+                expectedSession != null && actualSession != null &&
+                !actualSession.mixedAssistantHistory &&
+                actualSession.assistantId == expectedSession.assistantId &&
+                actualSession.assistantSnapshot == expectedSession.assistantSnapshot
         }
         val selection = initialState.contextSummaryModelSelection
         val local = selection == "local" || selection == "current" && effectiveBackend == ChatBackend.LOCAL
@@ -4934,6 +4957,53 @@ class MainViewModel @JvmOverloads constructor(
                         )
                     }
                 }
+        }
+    }
+
+    /** Downloads the publisher-pinned Viggle v0.2.1 adapter into the same
+     * private store used by user-imported LoRAs. Unknown device profiles do not
+     * affect visibility or access; the store's byte and SHA checks are the
+     * acceptance gate. */
+    fun downloadOfficialViggleLora() {
+        if (_uiState.value.localImageLoraImporting) return
+        _uiState.update {
+            it.copy(
+                localImageLoraImporting = true,
+                localImageLoraMessage = "正在下载 Viggle v0.2.1 LoRA…"
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            var lastReported = -1L
+            runCatching {
+                ViggleV021LoraDownloader.download(localImageLoraStore) { bytes ->
+                    val mb = bytes / (1024L * 1024L)
+                    if (mb != lastReported) {
+                        lastReported = mb
+                        _uiState.update {
+                            it.copy(
+                                localImageLoraMessage =
+                                    "正在下载 Viggle v0.2.1 LoRA… ${bytes * 100 / ViggleV021LoraDownloader.EXPECTED_SIZE_BYTES}%"
+                            )
+                        }
+                    }
+                }
+            }.onSuccess { record ->
+                _uiState.update {
+                    it.copy(
+                        localImageLoras = localImageLoraStore.load(),
+                        localImageLoraImporting = false,
+                        localImageLoraMessage = "已下载并校验 Viggle v0.2.1 LoRA：${record.name}"
+                    )
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                _uiState.update {
+                    it.copy(
+                        localImageLoraImporting = false,
+                        localImageLoraMessage = "Viggle LoRA 下载失败：${error.message ?: "网络或文件校验错误"}"
+                    )
+                }
+            }
         }
     }
 
@@ -5853,6 +5923,31 @@ class MainViewModel @JvmOverloads constructor(
         error("New local image requests cannot enter the legacy V4 LLM prompt translation path.")
     }
 
+    /** Keeps chat weights unloaded until the local image request has released its worker. */
+    private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease {
+        // Wait for a genuine in-flight chat/load to finish; never stop another request here.
+        val lease = engine.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
+        try {
+            val hadLoadedModel = engine.stats.value.loaded || _uiState.value.loadedModelId != null
+            val releasedIdentity = activeRuntimeIdentity
+            engine.unloadModel(lease = lease)
+            if (hadLoadedModel) {
+                clearNativeRuntimeSessionState(
+                    lifecycle = AgentEngineLifecycle.UNLOADED,
+                    statusMessage = "已释放聊天模型内存，正在准备本地生图；聊天模型可在生图结束后重新加载。"
+                )
+                clearPendingRuntimeTransactionForLifecycle(
+                    reason = "LOCAL_IMAGE_MEMORY_RECLAIM",
+                    identity = releasedIdentity
+                )
+            }
+            return lease
+        } catch (error: Throwable) {
+            withContext(NonCancellable) { lease.release() }
+            throw error
+        }
+    }
+
     private fun enqueueImageGeneration(
         prompt: String,
         inputDraft: LocalImageInputDraft,
@@ -6145,6 +6240,7 @@ class MainViewModel @JvmOverloads constructor(
         )
         val executionJob = viewModelScope.launch(Dispatchers.IO) {
             var preparedJobSpec = executionJobSpec
+            var chatRuntimeLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
             try {
                 awaitImageLibraryStartupReconciliation()
                 _uiState.update { state ->
@@ -6213,6 +6309,8 @@ class MainViewModel @JvmOverloads constructor(
                         return@launch
                     }
                     preparedJobSpec = executionJobSpec.copy(promptExecution = promptExecution)
+                    currentCoroutineContext().ensureActive()
+                    chatRuntimeLease = prepareLocalImageRuntimeMemory()
                     currentCoroutineContext().ensureActive()
                     localImageWorkerClient.begin(model.runtime)
                     currentCoroutineContext().ensureActive()
@@ -6600,6 +6698,15 @@ class MainViewModel @JvmOverloads constructor(
                     return@launch
                 }
             } finally {
+                withContext(NonCancellable) {
+                    // The image client unbinds before returning, but the disposable worker may
+                    // still hold native mappings until its process dies. Confirm that boundary
+                    // before allowing the chat engine to map its weights again.
+                    if (chatRuntimeLease != null) {
+                        runCatching { localImageWorkerClient.awaitOwnedWorkerRelease() }
+                        chatRuntimeLease?.release()
+                    }
+                }
                 cleanupLocalImagePreviews(jobId)
             }
         }
@@ -7893,23 +8000,25 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun updateParams(params: GenerationParams) {
-        val previous = _uiState.value.params
-        val changedRuntimeFields = runtimeParameterChanges(previous, params)
+        val state = _uiState.value
+        val previous = state.params
+        val scopedParams = params.copy(systemPrompt = state.selectedAssistant()?.systemPrompt ?: previous.systemPrompt)
+        val changedRuntimeFields = runtimeParameterChanges(previous, scopedParams)
         if (changedRuntimeFields.isNotEmpty()) {
             runtimeUserOverrideFields += changedRuntimeFields
             persistRuntimeUserOverrideFields(runtimeUserOverrideFields)
         }
-        persistGenerationParams(params)
+        persistGenerationParams(scopedParams)
         // Keep the legacy global/assistant preference for migration, while also
         // recording this edit against the active model so switching models does
         // not make users repeat the same tuning work.
-        persistModelGenerationParams(_uiState.value, params)
-        val updatedAssistants = updatedAssistantsWithParams(params)
+        persistModelGenerationParams(state, scopedParams)
+        val updatedAssistants = updatedAssistantsWithParams(scopedParams)
         val hasLoadedModel = _uiState.value.loadedModelId != null
-        val reloadRequired = hasLoadedModel && executionProfileDiffers(params, engine.activeExecutionProfile())
+        val reloadRequired = hasLoadedModel && executionProfileDiffers(scopedParams, engine.activeExecutionProfile())
         _uiState.update { state ->
             state.copy(
-                params = params,
+                params = scopedParams,
                 assistants = updatedAssistants,
                 reloadRequired = reloadRequired,
                 statusMessage = if (reloadRequired) {
@@ -7923,7 +8032,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         persistAssistantsAsync()
         if (reloadRequired && changedRuntimeFields.isNotEmpty()) {
-            stageDirectParameterProfile(params)
+            stageDirectParameterProfile(scopedParams)
         } else if (!reloadRequired && changedRuntimeFields.isNotEmpty()) {
             directParameterStageGeneration.incrementAndGet()
             directParameterStageJob?.cancel()
@@ -8083,6 +8192,11 @@ class MainViewModel @JvmOverloads constructor(
             ?.trim()
             ?.takeIf { it.isNotBlank() && cleanDefaultModelMode != ASSISTANT_MODEL_MODE_FOLLOW_CURRENT }
         val state = _uiState.value
+        if (rejectWhileConversationMutationInProgress() || state.isGenerating ||
+            hasActiveAssistantImageExecution(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "请先结束当前角色请求，再保存角色卡。") }
+            return
+        }
         val now = System.currentTimeMillis()
         val existing = id?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
         val assistant = (existing ?: AssistantRecord(name = cleanName, createdAt = now)).copy(
@@ -8124,38 +8238,40 @@ class MainViewModel @JvmOverloads constructor(
             state.assistants.map { if (it.id == assistant.id) assistant else it }
         }
         val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId
-        if (shouldSelectAssistant) {
-            assistantStore.saveSelectedAssistantId(assistant.id)
-        }
+        if (shouldSelectAssistant && existing != null) assistantStore.saveSelectedAssistantId(assistant.id)
         val updatedParams = assistant.toGenerationParams(state.params)
-        if (shouldSelectAssistant) {
+        if (shouldSelectAssistant && existing != null) {
             persistGenerationParams(updatedParams)
             // Editing the active assistant is an explicit user change for the
             // currently selected model; retain it in that model's profile.
             persistModelGenerationParams(state, updatedParams)
         }
-        // An assistant edit changes the persona that the user sees in the editor.  Keep the
-        // selected assistant, session binding, and effective generation snapshot consistent:
-        // leaving an older snapshot in an existing session made the UI show the new card while
-        // the runner silently continued to use the old one.
-        val applyToActiveConversation = shouldSelectAssistant && state.activeChatSessionId != null
-        val updatedSessions = if (applyToActiveConversation) {
-            state.chatSessions.bindSession(
-                sessionId = state.activeChatSessionId,
-                assistantId = assistant.id,
-                assistantSnapshot = assistant.toConversationSnapshot(),
-                replaceAssistantSnapshot = true,
-                modelMode = state.selectedChatBackend.bindingValue(),
-                modelId = state.currentChatModelId()
-            )
-        } else {
-            state.chatSessions
-        }
+        // An explicit edit applies to this role's active conversation only. Other
+        // conversations keep the prompt version they captured when created.
+        val activeSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
+        val applyToActiveConversation = existing != null && shouldSelectAssistant &&
+            activeSession?.assistantId == assistant.id &&
+            activeSession?.assistantSnapshot?.assistantId == assistant.id &&
+            activeSession?.mixedAssistantHistory == false
+        val updatedSessions = if (applyToActiveConversation) state.chatSessions.map { session ->
+            val previousSnapshot = session.assistantSnapshot
+            if (session.id != state.activeChatSessionId || session.mixedAssistantHistory ||
+                session.assistantId != assistant.id ||
+                previousSnapshot?.assistantId != assistant.id) session else {
+                val revisedSnapshot = assistant.toConversationSnapshot(previousSnapshot.capturedAt).copy(
+                    priorSystemPromptHashes = (
+                        previousSnapshot.priorSystemPromptHashes +
+                            com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(previousSnapshot.systemPrompt)
+                        ).distinct().takeLast(32)
+                )
+                session.copy(assistantSnapshot = revisedSnapshot)
+            }
+        } else state.chatSessions
         _uiState.update {
             it.copy(
                 assistants = updatedAssistants,
-                selectedAssistantId = if (shouldSelectAssistant) assistant.id else state.selectedAssistantId,
-                params = if (shouldSelectAssistant) updatedParams else state.params,
+                selectedAssistantId = if (shouldSelectAssistant && existing != null) assistant.id else state.selectedAssistantId,
+                params = if (shouldSelectAssistant && existing != null) updatedParams else state.params,
                 chatSessions = updatedSessions,
                 statusMessage = when {
                     existing == null -> "已创建助手：${assistant.name}"
@@ -8166,13 +8282,17 @@ class MainViewModel @JvmOverloads constructor(
             )
         }
         persistAssistantsAsync()
-        persistChatSessions(updatedSessions)
+        if (existing != null) persistChatSessions(updatedSessions)
         if (applyToActiveConversation) {
             // The persona prefix changed. Do not allow a local runner to continue from the
             // previous role's KV cache, regardless of whether the assistant was newly created.
             markLocalConversationContextInvalid()
         }
-        if (shouldSelectAssistant) {
+        if (existing == null) {
+            selectAssistant(assistant.id)
+            persistChatSessions()
+            _uiState.update { it.copy(statusMessage = "已创建助手：${assistant.name}") }
+        } else if (shouldSelectAssistant) {
             applyAssistantDefaultModel(assistant)
         }
     }
@@ -8239,6 +8359,7 @@ class MainViewModel @JvmOverloads constructor(
     private fun recordCompletedCharacterMemoryTurn(
         assistantId: String,
         sessionId: String,
+        assistantSnapshot: AssistantConversationSnapshot,
         user: ChatMessage,
         assistant: ChatMessage,
         conversationPersistJob: Job?,
@@ -8260,6 +8381,7 @@ class MainViewModel @JvmOverloads constructor(
             conversationPersistJob?.join()
             val state = _uiState.value
             if (state.assistants.none { it.id == assistantId && it.memoryEnabled } ||
+                state.chatSessions.none { it.id == sessionId && it.assistantSnapshot == assistantSnapshot } ||
                 !state.chatSessions.containsCompletedMemoryTurn(turn)) return@launch
             val inserted = runCatching { chatSessionStore.appendMemoryTurn(turn) }.getOrDefault(false)
             if (inserted) {
@@ -8947,7 +9069,7 @@ class MainViewModel @JvmOverloads constructor(
         val assistant = state.assistants.firstOrNull { it.id == assistantId } ?: return
         val previousSession = state.chatSessions.latestSessionForAssistant(assistantId)
         if (previousSession != null) {
-            if (previousSession.id != state.activeChatSessionId) {
+            if (previousSession.id != state.activeChatSessionId || state.selectedAssistantId != assistant.id) {
                 selectChatSession(previousSession.id)
             }
             if (_uiState.value.activeChatSessionId == previousSession.id &&
@@ -8962,6 +9084,16 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         if (!newChatForAssistant(assistant, bindDefaultModel = true)) return
+        finishSelectingNewAssistant(assistant)
+    }
+
+    fun createChatForAssistant(assistantId: String) {
+        val assistant = _uiState.value.assistants.firstOrNull { it.id == assistantId } ?: return
+        if (!newChatForAssistant(assistant, bindDefaultModel = true)) return
+        finishSelectingNewAssistant(assistant)
+    }
+
+    private fun finishSelectingNewAssistant(assistant: AssistantRecord) {
         invalidatePendingChatImagePreparation()
         contentImportSelectionRevision.incrementAndGet()
         assistantStore.saveSelectedAssistantId(assistant.id)
@@ -9199,6 +9331,10 @@ class MainViewModel @JvmOverloads constructor(
     fun deleteAssistant(assistantId: String) {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (state.isGenerating || hasActiveAssistantImageExecution(state.activeChatSessionId)) {
+            _uiState.update { it.copy(statusMessage = "请先结束当前角色请求，再删除助手。") }
+            return
+        }
         if (assistantId == AssistantRecord.DEFAULT_ID || state.assistants.size <= 1) {
             _uiState.update { it.copy(statusMessage = "默认助手不能删除") }
             return
@@ -9220,33 +9356,21 @@ class MainViewModel @JvmOverloads constructor(
             }
             return
         }
-        assistantStore.saveSelectedAssistantId(next.id)
+        val deletingSelectedAssistant = state.selectedAssistantId == assistantId
+        if (deletingSelectedAssistant) assistantStore.saveSelectedAssistantId(next.id)
         val nextAssistantParams = next.toGenerationParams(state.params)
-        val updatedParams = state.modelGenerationProfileKey()
+        val updatedParams = if (deletingSelectedAssistant) state.modelGenerationProfileKey()
             ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, nextAssistantParams) }
-            ?: nextAssistantParams
-        persistGenerationParams(updatedParams)
+            ?: nextAssistantParams else state.params
+        if (deletingSelectedAssistant) persistGenerationParams(updatedParams)
         val updatedSessions = state.chatSessions
-            .map { session ->
-                if (session.assistantId == assistantId) {
-                    session.copy(assistantId = next.id)
-                } else {
-                    session
-                }
-            }
-            .bindSession(
-                sessionId = state.activeChatSessionId,
-                assistantId = next.id,
-                modelMode = state.selectedChatBackend.bindingValue(),
-                modelId = state.currentChatModelId()
-            )
         _uiState.update {
             it.copy(
                 assistants = remaining,
                 assistantMemories = it.assistantMemories.filterNot { memory ->
                     memory.assistantId == assistantId
                 },
-                selectedAssistantId = next.id,
+                selectedAssistantId = if (deletingSelectedAssistant) next.id else it.selectedAssistantId,
                 params = updatedParams,
                 chatSessions = updatedSessions,
                 statusMessage = "已删除助手：${removed.name}"
@@ -9267,8 +9391,12 @@ class MainViewModel @JvmOverloads constructor(
             scope = WorldBookScope.ASSISTANT,
             retainedOwnerIds = remaining.mapTo(hashSetOf()) { it.id }
         )
-        persistChatSessions(updatedSessions)
-        applyAssistantDefaultModel(next)
+        if (deletingSelectedAssistant) {
+            selectAssistant(next.id)
+            persistChatSessions()
+        } else {
+            persistChatSessions(updatedSessions)
+        }
         viewModelScope.launch { chatAppearanceMutex.withLock { cleanupUnusedChatBackgrounds() } }
     }
 
@@ -9482,29 +9610,13 @@ class MainViewModel @JvmOverloads constructor(
         }
         val currentState = _uiState.value
         val currentOwnerIsCurrent = owner.isCurrent(currentState)
-        val currentOwnerSessionId = owner.sessionId?.takeIf { id -> currentState.chatSessions.any { it.id == id } }
-        val updatedParams = assistant.toGenerationParams(currentState.params)
-        val hasFirstGreeting = success.card.firstMessage.isNotBlank()
-        val selectImportedAssistant = currentOwnerIsCurrent && (!hasFirstGreeting ||
-            (!currentState.isGenerating && conversationMutationBarrier?.isActive != true &&
-                !hasActiveAssistantImageExecution(currentState.activeChatSessionId)))
-        if (selectImportedAssistant) {
-            assistantStore.saveSelectedAssistantId(assistant.id)
-            persistGenerationParams(updatedParams)
-        }
-        val updatedSessions = if (hasFirstGreeting) currentState.chatSessions else currentState.chatSessions.bindSession(
-            sessionId = currentOwnerSessionId,
-            assistantId = assistant.id,
-            assistantSnapshot = assistant.toConversationSnapshot(),
-            replaceAssistantSnapshot = true,
-            modelMode = if (selectImportedAssistant) currentState.selectedChatBackend.bindingValue() else null,
-            modelId = if (selectImportedAssistant) currentState.currentChatModelId() else null
-        )
+        val selectImportedAssistant = currentOwnerIsCurrent &&
+            !currentState.isGenerating && conversationMutationBarrier?.isActive != true &&
+            !hasActiveAssistantImageExecution(currentState.activeChatSessionId)
+        val updatedSessions = currentState.chatSessions
         _uiState.update {
             it.copy(
                 assistants = it.assistants.filterNot { record -> record.id == assistant.id } + assistant,
-                selectedAssistantId = if (selectImportedAssistant) assistant.id else it.selectedAssistantId,
-                params = if (selectImportedAssistant) updatedParams else it.params,
                 chatSessions = updatedSessions,
                 worldBooks = updatedWorldBooks,
                 statusMessage = buildString {
@@ -9513,36 +9625,52 @@ class MainViewModel @JvmOverloads constructor(
                     append("角色卡：")
                     append(assistant.name)
                     if (!selectImportedAssistant) {
-                        append(if (currentOwnerSessionId != null && !hasFirstGreeting) "；已保存到原对话，当前对话未切换角色" else "；当前对话未切换角色")
+                        append("；当前对话未切换角色")
                     }
                     append(embeddedCharacterBookStatusSuffix(embeddedWorldBookImport, embeddedWorldBookSaveError))
                 }
             )
         }
-        if (selectImportedAssistant && hasFirstGreeting) {
-            val importStatus = _uiState.value.statusMessage
-            if (newChatForAssistant(assistant, bindDefaultModel = true)) {
-                _uiState.update { it.copy(statusMessage = importStatus) }
-            }
-        }
-        chatSessionPersistenceSequence.incrementAndGet()
-        withContext(Dispatchers.IO) {
-            chatSessionPersistenceMutex.withLock {
-                val snapshot = _uiState.value.chatSessions
-                val liveIds = snapshot.mapTo(hashSetOf()) { it.id }
-                val bindings = synchronized(chatSessionPersistenceStateLock) {
-                    pendingKnowledgeBindings.filterKeys { it in liveIds }.mapValues { (_, ids) -> ids.toSet() }
-                }
-                chatSessionStore.save(snapshot, bindings)
-                durableChatSessions = snapshot
-            }
-        }
-        // Importing a card selects it for a fresh conversation when it has a greeting.
-        // Its captured persona must not share the previous local KV tail.
         if (selectImportedAssistant) {
-            markLocalConversationContextInvalid()
-            applyAssistantDefaultModel(assistant)
+            val importStatus = _uiState.value.statusMessage
+            try {
+                selectAssistant(assistant.id)
+                if (_uiState.value.selectedAssistantId == assistant.id &&
+                    _uiState.value.activeChatSessionId != currentState.activeChatSessionId) {
+                    _uiState.update { it.copy(statusMessage = importStatus) }
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _uiState.update {
+                    it.copy(statusMessage = "$importStatus；角色卡已保存，自动切换会话失败：${error.message ?: "请手动选择角色卡"}")
+                }
+            }
         }
+        val createdSessionId = _uiState.value.activeChatSessionId?.takeIf { activeId ->
+            currentState.chatSessions.none { it.id == activeId }
+        }
+        if (createdSessionId != null) {
+            try {
+                chatSessionPersistenceSequence.incrementAndGet()
+                withContext(Dispatchers.IO) {
+                    chatSessionPersistenceMutex.withLock {
+                        val snapshot = _uiState.value.chatSessions
+                        val liveIds = snapshot.mapTo(hashSetOf()) { it.id }
+                        val bindings = synchronized(chatSessionPersistenceStateLock) {
+                            pendingKnowledgeBindings.filterKeys { it in liveIds }.mapValues { (_, ids) -> ids.toSet() }
+                        }
+                        chatSessionStore.save(snapshot, bindings)
+                        durableChatSessions = snapshot
+                    }
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                _uiState.update {
+                    it.copy(statusMessage = "${it.statusMessage.orEmpty()}；角色卡已保存，但新会话保存失败：${error.message ?: "存储错误"}")
+                }
+            }
+        }
+        // Import success depends on the role and its book, not on optional chat navigation.
         return embeddedWorldBookSaveError == null
     }
 
@@ -11888,6 +12016,10 @@ class MainViewModel @JvmOverloads constructor(
         preparedInput: PreparedChatInput
     ) {
         if (rejectWhileConversationMutationInProgress()) return
+        if (!state.canWriteToActiveAssistantSession()) {
+            _uiState.update { it.copy(statusMessage = "此对话的角色归属不明确或角色已删除，请在历史中查看并手动分支。") }
+            return
+        }
         if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
             _uiState.update { it.copy(statusMessage = "请先确认、取消或等待上一张角色请求的图片完成。") }
             return
@@ -12103,6 +12235,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         val currentOwner = _uiState.value
         if (currentOwner.activeChatSessionId != state.activeChatSessionId ||
+            !currentOwner.canWriteToActiveAssistantSession() ||
             currentOwner.input != state.input || currentOwner.messages != state.messages ||
             currentOwner.selectedAssistantId != state.selectedAssistantId ||
             currentOwner.assistants != state.assistants ||
@@ -12394,6 +12527,10 @@ class MainViewModel @JvmOverloads constructor(
     ) {
         val original = prompt.trim()
         val bridgeContextState = _uiState.value
+        if (!bridgeContextState.canWriteToActiveAssistantSession()) {
+            _uiState.update { it.copy(statusMessage = "此会话仅供查看，请先创建角色分支。") }
+            return
+        }
         val initialImageOptions = runCatching {
             chatImageOptionsForCurrentSelection(bridgeContextState).let { options ->
                 options.copy(batchCount = requestedOutputCount ?: options.batchCount)
@@ -12929,6 +13066,10 @@ class MainViewModel @JvmOverloads constructor(
         contextTraceJson: String? = null
     ) {
         val initialState = _uiState.value
+        if (!initialState.canWriteToActiveAssistantSession()) {
+            _uiState.update { it.copy(statusMessage = "此会话仅供查看，请先创建角色分支。") }
+            return
+        }
         if (initialState.isGenerating) {
             _uiState.update { it.copy(statusMessage = "当前聊天仍在生成，请等本轮结束后再发送图片请求。") }
             return
@@ -13761,6 +13902,7 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         val (sessionId, message) = owner
+        if (state.activeChatSessionId != sessionId || !state.canWriteToActiveAssistantSession()) return
         val previous = message.generatedImageRequest ?: return
         val jobId = "ui-img-${UUID.randomUUID()}"
         val snapshot = buildChatImageRetrySnapshot(previous, sessionId)
@@ -13806,6 +13948,8 @@ class MainViewModel @JvmOverloads constructor(
     fun approveChatImageRequest(requestId: String) {
         val owner = findChatGeneratedImageRequest(requestId) ?: return
         val (chatSessionId, request) = owner
+        val state = _uiState.value
+        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
         if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
         val snapshot = buildChatImageRetrySnapshot(request, chatSessionId)
         if (snapshot == null) {
@@ -13853,6 +13997,8 @@ class MainViewModel @JvmOverloads constructor(
     fun rejectChatImageRequest(requestId: String) {
         val owner = findChatGeneratedImageRequest(requestId) ?: return
         val (chatSessionId, request) = owner
+        val state = _uiState.value
+        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
         if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
         val rejected = request.copy(
             status = ChatGeneratedImageStatus.CANCELLED,
@@ -13866,6 +14012,7 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
     fun continueAssistantImageTurn(requestId: String) {
+        if (!_uiState.value.canWriteToActiveAssistantSession()) return
         val owner = findChatGeneratedImageRequest(requestId) ?: return
         val (_, request) = owner
         if (!request.canContinueAssistantImageTurn()) return
@@ -13892,7 +14039,9 @@ class MainViewModel @JvmOverloads constructor(
 
     fun cancelChatImageGeneration(requestId: String) {
         val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (_, request) = owner
+        val (chatSessionId, request) = owner
+        val state = _uiState.value
+        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
         if (request.status == ChatGeneratedImageStatus.AWAITING_APPROVAL) {
             rejectChatImageRequest(requestId)
             return
@@ -14061,6 +14210,8 @@ class MainViewModel @JvmOverloads constructor(
         var persistedSessions: List<ChatSessionRecord>? = null
         _uiState.update { state ->
             val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@update state
+            if (owner.mixedAssistantHistory || owner.assistantId == null ||
+                owner.assistantSnapshot?.assistantId != owner.assistantId) return@update state
             val sourceMessages = if (state.activeChatSessionId == chatSessionId) {
                 state.messages
             } else {
@@ -14102,6 +14253,8 @@ class MainViewModel @JvmOverloads constructor(
         if (images.isEmpty()) return null
         val state = _uiState.value
         val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return null
+        if (owner.mixedAssistantHistory || owner.assistantId == null ||
+            owner.assistantSnapshot?.assistantId != owner.assistantId) return null
         val sourceMessages = if (state.activeChatSessionId == chatSessionId) state.messages else owner.messages
         val currentRequest = sourceMessages.firstOrNull {
             it.generatedImageRequest?.id == requestId
@@ -14179,6 +14332,7 @@ class MainViewModel @JvmOverloads constructor(
     fun regenerateLastResponse() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) return
         val lastAssistant = state.messages.indexOfLast { it.role == Role.ASSISTANT }
         if (lastAssistant < 0) return
@@ -14231,6 +14385,7 @@ class MainViewModel @JvmOverloads constructor(
     fun deleteMessageAt(index: Int) {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
             _uiState.update { it.copy(statusMessage = "请先停止当前生成，再删除消息") }
             return
@@ -14243,12 +14398,16 @@ class MainViewModel @JvmOverloads constructor(
         }
         val rollback = state.conversationMutationRollbackState()
         val updatedMessages = state.messages.filterIndexed { messageIndex, _ -> messageIndex != index }
-        val emptiedActiveSessionId = state.activeChatSessionId.takeIf { updatedMessages.isEmpty() }
         val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
         var updatedSessions: List<ChatSessionRecord> = state.chatSessions
         _uiState.update {
             updatedSessions = if (updatedMessages.isEmpty()) {
-                it.chatSessions.filterNot { session -> session.id == sessionId }
+                it.chatSessions.map { session ->
+                    if (session.id == sessionId) session.copy(
+                        messages = emptyList(), contextSummaries = emptyList(),
+                        updatedAt = System.currentTimeMillis()
+                    ) else session
+                }
             } else {
                 it.chatSessions.upsertSession(
                     sessionId = sessionId,
@@ -14260,14 +14419,11 @@ class MainViewModel @JvmOverloads constructor(
             }
             it.copy(
                 messages = updatedMessages,
-                activeChatSessionId = if (updatedMessages.isEmpty()) null else sessionId,
+                activeChatSessionId = sessionId,
                 chatSessions = updatedSessions,
                 promptContextUsage = null,
                 statusMessage = "已删除消息"
             )
-        }
-        emptiedActiveSessionId?.let { ownerId ->
-            queueWorldBookCleanup(WorldBookScope.CHAT, setOf(ownerId))
         }
         removedRequest?.let { pendingAssistantImageToolTurns.remove(it.id) }
         persistConversationMutation(updatedSessions, rollback)
@@ -14276,6 +14432,7 @@ class MainViewModel @JvmOverloads constructor(
     fun deleteLastConversationTurn() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
+        if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
             _uiState.update { it.copy(statusMessage = "\u8bf7\u5148\u505c\u6b62\u5f53\u524d\u751f\u6210\uff0c\u518d\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd") }
             return
@@ -14298,11 +14455,15 @@ class MainViewModel @JvmOverloads constructor(
         }
         val rollback = state.conversationMutationRollbackState()
         val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-        val emptiedActiveSessionId = state.activeChatSessionId.takeIf { prune.messages.isEmpty() }
         var updatedSessions: List<ChatSessionRecord> = state.chatSessions
         _uiState.update {
             updatedSessions = if (prune.messages.isEmpty()) {
-                it.chatSessions.filterNot { session -> session.id == sessionId }
+                it.chatSessions.map { session ->
+                    if (session.id == sessionId) session.copy(
+                        messages = emptyList(), contextSummaries = emptyList(),
+                        updatedAt = System.currentTimeMillis()
+                    ) else session
+                }
             } else {
                 it.chatSessions.upsertSession(
                     sessionId = sessionId,
@@ -14314,14 +14475,11 @@ class MainViewModel @JvmOverloads constructor(
             }
             it.copy(
                 messages = prune.messages,
-                activeChatSessionId = if (prune.messages.isEmpty()) null else sessionId,
+                activeChatSessionId = sessionId,
                 chatSessions = updatedSessions,
                 promptContextUsage = null,
                 statusMessage = "\u5df2\u5220\u9664\u6700\u540e\u4e00\u8f6e\u5bf9\u8bdd"
             )
-        }
-        emptiedActiveSessionId?.let { ownerId ->
-            queueWorldBookCleanup(WorldBookScope.CHAT, setOf(ownerId))
         }
         removedRequests.forEach { pendingAssistantImageToolTurns.remove(it.id) }
         persistConversationMutation(
@@ -14391,6 +14549,14 @@ class MainViewModel @JvmOverloads constructor(
             try {
             if (!generationStillOwnsUi()) return@launch
             val initialState = _uiState.value
+            if (!initialState.canWriteToActiveAssistantSession()) {
+                terminalEventSeen = true
+                settleGenerationUi(engine.stats.value, "此对话的角色归属不明确，无法继续生成；请先手动分支。")
+                return@launch
+            }
+            val frozenSession = initialState.chatSessions.first { it.id == initialState.activeChatSessionId }
+            val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)
+            val frozenAssistantId = frozenAssistantSnapshot.assistantId
             val effectiveChatBackend = if (chatModelIdOverride != null) {
                 ChatBackend.CLOUD
             } else {
@@ -14403,10 +14569,9 @@ class MainViewModel @JvmOverloads constructor(
                 foregroundRecoveryJob?.takeUnless { it === generationJob }?.join()
                 if (!generationStillOwnsUi()) return@launch
             }
-            val assistantSnapshot = initialState.activeAssistantSnapshot()
-                ?: initialState.selectedAssistant()?.toConversationSnapshot()
+            val assistantSnapshot = frozenAssistantSnapshot
             val characterMemoryEnabled = initialState.assistants.any {
-                it.id == (assistantSnapshot?.assistantId ?: initialState.selectedAssistantId) &&
+                it.id == frozenAssistantId &&
                     it.memoryEnabled
             }
             if (effectiveChatBackend == ChatBackend.LOCAL &&
@@ -14430,17 +14595,36 @@ class MainViewModel @JvmOverloads constructor(
                 _uiState.update { it.copy(params = baseParams) }
             }
             val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams
-            val characterMemoryContextForTurn = if (characterMemoryEnabled) {
+            val memoryForTurn = if (characterMemoryEnabled) {
                 withContext(Dispatchers.IO) {
-                    val assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId
-                    buildCharacterMemoryContext(
-                        assistantId = assistantId,
-                        memories = chatSessionStore.loadMemories(assistantId),
-                        pendingTurns = chatSessionStore.loadMemoryTurns(assistantId),
-                        currentSessionId = initialState.activeChatSessionId
-                    )
+                    chatSessionStore.loadMemories(frozenAssistantId) to
+                        chatSessionStore.loadMemoryTurns(frozenAssistantId)
                 }
+            } else emptyList<MemoryRecord>() to emptyList<AssistantMemoryTurnRecord>()
+            val characterMemoryContextForTurn = if (characterMemoryEnabled) {
+                buildCharacterMemoryContext(
+                    assistantId = frozenAssistantId,
+                    memories = memoryForTurn.first,
+                    pendingTurns = memoryForTurn.second,
+                    currentSessionId = frozenSession.id
+                )
             } else ""
+            val frozenRoleCardVersion = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
+                frozenAssistantSnapshot.toJsonString()
+            )
+            val frozenMemoryRevision = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
+                buildString {
+                    append(frozenAssistantId).append('\n')
+                    memoryForTurn.first.sortedBy { it.id }.forEach { memory ->
+                        append(memory.id).append('\u001f').append(memory.scope).append('\u001f')
+                            .append(memory.content).append('\n')
+                    }
+                    memoryForTurn.second.sortedBy { it.id }.forEach { turn ->
+                        append(turn.id).append('\u001f').append(turn.sessionId).append('\u001f')
+                            .append(turn.userText).append('\u001f').append(turn.assistantText).append('\n')
+                    }
+                }
+            )
             // A private summary request completes before the normal chat request takes
             // the runtime lease. Original messages remain the revision source.
             val manualCompression = manualContextCompressionRequests.consume(initialState.activeChatSessionId)
@@ -14448,8 +14632,7 @@ class MainViewModel @JvmOverloads constructor(
             if (manualCompression) {
                 _uiState.update { it.copy(contextCompressionPending = false) }
             }
-            val summaryRecords = initialState.chatSessions
-                .firstOrNull { it.id == initialState.activeChatSessionId }?.contextSummaries.orEmpty()
+            val summaryRecords = frozenSession.contextSummaries
             val allowSummaryCandidate = manualCompression || summaryRecords.isEmpty() || summaryRecords.any { it.active }
             val compression = summarizeContextForGeneration(
                 request = ChatRequest(
@@ -14724,6 +14907,15 @@ class MainViewModel @JvmOverloads constructor(
             // compression pass.  Use that exact list for every provider; the
             // full list remains in the persisted session for future summaries.
             val admittedRequestMessages = contextAdmission.request.messages
+            // Live KV invalidation changes on every role switch. Keep the disk identity
+            // stable for a return visit; native token-prefix validation rejects edited history.
+            val frozenContextRevision = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
+                buildString {
+                    append(frozenSession.id).append('\n')
+                    summaryRecords.forEach { append(it.toString()).append('\n') }
+                    summaryCandidate?.let { append(it.toString()) }
+                }
+            )
             attachContextAssemblyTrace(
                 withContext(Dispatchers.IO) { runtimeContextPlan.trace?.toJsonString() },
                 generationRunId,
@@ -14874,9 +15066,12 @@ class MainViewModel @JvmOverloads constructor(
                         params = activeRequestParams,
                         runtimeSystemContext = runtimeSystemContextForTurn,
                         persistentPrefixSystemPrompt = persistentLlamaPrefix,
-                        persistentSessionId = initialState.activeChatSessionId,
+                        persistentSessionId = frozenSession.id,
+                        persistentRoleId = frozenAssistantId,
+                        persistentRoleCardVersion = frozenRoleCardVersion,
+                        persistentMemoryVersion = frozenMemoryRevision,
                         protectedMessageIds = localMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                        conversationContextRevision = localConversationContextInvalidationSequence.get().toString()
+                        conversationContextRevision = frozenContextRevision
                     ),
                     executionContext
                 ) ?: engine.streamChat(
@@ -14885,9 +15080,12 @@ class MainViewModel @JvmOverloads constructor(
                         params = activeRequestParams,
                         runtimeSystemContext = runtimeSystemContextForTurn,
                         persistentPrefixSystemPrompt = persistentLlamaPrefix,
-                        persistentSessionId = initialState.activeChatSessionId,
+                        persistentSessionId = frozenSession.id,
+                        persistentRoleId = frozenAssistantId,
+                        persistentRoleCardVersion = frozenRoleCardVersion,
+                        persistentMemoryVersion = frozenMemoryRevision,
                         protectedMessageIds = localMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                        conversationContextRevision = localConversationContextInvalidationSequence.get().toString()
+                        conversationContextRevision = frozenContextRevision
                     ),
                     executionContext
                 )
@@ -15027,7 +15225,9 @@ class MainViewModel @JvmOverloads constructor(
                                     if (!generationStillOwnsUi() ||
                                         current.activeChatSessionId != initialState.activeChatSessionId) current
                                     else current.copy(chatSessions = current.chatSessions.map { session ->
-                                        if (session.id != initialState.activeChatSessionId) session else {
+                                        if (session.id != frozenSession.id || session.mixedAssistantHistory ||
+                                            session.assistantId != frozenAssistantId ||
+                                            session.assistantSnapshot != frozenAssistantSnapshot) session else {
                                             val records = activateContextSummaryCandidate(
                                                 session.contextSummaries, summaryCandidate, current.messages, summaryScope
                                             )
@@ -15070,6 +15270,7 @@ class MainViewModel @JvmOverloads constructor(
                                     recordCompletedCharacterMemoryTurn(
                                         assistantId = assistantSnapshot.assistantId,
                                         sessionId = sessionId,
+                                        assistantSnapshot = assistantSnapshot,
                                         user = user,
                                         assistant = reply,
                                         conversationPersistJob = conversationPersistJob,
@@ -15330,24 +15531,26 @@ class MainViewModel @JvmOverloads constructor(
             ?.takeIf { bindDefaultModel && !it.defaultModelId.isNullOrBlank() }
             ?.defaultModelMode
             ?.normalizedAssistantModelMode()
-        val greetingSession = assistant?.initialGreetingSession(
-            modelMode = defaultModelMode?.takeUnless { it == ASSISTANT_MODEL_MODE_FOLLOW_CURRENT }
-                ?: state.selectedChatBackend.bindingValue(),
-            modelId = if (defaultModelMode != null && defaultModelMode != ASSISTANT_MODEL_MODE_FOLLOW_CURRENT) {
-                assistant?.defaultModelId
-            } else {
-                state.currentChatModelId()
-            }
+        val targetAssistant = assistant ?: state.selectedAssistant() ?: return false
+        val modelMode = defaultModelMode?.takeUnless { it == ASSISTANT_MODEL_MODE_FOLLOW_CURRENT }
+            ?: state.selectedChatBackend.bindingValue()
+        val modelId = if (defaultModelMode != null && defaultModelMode != ASSISTANT_MODEL_MODE_FOLLOW_CURRENT) {
+            targetAssistant.defaultModelId
+        } else {
+            state.currentChatModelId()
+        }
+        val greetingSession = targetAssistant.newConversationSession(
+            modelMode = modelMode,
+            modelId = modelId
         )
         var sessionsToPersist: List<ChatSessionRecord>? = null
         _uiState.update {
-            sessionsToPersist = greetingSession?.let { session ->
-                (listOf(session) + it.chatSessions).sortedForHistory()
-            }
+            sessionsToPersist = (listOf(greetingSession) + it.chatSessions).sortedForHistory()
             it.copy(
-                messages = greetingSession?.messages.orEmpty(),
+                messages = greetingSession.messages,
                 input = "",
-                activeChatSessionId = greetingSession?.id,
+                activeChatSessionId = greetingSession.id,
+                selectedAssistantId = targetAssistant.id,
                 chatSessions = sessionsToPersist ?: it.chatSessions,
                 browserTask = it.browserTask?.let { task ->
                     com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Conversation owner changed")
@@ -15421,6 +15624,11 @@ class MainViewModel @JvmOverloads constructor(
             cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
         }
         val status = when {
+            session.mixedAssistantHistory ->
+                "混合会话已保留原始消息，仅供查看；请从历史菜单手动创建角色分支。"
+            session.assistantId == null || session.assistantSnapshot?.assistantId != session.assistantId ||
+                state.assistants.none { it.id == session.assistantId } ->
+                "原角色已不存在或会话归属不明确，此会话仅供查看。"
             sessionBackend == ChatBackend.LOCAL &&
                 !session.modelId.isNullOrBlank() &&
                 session.modelId != state.loadedModelId ->
@@ -15451,6 +15659,8 @@ class MainViewModel @JvmOverloads constructor(
             )
         }
         markLocalConversationContextInvalid()
+        if (session.mixedAssistantHistory || session.assistantSnapshot?.assistantId != session.assistantId ||
+            state.assistants.none { it.id == session.assistantId }) return
         session.messages.firstNotNullOfOrNull { message ->
             message.generatedImageRequest?.takeIf { request ->
                 request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
@@ -15463,6 +15673,32 @@ class MainViewModel @JvmOverloads constructor(
                     )
             }
         }?.let { continueAssistantImageTurn(it.id) }
+    }
+
+    fun branchMixedChatSession(sessionId: String, assistantId: String) {
+        val state = _uiState.value
+        if (rejectWhileConversationMutationInProgress() || state.isGenerating) return
+        val source = state.chatSessions.firstOrNull { it.id == sessionId && it.mixedAssistantHistory } ?: return
+        val assistant = state.assistants.firstOrNull { it.id == assistantId } ?: return
+        if (hasActiveAssistantImageExecution(state.activeChatSessionId)) return
+        val now = System.currentTimeMillis()
+        // The old transcript stays intact. An uncertain role history cannot be copied into
+        // another card's prompt, summaries, or automatic long-term memory.
+        val branch = ChatSessionRecord(
+            id = UUID.randomUUID().toString(),
+            title = "${source.title.take(48)} · 分支",
+            messages = emptyList(),
+            manualTitle = true,
+            updatedAt = now,
+            assistantId = assistant.id,
+            assistantSnapshot = assistant.toConversationSnapshot(now),
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
+        val sessions = (listOf(branch) + state.chatSessions).sortedForHistory()
+        _uiState.update { current -> current.copy(chatSessions = sessions) }
+        persistChatSessions(sessions)
+        selectChatSession(branch.id)
     }
 
     fun deleteChatSession(sessionId: String) {
@@ -15481,15 +15717,20 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         val rollback = state.conversationMutationRollbackState()
-        val remaining = state.chatSessions.filterNot { it.id == sessionId }
         val isActive = state.activeChatSessionId == sessionId
+        val replacement = if (isActive) state.selectedAssistant()?.newConversationSession(
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        ) else null
+        val remaining = (state.chatSessions.filterNot { it.id == sessionId } + listOfNotNull(replacement))
+            .sortedForHistory()
         manualContextCompressionRequests.clear(sessionId)
         _uiState.update {
             it.copy(
                 chatSessions = remaining,
-                messages = if (isActive) emptyList() else it.messages,
+                messages = if (isActive) replacement?.messages.orEmpty() else it.messages,
                 input = if (isActive) "" else it.input,
-                activeChatSessionId = if (isActive) null else it.activeChatSessionId,
+                activeChatSessionId = if (isActive) replacement?.id else it.activeChatSessionId,
                 browserTask = it.browserTask?.let { task ->
                     if (task.sessionId == sessionId) {
                         com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Conversation deleted")
@@ -15578,13 +15819,17 @@ class MainViewModel @JvmOverloads constructor(
             return
         }
         val rollback = state.conversationMutationRollbackState()
+        val freshSession = state.selectedAssistant()?.newConversationSession(
+            modelMode = state.selectedChatBackend.bindingValue(),
+            modelId = state.currentChatModelId()
+        )
         manualContextCompressionRequests.clearAll()
         _uiState.update {
             it.copy(
-                chatSessions = emptyList(),
-                messages = emptyList(),
+                chatSessions = listOfNotNull(freshSession),
+                messages = freshSession?.messages.orEmpty(),
                 input = "",
-                activeChatSessionId = null,
+                activeChatSessionId = freshSession?.id,
                 browserTask = it.browserTask?.let { task ->
                     com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Conversation history cleared")
                 },
@@ -15599,7 +15844,7 @@ class MainViewModel @JvmOverloads constructor(
             ownerIds = state.chatSessions.mapTo(hashSetOf()) { it.id }
         )
         pendingAssistantImageToolTurns.clear()
-        persistConversationMutation(emptyList(), rollback)
+        persistConversationMutation(listOfNotNull(freshSession), rollback)
         viewModelScope.launch(Dispatchers.IO) {
             chatImageToolAuthorizationStore.prune(emptyList())
         }
@@ -17984,6 +18229,54 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
+    private fun reconciledChatSessionsAfterSave(
+        snapshot: List<ChatSessionRecord>
+    ): List<ChatSessionRecord> {
+        val mixedIds = runCatching { chatSessionStore.mixedSessionIds() }.getOrNull() ?: return snapshot
+        val currentById = snapshot.associateBy { it.id }
+        val durableById = durableChatSessions.associateBy { it.id }
+        if (mixedIds.none { id ->
+                currentById[id]?.mixedAssistantHistory != true || currentById[id] != durableById[id]
+            }) return snapshot
+        val persisted = chatSessionStore.load()
+        return persisted.takeIf { sessions ->
+            mixedIds.all { id -> sessions.any { it.id == id && it.mixedAssistantHistory } }
+        } ?: snapshot
+    }
+
+    private fun publishReconciledChatSessions(
+        requested: List<ChatSessionRecord>,
+        persisted: List<ChatSessionRecord>
+    ) {
+        if (requested == persisted) return
+        val requestedById = requested.associateBy { it.id }
+        val correctedById = persisted.filter { it.mixedAssistantHistory }.associateBy { it.id }
+        var activeCorrection = false
+        _uiState.update { current ->
+            val corrected = current.chatSessions.map { session ->
+                correctedById[session.id]?.takeIf { requestedById[session.id] == session } ?: session
+            }
+            if (corrected == current.chatSessions) current else {
+                val activeBefore = current.chatSessions.firstOrNull { it.id == current.activeChatSessionId }
+                val activeAfter = corrected.firstOrNull { it.id == current.activeChatSessionId }
+                val activeWasCorrected = activeAfter != activeBefore
+                if (activeWasCorrected) activeCorrection = true
+                current.copy(
+                    chatSessions = corrected,
+                    messages = if (activeWasCorrected) activeAfter?.messages.orEmpty() else current.messages,
+                    isGenerating = if (activeWasCorrected) false else current.isGenerating,
+                    generationPhase = if (activeWasCorrected) null else current.generationPhase,
+                    generationTokenProgress = if (activeWasCorrected) null else current.generationTokenProgress,
+                    generationPersistProgress = if (activeWasCorrected) null else current.generationPersistProgress,
+                    statusMessage = if (activeWasCorrected) {
+                        "会话角色归属不明确，原始消息已保留；可从历史菜单创建角色分支。"
+                    } else current.statusMessage
+                )
+            }
+        }
+        if (activeCorrection) cancelGenerationJob()
+    }
+
     private fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
         knowledgeBinding: Pair<String, Set<String>>? = null,
@@ -18024,13 +18317,15 @@ class MainViewModel @JvmOverloads constructor(
                 runCatching {
                     chatSessionStore.save(snapshot, knowledgeBindingsForSave)
                 }.onSuccess {
+                    val persisted = reconciledChatSessionsAfterSave(snapshot)
                     // This write reached Room even if a newer in-memory snapshot
                     // arrived while it was running. Keep the rollback anchor in
                     // lockstep with the last transaction that actually committed.
-                    durableChatSessions = snapshot
+                    durableChatSessions = persisted
                     // A newer snapshot may have arrived while Room was writing.
                     // It owns pending state and orphan cleanup.
                     if (sequence != chatSessionPersistenceSequence.get()) return@onSuccess
+                    publishReconciledChatSessions(snapshot, persisted)
                     synchronized(chatSessionPersistenceStateLock) {
                         knowledgeBindingsForSave.forEach { (sessionId, persistedIds) ->
                             if (pendingKnowledgeBindings[sessionId] == persistedIds) {
@@ -18095,7 +18390,9 @@ class MainViewModel @JvmOverloads constructor(
                     // User/assistant tail removal cannot persist half a turn.
                     chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)
                 }.onSuccess {
-                    durableChatSessions = snapshot
+                    val persisted = reconciledChatSessionsAfterSave(snapshot)
+                    durableChatSessions = persisted
+                    publishReconciledChatSessions(snapshot, persisted)
                     if (!sessionCachesCleared) {
                         _uiState.update {
                             it.copy(statusMessage = "聊天已删除，但磁盘会话缓存清理失败；请在设置中清空缓存。")
@@ -18140,7 +18437,7 @@ class MainViewModel @JvmOverloads constructor(
                                 }
                             }
                     }
-                    onCommitted?.invoke()
+                    if (persisted == snapshot) onCommitted?.invoke() else onCommitFailed?.invoke()
                 }.onFailure { error ->
                     onCommitFailed?.invoke()
                     // Do not invalidate KV after a failed durable write. Room
@@ -18282,6 +18579,14 @@ class MainViewModel @JvmOverloads constructor(
     ): List<ChatSessionRecord> {
         if (messages.isEmpty()) return this
         val existing = firstOrNull { it.id == sessionId }
+        val existingOwner = existing?.assistantSnapshot?.assistantId ?: existing?.assistantId
+        if (existing != null && (existing.mixedAssistantHistory ||
+                (assistantId != null && existingOwner != assistantId) ||
+                (assistantSnapshot != null && assistantSnapshot.assistantId != existingOwner))) return this
+        val capturedSnapshot = existing?.assistantSnapshot ?: assistantSnapshot
+            ?: assistantId?.let { owner ->
+                _uiState.value.assistants.firstOrNull { it.id == owner }?.toConversationSnapshot()
+            }
         val record = ChatSessionRecord(
             id = sessionId,
             title = if (existing?.manualTitle == true) existing.title else messages.chatTitle(),
@@ -18290,12 +18595,13 @@ class MainViewModel @JvmOverloads constructor(
             manualTitle = existing?.manualTitle ?: false,
             updatedAt = System.currentTimeMillis(),
             projectId = existing?.projectId,
-            assistantId = assistantId ?: existing?.assistantId,
+            assistantId = existing?.assistantId ?: assistantId,
             assistantSnapshot = if (replaceAssistantSnapshot) {
-                assistantSnapshot
+                assistantSnapshot ?: capturedSnapshot
             } else {
-                assistantSnapshot ?: existing?.assistantSnapshot
+                capturedSnapshot
             },
+            mixedAssistantHistory = existing?.mixedAssistantHistory ?: false,
             modelMode = modelMode ?: existing?.modelMode,
             modelId = if (modelMode != null) modelId else existing?.modelId,
             appearanceOverride = existing?.appearanceOverride,
@@ -18318,8 +18624,13 @@ class MainViewModel @JvmOverloads constructor(
             if (session.id != sessionId) {
                 session
             } else {
+                val owner = session.assistantSnapshot?.assistantId ?: session.assistantId
+                if (session.mixedAssistantHistory ||
+                    (assistantId != null && owner != assistantId) ||
+                    (assistantSnapshot != null && assistantSnapshot.assistantId != owner)
+                ) return@map session
                 val next = session.copy(
-                    assistantId = assistantId ?: session.assistantId,
+                    assistantId = session.assistantId ?: assistantId,
                     assistantSnapshot = if (replaceAssistantSnapshot) {
                         assistantSnapshot
                     } else {
@@ -19179,6 +19490,7 @@ class MainViewModel @JvmOverloads constructor(
             requestJob = requestJob
         )
         var ownershipRegistered = false
+        var chatRuntimeLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
         try {
             registerLocalApiImageGenerationOwnership(ownership)
             ownershipRegistered = true
@@ -19265,6 +19577,8 @@ class MainViewModel @JvmOverloads constructor(
             val effectiveOptions = options.copy(
                 negativePrompt = promptExecution.effectiveNegativePrompt
             )
+            chatRuntimeLease = prepareLocalImageRuntimeMemory()
+            currentCoroutineContext().ensureActive()
             val childResults = try {
                 executeLocalImageBatchPlan(
                     plan = batchPlan,
@@ -19434,6 +19748,12 @@ class MainViewModel @JvmOverloads constructor(
             if (ownershipRegistered) cancelOwnedLocalApiImageWorker(ownership)
             throw cancelled
         } finally {
+            withContext(NonCancellable) {
+                // Keep the authenticated API path under the same native memory release barrier
+                // as the UI path before chat weights can be loaded again.
+                runCatching { localImageWorkerClient.awaitOwnedWorkerRelease() }
+                chatRuntimeLease?.release()
+            }
             if (ownershipRegistered) {
                 check(unregisterLocalApiImageGenerationOwnership(ownership)) {
                     "Local API image cancellation ownership changed before request completion."
@@ -19651,7 +19971,6 @@ class MainViewModel @JvmOverloads constructor(
         return state.assistants.map { assistant ->
             if (assistant.id == selectedId) {
                 assistant.copy(
-                    systemPrompt = params.systemPrompt,
                     paramsJson = params.toAssistantGenerationJson(),
                     updatedAt = System.currentTimeMillis()
                 )
@@ -19707,6 +20026,15 @@ class MainViewModel @JvmOverloads constructor(
         activeChatSessionId
             ?.let { sessionId -> chatSessions.firstOrNull { it.id == sessionId } }
             ?.assistantSnapshot
+
+    private fun MainUiState.canWriteToActiveAssistantSession(): Boolean {
+        val sessionId = activeChatSessionId ?: return false
+        val session = chatSessions.firstOrNull { it.id == sessionId } ?: return false
+        val owner = session.assistantId ?: return false
+        return !session.mixedAssistantHistory && owner == selectedAssistantId &&
+            session.assistantSnapshot?.assistantId == owner &&
+            assistants.any { it.id == owner }
+    }
 
     private fun MainUiState.selectedAssistant(): AssistantRecord? =
         assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()

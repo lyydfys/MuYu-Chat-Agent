@@ -106,6 +106,10 @@ internal fun materializeDownloadedImageExecutionProfile(
     }
 
     val defaults = source.defaults
+    val qwen21Gguf = bundle.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP &&
+        source.variant.name == ImageModelVariant.QWEN_IMAGE_21.name
+    val latentChannels = if (qwen21Gguf) 64 else 4
+    val latentDownsample = if (qwen21Gguf) 16 else 8
     val profile = ImageExecutionProfile(
         profileId = source.profileId,
         profileRevision = source.profileRevision,
@@ -130,6 +134,7 @@ internal fun materializeDownloadedImageExecutionProfile(
             eosId = source.tokenizer.eosId,
             padId = source.tokenizer.padId,
             maxLength = source.tokenizer.maxLength,
+            lowercase = !qwen21Gguf,
             clip1PadRule = ImageClipPadRule.valueOf(source.tokenizer.clip1PadRule.name),
             clip2PadRule = source.tokenizer.clip2PadRule?.let { ImageClipPadRule.valueOf(it.name) },
             supportsPromptWeighting = source.tokenizer.supportsPromptWeighting,
@@ -174,11 +179,11 @@ internal fun materializeDownloadedImageExecutionProfile(
             seedBits = source.scheduler.seedBits
         ),
         latent = ImageLatentContract(
-            channels = 4,
-            downsampleFactor = 8,
+            channels = latentChannels,
+            downsampleFactor = latentDownsample,
             schedulerLayout = ImageTensorLayout.NCHW,
             graphLayout = ImageTensorLayout.NCHW,
-            initialShape = listOf(1, 4, defaults.height / 8, defaults.width / 8),
+            initialShape = listOf(1, latentChannels, defaults.height / latentDownsample, defaults.width / latentDownsample),
             dataType = ImageEmbeddingDiskDataType.FP32
         ),
         vae = ImageVaeContract(

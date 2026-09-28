@@ -8,6 +8,7 @@ import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.security.MessageDigest
@@ -60,7 +61,37 @@ internal class LocalImageLoraStore(context: Context) {
 
     @Synchronized
     fun import(uri: Uri): LocalImageLoraRecord {
-        val displayName = displayName(uri)
+        return importFromStream(displayName(uri)) {
+            appContext.contentResolver.openInputStream(uri)
+                ?: throw IOException("无法读取 LoRA 文件")
+        }
+    }
+
+    @Synchronized
+    fun importVerifiedDownload(
+        displayName: String,
+        expectedSizeBytes: Long,
+        expectedSha256: String,
+        source: InputStream,
+        onProgress: (Long) -> Unit
+    ): LocalImageLoraRecord {
+        require(expectedSizeBytes in MIN_LORA_BYTES..MAX_LORA_BYTES)
+        require(SHA256_REGEX.matches(expectedSha256))
+        return importFromStream(
+            displayName = displayName,
+            expectedSizeBytes = expectedSizeBytes,
+            expectedSha256 = expectedSha256,
+            onProgress = onProgress
+        ) { source }
+    }
+
+    private fun importFromStream(
+        displayName: String,
+        expectedSizeBytes: Long? = null,
+        expectedSha256: String? = null,
+        onProgress: (Long) -> Unit = {},
+        openSource: () -> InputStream
+    ): LocalImageLoraRecord {
         val extension = displayName.substringAfterLast('.', "").lowercase()
         require(extension in ALLOWED_EXTENSIONS) {
             "LoRA 仅支持 .safetensors 或 .ckpt 文件"
@@ -72,9 +103,7 @@ internal class LocalImageLoraStore(context: Context) {
         val digest = MessageDigest.getInstance("SHA-256")
         var copied = 0L
         try {
-            val input = appContext.contentResolver.openInputStream(uri)
-                ?: throw IOException("无法读取 LoRA 文件")
-            input.use { source ->
+            openSource().use { source ->
                 FileOutputStream(part).use { fileOutput ->
                     BufferedOutputStream(fileOutput).use { output ->
                         val buffer = ByteArray(COPY_BUFFER_BYTES)
@@ -85,8 +114,12 @@ internal class LocalImageLoraStore(context: Context) {
                             if (copied > MAX_LORA_BYTES) {
                                 throw IOException("LoRA 文件超过大小限制")
                             }
+                            if (expectedSizeBytes != null && copied > expectedSizeBytes) {
+                                throw IOException("LoRA 下载大小与发布记录不符")
+                            }
                             digest.update(buffer, 0, read)
                             output.write(buffer, 0, read)
+                            onProgress(copied)
                         }
                         output.flush()
                         fileOutput.fd.sync()
@@ -94,12 +127,18 @@ internal class LocalImageLoraStore(context: Context) {
                 }
             }
             require(copied >= MIN_LORA_BYTES) { "LoRA 文件为空或不完整" }
+            require(expectedSizeBytes == null || copied == expectedSizeBytes) {
+                "LoRA 下载不完整：已接收 $copied / $expectedSizeBytes 字节"
+            }
             if (extension == "safetensors") {
                 validateSafetensorsHeader(part)
             } else {
                 validateCkptHeader(part)
             }
             val sha256 = digest.digest().toHex()
+            require(expectedSha256 == null || sha256 == expectedSha256) {
+                "LoRA SHA-256 与发布记录不符"
+            }
             load().firstOrNull { it.sha256 == sha256 && it.sizeBytes == copied }?.let { duplicate ->
                 part.delete()
                 return duplicate

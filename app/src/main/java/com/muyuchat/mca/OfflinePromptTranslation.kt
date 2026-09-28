@@ -1407,6 +1407,9 @@ internal class OfflinePromptTranslationService(
         } catch (error: CancellationException) {
             // Do not turn a user stop into a normal prompt result. The parent job owns cancel.
             throw error
+        } catch (error: OfflinePromptTranslationCleanupException) {
+            // A fallback may start a large image runtime, so it requires confirmed release.
+            throw error
         } catch (_: Throwable) {
             return fallback(
                 request = request,

@@ -496,7 +496,13 @@ data class ChatRequest(
     /** Tool transcript appended to this request using the provider's native message format. */
     val toolExchanges: List<ChatToolExchange> = emptyList(),
     /** Changes when edits, summary changes or explicit invalidation replace native history. */
-    val conversationContextRevision: String? = null
+    val conversationContextRevision: String? = null,
+    /** Frozen role ownership for this request's disk-backed KV state. */
+    val persistentRoleId: String? = null,
+    /** Fingerprint of the role card snapshot used to render this request. */
+    val persistentRoleCardVersion: String? = null,
+    /** Fingerprint of the role memory and progress injected into this request. */
+    val persistentMemoryVersion: String? = null
 ) {
     /**
      * Returns only the stable configured persona prefix. Request-scoped system
@@ -702,6 +708,8 @@ data class RuntimeStats(
 /** Execution boundaries reported by [GenerateEvent.Phase]. */
 enum class GenerationPhase {
     LOAD,
+    /** Local image files are staged/decoded before native vision prefill. */
+    PREPROCESS,
     TOKENIZE,
     PREFILL,
     DECODE,

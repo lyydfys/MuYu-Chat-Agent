@@ -17,6 +17,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -82,6 +83,104 @@ class McaInferenceServicePersistentPrefixCacheTest {
         val warmStats = (warmEvents.last() as GenerateEvent.Done).stats
         assertTrue(warmStats.persistentPrefixCacheHit)
         assertEquals("session_state_saved", warmStats.persistentPrefixCacheReason)
+    }
+
+    @Test
+    fun fullSessionStateRequiresTheSameRoleCardMemoryAndContextVersions() = runBlocking {
+        val root = temporaryRoot("role-session-isolation")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        val first = request("first").copy(
+            persistentSessionId = "conversation-a",
+            persistentRoleId = "role-a",
+            persistentRoleCardVersion = "card-v1",
+            persistentMemoryVersion = "memory-v1",
+            conversationContextRevision = "summary-v1"
+        )
+        val variants = listOf(
+            first,
+            first.copy(persistentRoleId = "role-b"),
+            first.copy(persistentRoleCardVersion = "card-v2"),
+            first.copy(persistentMemoryVersion = "memory-v2"),
+            first.copy(conversationContextRevision = "summary-v2")
+        )
+        variants.forEachIndexed { index, variant ->
+            runner.enqueue("reply-$index")
+            assertTrue(service.streamChat(variant).toList().last() is GenerateEvent.Done)
+            assertNull(runner.prefixRequests.last().restoreStatePath)
+        }
+
+        runner.enqueue("same state again")
+        assertTrue(service.streamChat(variants.last()).toList().last() is GenerateEvent.Done)
+        assertNotNull(runner.prefixRequests.last().restoreStatePath)
+        assertNotEquals(runner.runtimeScopes[0].first, runner.runtimeScopes[1].first)
+        assertNotEquals(runner.runtimeScopes[0].second, runner.runtimeScopes[2].second)
+        assertNotEquals(runner.runtimeScopes[0].second, runner.runtimeScopes[3].second)
+        assertNotEquals(runner.runtimeScopes[0].second, runner.runtimeScopes[4].second)
+        assertEquals(runner.runtimeScopes[4], runner.runtimeScopes[5])
+
+        assertTrue(service.clearPersistentSessionStates(listOf("conversation-a")))
+        assertTrue(store.entries().isEmpty())
+    }
+
+    @Test
+    fun returningToRoleRestoresItsOwnSessionState() = runBlocking {
+        val root = temporaryRoot("role-return")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        val roleA = request("first").copy(
+            persistentSessionId = "conversation-a",
+            persistentRoleId = "role-a",
+            persistentRoleCardVersion = "card-a",
+            persistentMemoryVersion = "memory-a",
+            conversationContextRevision = "summary-a"
+        )
+        val roleB = roleA.copy(
+            persistentSessionId = "conversation-b",
+            persistentRoleId = "role-b",
+            persistentRoleCardVersion = "card-b",
+            persistentMemoryVersion = "memory-b",
+            conversationContextRevision = "summary-b"
+        )
+
+        runner.enqueue("A reply")
+        service.streamChat(roleA).toList()
+        runner.enqueue("B reply")
+        service.streamChat(roleB).toList()
+        assertNull(runner.prefixRequests.last().restoreStatePath)
+
+        runner.enqueue("A resumed")
+        assertTrue(service.streamChat(roleA).toList().last() is GenerateEvent.Done)
+        assertNotNull(runner.prefixRequests.last().restoreStatePath)
+    }
+
+    @Test
+    fun fixedPrefixStateDoesNotCrossRoleCardIdentity() = runBlocking {
+        val root = temporaryRoot("role-prefix-isolation")
+        val store = PersistentPrefixCacheStore(File(root, "prefix"), maxBytes = 64 * 1024L)
+        val runner = PrefixRunner()
+        val service = loadedService(root, runner, store)
+        val first = request("first").copy(
+            persistentRoleId = "role-a",
+            persistentRoleCardVersion = "card-v1"
+        )
+        runner.enqueue("first reply")
+        service.streamChat(first).toList()
+        assertNull(runner.prefixRequests.last().restoreStatePath)
+
+        runner.enqueue("other role")
+        service.streamChat(first.copy(persistentRoleId = "role-b")).toList()
+        assertNull(runner.prefixRequests.last().restoreStatePath)
+
+        runner.enqueue("edited card")
+        service.streamChat(first.copy(persistentRoleCardVersion = "card-v2")).toList()
+        assertNull(runner.prefixRequests.last().restoreStatePath)
+
+        runner.enqueue("original role")
+        service.streamChat(first).toList()
+        assertNotNull(runner.prefixRequests.last().restoreStatePath)
     }
 
     @Test
@@ -332,6 +431,7 @@ class McaInferenceServicePersistentPrefixCacheTest {
         private var pendingSessionState: PersistentPrefixCacheRequest? = null
 
         val prefixRequests = mutableListOf<PersistentPrefixCacheRequest>()
+        val runtimeScopes = mutableListOf<Pair<String, String?>>()
         var ordinaryBeginCalls = 0
             private set
         var reportRestoreHit = false
@@ -356,6 +456,7 @@ class McaInferenceServicePersistentPrefixCacheTest {
 
         override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
             ordinaryBeginCalls += 1
+            recordRuntimeScope(paramsJson)
             return 0
         }
 
@@ -366,6 +467,7 @@ class McaInferenceServicePersistentPrefixCacheTest {
         ): Int {
             val request = requireNotNull(prefixCache)
             prefixRequests += request
+            recordRuntimeScope(paramsJson)
             val hit = reportRestoreHit && request.restoreStatePath != null
             pendingSessionState = request.takeIf { it.fullSessionState }
             val saved = !request.fullSessionState && !hit && writeState && request.writeStatePath != null
@@ -390,6 +492,12 @@ class McaInferenceServicePersistentPrefixCacheTest {
                 )
                 .toString()
             return 0
+        }
+
+        private fun recordRuntimeScope(paramsJson: String) {
+            val params = JSONObject(paramsJson)
+            runtimeScopes += params.optString("conversationOwnerId") to
+                params.optString("conversationContextRevision").takeIf(String::isNotBlank)
         }
 
         override fun generateNextChunk(): String? {

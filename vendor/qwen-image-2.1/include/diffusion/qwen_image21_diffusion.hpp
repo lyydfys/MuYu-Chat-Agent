@@ -38,10 +38,11 @@ public:
     // Step-by-step pieces, public so tools can validate each stage.
     // Text encoder hidden states after dropping the system prompt: [1, L, 4096].
     VARP encodePrompt(const std::string& prompt);
-    // Text KV cache for all blocks: [32, 2, L, 32, 128].
+    // Packed per-layer cache returned by dit.mnn: [32, 2, L, 32, 128].
+    // The graph drops the masked zero sentinel used as the prefill input.
     VARP buildPrefixCache(VARP textHidden);
-    // Denoise from seeded noise against a prefix K/V of length prefixLen; returns packed latents [1, N, 64].
-    VARP denoise(VARP prefixKV, int prefixLen, const float* cosTarget, const float* sinTarget, int steps, int seed,
+    // Denoise against a packed prefix K/V and derive the key length from the cache tensor itself.
+    VARP denoise(const VARP& prefixKV, const float* cosTarget, const float* sinTarget, int steps, int seed,
                  std::function<void(int)> progressCallback);
     // Image editing: one condition image (also chosen by run(..., inputImagePath)). Output keeps the input's
     // aspect ratio at the configured pixel area.
@@ -69,13 +70,15 @@ private:
     std::shared_ptr<Module> loadModule(const std::string& file, const std::vector<std::string>& inputs,
                                        const std::vector<std::string>& outputs,
                                        std::shared_ptr<Executor::RuntimeManager> rt);
+    // dit.mnn exposes one packed "past_kv" input and one packed "present_kv" output.
     VARP runPrefix(VARP hidden, const std::vector<float>& cosTab, const std::vector<float>& sinTab,
                    const std::vector<float>& mask);
     VARP embedText(VARP textHidden);
     VARP encodeEditPrompt(const std::string& prompt, VARP bgr, int w, int h, std::vector<char>& isPad);
     VARP encodeImage(VARP rgb, int w, int h);
     void editSize(int srcW, int srcH, int& w, int& h) const;
-    // Returns false and records kOutOfMemory when the device has less than needMB (+margin) available.
+    // Logs an advisory estimate and always permits the actual native stage to run.
+    // Only a concrete allocation/execution failure may fail the request.
     bool ensureMemory(const char* stage, int needMB);
     bool fail(int code, const std::string& message);
     bool failStage(const char* stage);

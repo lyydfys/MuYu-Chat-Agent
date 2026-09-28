@@ -66,27 +66,23 @@ internal object LocalModelMemoryAdmissionPolicy {
         val modelBudget = device.modelMemoryBudgetBytes.takeIf { it > 0L }
             ?: maxOf(availableRam, (device.totalRamBytes * 0.70).toLong())
         val estimatedNeed = denseEstimate(model.sizeBytes)
-        val blocker = when {
+        // A file-size/total-RAM estimate cannot prove that mmap, KV cache, or the selected
+        // backend will fail. Keep pressure as a warning and let the real native load/graph result
+        // decide; static RAM checks previously rejected viable large quantized models.
+        val advisory = when {
             totalRam > 0L && estimatedNeed > (totalRam * 0.88).toLong() ->
-                "模型约需 ${formatBytes(estimatedNeed)} 内存，已接近或超过本机总内存 ${formatBytes(totalRam)}。建议换用更小的量化文件。"
+                "模型约需 ${formatBytes(estimatedNeed)}，接近本机总内存 ${formatBytes(totalRam)}；将继续尝试原生 mmap 加载，失败时再根据实际错误处理。"
             device.isLowMemory ->
-                "系统已进入低内存状态（可用约 ${formatBytes(availableRam)}），建议关闭后台应用后再加载。"
-            estimatedNeed > modelBudget && availableRam < 2L * GIB ->
-                "当前系统可用内存约 ${formatBytes(availableRam)}，运行预算偏紧。建议关闭后台应用，或先用短基准确认。"
+                "系统当前处于低内存状态（可用约 ${formatBytes(availableRam)}）；仍将尝试原生加载，建议关闭后台应用。"
+            estimatedNeed > modelBudget ->
+                "当前系统可用内存约 ${formatBytes(availableRam)}，运行预算偏紧；将以原生加载结果为准。"
             else -> null
         }
-        return if (blocker == null) {
-            LocalModelMemoryAdmission(
-                mode = LocalModelMemoryAdmissionMode.ALLOW,
-                estimatedDenseNeedBytes = estimatedNeed
-            )
-        } else {
-            LocalModelMemoryAdmission(
-                mode = LocalModelMemoryAdmissionMode.DENY,
-                blocker = blocker,
-                estimatedDenseNeedBytes = estimatedNeed
-            )
-        }
+        return LocalModelMemoryAdmission(
+            mode = LocalModelMemoryAdmissionMode.ALLOW,
+            advisory = advisory,
+            estimatedDenseNeedBytes = estimatedNeed
+        )
     }
 
     private fun denseEstimate(fileBytes: Long): Long {

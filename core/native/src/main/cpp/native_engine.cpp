@@ -3771,7 +3771,13 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         mtmd_context_params vision_params = mtmd_context_params_default();
         vision_params.use_gpu = false;
         vision_params.print_timings = false;
-        vision_params.n_threads = n_threads;
+        // The text profile intentionally defaults to one decode thread to keep chat responsive,
+        // but mtmd image projection is a batch operation and becomes needlessly slow at one
+        // thread. Use a small bounded pool for vision without changing text decode behavior.
+        const long online_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        const int available_threads = online_cpus > 0 ? static_cast<int>(online_cpus) : 1;
+        const int vision_threads = std::min(4, std::max(1, available_threads));
+        vision_params.n_threads = vision_threads;
         vision_params.flash_attn_type = ctx_params.flash_attn_type;
         vision_params.warmup = false;
         g_mtmd_context = mtmd_init_from_file(mmproj_path.c_str(), g_model, vision_params);

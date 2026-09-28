@@ -3,6 +3,8 @@ package com.muyuchat.mca
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -33,6 +35,15 @@ class AssistantMemoryRoomTest {
             dao.insertMemories(listOf(manual, oldAutomatic, otherRole).map {
                 MemoryEntity(it.id, it.assistantId, it.scope, it.content, it.source, it.createdAt)
             })
+            val owner = AssistantRecord(id = "role-a", name = "Role A", memoryEnabled = true)
+            dao.replaceAll(listOf(ChatSessionRecord(
+                id = "session-a", title = "Role A", assistantId = owner.id,
+                assistantSnapshot = owner.toConversationSnapshot(capturedAt = 1L),
+                messages = listOf(ChatMessage(
+                    id = "reply-a-1", role = Role.ASSISTANT,
+                    content = "We finished chapter two", createdAt = 4L
+                ))
+            )))
             val turn = AssistantMemoryTurnEntity(
                 id = "reply-a-1", assistantId = "role-a", sessionId = "session-a",
                 userText = "I reached chapter two", assistantText = "We finished chapter two", createdAt = 4L
@@ -49,16 +60,14 @@ class AssistantMemoryRoomTest {
             )
             assertTrue(dao.commitMemorySummary("role-a", listOf(turn.id), summary))
             assertFalse(dao.commitMemorySummary("role-a", listOf(turn.id), summary))
-            assertEquals(emptyList<AssistantMemoryTurnEntity>(), dao.pendingMemoryTurns("role-a", 100))
+            assertEquals(emptyList<AssistantMemoryTurnEntity>(), dao.trustedPendingMemoryTurns("role-a", 100))
             database.openHelper.readableDatabase.query(
                 "SELECT userText, assistantText FROM assistant_memory_turns WHERE id = ?",
                 arrayOf(turn.id)
             ).use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals("", cursor.getString(0))
-                assertEquals("", cursor.getString(1))
+                assertFalse(cursor.moveToFirst())
             }
-            assertEquals(-1L, dao.insertMemoryTurn(turn))
+            assertTrue(dao.insertMemoryTurn(turn) > 0L)
             assertEquals(setOf("manual-a", "new-auto-a"), dao.memories("role-a").map { it.id }.toSet())
             assertEquals(listOf("auto-b"), dao.memories("role-b").map { it.id })
             assertFalse(dao.upsertMemoryRecord(
