@@ -73,7 +73,7 @@ class ImageUpscaleProductClosureTest {
         )
         val deleteUpscaler = functionBody(viewModel, "fun deleteLocalImageUpscaler(")
         val publish = functionBody(viewModel, "private suspend fun createUpscaledImageAsset(")
-        val cloudPublish = functionBody(viewModel, "private suspend fun createCloudGeneratedImageAsset(")
+        val cloudPublish = functionBody(viewModel, "private suspend fun createCloudGeneratedImageAssets(")
         val localPublish = functionBody(viewModel, "private suspend fun createLocalGeneratedImageAsset(")
         val importBackup = functionBody(viewModel, "fun importImageLibraryBackup(")
         val startBackup = functionBody(viewModel, "private fun startImageLibraryBackupJob(")

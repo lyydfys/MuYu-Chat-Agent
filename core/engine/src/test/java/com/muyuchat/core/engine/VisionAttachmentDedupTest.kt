@@ -71,14 +71,15 @@ class VisionAttachmentDedupTest {
     @Test
     fun preparerDoesNotWriteDuplicateNativeFilesForSameInlineImage() {
         val cacheDir = Files.createTempDirectory("mca-vision-dedup").toFile()
+        val payload = Base64.getEncoder().encodeToString(validPngBytes())
         val request = ChatRequest(
             messages = listOf(
                 ChatMessage(
                     role = Role.USER,
                     content = "describe",
                     imageAttachments = listOf(
-                        ChatImageAttachment(mimeType = "image/png", dataBase64 = "AAECAwQ="),
-                        ChatImageAttachment(mimeType = "image/png", dataBase64 = "AAECAwQ=")
+                        ChatImageAttachment(mimeType = "image/png", dataBase64 = payload),
+                        ChatImageAttachment(mimeType = "image/png", dataBase64 = payload)
                     )
                 )
             )
@@ -98,7 +99,7 @@ class VisionAttachmentDedupTest {
     @Test
     fun preparerAcceptsCaseInsensitiveDataUrlBase64Marker() {
         val cacheDir = Files.createTempDirectory("mca-vision-uppercase-data-url").toFile()
-        val bytes = byteArrayOf(0, 1, 2, 3, 4)
+        val bytes = validPngBytes()
         val payload = Base64.getEncoder().encodeToString(bytes)
         val request = ChatRequest(
             messages = listOf(
@@ -131,7 +132,7 @@ class VisionAttachmentDedupTest {
     fun preparerDeduplicatesDifferentRepresentationsAfterMaterializingBytes() {
         val cacheDir = Files.createTempDirectory("mca-vision-materialized-dedup").toFile()
         val source = cacheDir.resolve("source.bin")
-        val bytes = byteArrayOf(0, 1, 2, 3, 4, 5)
+        val bytes = validPngBytes()
         source.writeBytes(bytes)
         val inline = Base64.getEncoder().encodeToString(bytes)
         val request = ChatRequest(
@@ -445,4 +446,9 @@ class VisionAttachmentDedupTest {
             attachments.map { it.uriString }
         )
     }
+
+    private fun validPngBytes(): ByteArray = Base64.getDecoder().decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQU" +
+            "AAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY/jPwPAfAAUAAf+mXJtdAAAAAElFTkSuQmCC"
+    )
 }

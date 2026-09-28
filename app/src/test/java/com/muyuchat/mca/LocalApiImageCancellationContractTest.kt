@@ -57,10 +57,7 @@ class LocalApiImageCancellationContractTest {
             server,
             "private suspend fun <T> withImageClientDisconnectCancellation("
         )
-        val stopRoute = server.substring(
-            server.indexOf("method == \"POST\" && path == \"/v1/generate/stop\""),
-            server.indexOf("method == \"POST\" && path in GENERATION_PATHS")
-        )
+        val stopRoute = functionBody(server, "private suspend fun handleGenerationStop(")
 
         assertTrue(stop.contains("cancelActiveImageRequests("))
         assertTrue(imageHandler.contains("registerImageRequest(requestId, requestJob, cancellationEpoch)"))
@@ -68,15 +65,16 @@ class LocalApiImageCancellationContractTest {
         assertTrue(imageHandler.contains("withImageClientDisconnectCancellation("))
         assertTrue(imageHandler.contains("\"image_generation_cancelled\""))
         assertTrue(stopRoute.contains("LocalApiRuntime.stopGeneration()"))
-        assertTrue(stopRoute.contains("cancelActiveImageRequests("))
-        assertTrue(stopRoute.contains("awaitImageRequestTermination(imageRequests)"))
+        assertTrue(stopRoute.contains("LocalApiRuntime.stopGenerationIfRequestActive(chatRequestId)"))
+        assertTrue(stopRoute.contains("imageJobs.forEach"))
+        assertTrue(stopRoute.contains("imageJobs.map { it.second }.joinAll()"))
         assertTrue(
-            stopRoute.indexOf("cancelActiveImageRequests(") <
+            stopRoute.indexOf("activeImageRequestJobs.filterKeys") <
                 stopRoute.indexOf("LocalApiRuntime.stopGeneration()")
         )
         assertTrue(server.contains("imageRequestCancellationEpoch += 1L"))
         assertTrue(server.contains("imageRequestAdmissionPauseCount += 1"))
-        assertTrue(server.contains("resumeImageRequestAdmission()"))
+        assertTrue(server.contains("imageRequestAdmissionPauseCount = 0"))
         assertTrue(disconnectMonitor.contains("catch (error: IOException)"))
         assertTrue(disconnectMonitor.contains("cancelImageRequest("))
         assertTrue(disconnectMonitor.contains("if (input.read() < 0) return@launch"))

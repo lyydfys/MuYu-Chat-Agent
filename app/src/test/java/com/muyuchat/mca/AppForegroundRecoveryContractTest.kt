@@ -65,7 +65,7 @@ class AppForegroundRecoveryContractTest {
 
         assertTrue(onCreate.contains("ServiceCompat.startForeground("))
         assertTrue(onCreate.indexOf("ServiceCompat.startForeground(") < onCreate.indexOf("serviceForeground = true"))
-        assertTrue(onStart.contains("if (intent == null || !isRequested())"))
+        assertTrue(onStart.contains("if (!persistedEnabled || !isRequested())"))
         assertTrue(stop.contains("serviceCreated || serviceForeground"))
         assertTrue(stop.contains("do not cancel"))
         assertTrue(service.contains("restartAfterDestroy"))
@@ -198,7 +198,7 @@ class AppForegroundRecoveryContractTest {
         assertTrue(body.contains("synchronized(localApiProcessLifecycleLock)"))
         assertTrue(body.contains("localApiProcessOwnerToken !== localApiRuntimeOwner"))
         assertTrue(body.contains("apiLifecycleClosed.get()"))
-        assertTrue(body.indexOf("localApiProcessOwnerToken !== localApiRuntimeOwner") < body.indexOf("next.start()"))
+        assertTrue(body.indexOf("localApiProcessOwnerToken !== localApiRuntimeOwner") < body.indexOf("LocalApiForegroundService.ensureListener("))
     }
 
     @Test
@@ -224,8 +224,10 @@ class AppForegroundRecoveryContractTest {
         assertTrue(release.contains("loadedModelJsonProvider = { \"{}\" }"))
         assertTrue(release.contains("benchmarkJsonProvider = { \"{}\" }"))
         assertTrue(release.contains("controlPlane = null"))
-        assertTrue(cleared.contains("forceServerStop = releasedRuntimeOwner"))
-        assertTrue(viewModel.contains("forceServerStop = true"))
+        assertTrue(cleared.contains("stopForegroundService = false"))
+        assertTrue(cleared.contains("forceServerStop = false"))
+        assertTrue(cleared.indexOf("LocalApiRuntime.releaseOwner(localApiRuntimeOwner)") <
+            cleared.indexOf("retireLocalApiListener("))
     }
 
     @Test

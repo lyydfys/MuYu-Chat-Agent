@@ -142,7 +142,7 @@ private val negatedActionCorrection = Regex(
 )
 
 private val nonImageOutputNoun = Regex(
-    """(?is)^(?:(?:一|两|二|三|四|五|六|七|八|九|十|\d+)\s*(?:段|个|篇|首|份|张)?\s*)?(?:代码|程序|脚本|函数|算法|九九乘法表|乘法表|表格|公式|作文|故事|句子|翻译|解释|总结|清单|列表|视频|音频|音乐|录音|语音|声音|文案|字幕|json|markdown)(?:\b|[，,。\s]|$)"""
+    """(?is)^(?:(?:一|两|二|三|四|五|六|七|八|九|十|\d+)\s*(?:段|个|篇|首|份|张)?\s*)?(?:代码|程序|脚本|函数|算法|九九乘法表|乘法表|表格|公式|作文|故事|句子|文字|翻译|解释|总结|清单|列表|视频|音频|音乐|录音|语音|声音|文案|字幕|json|markdown)(?:\b|[，,。\s]|$)"""
 )
 
 private val quotedOrConditionalImageDiscussion = Regex(
@@ -305,7 +305,7 @@ internal fun classifyChatImageIntent(
             return ChatImageIntentDecision(
                 route = ChatImageIntentRoute.GENERATE,
                 sourceText = value,
-                prompt = corrected.prompt,
+                prompt = correction.groupValues[1].trim(),
                 reason = "corrected_image_action",
                 requestedOutputCount = imageCount(outputCountPattern.find(value)?.groupValues?.get(1)),
                 visualSubjectCount = imageCount(visualSubjectCountPattern.find(value)?.groupValues?.get(1))

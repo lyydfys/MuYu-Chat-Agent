@@ -157,6 +157,9 @@ if ($missingRuntimeNames.Count -gt 0) {
 Save-BuildRecord
 
 $jdkCandidates = @(
+    "$PSScriptRoot\..\toolchains\jdk-21",
+    "$env:USERPROFILE\.jdks\ms-21",
+    "$env:USERPROFILE\.jdks\openjdk-21",
     "$PSScriptRoot\..\toolchains\jdk-17",
     "$env:USERPROFILE\.jdks\ms-17.0.15"
 )
@@ -257,6 +260,10 @@ $gradleArgs = @(
     "-PmcaQnnSdkRoot=$qnnSdkRoot",
     "-PmcaQnnRuntimeRoot=$qnnRuntimeRoot",
     "-PmcaQnnTypedBindingsRequired=true",
+    "-Pkotlin.compiler.execution.strategy=in-process",
+    "--max-workers=2",
+    # APK signing uses the JVM common pool, independently of Gradle workers.
+    "-Djava.util.concurrent.ForkJoinPool.common.parallelism=2",
     # Native CMake configuration embeds the absolute QNN SDK path in the
     # externalNativeBuild variant.  Gradle otherwise considers an older
     # CMake variant up-to-date when the SDK path changes (for example from

@@ -12,6 +12,16 @@ import java.nio.file.Files
 
 class LocalChatSmokeActivityTest {
     @Test
+    fun guardApiRequestIncludesModelAndUserMessage() {
+        val body = JSONObject(localChatSmokeGuardApiRequestBody())
+
+        assertEquals(LOCAL_CHAT_SMOKE_API_MODEL, body.getString("model"))
+        assertEquals("user", body.getJSONArray("messages").getJSONObject(0).getString("role"))
+        assertTrue(body.getBoolean("stream"))
+        assertTrue(body.getBoolean("hide_reasoning"))
+    }
+
+    @Test
     fun generationTimeoutIncludesDecodeBudgetAndClamps() {
         assertEquals(
             90_000L,

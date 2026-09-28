@@ -261,7 +261,7 @@ class LocalImagePromptCancellationContractTest {
         )
         val validate = publish.indexOf("validateLocalImagePromptExecutionBinding(")
         val firstWrite = publish.indexOf("writeImageAssetBytesAtomically(")
-        val attachMetadata = publish.indexOf(".withNativeExecution(result.executionMetadataJson)")
+        val attachMetadata = publish.indexOf(".withNativeExecution(executionWithQnnVerificationEvidence(")
 
         assertTrue(validate >= 0)
         assertTrue(attachMetadata > validate)
@@ -272,7 +272,7 @@ class LocalImagePromptCancellationContractTest {
     fun `authenticated api materializes random seed before prompt preparation`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val api = functionBody(source, "private suspend fun generateLocalApiImage(")
-        val plan = api.indexOf("options = planLocalImageBatch(")
+        val plan = api.indexOf("val batchPlan = planLocalImageBatch(")
         val prepare = api.indexOf("prepareLocalImagePromptExecution(")
         val worker = api.indexOf("localImageWorkerClient.generate(")
 

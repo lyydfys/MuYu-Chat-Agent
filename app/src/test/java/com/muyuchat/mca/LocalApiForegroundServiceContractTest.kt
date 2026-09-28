@@ -26,7 +26,7 @@ class LocalApiForegroundServiceContractTest {
             "The service must promote itself before queued start/stop commands can race",
             create.contains("ServiceCompat.startForeground(")
         )
-        assertTrue(method.contains("if (intent == null || !isRequested())"))
+        assertTrue(method.contains("if (!persistedEnabled || !isRequested())"))
         assertTrue(source.contains("serviceCreated || serviceForeground"))
         assertTrue(source.contains("restartAfterDestroy"))
         assertTrue(source.contains("fun isForegroundReady(): Boolean"))

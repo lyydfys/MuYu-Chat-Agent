@@ -125,7 +125,7 @@ class ChatContextComposerTest {
     fun assistantFileContextSettingIsPassedToPreflightAndGenerationComposition() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
 
-        listOf("sendPreparedMessage", "startGeneration").forEach { function ->
+        listOf("sendPreparedMessageAsync", "startGeneration").forEach { function ->
             val body = functionBody(source, "fun $function")
             assertTrue(body.contains("fileContextEnabled = assistantSnapshot?.fileContextEnabled"))
         }
@@ -138,7 +138,7 @@ class ChatContextComposerTest {
         // the request admission/compression and persistence live in the synchronous handoff it
         // calls so the final request uses the exact deduplicated attachment snapshot.
         val sendMessage = functionBody(source, "fun sendMessage")
-        val sendPreparedMessage = functionBody(source, "fun sendPreparedMessage")
+        val sendPreparedMessage = functionBody(source, "fun sendPreparedMessageAsync")
         val request = sendPreparedMessage.indexOf("val preflightRequest = ChatRequest(")
         val initialAdmission = sendPreparedMessage.indexOf("val initialAdmission = localContextWindowAdmission(", request)
         val compression = sendPreparedMessage.indexOf("val preflightCompression = compressChatRequestContext(", initialAdmission)
@@ -156,7 +156,7 @@ class ChatContextComposerTest {
         assertTrue(persistedMessages > finalAdmission)
         assertTrue(sendPreparedMessage.contains("trigger = if (initialAdmission.isAccepted)"))
         assertTrue(sendPreparedMessage.contains("ContextCompressionTrigger.MANUAL"))
-        assertTrue(sendPreparedMessage.contains("runtimeSystemContext = rebuiltPreflightContext.runtimeSystemContext"))
+        assertTrue(sendPreparedMessage.contains("listOf(rebuiltPreflightContext.runtimeSystemContext, characterMemoryContext)"))
         assertTrue(sendMessage.contains("deduplicateVisionAttachmentsForSend"))
     }
 

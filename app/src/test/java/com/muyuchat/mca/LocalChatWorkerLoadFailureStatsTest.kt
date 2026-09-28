@@ -91,7 +91,7 @@ class LocalChatWorkerLoadFailureStatsTest {
         val reset = service.lastIndexOf("retainedLoadFailureStatsJson = null", capture)
         val unload = service.indexOf("runCatching { runner.unloadModel() }", capture)
         val detach = service.indexOf("activeRunner = null", unload)
-        val publish = service.indexOf("retainedLoadFailureStatsJson = failureStatsJson", detach)
+        val publish = service.indexOf("retainedLoadFailureStatsJson = lastStableRuntimeStatsJson", detach)
 
         assertTrue(reset >= 0)
         assertTrue(capture > reset)
@@ -99,6 +99,7 @@ class LocalChatWorkerLoadFailureStatsTest {
         assertTrue(unload > capture)
         assertTrue(detach > unload)
         assertTrue(publish > detach)
+        assertTrue(service.substring(detach, publish).contains("invalidateRuntimeStatsLocked(failureStatsJson)"))
         assertTrue(
             service.contains(
                 "fallback = retainedLoadFailureStatsJson ?: lastStableRuntimeStatsJson"

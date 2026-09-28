@@ -19,13 +19,16 @@ class LocalApiLifecycleOwnershipContractTest {
 
     @Test
     fun listenerReplacementAndShutdownShareAnExactServerLock() {
-        val source = mainViewModelSource()
-        val start = functionBody(source, "private fun startApiServer(")
-        val stop = functionBody(source, "private fun stopApiServer(")
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiForegroundService.kt")
+        val start = functionBody(source, "fun ensureListener(")
+        val stop = functionBody(source, "fun stopListener()")
 
-        assertTrue(source.contains("private val apiServerLifecycleLock = Any()"))
-        assertTrue(start.contains("synchronized(apiServerLifecycleLock)"))
-        assertTrue(stop.contains("synchronized(apiServerLifecycleLock)"))
+        assertTrue(source.contains("private val listenerLock = Any()"))
+        assertTrue(start.contains("synchronized(listenerLock)"))
+        assertTrue(stop.contains("synchronized(listenerLock)"))
+        val viewModel = mainViewModelSource()
+        assertTrue(viewModel.contains("LocalApiForegroundService.ensureListener("))
+        assertTrue(viewModel.contains("LocalApiForegroundService.stopListener()"))
     }
 
     private fun functionBody(source: String, signature: String): String {
@@ -45,16 +48,16 @@ class LocalApiLifecycleOwnershipContractTest {
         error("Unterminated function: $signature")
     }
 
-    private fun mainViewModelSource(): String {
+    private fun mainViewModelSource(): String =
+        sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+
+    private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         while (directory != null) {
-            val candidate = File(
-                directory,
-                "app/src/main/java/com/muyuchat/mca/MainViewModel.kt"
-            )
+            val candidate = File(directory, relativePath)
             if (candidate.isFile) return candidate.readText(Charsets.UTF_8)
             directory = directory.parentFile
         }
-        error("Unable to locate MainViewModel.kt")
+        error("Unable to locate $relativePath")
     }
 }

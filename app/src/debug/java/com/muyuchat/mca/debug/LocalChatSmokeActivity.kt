@@ -195,6 +195,15 @@ internal fun resolveLocalChatSmokePrompt(promptExtra: String?, hasImage: Boolean
 internal const val LOCAL_CHAT_SMOKE_DEFAULT_SYSTEM_PROMPT =
     "You are MCA smoke test. Answer briefly in Chinese."
 
+internal const val LOCAL_CHAT_SMOKE_API_MODEL = "mca-local"
+
+internal fun localChatSmokeGuardApiRequestBody(): String = JSONObject()
+    .put("model", LOCAL_CHAT_SMOKE_API_MODEL)
+    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "hi")))
+    .put("stream", true)
+    .put("hide_reasoning", true)
+    .toString()
+
 // This key is consumed only by the MNN native debug runner. It retains a short
 // raw-output prefix and a capped rendered-prompt trace in smoke nativeStats,
 // never in normal UI/API telemetry, so a failed smoke can be classified without
@@ -2499,7 +2508,7 @@ open class LocalChatSmokeActivity : Activity() {
             }
             LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
             server.start()
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
+            val body = localChatSmokeGuardApiRequestBody()
             val response = rawHttp(port, chatRequest(body))
             require(response.httpStatusLine() == "HTTP/1.1 200 OK") {
                 "guard API status failed: ${response.take(2048)}"
@@ -2553,7 +2562,7 @@ open class LocalChatSmokeActivity : Activity() {
                     )
             }
             val body = JSONObject()
-                .put("model", "mca-local")
+                .put("model", LOCAL_CHAT_SMOKE_API_MODEL)
                 .put("stream", true)
                 .put("hide_reasoning", true)
                 .put("reasoning_mode", "off")

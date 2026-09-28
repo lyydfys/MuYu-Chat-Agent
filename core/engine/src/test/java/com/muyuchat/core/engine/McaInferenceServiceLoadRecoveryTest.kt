@@ -10,10 +10,12 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
+import java.util.Base64
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.zip.CRC32
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -312,7 +314,7 @@ class McaInferenceServiceLoadRecoveryTest {
     fun mnnVisionGenerationReloadsSessionBeforeTheNextTextRequest() = runBlocking {
         val context = FakeContext()
         val image = File(context.cacheDir, "vision-smoke.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         val runner = FakeLocalChatRunner()
         val service = McaInferenceService(
@@ -379,7 +381,7 @@ class McaInferenceServiceLoadRecoveryTest {
     fun visionPreparationReachesDebugAndRequestSinksWithoutAffectingInference() = runBlocking {
         val context = FakeContext()
         val image = File(context.cacheDir, "vision-diagnostic.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         val runner = FakeLocalChatRunner()
         val service = McaInferenceService(
@@ -778,7 +780,7 @@ class McaInferenceServiceLoadRecoveryTest {
     fun repeatedMnnVisionGenerationReloadsSessionBeforeNativeBeginCompletion() = runBlocking {
         val context = FakeContext()
         val image = File(context.cacheDir, "vision-smoke.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         val runner = FakeLocalChatRunner()
         val service = McaInferenceService(
@@ -833,10 +835,10 @@ class McaInferenceServiceLoadRecoveryTest {
     fun mnnVisionBeginUsesContiguousImageTagsBeforeUserText() = runBlocking {
         val context = FakeContext()
         val firstImage = File(context.cacheDir, "first-vision.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         val secondImage = File(context.cacheDir, "second-vision.png").apply {
-            writeBytes(byteArrayOf(5, 6, 7, 8))
+            writeBytes(validPngBytes(distinct = true))
         }
         val runner = FakeLocalChatRunner()
         val service = McaInferenceService(
@@ -888,7 +890,7 @@ class McaInferenceServiceLoadRecoveryTest {
     fun nonMnnVisionBeginKeepsOpenAiTextFirstParts() = runBlocking {
         val context = FakeContext()
         val image = File(context.cacheDir, "llama-vision.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         val mnnRunner = FakeLocalChatRunner()
         val llamaRunner = FakeLocalChatRunner(runnerRuntime = LocalChatRuntime.LLAMA_CPP)
@@ -1667,7 +1669,7 @@ class McaInferenceServiceLoadRecoveryTest {
 
     private fun visionRequest(context: Context): ChatRequest {
         val image = File(context.cacheDir, "vision-begin-failure.png").apply {
-            writeBytes(byteArrayOf(1, 2, 3, 4))
+            writeBytes(validPngBytes())
         }
         return ChatRequest(
             messages = listOf(
@@ -1685,6 +1687,27 @@ class McaInferenceServiceLoadRecoveryTest {
             ),
             params = testGenerationParams()
         )
+    }
+
+    private fun validPngBytes(distinct: Boolean = false): ByteArray {
+        val image = Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQU" +
+                "AAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY/jPwPAfAAUAAf+mXJtdAAAAAElFTkSuQmCC"
+        )
+        if (!distinct) return image
+        val type = "tEXt".toByteArray(Charsets.US_ASCII)
+        val data = "variant\u0000second".toByteArray(Charsets.US_ASCII)
+        val checksum = CRC32().apply {
+            update(type)
+            update(data)
+        }
+        val chunk = ByteBuffer.allocate(12 + data.size).order(ByteOrder.BIG_ENDIAN).apply {
+            putInt(data.size)
+            put(type)
+            put(data)
+            putInt(checksum.value.toInt())
+        }.array()
+        return image.copyOfRange(0, image.size - 12) + chunk + image.copyOfRange(image.size - 12, image.size)
     }
 
     private fun textRequest(): ChatRequest = ChatRequest(

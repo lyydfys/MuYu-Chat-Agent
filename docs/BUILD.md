@@ -6,11 +6,12 @@ llama.cpp 运行库。
 
 ## 标准 Windows 构建
 
-先配置 JDK 17、Android SDK 和 QAIRT SDK。QNN SDK 路径可以通过下面任意一个
+先配置 JDK 21、Android SDK 和 QAIRT SDK。LiteRT-LM 的上游 AAR 包含 Java 21
+字节码，宿主单测必须由 JDK 21 或更新版本运行。QNN SDK 路径可以通过下面任意一个
 环境变量提供；标准脚本会把它们统一到同一个路径：
 
 ```powershell
-$env:JAVA_HOME = 'C:\path\to\jdk-17'
+$env:JAVA_HOME = 'C:\path\to\jdk-21'
 $env:MCA_QNN_SDK_ROOT = 'C:\path\to\qairt-sdk'
 $env:QNN_SDK_ROOT = $env:MCA_QNN_SDK_ROOT
 $env:QAIRT_SDK_ROOT = $env:MCA_QNN_SDK_ROOT

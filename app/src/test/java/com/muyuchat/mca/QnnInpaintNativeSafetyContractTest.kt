@@ -72,7 +72,7 @@ class QnnInpaintNativeSafetyContractTest {
             "qnn_read_float_tensor(vae.outputs[0]",
             "qnn_laplacian_blend_inpaint_vae_output(",
             "pixels = std::move(blended_pixels)",
-            "write_vae_tensor_png(",
+            "write_qnn_image_png_atomic(",
         )
         assertTrue(source("core/native/src/main/cpp/qnn_inpaint_contract.hpp").contains(
             "laplacian_pyramid_blend_nchw("

@@ -15288,7 +15288,8 @@ private fun GenerationParamsQuickDialog(
 private data class CharacterHtmlProjection(
     val messageId: String,
     val source: String,
-    val preview: String?
+    val preview: String?,
+    val blocks: List<CharacterHtmlBlock>?
 )
 
 @Composable
@@ -15328,24 +15329,32 @@ private fun AssistantMessageBlock(
         parseContextAssemblyTrace(message.contextAssemblyTraceJson)
     }
     var showContextTrace by remember(message.id) { mutableStateOf(false) }
+    val htmlCandidate = remember(message.content, characterCardHtml) {
+        characterHtmlMayNeedPreview(message.content) &&
+            (characterCardHtml || characterHtmlHasStatus(message.content))
+    }
     val htmlProjection by produceState<CharacterHtmlProjection?>(
         initialValue = null,
         key1 = message.id,
         key2 = message.content,
-        key3 = characterCardHtml
+        key3 = htmlCandidate
     ) {
-        val preview = if (characterCardHtml) {
-            withContext(Dispatchers.Default) { characterHtmlPreview(message.content) }
-        } else {
-            null
+        val blocks = if (htmlCandidate) {
+            withContext(Dispatchers.Default) { characterHtmlBlocks(message.content) }
+        } else null
+        val preview = blocks?.joinToString("\n\n") { block ->
+            when (block) {
+                is CharacterHtmlBlock.Text -> block.content
+                is CharacterHtmlBlock.Details -> listOf(block.title, block.content)
+                    .filter(String::isNotBlank)
+                    .joinToString("\n")
+            }
         }
-        value = CharacterHtmlProjection(message.id, message.content, preview)
-    }
-    val htmlCandidate = remember(message.content, characterCardHtml) {
-        characterCardHtml && characterHtmlMayNeedPreview(message.content)
+        value = CharacterHtmlProjection(message.id, message.content, preview, blocks)
     }
     val currentProjection = htmlProjection?.takeIf { it.messageId == message.id }
     val visibleHtmlPreview = currentProjection?.preview?.takeIf { htmlCandidate }
+    val visibleHtmlBlocks = currentProjection?.blocks?.takeIf { htmlCandidate }
     val previewPending = htmlCandidate && currentProjection?.source != message.content && visibleHtmlPreview == null
     var showHtmlSource by remember(message.id) { mutableStateOf(false) }
     Surface(
@@ -15411,7 +15420,13 @@ private fun AssistantMessageBlock(
                             }
                         }
                         SelectionContainer {
-                            PagedAssistantRichText(if (showHtmlSource) message.content else visibleHtmlPreview)
+                            if (showHtmlSource) {
+                                PagedAssistantRichText(message.content)
+                            } else if (visibleHtmlBlocks != null) {
+                                CharacterHtmlBlocksContent(visibleHtmlBlocks)
+                            } else {
+                                PagedAssistantRichText(visibleHtmlPreview)
+                            }
                         }
                     }
                 } else if (previewPending) {
@@ -16779,12 +16794,92 @@ private fun PagedPlainMessageText(
 }
 
 @Composable
-private fun PagedAssistantRichText(content: String) {
+private fun CharacterHtmlBlocksContent(blocks: List<CharacterHtmlBlock>) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        blocks.forEachIndexed { index, block ->
+            when (block) {
+                is CharacterHtmlBlock.Text -> {
+                    if (block.content.isNotBlank()) {
+                        PagedAssistantRichText(block.content)
+                    }
+                }
+                is CharacterHtmlBlock.Details -> CharacterHtmlDetails(
+                    block = block,
+                    key = index
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CharacterHtmlDetails(
+    block: CharacterHtmlBlock.Details,
+    key: Int
+) {
+    var expanded by rememberSaveable(key, block.title) { mutableStateOf(block.initiallyOpen) }
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = colors.surfaceVariant.copy(alpha = 0.28f),
+        border = BorderStroke(1.dp, colors.outlineVariant.copy(alpha = 0.7f))
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .semantics(mergeDescendants = true) {
+                        stateDescription = if (expanded) "已展开" else "已收起"
+                    }
+                    .clickable(
+                        role = SemanticsRole.Button,
+                        onClickLabel = if (expanded) "收起状态栏" else "展开状态栏"
+                    ) { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = block.title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = colors.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium
+                )
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = if (expanded) "收起状态栏" else "展开状态栏",
+                    tint = colors.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(tween(100)) + expandVertically(tween(160)),
+                exit = fadeOut(tween(80)) + shrinkVertically(tween(120))
+            ) {
+                Column {
+                    HorizontalDivider(color = colors.outlineVariant.copy(alpha = 0.55f))
+                    if (block.content.isNotBlank()) {
+                        PagedAssistantRichText(
+                            content = block.content,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PagedAssistantRichText(content: String, modifier: Modifier = Modifier) {
     var visibleCharacters by rememberSaveable { mutableStateOf(MESSAGE_RENDER_PAGE_CHARS) }
     val visibleContent = remember(content, visibleCharacters) {
         content.safePrefix(visibleCharacters)
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AssistantRichText(visibleContent, fullContent = content)
         if (visibleContent.length < content.length) {
             TextButton(

@@ -28,7 +28,7 @@ keyPassword=...
 ## Build an arm64 release APK
 
 ```powershell
-$env:JAVA_HOME='<path-to-jdk-17>'
+$env:JAVA_HOME='<path-to-jdk-21>'
 $env:ANDROID_HOME='<path-to-android-sdk>'
 $env:MCA_QNN_SDK_ROOT='<path-to-qairt-sdk>'
 .\gradlew.bat :app:assembleRelease -Pmca.abis=arm64-v8a

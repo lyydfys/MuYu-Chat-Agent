@@ -191,7 +191,7 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
         assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
         assertFalse(persistBody.contains("knowledgeBaseStore.setSelectedKnowledgeBaseIds"))
-        val sendBody = functionBody(source, "sendPreparedMessage")
+        val sendBody = functionBody(source, "sendPreparedMessageAsync")
         assertTrue(sendBody.contains("knowledgeBinding = chatSessionIdForKnowledgeBinding"))
         assertFalse(sendBody.contains("persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIdsForBinding)"))
     }
@@ -272,11 +272,8 @@ class KnowledgeBaseRoomContractTest {
     fun migrationChainFrom16To22CreatesKnowledgeTablesWithoutReplacingExistingData() {
         val source = chatSessionStoreSource()
 
-        // Version 22 adds persisted generation metrics; the 16→21 knowledge
-        // base migrations remain part of the same non-destructive chain.
-        // Generated image requests are persisted in schema 23.  The 22 -> 23
-        // migration is part of the same non-destructive chain under test.
-        assertTrue(Regex("""version\s*=\s*23""").containsMatchIn(source))
+        // Later character memory migrations extend the same non-destructive chain.
+        assertTrue(Regex("""version\s*=\s*26""").containsMatchIn(source))
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))
@@ -286,6 +283,9 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(builder.contains("MIGRATION_18_19"))
         assertTrue(builder.contains("MIGRATION_19_20"))
         assertTrue(builder.contains("MIGRATION_20_21"))
+        assertTrue(builder.contains("MIGRATION_23_24"))
+        assertTrue(builder.contains("MIGRATION_24_25"))
+        assertTrue(builder.contains("MIGRATION_25_26"))
 
         val migration16To17 = region(source, "private val MIGRATION_16_17", "private val MIGRATION_17_18")
         assertTrue(migration16To17.contains("createKnowledgeBaseTablesIfMissing(db)"))
@@ -357,7 +357,7 @@ class KnowledgeBaseRoomContractTest {
     }
 
     private fun functionBody(source: String, functionName: String): String {
-        val declaration = source.indexOf("fun $functionName")
+        val declaration = source.indexOf("fun $functionName(")
         assertTrue("Missing function $functionName", declaration >= 0)
         return blockAt(source, source.indexOf('{', declaration))
     }

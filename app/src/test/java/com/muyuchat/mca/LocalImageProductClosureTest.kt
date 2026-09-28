@@ -48,7 +48,7 @@ class LocalImageProductClosureTest {
         assertTrue(api.contains("supportsAuthenticatedLocalImageCount(model.runtime, request.imageCount)"))
         assertTrue(api.contains("code = \"unsupported_image_count\""))
         assertTrue(api.contains("httpStatus = 422"))
-        assertTrue(api.contains("require(result.outputs.size == request.imageCount)"))
+        assertTrue(api.contains("require(orderedOutputs.size == request.imageCount)"))
         assertFalse(api.contains("request.copy(imageCount = 1)"))
     }
 

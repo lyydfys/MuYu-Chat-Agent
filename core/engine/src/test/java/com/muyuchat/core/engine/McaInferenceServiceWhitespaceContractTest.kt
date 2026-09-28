@@ -10,7 +10,9 @@ class McaInferenceServiceWhitespaceContractTest {
     @Test
     fun generationLoopKeepsWhitespaceChunksAndOnlyRejectsEmptyChunks() {
         val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt")
-        assertTrue(source.contains("if (chunk.isEmpty()) continue"))
+        assertTrue(source.contains("if (rawChunk.isEmpty()) continue"))
+        assertTrue(source.contains("if (chunk.isEmpty()) {"))
+        assertFalse(source.contains("if (rawChunk.isBlank()) continue"))
         assertFalse(source.contains("if (chunk.isBlank()) continue"))
         assertTrue(source.contains("filtered.visible.isNotEmpty()"))
         assertTrue(source.contains("remaining.visible.isNotEmpty()"))

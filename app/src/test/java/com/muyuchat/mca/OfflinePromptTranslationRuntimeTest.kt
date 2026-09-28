@@ -34,12 +34,13 @@ class OfflinePromptTranslationRuntimeTest {
     @Test
     fun `protected token extraction removes nested duplicates and keeps weighted syntax`() {
         val tokens = extractOfflinePromptProtectedTokens(
-            "<lora:portrait:0.8> lora:portrait (masterpiece:1.2)"
+            "<lora:portrait:0.8> (masterpiece:1.2)"
         )
 
         assertTrue(tokens.contains("<lora:portrait:0.8>"))
         assertTrue(tokens.contains("(masterpiece:1.2)"))
         assertTrue(tokens.none { it == "lora:portrait" })
+        assertTrue(extractOfflinePromptProtectedTokens("lora:portrait").contains("lora:portrait"))
     }
 
     @Test

@@ -7,17 +7,20 @@ import org.junit.Test
 class KnowledgeBaseImportUxContractTest {
     @Test
     fun knowledgeImportTracksProgressAndActivatesTheImportedBase() {
-        val body = functionBody(mainViewModelSource(), "importKnowledgeDocument")
+        val source = mainViewModelSource()
+        val body = functionBody(source, "importKnowledgeDocument")
+        val confirm = functionBody(source, "confirmKnowledgeDocumentImport")
 
         assertTrue(body.contains("knowledgeBaseImportingIds"))
-        assertTrue(body.contains("knowledgeDocumentCounts"))
-        assertTrue(body.contains("selectedKnowledgeBaseIds = state.selectedKnowledgeBaseIds + knowledgeBaseId"))
-        assertTrue(body.contains("persistKnowledgeBaseBindings(sessionId, selectedKnowledgeBaseIds)"))
+        assertTrue(body.contains("stageContentImportPreview(preview)"))
+        assertTrue(confirm.contains("knowledgeDocumentCounts"))
+        assertTrue(confirm.contains("selectedKnowledgeBaseIds = if (ownerIsCurrent) current.selectedKnowledgeBaseIds + baseId"))
+        assertTrue(confirm.contains("chatSessionStore.save(snapshot.chatSessions, bindings)"))
     }
 
     @Test
     fun oversizedInlineFileGetsKnowledgeBaseRecoveryAdvice() {
-        val body = functionBody(mainViewModelSource(), "sendPreparedMessage")
+        val body = functionBody(mainViewModelSource(), "sendPreparedMessageAsync")
 
         assertTrue(body.contains("FILE_ATTACHMENT_MARKER"))
         assertTrue(body.contains("请将长文件导入知识库后再提问"))

@@ -23,7 +23,7 @@ class LongTextRenderPolicyTest {
 
         assertTrue(source.contains("private const val MESSAGE_RENDER_PAGE_CHARS = 16_384"))
         assertTrue(source.contains("private fun PagedPlainMessageText("))
-        assertTrue(source.contains("private fun PagedAssistantRichText(content: String)"))
+        assertTrue(source.contains("private fun PagedAssistantRichText(content: String, modifier: Modifier = Modifier)"))
         assertTrue(source.contains("private fun ReasoningPanel("))
         assertTrue(source.countOccurrences("safePrefix(visibleCharacters)") >= 3)
         assertTrue(source.countOccurrences("visibleCharacters + MESSAGE_RENDER_PAGE_CHARS") >= 3)
@@ -40,7 +40,7 @@ class LongTextRenderPolicyTest {
         assertTrue(source.contains("private const val STREAMING_SCROLL_CHAR_STEP = 512"))
         assertTrue(policy.contains("message.content.length + message.reasoningContent.length"))
         assertTrue(policy.contains("/ STREAMING_SCROLL_CHAR_STEP"))
-        assertTrue(policy.contains("LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket)"))
+        assertTrue(policy.contains("LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket,"))
         assertFalse(policy.contains("message.content,"))
         assertFalse(policy.contains("message.reasoningContent,"))
     }

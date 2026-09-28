@@ -1,6 +1,7 @@
 package com.muyuchat.core.engine
 
 import com.geniex.sdk.bean.GenerationConfig
+import java.math.BigDecimal
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -8,6 +9,9 @@ private val GENERATION_TRACE_FIELDS = listOf(
     "n_predict", "temperature", "top_k", "top_p", "min_p", "repeat_penalty",
     "presence_penalty", "frequency_penalty", "seed", "stop_words", "reasoning_mode",
     "enable_thinking", "thinking_budget", "hide_reasoning"
+)
+private val FLOAT_TRACE_FIELDS = setOf(
+    "temperature", "top_p", "min_p", "repeat_penalty", "presence_penalty", "frequency_penalty"
 )
 
 /** Records the adapter boundary; submitted values are never treated as runtime acknowledgement. */
@@ -44,7 +48,7 @@ internal fun generationParameterApplication(
         val ignoredReason = ignored[field]
         val hasSubmitted = submitted.has(field)
         val hasAcknowledgement = acknowledged.has(field) && !acknowledged.isNull(field)
-        val changed = hasSubmitted && !sameParameterValue(requested.opt(field), submitted.opt(field))
+        val changed = hasSubmitted && !sameParameterValue(field, requested.opt(field), submitted.opt(field))
         val disposition = when {
             ignoredReason != null -> "ignored"
             hostReason != null -> "host_enforced"
@@ -81,8 +85,11 @@ internal fun generationParameterApplication(
         .put("fields", fields)
 }
 
-private fun sameParameterValue(first: Any?, second: Any?): Boolean = when {
-    first is Number && second is Number -> first.toDouble() == second.toDouble()
+private fun sameParameterValue(field: String, first: Any?, second: Any?): Boolean = when {
+    field in FLOAT_TRACE_FIELDS && first is Number && second is Number ->
+        first.toFloat() == second.toFloat()
+    first is Number && second is Number ->
+        BigDecimal(first.toString()).compareTo(BigDecimal(second.toString())) == 0
     else -> first?.toString() == second?.toString()
 }
 

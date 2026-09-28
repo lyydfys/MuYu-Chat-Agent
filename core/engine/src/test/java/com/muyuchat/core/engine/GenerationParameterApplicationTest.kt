@@ -41,6 +41,42 @@ class GenerationParameterApplicationTest {
     }
 
     @Test
+    fun floatSerializationNoiseDoesNotCountAsNormalization() {
+        val requested = GenerationParams(repeatPenalty = 1.08f).toJson()
+        val trace = generationParameterApplication(
+            runtime = LocalChatRuntime.LITERT_LM,
+            backend = "npu",
+            requestedJson = requested,
+            source = "test",
+            submitted = JSONObject().put("repeat_penalty", 1.08)
+        )
+        val fields = trace.getJSONArray("fields")
+        val penalty = (0 until fields.length()).map(fields::getJSONObject)
+            .first { it.getString("field") == "repeat_penalty" }
+        assertEquals("submitted", penalty.getString("disposition"))
+    }
+
+    @Test
+    fun realNormalizationAndAdjacentLargeSeedsRemainDistinct() {
+        val requested = GenerationParams(repeatPenalty = 0.8f, seed = Int.MAX_VALUE).toJson()
+        val trace = generationParameterApplication(
+            runtime = LocalChatRuntime.LITERT_LM,
+            backend = "npu",
+            requestedJson = requested,
+            source = "test",
+            submitted = JSONObject()
+                .put("repeat_penalty", 1.0)
+                .put("seed", Int.MAX_VALUE - 1)
+        )
+        val fields = trace.getJSONArray("fields")
+        for (name in listOf("repeat_penalty", "seed")) {
+            val field = (0 until fields.length()).map(fields::getJSONObject)
+                .first { it.getString("field") == name }
+            assertEquals("normalized", field.getString("disposition"))
+        }
+    }
+
+    @Test
     fun genieXRescueTraceReadsTheActualSdkObject() {
         val requested = GenerationParams(temperature = 0f, topK = 1, topP = 1f).toJson()
         val config = GenerationConfig(
