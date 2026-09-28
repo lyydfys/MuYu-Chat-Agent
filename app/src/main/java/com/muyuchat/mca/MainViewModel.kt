@@ -1736,6 +1736,10 @@ private fun String.takeUtf8Prefix(maxBytes: Int): Utf8BoundedText {
 
 data class MainUiState(
     val offlineTranslationInstalling: Boolean = false,
+    val offlineTranslationDownloading: Boolean = false,
+    val offlineTranslationDownloadBytes: Long = 0L,
+    val offlineTranslationDownloadTotalBytes: Long = 0L,
+    val offlineTranslationDownloadProgress: Float? = null,
     val offlineTranslationStatus: String = "未安装",
     val pendingChatImageTranslationDraft: com.muyuchat.feature.chat.ChatImageTranslationDraftUi? = null,
     val pendingChatImageActionDraft: com.muyuchat.feature.chat.ChatImageActionDraftUi? = null,
@@ -2469,7 +2473,9 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
     private val offlineTranslationInstaller = OfflinePromptTranslationBundleInstaller(application)
+    private val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
     private var offlineTranslationInstallJob: Job? = null
+    private var offlineTranslationDownloadJob: Job? = null
     private data class PendingImageTranslation(
         val id: String,
         val visibleUserText: String,
@@ -2718,6 +2724,7 @@ class MainViewModel @JvmOverloads constructor(
     private val adaptiveTuningPauseRequested = AtomicBoolean(false)
     private val adaptiveTuningCancelRequested = AtomicBoolean(false)
     private var activeRuntimeIdentity: ModelRuntimeIdentity? = null
+    private var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
     private var activeAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
     private var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
     private var pendingProfileTransactionId: String? = null
@@ -3357,6 +3364,14 @@ class MainViewModel @JvmOverloads constructor(
         observeManagedDownloads()
         observeManagedImports()
         viewModelScope.launch {
+            if (verifiedOfflineTranslationBundle() != null) {
+                _uiState.update { state ->
+                    if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
+                    else state.copy(offlineTranslationStatus = "Hy-MT2 文件完整性已校验；真实翻译待执行")
+                }
+            }
+        }
+        viewModelScope.launch {
             ProcessUiLifecycleEvents.events.collect { event ->
                 when (event) {
                     ProcessUiLifecycleEvent.FOREGROUNDED -> onAppForegrounded()
@@ -3937,22 +3952,6 @@ class MainViewModel @JvmOverloads constructor(
             recoverInterruptedRuntimeProfiles()
         }
 
-        // GenieX keeps successfully installed QAIRT packages in internal app
-        // storage. Recover a lost MCA product manifest in the background so a
-        // multi-gigabyte bundle is reused instead of downloaded again. Directory
-        // hashing must never run in the ViewModel constructor/main thread.
-        if (!skipInitialModelDiscovery) launchModelOperation("恢复模型目录失败") {
-            val recovered = modelStore.recoverInstalledQairtBundles()
-            if (recovered.isNotEmpty()) {
-                refreshManagedRuntimeReadiness()
-                _uiState.update { state ->
-                    state.copy(
-                        statusMessage = "已恢复 ${recovered.size} 个现有 QAIRT NPU 模型；首次加载会自动隔离安全启动。"
-                    )
-                }
-            }
-        }
-
         // Always enqueue one construction-time recovery when the persisted
         // preference says the API was enabled.  A ViewModel can be created
         // after the process foreground replay has already been consumed; in
@@ -4001,11 +4000,33 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
 
-        // Stamp hashing walks the whole managed QNN bundle, so it must not run
-        // on the main thread.  Run the catalog/readiness refresh after the shell is
-        // published even when startup deliberately skipped initial image discovery.
-        // The refresh publishes a cheap catalog first and hashes packages in the background.
+        // Publish the persisted catalog before either QAIRT recovery or stable-identity
+        // reconciliation takes the model-store lock for multi-gigabyte hashing.
         viewModelScope.launch(Dispatchers.IO) {
+            refreshManagedRuntimeReadiness()
+            // GenieX recovery is still needed when its installed package survived a lost
+            // product manifest, but its directory hashing must follow catalog publication.
+            if (!skipInitialModelDiscovery) {
+                recoverModelOperation(
+                    operation = { modelStore.recoverInstalledQairtBundles() },
+                    onSuccess = { recovered ->
+                        if (recovered.isNotEmpty()) {
+                            refreshManagedRuntimeReadiness()
+                            _uiState.update { state ->
+                                state.copy(statusMessage =
+                                    "已恢复 ${recovered.size} 个现有 QAIRT NPU 模型；首次加载会自动隔离安全启动。")
+                            }
+                        }
+                    },
+                    onFailure = { error ->
+                        Log.e("McaModelOperation", "恢复模型目录失败", error)
+                        _uiState.update { state ->
+                            state.copy(statusMessage =
+                                "恢复模型目录失败：${error.message.orEmpty()}。请检查模型文件和存储空间后重试。")
+                        }
+                    }
+                )
+            }
             reconcileModelIdentities()
             refreshManagedRuntimeReadiness()
         }
@@ -11296,6 +11317,7 @@ class MainViewModel @JvmOverloads constructor(
                 busy = true
             )
             activeRuntimeIdentity = identity
+            activeVisionProjectorStamp = loadedVisionProjectorStamp(model, identity)
             activeModelForRuntimeProfile = model
             _uiState.update { it.copy(modelLoadStage = "正在完成准备") }
             val modelParams = loadModelGenerationParams(
@@ -11551,6 +11573,7 @@ class MainViewModel @JvmOverloads constructor(
         directParameterStageGeneration.incrementAndGet()
         directParameterStageJob?.cancel()
         activeRuntimeIdentity = null
+        activeVisionProjectorStamp = null
         activeModelForRuntimeProfile = null
         activeAdaptiveRecommendation = null
         pendingAdaptiveRecommendation = null
@@ -11579,6 +11602,7 @@ class MainViewModel @JvmOverloads constructor(
         val activeProfile = engine.activeExecutionProfile() ?: snapshot.profile
         val profileState = runtimeProfileStore.currentRuntimeState(activeProfile.runtimeIdentity.identityHash)
         activeRuntimeIdentity = activeProfile.runtimeIdentity
+        activeVisionProjectorStamp = loadedVisionProjectorStamp(snapshot.model, activeProfile.runtimeIdentity)
         activeModelForRuntimeProfile = snapshot.model
         activeAdaptiveRecommendation = snapshot.adaptiveRecommendation
         pendingAdaptiveRecommendation = null
@@ -12193,7 +12217,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun importOfflinePromptTranslationBundle(uri: Uri) {
-        if (offlineTranslationInstallJob?.isActive == true) return
+        if (offlineTranslationInstallJob?.isActive == true || offlineTranslationDownloadJob?.isActive == true) return
         offlineTranslationInstallJob = viewModelScope.launch {
             _uiState.update { it.copy(offlineTranslationInstalling = true, offlineTranslationStatus = "正在导入并校验 Hy-MT2") }
             try {
@@ -12212,6 +12236,48 @@ class MainViewModel @JvmOverloads constructor(
 
     fun cancelOfflinePromptTranslationInstall() {
         offlineTranslationInstallJob?.cancel()
+    }
+
+    fun downloadOfflinePromptTranslationBundle() {
+        if (offlineTranslationDownloadJob?.isActive == true || offlineTranslationInstallJob?.isActive == true) return
+        offlineTranslationDownloadJob = viewModelScope.launch {
+            _uiState.update { it.copy(
+                offlineTranslationDownloading = true,
+                offlineTranslationDownloadBytes = 0L,
+                offlineTranslationDownloadTotalBytes = 0L,
+                offlineTranslationDownloadProgress = null,
+                offlineTranslationStatus = "正在准备下载 Hy-MT2"
+            ) }
+            try {
+                offlinePromptTranslationBundle = offlineTranslationDownloader.download { progress ->
+                    _uiState.update { state -> state.copy(
+                        offlineTranslationDownloadBytes = progress.downloadedBytes,
+                        offlineTranslationDownloadTotalBytes = progress.totalBytes,
+                        offlineTranslationDownloadProgress =
+                            (progress.downloadedBytes.toDouble() / progress.totalBytes.coerceAtLeast(1L)).toFloat().coerceIn(0f, 1f),
+                        offlineTranslationStatus = progress.detail?.takeIf { it != "LICENSE" && it != "LICENSE.txt" && it != HyMt2PromptTranslationContract.MODEL_FILE }
+                            ?: "正在下载并校验 Hy-MT2：${progress.downloadedBytes / 1_000_000} / ${progress.totalBytes / 1_000_000} MB"
+                    ) }
+                }
+                _uiState.update { it.copy(
+                    offlineTranslationStatus = "Hy-MT2 文件完整性已校验；真实翻译待执行",
+                    statusMessage = "Hy-MT2 已下载并安装。"
+                ) }
+            } catch (cancelled: CancellationException) {
+                _uiState.update { it.copy(offlineTranslationStatus = "下载已暂停，可继续下载") }
+                throw cancelled
+            } catch (error: Exception) {
+                _uiState.update { it.copy(
+                    offlineTranslationStatus = "Hy-MT2 下载失败：${error.message ?: "请重试"}"
+                ) }
+            } finally {
+                _uiState.update { it.copy(offlineTranslationDownloading = false) }
+            }
+        }
+    }
+
+    fun cancelOfflinePromptTranslationDownload() {
+        offlineTranslationDownloadJob?.cancel()
     }
 
     fun cancelChatImageTranslationDraft(id: String) {
@@ -14270,13 +14336,12 @@ class MainViewModel @JvmOverloads constructor(
             (reservation.supersededOwner as? Job)?.cancel()
         }
 
-    private fun cancelGenerationJob(): Job? {
+    private fun cancelGenerationJob(): UiGenerationCancellation {
         // A cancelled flow still runs finally blocks. The ownership gate advances the epoch
         // before exposing the captured Job, so late cleanup cannot claim a replacement request.
         val cancellation = uiGenerationOwnership.cancelCurrent()
-        val captured = cancellation.owner as? Job
-        captured?.cancel()
-        return captured
+        (cancellation.owner as? Job)?.cancel()
+        return cancellation
     }
 
     private fun startGeneration(
@@ -15177,14 +15242,20 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun stopGeneration() {
-        if (rejectWhileConversationMutationInProgress()) return
+        // Regeneration reserves the UI turn before its Room/KV mutation finishes.
+        // Stop must invalidate that reservation even while the mutation barrier
+        // is active; its eventual onCommitted callback cannot reactivate it.
         if (!stopGenerationInProgress.compareAndSet(false, true)) return
         viewModelScope.launch {
             try {
                 if (!_uiState.value.isGenerating) return@launch
                 val metrics = replyGenerationMetrics?.takeIf { it.runId == generationRunSequence.get() }
                     ?.finish()
-                val stoppedJob = cancelGenerationJob()
+                val cancellation = cancelGenerationJob()
+                val stoppedJob = cancellation.owner as? Job
+                val stopLocalRuntime = cancellation.stopLocalRuntime ||
+                    (cancellation.pendingCancelled &&
+                        engine.activeGenerationStopToken()?.requestId?.startsWith("ui-") == true)
                 val cancelledEpoch = generationRunSequence.get()
                 _uiState.update { state ->
                     val task = state.browserTask
@@ -15196,10 +15267,11 @@ class MainViewModel @JvmOverloads constructor(
                 // native decode mutex. A wedged Binder decode is bounded here so
                 // the UI can recover even before the isolated worker watchdog
                 // finishes reclaiming its process.
-                val stopRequested = withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS) {
-                    engine.stopGeneration()
-                    true
-                } == true
+                val stopRequested = !stopLocalRuntime ||
+                    withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS) {
+                        engine.stopGeneration()
+                        true
+                    } == true
                 val joined = withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS) {
                     stoppedJob?.join()
                     true
@@ -19939,12 +20011,8 @@ class MainViewModel @JvmOverloads constructor(
             if (expected != null && actual != expected) return false
             val loadedFingerprint = activeRuntimeIdentity?.projectorFingerprint
                 ?.takeIf(String::isNotBlank) ?: return false
-            val currentFingerprint = expected?.let { path ->
-                withContext(Dispatchers.IO) {
-                    runCatching { sha256File(File(path)) }.getOrNull()
-                }
-            }
-            if (!loadedFingerprint.equals(currentFingerprint, ignoreCase = true)) return false
+            val stamp = activeVisionProjectorStamp ?: return false
+            if (expected == null || !stamp.matches(File(expected), loadedFingerprint)) return false
         }
         return true
     }

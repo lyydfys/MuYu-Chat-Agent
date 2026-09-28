@@ -1255,11 +1255,12 @@ internal class LiteRtLmChatRunner(
                 // subsequent dispatch lookup reuses the intended objects.
                 preloadQualcommHostLibraries(nativeLibDir)
             }
-            val engineConfig = EngineConfig(
+            val engineConfig = liteRtEngineConfig(
                 modelPath = file.absolutePath,
                 backend = backendFor(config),
                 maxNumTokens = config.maxNumTokens,
-                cacheDir = config.cacheDir
+                cacheDir = config.cacheDir,
+                hasVisionComponents = visionModelVisualComponentsPresent
             )
             // BenchmarkInfo is used for real prefill/decode diagnostics. The
             // flag is read only when Engine is constructed.
@@ -1935,6 +1936,22 @@ internal class LiteRtLmChatRunner(
         private const val CANCEL_JOIN_TIMEOUT_MS = 2_000L
     }
 }
+
+internal fun liteRtEngineConfig(
+    modelPath: String,
+    backend: LiteRtBackend,
+    maxNumTokens: Int,
+    cacheDir: String?,
+    hasVisionComponents: Boolean
+): EngineConfig = EngineConfig(
+    modelPath = modelPath,
+    backend = backend,
+    // LiteRT-LM 0.16.1 creates no vision executor when this is null, even if
+    // the package contains vision sections and an ImageFile is sent later.
+    visionBackend = backend.takeIf { hasVisionComponents },
+    maxNumTokens = maxNumTokens,
+    cacheDir = cacheDir
+)
 
 /** Constructor selections are submission evidence; null delegates stay SDK/model defaults. */
 internal fun liteRtComponentBackends(engineConfig: EngineConfig?): JSONObject {

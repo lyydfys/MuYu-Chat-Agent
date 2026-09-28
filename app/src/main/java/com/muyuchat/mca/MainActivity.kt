@@ -1224,6 +1224,12 @@ private fun McaApp(
                 },
                 onImportChatModel = requestModelImport,
                 onImportImageModel = onImportLocalImageModel,
+                offlineTranslationStatus = state.offlineTranslationStatus,
+                offlineTranslationInstalling = state.offlineTranslationInstalling,
+                offlineTranslationDownloading = state.offlineTranslationDownloading,
+                offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
+                onDownloadOfflineTranslation = viewModel::downloadOfflinePromptTranslationBundle,
+                onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
                 onOpenApi = { onTab(AppTab.API) },
                 onOpenSettings = {
                     startSettingsInWebSearch = false
@@ -1581,6 +1587,10 @@ private fun McaApp(
                 onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
                 offlineTranslationStatus = state.offlineTranslationStatus,
                 offlineTranslationInstalling = state.offlineTranslationInstalling,
+                offlineTranslationDownloading = state.offlineTranslationDownloading,
+                offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
+                onDownloadOfflineTranslation = viewModel::downloadOfflinePromptTranslationBundle,
+                onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
                 onImportOfflineTranslation = onImportOfflineTranslation,
                 onCancelOfflineTranslationImport = viewModel::cancelOfflinePromptTranslationInstall,
                 onSaveWebSearchSettings = { draft: WebSearchSettingsDraft ->

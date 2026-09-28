@@ -400,6 +400,45 @@ class McaInferenceServicePhaseEventTest {
         assertTrue(second.await().last() is GenerateEvent.Error)
     }
 
+    @Test
+    fun modelReloadDiscardsOrphanedStopTargetWithoutClearingTheNextGeneration() = runBlocking {
+        val runner = PhaseRunner(LocalChatRuntime.LLAMA_CPP)
+        val service = loadedService(runner)
+        val activate = McaInferenceService::class.java.getDeclaredMethod(
+            "activateGenerationStopTarget",
+            String::class.java,
+            LocalChatRunner::class.java
+        ).apply { isAccessible = true }
+        val clear = McaInferenceService::class.java.getDeclaredMethod(
+            "clearGenerationStopTarget",
+            GenerationStopToken::class.java
+        ).apply { isAccessible = true }
+        val orphan = activate.invoke(service, "old-vision-request", runner) as GenerationStopToken
+
+        service.loadModel(
+            modelPath = "/models/phase/model.gguf",
+            runtime = LocalChatRuntime.LLAMA_CPP,
+            params = LoadParams(nCtx = 4096, nThreads = 2)
+        ).getOrThrow()
+        assertNull(service.activeGenerationStopToken())
+        assertFalse(service.stopGenerationIfActive(orphan))
+
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        runner.blockNextGenerate(entered, release, "fresh")
+        val generation = async(Dispatchers.Default) { service.streamChat(request()).toList() }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val current = requireNotNull(service.activeGenerationStopToken())
+            clear.invoke(service, orphan)
+            assertTrue(service.activeGenerationStopToken() === current)
+            assertFalse(service.stopGenerationIfActive(orphan))
+        } finally {
+            release.countDown()
+        }
+        assertTrue(generation.await().last() is GenerateEvent.Done)
+    }
+
     private suspend fun loadedService(
         runner: PhaseRunner,
         prefillProgressPollIntervalMs: Long = 5L,
@@ -407,13 +446,17 @@ class McaInferenceServicePhaseEventTest {
     ): McaInferenceService {
         val service = McaInferenceService(
             context = FakeContext(),
-            runners = mapOf(LocalChatRuntime.MNN_CPU to runner),
+            runners = mapOf(runner.runtime to runner),
             prefillProgressPollIntervalMs = prefillProgressPollIntervalMs,
             clock = clock
         )
         service.loadModel(
-            modelPath = "/models/phase/config.json",
-            runtime = LocalChatRuntime.MNN_CPU,
+            modelPath = if (runner.runtime == LocalChatRuntime.LLAMA_CPP) {
+                "/models/phase/model.gguf"
+            } else {
+                "/models/phase/config.json"
+            },
+            runtime = runner.runtime,
             params = LoadParams(nCtx = 4096, nThreads = 2)
         ).getOrThrow()
         return service
@@ -430,8 +473,10 @@ class McaInferenceServicePhaseEventTest {
         )
     )
 
-    private class PhaseRunner : LocalChatRunner {
-        private var statsJson = loadedStatsJson("{}")
+    private class PhaseRunner(
+        override val runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
+    ) : LocalChatRunner {
+        private var statsJson = loadedStatsJson(runtime, "{}")
         private val chunks = ArrayDeque<String>()
 
         var beginReturnCode = 0
@@ -463,7 +508,6 @@ class McaInferenceServicePhaseEventTest {
         @Volatile
         private var stopRequested = false
 
-        override val runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
         override val isAvailable: Boolean = true
         override val loadError: Throwable? = null
 
@@ -471,7 +515,7 @@ class McaInferenceServicePhaseEventTest {
 
         override fun loadModel(modelPath: String, paramsJson: String): Int {
             onLoad?.invoke()
-            statsJson = loadedStatsJson(paramsJson)
+            statsJson = loadedStatsJson(runtime, paramsJson)
             return 0
         }
 
@@ -554,7 +598,7 @@ class McaInferenceServicePhaseEventTest {
         private companion object {
             const val PREFILL_STEP_PAUSE_MS = 60L
 
-            fun loadedStatsJson(paramsJson: String): String {
+            fun loadedStatsJson(runtime: LocalChatRuntime, paramsJson: String): String {
                 val params = runCatching { JSONObject(paramsJson) }.getOrElse { JSONObject() }
                 val advanced = when (val raw = params.opt("advanced_json")) {
                     is JSONObject -> raw
@@ -580,8 +624,9 @@ class McaInferenceServicePhaseEventTest {
                     .put("thread_num", nThreads)
                     .put("chunk", value("chunk", 128))
                 return JSONObject()
-                    .put("backend", LocalChatRuntime.MNN_CPU.backendId)
+                    .put("backend", runtime.backendId)
                     .put("loaded", true)
+                    .put("effectiveConfig", params)
                     .put("runnerReady", true)
                     .put("visionReady", true)
                     .put("nThreads", nThreads)

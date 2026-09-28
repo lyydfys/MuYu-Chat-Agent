@@ -95,4 +95,19 @@ class UiGenerationOwnershipTest {
         assertTrue(replacement.runId > background.invalidatedRunId)
         assertFalse(sequence.get() == background.invalidatedRunId)
     }
+
+    @Test
+    fun stopDuringRegenerationPersistenceRejectsLateGenerationStart() {
+        val sequence = AtomicLong(0L)
+        val ownership = UiGenerationOwnership(sequence)
+        val pending = requireNotNull(ownership.reserveStart())
+
+        val stopped = ownership.cancelCurrent()
+
+        assertTrue(stopped.pendingCancelled)
+        assertNull(stopped.owner)
+        assertFalse(stopped.stopLocalRuntime)
+        assertFalse(ownership.activate(pending, Any()))
+        assertTrue(sequence.get() > pending.runId)
+    }
 }

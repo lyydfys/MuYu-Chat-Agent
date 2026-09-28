@@ -349,7 +349,7 @@ open class LocalChatWorkerService : Service() {
                 dispatchRunnerStop()
                 return
             }
-            if (scheduleForcedRecoveryAfterStop()) return
+            scheduleForcedRecoveryAfterStop()
             dispatchRunnerStop()
         }
 
@@ -1110,6 +1110,13 @@ internal fun localChatWorkerOperationPolicy(
             )
             else -> defaultLocalChatWorkerOperationPolicy(stage).copy(forceProcessRecoveryOnCancel = true)
         }
+        target?.runtime == LocalChatRuntime.LLAMA_CPP ||
+            target?.runtime == LocalChatRuntime.GENIEX_LLAMA_CPP ->
+            defaultLocalChatWorkerOperationPolicy(stage).copy(
+                timeoutFailureCode = "gguf_native_timeout",
+                operationLabel = "GGUF llama.cpp",
+                forceProcessRecoveryOnCancel = true
+            )
         else -> defaultLocalChatWorkerOperationPolicy(stage)
     }
 }

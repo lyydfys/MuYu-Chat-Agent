@@ -12,6 +12,36 @@ import java.nio.file.Files
 
 class LiteRtLmChatRunnerTest {
     @Test
+    fun visionPackageInitializesTheSdkVisionExecutorForItsSelectedBackend() {
+        val backends = listOf(Backend.CPU(), Backend.GPU(), Backend.NPU("/runtime"))
+        backends.forEach { backend ->
+            val config = liteRtEngineConfig(
+                modelPath = "/models/vision.litertlm",
+                backend = backend,
+                maxNumTokens = 4096,
+                cacheDir = "/cache",
+                hasVisionComponents = true
+            )
+            assertEquals(backend, config.backend)
+            assertEquals(backend, config.visionBackend)
+            assertEquals(4096, config.maxNumTokens)
+            assertEquals("/cache", config.cacheDir)
+        }
+    }
+
+    @Test
+    fun textOnlyPackageDoesNotInitializeTheSdkVisionExecutor() {
+        val config = liteRtEngineConfig(
+            modelPath = "/models/text.litertlm",
+            backend = Backend.CPU(),
+            maxNumTokens = 2048,
+            cacheDir = null,
+            hasVisionComponents = false
+        )
+        assertNull(config.visionBackend)
+    }
+
+    @Test
     fun componentBackendDefaultsAreNotInheritedFromTheRequestedLlmBackend() {
         val config = EngineConfig(modelPath = "/models/vision.litertlm", backend = Backend.NPU("/runtime"))
         val components = liteRtComponentBackends(config)

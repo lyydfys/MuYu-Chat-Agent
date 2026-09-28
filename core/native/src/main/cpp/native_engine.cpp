@@ -55,6 +55,14 @@ std::mutex g_mutex;
 std::atomic_bool g_stop_requested{false};
 std::atomic<std::uint64_t> g_stop_epoch{0};
 std::atomic_bool g_generation_active{false};
+#if MCA_WITH_LLAMA_CPP
+std::atomic_bool g_inference_abort_enabled{false};
+
+bool abort_inference_if_stopped(void *) {
+    return g_inference_abort_enabled.load(std::memory_order_acquire) &&
+           g_stop_requested.load(std::memory_order_acquire);
+}
+#endif
 
 enum class GenerationStopReason : int {
     IDLE = 0,
@@ -2444,6 +2452,10 @@ int prefill_multimodal_locked(
     std::vector<const mtmd_bitmap *> bitmap_ptrs;
     for (const auto &message: messages) {
         for (const auto &path: message.image_paths) {
+            if (g_stop_requested.load(std::memory_order_acquire)) {
+                free_media();
+                return COMPLETION_STOPPED;
+            }
             const auto loaded = mtmd_helper_bitmap_init_from_file(
                     g_mtmd_context,
                     path.c_str(),
@@ -2462,6 +2474,10 @@ int prefill_multimodal_locked(
         }
     }
 
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        free_media();
+        return COMPLETION_STOPPED;
+    }
     mtmd_input_chunks *chunks = mtmd_input_chunks_init();
     if (chunks == nullptr) {
         free_media();
@@ -2487,11 +2503,25 @@ int prefill_multimodal_locked(
     free_media();
     if (tokenize_rc != 0) {
         mtmd_input_chunks_free(chunks);
+        if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
         g_last_error = "mtmd_tokenize failed: " + std::to_string(tokenize_rc);
         return -7;
     }
+    if (g_stop_requested.load(std::memory_order_acquire)) {
+        mtmd_input_chunks_free(chunks);
+        return COMPLETION_STOPPED;
+    }
 
     const size_t multimodal_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
+    if (multimodal_prompt_tokens == 0 ||
+        multimodal_prompt_tokens >= static_cast<size_t>(g_n_ctx - OVERFLOW_HEADROOM)) {
+        mtmd_input_chunks_free(chunks);
+        g_last_error = "Vision prompt needs " + std::to_string(multimodal_prompt_tokens) +
+                       " tokens, but n_ctx=" + std::to_string(g_n_ctx) +
+                       " must also leave room for generation. Reduce image size or history, "
+                       "or reload with a larger context.";
+        return -9;
+    }
     begin_prefill_progress(multimodal_prompt_tokens);
 
     llama_pos new_position = 0;
@@ -2507,9 +2537,11 @@ int prefill_multimodal_locked(
     g_prompt_tokens = (long long) multimodal_prompt_tokens;
     mtmd_input_chunks_free(chunks);
     if (eval_rc != 0) {
+        if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
         g_last_error = "mtmd_helper_eval_chunks failed: " + std::to_string(eval_rc);
         return -8;
     }
+    if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
     g_current_position = new_position;
     g_prefill_computed_tokens = (long long) multimodal_prompt_tokens;
     report_reused_prefill_tokens(multimodal_prompt_tokens);
@@ -3366,6 +3398,9 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
     g_stop_epoch.fetch_add(1, std::memory_order_acq_rel);
     try {
     std::lock_guard<std::mutex> lock(g_mutex);
+#if MCA_WITH_LLAMA_CPP
+    g_inference_abort_enabled.store(false, std::memory_order_release);
+#endif
     const std::string path = jstring_to_string(env, modelPath);
     const std::string params = jstring_to_string(env, paramsJson);
     g_stop_requested.store(true, std::memory_order_relaxed);
@@ -3604,6 +3639,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         ctx_params.type_v = cache_type_from_name(effective.cache_type_v);
         ctx_params.flash_attn_type = flash_attn_from_name(effective.flash_attn);
         ctx_params.no_perf = !effective.perf;
+        ctx_params.abort_callback = abort_inference_if_stopped;
         g_n_threads = n_threads;
         g_n_threads_batch = effective.n_threads_batch;
         g_n_batch = effective.n_batch;
@@ -3985,6 +4021,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
         const auto messages = parse_messages(messages_json);
         int rc = 0;
         const bool has_images = messages_have_images(messages);
+        g_inference_abort_enabled.store(true, std::memory_order_release);
         if (has_images) {
             g_speculative.reset();
             g_spec_request_active = false;

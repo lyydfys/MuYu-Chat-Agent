@@ -2026,6 +2026,12 @@ fun ChatScreen(
     onOpenRecommendedModels: () -> Unit = onOpenModels,
     onImportChatModel: () -> Unit = onOpenModels,
     onImportImageModel: () -> Unit = onOpenModels,
+    offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalling: Boolean = false,
+    offlineTranslationDownloading: Boolean = false,
+    offlineTranslationDownloadProgress: Float? = null,
+    onDownloadOfflineTranslation: () -> Unit = {},
+    onCancelOfflineTranslationDownload: () -> Unit = {},
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
     onRequestContextCompression: () -> Unit = {},
@@ -3552,6 +3558,12 @@ fun ChatScreen(
                 ImagesWorkspaceScreen(
                     onOpenModels = onOpenRecommendedModels,
                     onImportModel = onImportImageModel,
+                    offlineTranslationStatus = offlineTranslationStatus,
+                    offlineTranslationInstalling = offlineTranslationInstalling,
+                    offlineTranslationDownloading = offlineTranslationDownloading,
+                    offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
+                    onDownloadOfflineTranslation = onDownloadOfflineTranslation,
+                    onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
                     statusMessage = imageValidationError ?: state.statusMessage,
                     onDismissStatusMessage = { imageValidationError = null; onDismissStatusMessage() },
                     images = state.images,
@@ -5639,6 +5651,12 @@ private fun String.toAssistantStopWords(default: List<String>): List<String> =
 private fun ImagesWorkspaceScreen(
     onOpenModels: () -> Unit,
     onImportModel: () -> Unit,
+    offlineTranslationStatus: String,
+    offlineTranslationInstalling: Boolean,
+    offlineTranslationDownloading: Boolean,
+    offlineTranslationDownloadProgress: Float?,
+    onDownloadOfflineTranslation: () -> Unit,
+    onCancelOfflineTranslationDownload: () -> Unit,
     statusMessage: String?,
     onDismissStatusMessage: () -> Unit,
     images: List<ImageAssetUiItem>,
@@ -6002,9 +6020,23 @@ private fun ImagesWorkspaceScreen(
                 Text("还没有可用的生图模型", style = MaterialTheme.typography.titleMedium)
                 Button(onClick = onOpenModels) { Text("选择推荐模型") }
                 OutlinedButton(onClick = onImportModel) { Text("导入已有模型") }
+                ImageTranslationDownloadRow(
+                    status = offlineTranslationStatus,
+                    installing = offlineTranslationInstalling,
+                    downloading = offlineTranslationDownloading,
+                    progress = offlineTranslationDownloadProgress,
+                    onDownload = onDownloadOfflineTranslation,
+                    onCancel = onCancelOfflineTranslationDownload
+                )
             }
         } else {
             ImageGalleryHome(
+                offlineTranslationStatus = offlineTranslationStatus,
+                offlineTranslationInstalling = offlineTranslationInstalling,
+                offlineTranslationDownloading = offlineTranslationDownloading,
+                offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
+                onDownloadOfflineTranslation = onDownloadOfflineTranslation,
+                onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
                 revealParameters = revealParameters,
                 images = filteredImages,
                 totalImageCount = images.size,
@@ -6665,7 +6697,69 @@ private val ImageGenerationUiJob.isWorking: Boolean
     get() = !terminal
 
 @Composable
+private fun ImageTranslationDownloadRow(
+    status: String,
+    installing: Boolean,
+    downloading: Boolean,
+    progress: Float?,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("image.translation.download"),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("图片提示词翻译 · Hy-MT2", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            OutlinedButton(
+                onClick = if (downloading) onCancel else onDownload,
+                enabled = downloading || !installing
+            ) {
+                Icon(
+                    if (downloading) Icons.Default.Stop else Icons.Default.Download,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text(if (downloading) "取消" else "下载")
+            }
+        }
+        if (downloading) {
+            val boundedProgress = progress?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+            if (boundedProgress == null) {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            } else {
+                LinearProgressIndicator(
+                    progress = { boundedProgress },
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+        HorizontalDivider()
+    }
+}
+
+@Composable
 private fun ImageGalleryHome(
+    offlineTranslationStatus: String,
+    offlineTranslationInstalling: Boolean,
+    offlineTranslationDownloading: Boolean,
+    offlineTranslationDownloadProgress: Float?,
+    onDownloadOfflineTranslation: () -> Unit,
+    onCancelOfflineTranslationDownload: () -> Unit,
     revealParameters: Int,
     images: List<ImageAssetUiItem>,
     totalImageCount: Int,
@@ -6825,6 +6919,16 @@ private fun ImageGalleryHome(
                 selectedModelIsCloud = selectedImageModelIsCloud,
                 enabled = imageModelSwitchEnabled,
                 onSelectModel = onSelectImageModel
+            )
+        }
+        item {
+            ImageTranslationDownloadRow(
+                status = offlineTranslationStatus,
+                installing = offlineTranslationInstalling,
+                downloading = offlineTranslationDownloading,
+                progress = offlineTranslationDownloadProgress,
+                onDownload = onDownloadOfflineTranslation,
+                onCancel = onCancelOfflineTranslationDownload
             )
         }
         item {

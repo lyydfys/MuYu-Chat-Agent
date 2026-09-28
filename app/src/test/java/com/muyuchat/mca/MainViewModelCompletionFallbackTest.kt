@@ -277,6 +277,7 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(joinTimeout > requestTimeout)
         assertTrue(source.contains("private const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L"))
         assertTrue(body.contains("已请求停止，正在恢复本地推理进程"))
+        assertFalse(body.contains("rejectWhileConversationMutationInProgress()"))
     }
 
     @Test

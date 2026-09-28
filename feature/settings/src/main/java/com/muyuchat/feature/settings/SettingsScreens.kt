@@ -37,6 +37,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -229,8 +230,12 @@ fun SettingsHubScreen(
     onClearPersistentPrefixCache: () -> Unit,
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalling: Boolean = false,
+    offlineTranslationDownloading: Boolean = false,
+    offlineTranslationDownloadProgress: Float? = null,
     onImportOfflineTranslation: () -> Unit = {},
     onCancelOfflineTranslationImport: () -> Unit = {},
+    onDownloadOfflineTranslation: () -> Unit = {},
+    onCancelOfflineTranslationDownload: () -> Unit = {},
     onSaveWebSearchSettings: (WebSearchSettingsDraft) -> Unit,
     onPreflightWebSearch: (WebSearchSettingsDraft) -> Unit,
     onTestWebSearch: (String, WebSearchSettingsDraft) -> Unit,
@@ -293,8 +298,12 @@ fun SettingsHubScreen(
                 state = state,
                 offlineTranslationStatus = offlineTranslationStatus,
                 offlineTranslationInstalling = offlineTranslationInstalling,
+                offlineTranslationDownloading = offlineTranslationDownloading,
+                offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
                 onImportOfflineTranslation = onImportOfflineTranslation,
                 onCancelOfflineTranslationImport = onCancelOfflineTranslationImport,
+                onDownloadOfflineTranslation = onDownloadOfflineTranslation,
+                onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
                 onCheckUpdate = onCheckUpdate,
                 onDownloadUpdate = onDownloadUpdate,
                 onInstallUpdate = onInstallUpdate,
@@ -342,8 +351,12 @@ fun RuntimeScreen(
     modifier: Modifier = Modifier,
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalling: Boolean = false,
+    offlineTranslationDownloading: Boolean = false,
+    offlineTranslationDownloadProgress: Float? = null,
     onImportOfflineTranslation: () -> Unit = {},
     onCancelOfflineTranslationImport: () -> Unit = {},
+    onDownloadOfflineTranslation: () -> Unit = {},
+    onCancelOfflineTranslationDownload: () -> Unit = {},
     onCheckUpdate: () -> Unit = {},
     onDownloadUpdate: () -> Unit = {},
     onInstallUpdate: () -> Unit = {},
@@ -369,11 +382,46 @@ fun RuntimeScreen(
         item { Text("运行状态", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("离线图片提示词翻译", fontWeight = FontWeight.SemiBold)
-                Text(offlineTranslationStatus, style = MaterialTheme.typography.bodySmall)
-                TextButton(
-                    onClick = if (offlineTranslationInstalling) onCancelOfflineTranslationImport else onImportOfflineTranslation
-                ) { Text(if (offlineTranslationInstalling) "取消导入" else "导入 Hy-MT2 包") }
+                Text("离线图片提示词翻译 · Hy-MT2", fontWeight = FontWeight.SemiBold)
+                Text(
+                    offlineTranslationStatus,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (offlineTranslationStatus.contains("失败") || offlineTranslationStatus.contains("错误")) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+                if (offlineTranslationDownloading) {
+                    val progress = offlineTranslationDownloadProgress?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+                    if (progress == null) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    } else {
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                        Text("下载进度 ${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = if (offlineTranslationDownloading) onCancelOfflineTranslationDownload else onDownloadOfflineTranslation,
+                        enabled = !offlineTranslationInstalling,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(if (offlineTranslationDownloading) Icons.Default.Close else Icons.Default.Download, contentDescription = null)
+                        Text(
+                            if (offlineTranslationDownloading) "取消下载" else if (offlineTranslationStatus.contains("下载失败")) "重试下载" else "下载",
+                            modifier = Modifier.padding(start = 6.dp)
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = if (offlineTranslationInstalling) onCancelOfflineTranslationImport else onImportOfflineTranslation,
+                        enabled = !offlineTranslationDownloading,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(if (offlineTranslationInstalling) Icons.Default.Close else Icons.Default.FileDownload, contentDescription = null)
+                        Text(if (offlineTranslationInstalling) "取消导入" else "本地导入", modifier = Modifier.padding(start = 6.dp))
+                    }
+                }
             }
         }
         item {

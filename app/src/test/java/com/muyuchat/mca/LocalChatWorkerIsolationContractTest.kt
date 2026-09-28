@@ -106,6 +106,18 @@ class LocalChatWorkerIsolationContractTest {
         assertEquals("litert_cpu_cancel_timeout", prefill.timeoutFailureCode)
     }
 
+    @Test
+    fun ggufVisionPrefillAndDecodeRecoverWhenNativeCancellationStalls() {
+        listOf(LocalChatRuntime.LLAMA_CPP, LocalChatRuntime.GENIEX_LLAMA_CPP).forEach { runtime ->
+            val target = localChatWorkerOperationTarget(runtime, "{}")
+            listOf("prefill", "decode").forEach { stage ->
+                val policy = localChatWorkerOperationPolicy(target, stage)
+                assertTrue(policy.forceProcessRecoveryOnCancel)
+                assertEquals("gguf_native_timeout", policy.timeoutFailureCode)
+            }
+        }
+    }
+
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         while (directory != null) {

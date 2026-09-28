@@ -565,6 +565,7 @@ class McaInferenceService(
             // Failed/cancelled MNN turns deliberately bypass this fast path and
             // are refreshed below before their next request.
             mutex.withLock {
+                invalidateGenerationStopTargetAfterLifecycleTransition()
                 validateExecutionProfilePathLocked(modelPath, resolvedExecutionProfile)
                 parameterCoordinator.prepareOrdinaryLoad(resolvedExecutionProfile)
                 reusableMnnLoadedStats(modelPath, runtime, resolvedExecutionProfile)
@@ -576,6 +577,7 @@ class McaInferenceService(
             }
             stopGeneration()
             mutex.withLock {
+                invalidateGenerationStopTargetAfterLifecycleTransition()
                 // A running request may have completed while stopGeneration()
                 // waited outside the lock. Recheck so that concurrent model-page
                 // taps still do not tear down a healthy MNN session.
@@ -723,6 +725,7 @@ class McaInferenceService(
     suspend fun unloadModel() = withContext(io) {
         stopGeneration()
         mutex.withLock {
+            invalidateGenerationStopTargetAfterLifecycleTransition()
             val unloadedRuntime = activeRuntime
             val dryRunWitness = qairtDryRunWitness
             runnerFor(unloadedRuntime).unloadModel()
@@ -1738,6 +1741,13 @@ class McaInferenceService(
         val target = capture.second ?: return true
         return withContext(io) {
             withTimeoutOrNull(STOP_REQUEST_TIMEOUT_MS) {
+                // Dispatch can lag behind a model reload or a replacement turn.
+                // Recheck after the dispatcher hop before signaling the runner.
+                val stillCurrent = synchronized(generationStopGate) {
+                    activeGenerationStopTarget?.token == expected &&
+                        stopRequestedToken == expected
+                }
+                if (!stillCurrent) return@withTimeoutOrNull true
                 // The engine-owned token is the active-operation proof. Do not
                 // perform a second native active-state query here: a damaged
                 // runner may serialize that query behind decode and recreate
@@ -1755,6 +1765,7 @@ class McaInferenceService(
         // Interrupt an active stream before waiting for streamChat's mutex ownership.
         runCatching { runnerFor(activeRuntime).requestStop() }
         mutex.withLock {
+            invalidateGenerationStopTargetAfterLifecycleTransition()
             runners.values.distinct().forEach { runner ->
                 runCatching { runner.requestStop() }
                 runCatching { runner.shutdown() }
@@ -1920,6 +1931,15 @@ class McaInferenceService(
                 activeGenerationStopTarget = null
                 if (stopRequestedToken == token) stopRequestedToken = null
             }
+        }
+    }
+
+    /** Called with the engine lifecycle mutex held, after the prior stream has exited. */
+    private fun invalidateGenerationStopTargetAfterLifecycleTransition() {
+        synchronized(generationStopGate) {
+            generationStopEpoch += 1L
+            activeGenerationStopTarget = null
+            stopRequestedToken = null
         }
     }
 
