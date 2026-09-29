@@ -14,6 +14,59 @@ import org.junit.Test
 
 class LocalImageExecutionProfileIntegrationTest {
     @Test
+    fun `stable diffusion catalog artifacts use the runtime native graph identity`() {
+        val recommendation = ModelScopeClient().recommendedModels()
+            .single { it.id == "qwen_image_21_q4_k_m" }
+        val profile = requireNotNull(
+            materializeDownloadedImageExecutionProfile(
+                requireNotNull(recommendation.imageEngineBundle),
+                "a".repeat(64)
+            )
+        )
+
+        listOfNotNull(profile.graph.textEncoder, profile.graph.unet, profile.graph.vae)
+            .forEach { artifact ->
+                assertEquals("runtime-native", artifact.graphName)
+            }
+    }
+
+    @Test
+    fun `record recommendation identity resolves a minimal bundle manifest`() {
+        val root = Files.createTempDirectory("qwen-minimal-manifest").toFile()
+        try {
+            val primary = root.resolve("qwen-image-2.1-Q4_K_M.gguf")
+                .apply { writeBytes(byteArrayOf(1, 2, 3)) }
+            root.resolve("manifest.json").writeText(
+                JSONObject()
+                    .put("id", "qwen_image_21_q4_k_m")
+                    .put("runtime", "STABLE_DIFFUSION_CPP")
+                    .put("family", "QWEN_IMAGE")
+                    .put("primaryFile", primary.name)
+                    .toString()
+            )
+            val resolution = resolveLocalImageExecutionProfile(
+                model = LocalImageModelRecord(
+                    displayName = primary.name,
+                    path = primary.absolutePath,
+                    fileName = primary.name,
+                    sizeBytes = primary.length(),
+                    sha256 = "",
+                    runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+                    family = LocalImageModelFamily.QWEN_IMAGE,
+                    recommendationId = "qwen_image_21_q4_k_m",
+                    bundleRoot = root.absolutePath
+                ),
+                options = LocalImageGenerationOptions(width = 320, height = 320, steps = 4),
+                bundleRoot = root
+            )
+            assertEquals("sdcpp.qwen-image-2.1", resolution.profile.profileId)
+            assertEquals("runtime-native", resolution.layers.resolved.graphName)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `upgrading installed Gen5 profiles retains publisher subdirectories before generation`() {
         val ids = setOf("qualcomm_sd15_gen5_qnn", "qualcomm_sd21_gen5_qnn", "qualcomm_controlnet_canny_gen5_qnn")
         ModelScopeClient().recommendedModels().filter { it.id in ids }.forEach { recommendation ->

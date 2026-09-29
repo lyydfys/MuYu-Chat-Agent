@@ -20,6 +20,11 @@ param(
     [double]$FlowShift = 0.0,
     [string]$SampleMethod = 'euler',
     [string]$Family = 'SD_TURBO',
+    [string]$LoraPath = '',
+    [string]$LoraId = '',
+    [string]$LoraSha256 = '',
+    [long]$LoraSizeBytes = 0,
+    [double]$LoraMultiplier = 1.0,
     [ValidateRange(1, 100)]
     [int]$Runs = 1,
     [ValidateSet('reuse', 'cold')]
@@ -137,9 +142,43 @@ foreach ($argument in @(
         [pscustomobject]@{ Name = 'BundleRoot'; Value = $BundleRoot },
         [pscustomobject]@{ Name = 'Prompt'; Value = $Prompt },
         [pscustomobject]@{ Name = 'SampleMethod'; Value = $SampleMethod },
-        [pscustomobject]@{ Name = 'Family'; Value = $Family }
+        [pscustomobject]@{ Name = 'Family'; Value = $Family },
+        [pscustomobject]@{ Name = 'LoraPath'; Value = $LoraPath },
+        [pscustomobject]@{ Name = 'LoraId'; Value = $LoraId },
+        [pscustomobject]@{ Name = 'LoraSha256'; Value = $LoraSha256 }
     )) {
     Assert-DeviceSmokeSingleLineArgument -Value $argument.Value -Name $argument.Name
+}
+
+if ([string]::IsNullOrWhiteSpace($LoraPath)) {
+    if (-not [string]::IsNullOrWhiteSpace($LoraId) -or
+        -not [string]::IsNullOrWhiteSpace($LoraSha256) -or
+        $LoraSizeBytes -ne 0 -or
+        $LoraMultiplier -ne 1.0) {
+        throw 'LoraPath is required when any LoRA metadata or a non-default multiplier is supplied.'
+    }
+    $LoraPath = ''
+    $LoraId = ''
+    $LoraSha256 = ''
+    $LoraSizeBytes = 0
+    $LoraMultiplier = 1.0
+} else {
+    if (-not $LoraPath.StartsWith('/')) {
+        throw 'LoraPath must be an absolute Android path.'
+    }
+    if ([string]::IsNullOrWhiteSpace($LoraId)) {
+        throw 'LoraId is required when LoraPath is supplied.'
+    }
+    if ($LoraSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'LoraSha256 must be a 64-character hexadecimal SHA-256 digest.'
+    }
+    if ($LoraSizeBytes -le 0) {
+        throw 'LoraSizeBytes must be greater than zero when LoraPath is supplied.'
+    }
+    if ($LoraMultiplier -le 0) {
+        throw 'LoraMultiplier must be greater than zero.'
+    }
+    $LoraSha256 = $LoraSha256.ToLowerInvariant()
 }
 
 if (-not $ModelPath.StartsWith('/')) {
@@ -163,6 +202,9 @@ $serial = Initialize-DeviceSmokeDevice -Adb $Adb -Serial $Serial
 Assert-DeviceSmokePackageInstalled -Adb $Adb -Serial $serial -Package $Package
 Assert-DeviceSmokeActivityAvailable -Adb $Adb -Serial $serial -Component $component
 Assert-RemoteNonEmptyFile -Adb $Adb -Serial $serial -Path $ModelPath -Description 'stable-diffusion.cpp model file'
+if (-not [string]::IsNullOrWhiteSpace($LoraPath)) {
+    Assert-RemoteNonEmptyFile -Adb $Adb -Serial $serial -Path $LoraPath -Description 'stable-diffusion.cpp LoRA file'
+}
 
 $runOutputDir = Join-Path $OutDir $SessionId
 New-Item -ItemType Directory -Force -Path $runOutputDir | Out-Null
@@ -208,6 +250,15 @@ for ($run = 1; $run -le $Runs; $run++) {
             '--el', 'workerStartPauseMs', [string]$WorkerStartPauseMs,
             '--el', 'workerMainLeaseHoldMs', [string]$WorkerMainLeaseHoldMs
         )
+        if (-not [string]::IsNullOrWhiteSpace($LoraPath)) {
+            $activityArguments += @(
+                '--es', 'loraPath', $LoraPath,
+                '--es', 'loraId', $LoraId,
+                '--es', 'loraSha256', $LoraSha256,
+                '--el', 'loraSizeBytes', [string]$LoraSizeBytes,
+                '--ef', 'loraMultiplier', (ConvertTo-DeviceSmokeInvariantDouble -Value $LoraMultiplier)
+            )
+        }
         $result = Invoke-DeviceSmokeActivityRun `
             -Adb $Adb -Serial $serial -Package $Package -Lifecycle $Lifecycle `
             -ActivityArguments $activityArguments -RemoteJson $remoteJson -LocalJson $localJson `
@@ -279,6 +330,12 @@ $summary = [pscustomobject][ordered]@{
     flowShift = $FlowShift
     sampleMethod = $SampleMethod
     family = $Family
+    loraPath = $LoraPath
+    loraId = $LoraId
+    loraSha256 = $LoraSha256
+    loraSizeBytes = $LoraSizeBytes
+    loraMultiplier = $LoraMultiplier
+    loraEnabled = -not [string]::IsNullOrWhiteSpace($LoraPath)
     lifecycle = $Lifecycle
     workerProductPath = [bool]$WorkerProductPath
     workerStartPauseMs = $WorkerStartPauseMs

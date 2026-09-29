@@ -145,6 +145,34 @@ class LocalImageSmokeActivity : Activity() {
             } else {
                 null
             }
+            val requestedLoraPath = intent.getStringExtra("loraPath").orEmpty().trim()
+            val loraId = intent.getStringExtra("loraId").orEmpty().trim()
+            val loraSha256 = intent.getStringExtra("loraSha256").orEmpty().trim().lowercase()
+            val loraSizeBytes = intent.getLongExtra("loraSizeBytes", 0L)
+            val loraMultiplier = intent.numberExtra("loraMultiplier", 1.0)
+            require(requestedLoraPath.isEmpty() || isStableDiffusionCpp) {
+                "LoRA adapters are supported only by stable-diffusion.cpp smoke."
+            }
+            if (requestedLoraPath.isNotEmpty()) {
+                require(loraId.isNotEmpty() && loraSha256.matches(Regex("[0-9a-f]{64}")) && loraSizeBytes > 0L) {
+                    "LoRA smoke requires id, SHA-256, and a positive size."
+                }
+                require(File(requestedLoraPath).isFile && File(requestedLoraPath).length() == loraSizeBytes) {
+                    "LoRA smoke file is missing or has an unexpected size."
+                }
+            }
+            // Keep native LoRA reopening inside this app's private storage. The
+            // harness may provide an external absolute path, but the bridge's
+            // worker/process boundary must not depend on broad storage access.
+            val loraPath = if (requestedLoraPath.isEmpty()) {
+                ""
+            } else {
+                stageLoraFile(
+                    sourcePath = requestedLoraPath,
+                    loraSha256 = loraSha256,
+                    loraSizeBytes = loraSizeBytes
+                )
+            }
             val sampleMethod = intent.getStringExtra("sampleMethod").orEmpty().ifBlank { "euler" }
             val family = intent.getStringExtra("family").orEmpty().ifBlank { "SD15" }
             val backendMode = intent.getStringExtra("backendMode").orEmpty().ifBlank { "cpu" }
@@ -196,8 +224,26 @@ class LocalImageSmokeActivity : Activity() {
                 .put("sampleMethod", sampleMethod)
                 .put("backendMode", backendMode)
                 .put("memoryMode", memoryMode)
-            distilledGuidance?.let { requestJson.put("distilledGuidance", it) }
+            // Qwen Image 2.1 uses flow matching without a distilled-guidance graph input.
+            // The harness keeps a legacy SD-Turbo default for other families, but must not
+            // mark that optional field as specified for Qwen native contract validation.
+            if (!family.equals("QWEN_IMAGE_21", ignoreCase = true)) {
+                distilledGuidance?.let { requestJson.put("distilledGuidance", it) }
+            }
             flowShift?.let { requestJson.put("flowShift", it) }
+            requestJson.put("loraCount", if (loraPath.isEmpty()) 0 else 1)
+                .put("loraRootPath", if (loraPath.isEmpty()) "" else File(loraPath).parentFile?.absolutePath.orEmpty())
+                .put("loras", JSONArray().apply {
+                    if (loraPath.isNotEmpty()) {
+                        put(JSONObject()
+                            .put("id", loraId)
+                            .put("name", File(loraPath).name)
+                            .put("path", loraPath)
+                            .put("sha256", loraSha256)
+                            .put("sizeBytes", loraSizeBytes)
+                            .put("multiplier", loraMultiplier))
+                    }
+                })
             if (isQnnHtp) {
                 requestJson.put(
                     "pixelRange",
@@ -1108,6 +1154,10 @@ class LocalImageSmokeActivity : Activity() {
             imageSize = "${width}x$height",
             source = "debug-product-path",
             bundleRoot = root.absolutePath,
+            // Preserve the installed catalog identity in the debug record so
+            // a minimal manifest can still select the complete built-in
+            // profile when the primary GGUF path is not the catalog filename.
+            recommendationId = manifest?.recommendationId ?: manifest?.id,
             componentCount = root.walkTopDown().count { it.isFile }.coerceAtLeast(1),
             verificationStatus = LocalImageVerificationStatus.UNKNOWN,
             verificationMessage = "",
@@ -1187,6 +1237,41 @@ class LocalImageSmokeActivity : Activity() {
             .put("dalvikPssKb", memoryInfo.dalvikPss)
             .put("nativePssKb", memoryInfo.nativePss)
             .put("otherPssKb", memoryInfo.otherPss)
+    }
+
+    private fun stageLoraFile(
+        sourcePath: String,
+        loraSha256: String,
+        loraSizeBytes: Long
+    ): String {
+        val source = File(sourcePath).canonicalFile
+        require(source.isFile && source.length() == loraSizeBytes) {
+            "LoRA smoke source changed while staging: ${source.absolutePath}"
+        }
+        val destinationRoot = File(filesDir, "image_loras").apply { mkdirs() }
+        val safeName = source.name
+            .replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .ifBlank { "adapter.safetensors" }
+        val destination = File(destinationRoot, "${loraSha256.take(16)}-$safeName")
+        if (destination.isFile && destination.length() == loraSizeBytes) {
+            return destination.absolutePath
+        }
+        val temporary = File(destinationRoot, ".${destination.name}.${Process.myPid()}.part")
+        temporary.delete()
+        source.inputStream().use { input ->
+            temporary.outputStream().use { output -> input.copyTo(output) }
+        }
+        require(temporary.length() == loraSizeBytes) {
+            temporary.delete()
+            "Staged LoRA size does not match metadata."
+        }
+        require(temporary.renameTo(destination) ||
+            (destination.isFile && destination.length() == loraSizeBytes)) {
+            temporary.delete()
+            "Unable to publish staged LoRA file."
+        }
+        temporary.delete()
+        return destination.absolutePath
     }
 
     private fun Intent.numberExtra(name: String, default: Double): Double {

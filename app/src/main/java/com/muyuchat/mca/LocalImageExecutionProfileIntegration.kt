@@ -38,6 +38,9 @@ internal fun resolveLocalImageExecutionProfile(
         ?.optString("recommendationId")
         ?.takeIf(String::isNotBlank)
         ?: manifestJson?.optString("id")?.takeIf(String::isNotBlank)
+        // Debug and legacy records may carry the catalog identity on the
+        // model record while their bundle has only a minimal manifest.
+        ?: model.recommendationId?.trim()?.takeIf(String::isNotBlank)
     val manifestProfile = manifestJson
         ?.let(ImageExecutionProfileJson::parseManifest)
         ?.let { profile -> canonicalRoot?.let(profile::rebindInstalledArtifactPaths) ?: profile }

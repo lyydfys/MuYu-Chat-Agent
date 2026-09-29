@@ -1968,9 +1968,21 @@ internal object ImageExecutionProfileResolver {
                 channelOrder = ImageChannelOrder.RUNTIME_NATIVE
             ),
             graph = ImageGraphContract(
-                textEncoder = ImageGraphArtifactContract("Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf"),
-                unet = ImageGraphArtifactContract("qwen-image-2.1-Q4_K_M.gguf"),
-                vae = ImageGraphArtifactContract("qwen_image_2.1_vae_bf16.safetensors"),
+                // stable-diffusion.cpp exposes one runtime-owned graph for the
+                // split Qwen artifacts; `model` is only the legacy QNN/MNN
+                // default and is rejected by the native contract.
+                textEncoder = ImageGraphArtifactContract(
+                    "Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf",
+                    graphName = "runtime-native"
+                ),
+                unet = ImageGraphArtifactContract(
+                    "qwen-image-2.1-Q4_K_M.gguf",
+                    graphName = "runtime-native"
+                ),
+                vae = ImageGraphArtifactContract(
+                    "qwen_image_2.1_vae_bf16.safetensors",
+                    graphName = "runtime-native"
+                ),
                 workerStrategy = ImageWorkerStrategy.IN_PROCESS
             ),
             capabilities = base.capabilities.copy(

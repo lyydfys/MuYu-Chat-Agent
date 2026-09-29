@@ -1319,7 +1319,7 @@ class ImageExecutionProfileResolverTest {
         assertEquals(256, qwen21.capabilities.minWidth)
         assertEquals(1536, qwen21.capabilities.maxWidth)
         assertTrue(qwen21.capabilities.supportsNegativePrompt)
-        assertFalse(qwen21.capabilities.supportsLora)
+        assertTrue(qwen21.capabilities.supportsLora)
         assertFalse(qwen21.capabilities.supportsLivePreview)
         assertEquals(-1.0, defaultStableDiffusionFlowShiftFor(qwen21), 0.0)
         assertEquals(480 to 320, resolveStableDiffusionDimensions(512, 512, 480, 320, 32))

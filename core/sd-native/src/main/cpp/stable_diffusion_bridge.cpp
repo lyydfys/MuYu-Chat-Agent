@@ -1595,7 +1595,8 @@ void set_progress_from_sd_log(const char *text) {
         g_observed_prediction.store(FLUX2_FLOW_PRED, std::memory_order_relaxed);
     } else if (contains(lower, "running in flux flow mode")) {
         g_observed_prediction.store(FLUX_FLOW_PRED, std::memory_order_relaxed);
-    } else if (contains(lower, "running in flow mode") ||
+    } else if (contains(lower, "running in qwen image 2.1 flow mode") ||
+               contains(lower, "running in flow mode") ||
                contains(lower, "running in ltxav flow mode")) {
         g_observed_prediction.store(FLOW_PRED, std::memory_order_relaxed);
     }

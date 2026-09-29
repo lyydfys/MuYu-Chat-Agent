@@ -15,13 +15,22 @@ internal fun materializeDownloadedImageExecutionProfile(
     modelFingerprint: String
 ): ImageExecutionProfile? {
     val source = bundle.executionProfile ?: return null
+    // stable-diffusion.cpp owns the graph lifecycle and exposes a single
+    // runtime-native graph regardless of the split artifact filenames. Keep
+    // explicit catalog graph names authoritative, while avoiding the legacy
+    // `model` default that the native contract rejects for this runtime.
+    val defaultGraphName = if (bundle.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP) {
+        "runtime-native"
+    } else {
+        "model"
+    }
     fun artifact(path: String?): ImageGraphArtifactContract? = path
         ?.trim()
         ?.takeIf(String::isNotEmpty)
         ?.let { path ->
             ImageGraphArtifactContract(
                 relativePath = path,
-                graphName = source.graph.graphNames[path] ?: "model"
+                graphName = source.graph.graphNames[path] ?: defaultGraphName
             )
         }
     val promptExecutionAssets = bundle.requiredComponents
