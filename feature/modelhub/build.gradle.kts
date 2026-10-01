@@ -23,6 +23,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:designsystem"))
     implementation(project(":core:deviceprofile"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:download"))

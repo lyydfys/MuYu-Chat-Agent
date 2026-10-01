@@ -259,6 +259,7 @@ import java.util.Calendar
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.SystemBackMotionHandler
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
@@ -11852,51 +11853,6 @@ private fun appMenuPageEnter() = slideInHorizontally(
     animationSpec = tween(durationMillis = 240),
     initialOffsetX = { it }
 ) + fadeIn(animationSpec = tween(durationMillis = 140))
-
-@Composable
-private fun SystemBackMotionHandler(
-    enabled: Boolean,
-    onProgress: (Float) -> Unit,
-    onCancel: () -> Unit,
-    onBack: () -> Unit
-) {
-    val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val currentOnProgress by rememberUpdatedState(onProgress)
-    val currentOnCancel by rememberUpdatedState(onCancel)
-    val currentOnBack by rememberUpdatedState(onBack)
-
-    val callback = remember {
-        object : OnBackPressedCallback(enabled) {
-            override fun handleOnBackStarted(backEvent: BackEventCompat) {
-                currentOnProgress(0f)
-            }
-
-            override fun handleOnBackProgressed(backEvent: BackEventCompat) {
-                currentOnProgress(backEvent.progress)
-            }
-
-            override fun handleOnBackCancelled() {
-                currentOnCancel()
-            }
-
-            override fun handleOnBackPressed() {
-                currentOnBack()
-            }
-        }
-    }
-
-    LaunchedEffect(enabled) {
-        callback.isEnabled = enabled
-    }
-
-    androidx.compose.runtime.DisposableEffect(dispatcher, lifecycleOwner, callback) {
-        dispatcher?.addCallback(lifecycleOwner, callback)
-        onDispose {
-            callback.remove()
-        }
-    }
-}
 
 @Composable
 private fun McaAppMenuPage(

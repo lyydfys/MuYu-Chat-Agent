@@ -126,6 +126,7 @@ import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.SystemBackMotionHandler
 
 private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
 
@@ -1789,51 +1790,6 @@ private fun SwipeBackPage(
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
 
             content(pageModifier, ::closeWithDrawerMotion)
-        }
-    }
-}
-
-@Composable
-private fun SystemBackMotionHandler(
-    enabled: Boolean,
-    onProgress: (Float) -> Unit,
-    onCancel: () -> Unit,
-    onBack: () -> Unit
-) {
-    val dispatcher = LocalOnBackPressedDispatcherOwner.current?.onBackPressedDispatcher
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val currentOnProgress by rememberUpdatedState(onProgress)
-    val currentOnCancel by rememberUpdatedState(onCancel)
-    val currentOnBack by rememberUpdatedState(onBack)
-
-    val callback = remember {
-        object : OnBackPressedCallback(enabled) {
-            override fun handleOnBackStarted(backEvent: BackEventCompat) {
-                currentOnProgress(0f)
-            }
-
-            override fun handleOnBackProgressed(backEvent: BackEventCompat) {
-                currentOnProgress(backEvent.progress)
-            }
-
-            override fun handleOnBackCancelled() {
-                currentOnCancel()
-            }
-
-            override fun handleOnBackPressed() {
-                currentOnBack()
-            }
-        }
-    }
-
-    LaunchedEffect(enabled) {
-        callback.isEnabled = enabled
-    }
-
-    androidx.compose.runtime.DisposableEffect(dispatcher, lifecycleOwner, callback) {
-        dispatcher?.addCallback(lifecycleOwner, callback)
-        onDispose {
-            callback.remove()
         }
     }
 }

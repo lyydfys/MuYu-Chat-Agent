@@ -23,6 +23,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:designsystem"))
     implementation(project(":core:advisor"))
     implementation(project(":core:benchmark"))
     implementation(project(":core:deviceprofile"))

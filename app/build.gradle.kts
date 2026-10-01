@@ -390,6 +390,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(project(":core:designsystem"))
     // The engine library exposes GenieX-backed runners but cannot embed a
     // local AAR in its own AAR. Package the vendored, hash-verified artifact
     // directly in the final application instead.

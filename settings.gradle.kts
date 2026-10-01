@@ -1,4 +1,4 @@
-﻿pluginManagement {
+pluginManagement {
     repositories {
         google()
         mavenCentral()
@@ -27,6 +27,7 @@ include(":core:deviceprofile")
 include(":core:tuning")
 include(":core:advisor")
 include(":core:benchmark")
+include(":core:designsystem")
 include(":api:local")
 include(":feature:chat")
 include(":feature:agent")

@@ -87,6 +87,7 @@ import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.SmoothRightToLeftPage
 
 private const val MAX_VISIBLE_BENCHMARK_HISTORY = 10
 internal const val MIN_CUSTOM_CONTEXT_LENGTH = 128
@@ -405,53 +406,6 @@ fun AgentScreen(
                 onBack = closePage,
                 modifier = pageModifier
             )
-        }
-    }
-}
-
-@Composable
-private fun SmoothRightToLeftPage(
-    visible: Boolean,
-    onDismiss: () -> Unit,
-    content: @Composable (Modifier, () -> Unit) -> Unit
-) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = slideInHorizontally(
-            animationSpec = tween(durationMillis = 240),
-            initialOffsetX = { it }
-        ) + fadeIn(animationSpec = tween(durationMillis = 140)),
-        exit = ExitTransition.None
-    ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val density = LocalDensity.current
-            val widthPx = with(density) { maxWidth.toPx() }
-            val scope = rememberCoroutineScope()
-            val offsetX = remember { Animatable(0f) }
-
-            LaunchedEffect(visible) {
-                if (visible) offsetX.snapTo(0f)
-            }
-
-            fun closeWithMotion() {
-                scope.launch {
-                    offsetX.animateTo(
-                        targetValue = widthPx,
-                        animationSpec = tween(durationMillis = 180)
-                    )
-                    onDismiss()
-                }
-            }
-
-            BackHandler(enabled = visible && !WindowInsets.isImeVisible) {
-                closeWithMotion()
-            }
-
-            val pageModifier = Modifier
-                .fillMaxSize()
-                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
-
-            content(pageModifier, ::closeWithMotion)
         }
     }
 }
