@@ -20725,15 +20725,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun canonicalJsonValue(value: Any?): String = when (value) {
-        null, JSONObject.NULL -> "null"
-        is Number -> value.toString().toBigDecimalOrNull()?.stripTrailingZeros()?.toPlainString() ?: value.toString()
-        is Boolean -> value.toString()
-        is JSONObject -> value.toString()
-        is JSONArray -> value.toString()
-        else -> value.toString().trim()
-    }
-
     private suspend fun timedLoadModel(
         model: ModelManifest,
         runtime: LocalChatRuntime,
