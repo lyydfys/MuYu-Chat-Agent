@@ -21694,18 +21694,7 @@ class MainViewModel @JvmOverloads constructor(
     ): CandidateMeasurementEntity {
         val gate = tuningCandidateHardGate(result)
         val score = CandidateScorer.score(gate, result.measurement)
-        val failureCode = when {
-            score.eligible -> null
-            gate.nativeFatalSignalCount > 0 -> "NATIVE_FATAL_SIGNAL"
-            gate.crashCount > 0 -> "WORKER_CRASH"
-            gate.anrCount > 0 -> "WORKER_TIMEOUT"
-            result.stats.lastError != null -> "RUNTIME_ERROR"
-            !gate.correctnessPassed || !gate.templateValid || !gate.outputVisible -> "CORRECTNESS_GATE_FAILED"
-            !gate.safetyPassed -> "SAFETY_GATE_FAILED"
-            gate.lowMemoryTriggered -> "LOW_MEMORY"
-            !gate.signaturesMatch -> "SIGNATURE_MISMATCH"
-            else -> "CANDIDATE_REJECTED"
-        }
+        val failureCode = tuningCandidateFailureCode(gate, score, result.stats.lastError)
         val metrics = JSONObject()
             .put("phase", phase)
             .put("eligible", score.eligible)
