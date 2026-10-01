@@ -32,6 +32,29 @@ public final class QwenImage21 {
     };
     private static volatile boolean librariesLoaded;
 
+    /** Primary MNN runtime for the DiT graph. Text encoder and VAE stay on CPU. */
+    public enum Backend {
+        CPU(0, false),
+        OPENCL(1, true),
+        QNN(2, true);
+
+        private final int nativeCode;
+        private final boolean gpuLike;
+
+        Backend(int nativeCode, boolean gpuLike) {
+            this.nativeCode = nativeCode;
+            this.gpuLike = gpuLike;
+        }
+
+        public int nativeCode() {
+            return nativeCode;
+        }
+
+        public boolean isGpuLike() {
+            return gpuLike;
+        }
+    }
+
     private QwenImage21() {}
 
     public interface ProgressListener {
@@ -203,7 +226,25 @@ public final class QwenImage21 {
     }
 
     public static long create(String modelDirectory, boolean useGpu, int threads) {
-        return nativeCreate(modelDirectory, useGpu, true, true, 0, Math.max(1, threads));
+        return create(modelDirectory, useGpu ? Backend.OPENCL : Backend.CPU, null, threads);
+    }
+
+    /**
+     * Creates the runtime with an explicit DiT backend. The text encoder and VAE are always
+     * requested on CPU to keep their memory and operator coverage independent from the primary
+     * backend. For QNN, {@code qnnRuntimePath} may point at an app-private directory containing
+     * libQnnSystem.so and libQnnHtp.so; a null path lets the native loader use platform libraries.
+     */
+    public static long create(String modelDirectory, Backend backend, String qnnRuntimePath, int threads) {
+        if (backend == null) throw new IllegalArgumentException("Qwen backend is required.");
+        if (!configureQnnRuntimePath(backend == Backend.QNN ? qnnRuntimePath : null)) return 0;
+        return nativeCreateWithBackend(modelDirectory, backend.nativeCode(), true, true, 0,
+                Math.max(1, threads));
+    }
+
+    /** Preloads QNN host libraries before MNN creates its runtime, without a device allowlist. */
+    public static boolean configureQnnRuntimePath(String path) {
+        return nativeSetQnnRuntimePath(path);
     }
 
     public static int generate(long handle, String prompt, String inputImage, String outputPng,
@@ -235,6 +276,10 @@ public final class QwenImage21 {
 
     private static native long nativeCreate(String modelDir, boolean useGpu, boolean textEncoderOnCpu,
                                              boolean vaeOnCpu, int memoryMode, int threads);
+    private static native long nativeCreateWithBackend(String modelDir, int backendCode,
+                                                       boolean textEncoderOnCpu, boolean vaeOnCpu,
+                                                       int memoryMode, int threads);
+    private static native boolean nativeSetQnnRuntimePath(String path);
     private static native int nativeGenerate(long handle, String prompt, String inputImage, String outputPng,
                                              int steps, int seed, int width, int height, ProgressListener listener);
     private static native String nativeLastError(long handle);

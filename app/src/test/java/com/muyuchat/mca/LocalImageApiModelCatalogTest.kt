@@ -11,6 +11,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalImageApiModelCatalogTest {
+    @Test fun retiredImageIdsResolveToTheCanonicalCatalogOwner() {
+        val root = Files.createTempDirectory("mca-image-api-alias").toFile()
+        try {
+            val primary = File(root, "model.gguf").apply { writeBytes(byteArrayOf(1)) }
+            val model = LocalImageModelRecord(
+                id = "canonical-owner", displayName = "Imported image", path = primary.absolutePath,
+                fileName = primary.name, sizeBytes = primary.length(), sha256 = "a".repeat(64),
+                runtime = LocalImageRuntime.CUSTOM, aliases = listOf("retired-scanner-id")
+            )
+            assertSame(model, resolveLocalImageApiModel("retired-scanner-id", emptyList(), listOf(model)))
+            assertSame(model, resolveLocalImageApiModel("image:retired-scanner-id", emptyList(), listOf(model)))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun stableTurboCatalogPublishesExecutableExtensionBounds() {
         val root = Files.createTempDirectory("mca-stable-turbo-api-catalog").toFile()

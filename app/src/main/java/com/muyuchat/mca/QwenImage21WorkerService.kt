@@ -8,6 +8,7 @@ import android.os.Looper
 import android.os.Process
 import android.os.RemoteException
 import android.os.SystemClock
+import android.system.Os
 import android.util.Log
 import com.muyuchat.api.local.imagePromptExecutionSha256
 import com.scsonic.qwenimage21.QwenImage21
@@ -36,6 +37,8 @@ class QwenImage21WorkerService : Service() {
     @Volatile private var loadedBundleId: String? = null
     @Volatile private var loadedRoot: String? = null
     @Volatile private var loadedUseGpu = false
+    @Volatile private var loadedBackend = QwenImage21Backend.CPU
+    @Volatile private var loadedQnnRuntimePath: String? = null
     @Volatile private var loadedBackendEffective = "NONE"
     @Volatile private var loadedBackendExecutionConfirmed = false
     @Volatile private var loadedThreads = 0
@@ -65,6 +68,8 @@ class QwenImage21WorkerService : Service() {
                         bundleRoot = request.bundleRoot,
                         providedFingerprint = request.bundleFingerprint,
                         useGpu = request.useGpu,
+                        backend = request.backend,
+                        qnnRuntimePath = request.qnnRuntimePath,
                         threads = request.threads
                     )
                     if (!next.cancelled.get()) {
@@ -110,6 +115,8 @@ class QwenImage21WorkerService : Service() {
                         bundleRoot = request.bundleRoot,
                         providedFingerprint = request.bundleFingerprint,
                         useGpu = request.useGpu,
+                        backend = request.backend,
+                        qnnRuntimePath = request.qnnRuntimePath,
                         threads = request.threads
                     )
                     checkNotCancelled(next)
@@ -318,6 +325,8 @@ class QwenImage21WorkerService : Service() {
         bundleRoot: String,
         providedFingerprint: String?,
         useGpu: Boolean,
+        backend: QwenImage21Backend,
+        qnnRuntimePath: String?,
         threads: Int
     ) {
         checkNotCancelled(operation)
@@ -327,7 +336,9 @@ class QwenImage21WorkerService : Service() {
             ?: loadedBundleId?.takeIf { loadedRoot == root.absolutePath }
         val fingerprint = bundleFingerprint(root, effectiveProvidedFingerprint)
         val alreadyLoaded = nativeHandle != 0L && loadedFingerprint == fingerprint &&
-            loadedRoot == root.absolutePath && loadedUseGpu == useGpu && loadedThreads == threads
+            loadedRoot == root.absolutePath && loadedUseGpu == useGpu && loadedBackend == backend &&
+            loadedQnnRuntimePath == qnnRuntimePath?.trim()?.takeIf(String::isNotBlank) &&
+            loadedThreads == threads
         if (alreadyLoaded) {
             loadedRoot = root.absolutePath
             state = STATE_READY
@@ -343,12 +354,30 @@ class QwenImage21WorkerService : Service() {
         state = STATE_LOADING
         emitProgress(operation, 0, "runtime_verifying")
         val started = SystemClock.elapsedRealtime()
+        val normalizedQnnPath = qnnRuntimePath?.trim()?.takeIf(String::isNotBlank)
+        if (backend == QwenImage21Backend.QNN) {
+            if ((applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                Os.setenv("MNN_QNN_DIAG", "1", true)
+            }
+            val adspLibraryPath = buildList {
+                add(normalizedQnnPath ?: applicationInfo.nativeLibraryDir)
+                addAll(Os.getenv("ADSP_LIBRARY_PATH").orEmpty().split(';').filter(String::isNotBlank))
+                addAll(QNN_COMMON_ADSP_PATHS)
+            }.distinct().joinToString(";")
+            Os.setenv("ADSP_LIBRARY_PATH", adspLibraryPath, true)
+            Log.i(TAG, "qnn_adsp_library_path=$adspLibraryPath")
+        }
         QwenImage21.loadRuntimeLibraries(applicationContext)
         checkNotCancelled(operation)
         emitProgress(operation, 5, "model_loading")
         lastErrorCode = null
         lastErrorMessage = null
-        val handle = QwenImage21.create(root.absolutePath, useGpu, threads)
+        val nativeBackend = when (backend) {
+            QwenImage21Backend.CPU -> QwenImage21.Backend.CPU
+            QwenImage21Backend.OPENCL -> QwenImage21.Backend.OPENCL
+            QwenImage21Backend.QNN -> QwenImage21.Backend.QNN
+        }
+        val handle = QwenImage21.create(root.absolutePath, nativeBackend, normalizedQnnPath, threads)
         modelLoadMs = (SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
         if (handle == 0L) {
             throw QwenNativeException(
@@ -359,7 +388,7 @@ class QwenImage21WorkerService : Service() {
         val loadAudit = runCatching { JSONObject(QwenImage21.executionAudit(handle)) }
             .getOrElse { JSONObject() }
         val effectiveBackend = loadAudit.optString("effectiveBackend").trim().ifBlank { "MNN_UNKNOWN" }
-        val requestedBackend = if (useGpu) "MNN_OPENCL" else "MNN_CPU"
+        val requestedBackend = backend.nativeAuditName
         // Fail closed if the pinned MNN runtime cannot report its selected
         // primary backend, or if it differs from the user's explicit request.
         if (!loadAudit.optBoolean("backendResolved", false) || effectiveBackend != requestedBackend) {
@@ -378,6 +407,8 @@ class QwenImage21WorkerService : Service() {
         loadedFingerprint = fingerprint
         loadedBundleId = effectiveProvidedFingerprint ?: fingerprint
         loadedUseGpu = useGpu
+        loadedBackend = backend
+        loadedQnnRuntimePath = normalizedQnnPath
         loadedBackendEffective = effectiveBackend
         loadedBackendExecutionConfirmed = loadAudit.optBoolean("backendResolved", false)
         loadedThreads = threads
@@ -400,6 +431,8 @@ class QwenImage21WorkerService : Service() {
         loadedBundleId = null
         loadedRoot = null
         loadedUseGpu = false
+        loadedBackend = QwenImage21Backend.CPU
+        loadedQnnRuntimePath = null
         loadedBackendEffective = "NONE"
         loadedBackendExecutionConfirmed = false
         loadedThreads = 0
@@ -506,6 +539,7 @@ class QwenImage21WorkerService : Service() {
         .put("bundleFingerprint", loadedFingerprint.orEmpty())
         .put("bundleId", loadedBundleId.orEmpty())
         .put("useGpu", loadedUseGpu)
+        .put("backend", loadedBackend.wireName)
         .put("backendConfigured", if (nativeHandle == 0L) "NONE" else loadedBackendEffective)
         .put("backendExecutionConfirmedByNative", loadedBackendExecutionConfirmed)
         .put("textEncoderOnCpu", true)
@@ -621,6 +655,8 @@ class QwenImage21WorkerService : Service() {
         val bundleRoot: String,
         val bundleFingerprint: String?,
         val useGpu: Boolean,
+        val backend: QwenImage21Backend,
+        val qnnRuntimePath: String?,
         val threads: Int
     ) {
         companion object {
@@ -630,9 +666,14 @@ class QwenImage21WorkerService : Service() {
                 val root = value.optString("bundleRoot").trim()
                 require(root.isNotBlank()) { "Model bundle path is required." }
                 val threads = value.optInt("threads", 4).coerceIn(1, 16)
+                val useGpu = value.optBoolean("useGpu", true)
+                val backend = QwenImage21Backend.fromWire(value.optString("backend"), useGpu)
                 return LoadRequest(
                     requestId, root, value.optString("bundleFingerprint").takeIf(String::isNotBlank),
-                    value.optBoolean("useGpu", true), threads
+                    backend.useGpu,
+                    backend,
+                    value.optString("qnnRuntimePath").takeIf(String::isNotBlank),
+                    threads
                 )
             }
         }
@@ -651,7 +692,9 @@ class QwenImage21WorkerService : Service() {
         val steps: Int,
         val seed: Int,
         val threads: Int,
-        val useGpu: Boolean
+        val useGpu: Boolean,
+        val backend: QwenImage21Backend,
+        val qnnRuntimePath: String?
     ) {
         companion object {
             fun parse(json: String): GenerateRequest {
@@ -676,6 +719,8 @@ class QwenImage21WorkerService : Service() {
                 val steps = value.optInt("steps", 20)
                 require(steps in 2..40) { "Qwen generation steps must be between 2 and 40." }
                 val threads = value.optInt("threads", 4).coerceIn(1, 16)
+                val useGpu = value.optBoolean("useGpu", true)
+                val backend = QwenImage21Backend.fromWire(value.optString("backend"), useGpu)
                 return GenerateRequest(
                     requestId = id,
                     bundleRoot = root,
@@ -689,7 +734,9 @@ class QwenImage21WorkerService : Service() {
                     steps = steps,
                     seed = value.optInt("seed", 42),
                     threads = threads,
-                    useGpu = value.optBoolean("useGpu", true)
+                    useGpu = backend.useGpu,
+                    backend = backend,
+                    qnnRuntimePath = value.optString("qnnRuntimePath").takeIf(String::isNotBlank)
                 )
             }
         }
@@ -699,6 +746,14 @@ class QwenImage21WorkerService : Service() {
 
     companion object {
         private const val TAG = "MCA-QwenImage21"
+        private val QNN_COMMON_ADSP_PATHS = listOf(
+            "/system/lib/rfsa/adsp",
+            "/system/vendor/lib/rfsa/adsp",
+            "/vendor/lib/rfsa/adsp",
+            "/vendor/dsp",
+            "/vendor/dsp/cdsp",
+            "/dsp"
+        )
         private const val STATE_UNLOADED = "UNLOADED"
         private const val STATE_LOADING = "LOADING"
         private const val STATE_READY = "READY"

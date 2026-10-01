@@ -27,6 +27,14 @@ class QwenImageBackendExecutionProofTest {
     }
 
     @Test
+    fun acceptsNativeQnnProof() {
+        verifyQwenNativeBackendExecutionEvidence(
+            audit = audit("MNN_QNN"),
+            expectedBackend = "MNN_QNN"
+        )
+    }
+
+    @Test
     fun rejectsConfiguredOpenClThatActuallyResolvedToCpu() {
         assertThrows(IllegalArgumentException::class.java) {
             verifyQwenNativeBackendExecutionEvidence(

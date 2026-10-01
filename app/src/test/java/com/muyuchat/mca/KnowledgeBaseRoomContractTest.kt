@@ -273,7 +273,7 @@ class KnowledgeBaseRoomContractTest {
         val source = chatSessionStoreSource()
 
         // Later character memory migrations extend the same non-destructive chain.
-        assertTrue(Regex("""version\s*=\s*26""").containsMatchIn(source))
+        assertTrue(Regex("""version\s*=\s*27""").containsMatchIn(source))
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))
@@ -286,6 +286,7 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(builder.contains("MIGRATION_23_24"))
         assertTrue(builder.contains("MIGRATION_24_25"))
         assertTrue(builder.contains("MIGRATION_25_26"))
+        assertTrue(builder.contains("MIGRATION_26_27"))
 
         val migration16To17 = region(source, "private val MIGRATION_16_17", "private val MIGRATION_17_18")
         assertTrue(migration16To17.contains("createKnowledgeBaseTablesIfMissing(db)"))

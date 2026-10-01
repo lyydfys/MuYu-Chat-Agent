@@ -229,6 +229,7 @@ fun SettingsHubScreen(
     onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
     onClearPersistentPrefixCache: () -> Unit,
     offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
     offlineTranslationDownloading: Boolean = false,
     offlineTranslationDownloadProgress: Float? = null,
@@ -297,6 +298,7 @@ fun SettingsHubScreen(
             SettingsSection.RUNTIME -> RuntimeScreen(
                 state = state,
                 offlineTranslationStatus = offlineTranslationStatus,
+                offlineTranslationInstalled = offlineTranslationInstalled,
                 offlineTranslationInstalling = offlineTranslationInstalling,
                 offlineTranslationDownloading = offlineTranslationDownloading,
                 offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
@@ -350,6 +352,7 @@ fun RuntimeScreen(
     state: SettingsUiState,
     modifier: Modifier = Modifier,
     offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
     offlineTranslationDownloading: Boolean = false,
     offlineTranslationDownloadProgress: Float? = null,
@@ -402,15 +405,24 @@ fun RuntimeScreen(
                     }
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = if (offlineTranslationDownloading) onCancelOfflineTranslationDownload else onDownloadOfflineTranslation,
-                        enabled = !offlineTranslationInstalling,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(if (offlineTranslationDownloading) Icons.Default.Close else Icons.Default.Download, contentDescription = null)
+                    if (offlineTranslationDownloading || !offlineTranslationInstalled) {
+                        Button(
+                            onClick = if (offlineTranslationDownloading) onCancelOfflineTranslationDownload else onDownloadOfflineTranslation,
+                            enabled = offlineTranslationDownloading || !offlineTranslationInstalling,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(if (offlineTranslationDownloading) Icons.Default.Close else Icons.Default.Download, contentDescription = null)
+                            Text(
+                                if (offlineTranslationDownloading) "取消下载" else if (offlineTranslationStatus.contains("下载失败")) "重试下载" else "下载",
+                                modifier = Modifier.padding(start = 6.dp)
+                            )
+                        }
+                    } else {
                         Text(
-                            if (offlineTranslationDownloading) "取消下载" else if (offlineTranslationStatus.contains("下载失败")) "重试下载" else "下载",
-                            modifier = Modifier.padding(start = 6.dp)
+                            "已安装",
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.weight(1f)
                         )
                     }
                     OutlinedButton(

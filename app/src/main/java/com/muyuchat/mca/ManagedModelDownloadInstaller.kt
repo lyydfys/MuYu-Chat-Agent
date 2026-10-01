@@ -54,18 +54,21 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
     private val _uiState = MutableStateFlow(ManagedDownloadProgress())
     val progress get() = _uiState
     private fun busy(message: String) { _uiState.update { it.copy(
+        downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null,
         statusMessage = message,
         phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INSTALLING
     ) } }
     private fun integrityPassed(message: String = "所有下载组件的大小和 SHA-256 与目录声明一致。") {
         _uiState.update { it.copy(
             phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.INTEGRITY_CHECK,
+            downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null,
             integrityStatus = "PASSED", integrityMessage = message
         ) }
     }
     private fun executionResult(status: String, message: String) {
         _uiState.update { it.copy(
             phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.EXECUTION_CHECK,
+            downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null,
             executionStatus = status, executionMessage = message
         ) }
     }
@@ -93,6 +96,16 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             )
         }
     }
+    private fun logCommittedCleanupFailure(error: Throwable) {
+        android.util.Log.w("McaModelDownload", "安装已提交；清理失败的文件将保留供下次恢复。", error)
+    }
+
+    private fun cleanupCommittedDownloadArtifact(file: File) {
+        runCatching {
+            check(!file.exists() || file.delete()) { "已安装模型的下载暂存文件清理失败：$file" }
+        }.exceptionOrNull()?.let(::logCommittedCleanupFailure)
+    }
+
     private fun formatBytes(bytes: Long) = "%.1f MB".format(bytes / 1048576.0)
 
     private data class QnnBundlePreflight(val status: String, val message: String)
@@ -456,7 +469,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     model = model,
                     preferredChipsets = preferredQairtChipsets(device)
                 )
-                val bundleId = remote.name.removeSuffix(".zip").ifBlank { model.id }
+                val bundleId = "qairt-" + remote.sourceIdentity()
                 val bundleDir = modelStore.managedBundleDirFor(bundleId)
                 val archiveDir = File(bundleDir.parentFile, ".${bundleDir.name}.archive").also { it.mkdirs() }
                 val finalZip = File(archiveDir, remote.name)
@@ -465,6 +478,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 downloadVerifiedOrResume(remote, tempFile, finalZip) { snapshot ->
                     _uiState.update {
                         it.copy(
+                            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
                             downloadFileName = snapshot.fileName,
                             downloadedBytes = snapshot.downloadedBytes,
                             downloadTotalBytes = snapshot.expectedLength,
@@ -479,21 +493,18 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 integrityPassed("QNN 聊天引擎压缩包已通过大小和 SHA-256 校验。")
                 extractResumableModelZip(finalZip, candidateDir)
                 modelStore.resolveQairtBundleRoot(candidateDir)
-                val backup = promoteImageBundleCandidate(candidateDir, bundleDir)
-                try {
-                    val qairtBundleRoot = modelStore.resolveQairtBundleRoot(bundleDir)
-                    val registered = modelStore.registerDownloadedQairtBundle(
-                        displayName = model.title, bundleDir = qairtBundleRoot,
-                        repoId = model.repoId, revision = model.revision,
-                        source = remote.provider.toModelSource(), quant = model.quant,
-                        architecture = recommendedQairtArchitecture(model))
-                    backup?.deleteRecursively()
-                    finalZip.delete()
-                    registered
-                } catch (error: Exception) {
-                    restoreImageBundleBackup(bundleDir, backup)
-                    throw error
+                val registered = modelStore.withCatalogTransaction {
+                    publishDownloadedBundleCandidate(candidateDir, bundleDir, ::logCommittedCleanupFailure) {
+                        val qairtBundleRoot = modelStore.resolveQairtBundleRoot(bundleDir)
+                        modelStore.registerDownloadedQairtBundle(
+                            displayName = model.title, bundleDir = qairtBundleRoot,
+                            repoId = model.repoId, revision = model.revision,
+                            source = remote.provider.toModelSource(), quant = model.quant,
+                            architecture = recommendedQairtArchitecture(model))
+                    }
                 }
+                cleanupCommittedDownloadArtifact(finalZip)
+                registered
         }
     }
 
@@ -504,14 +515,14 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 val config = components.firstOrNull {
                     it.mnnBundleRole == MnnModelBundleComponentRole.CONFIG
                 } ?: error("MNN 模型包缺少 config.json。")
-                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
+                val bundleDir = modelStore.managedBundleDirFor(modelBundleSourceIdentity(components, "mnn:" + bundle.installProfile.name))
                 val installer = ModelBundleInstaller(
                     BundleComponentDownloader { remote, tempFile, stagedFile, onProgress ->
                         downloader.download(remote, tempFile, stagedFile, onProgress)
                     }
                 )
                 val plan = installer.plan(bundleDir, components)
-                val knownTotalBytes = components.sumOf { remote -> remote.sizeBytes ?: 0L }
+                val knownTotalBytes = knownManagedBundleDownloadSize(components)
                 val downloadedBytesByPath = mutableMapOf<String, Long>()
                 val installed = installer.install(
                     bundleRoot = bundleDir,
@@ -526,11 +537,14 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
                     _uiState.update {
                         it.copy(
+                            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
                             downloadFileName = progressPath,
                             downloadedBytes = downloadedBytesByPath.values.sum(),
-                            downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
+                            downloadTotalBytes = knownTotalBytes,
                             downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                            downloadRemainingSeconds = snapshot.remainingSeconds,
+                            downloadRemainingSeconds = estimateDownloadRemainingSeconds(
+                                knownTotalBytes, downloadedBytesByPath.values.sum(), snapshot.speedBytesPerSecond
+                            ),
                             downloadStatus = if (snapshot.status == DownloadStatus.DONE) DownloadStatus.RUNNING else snapshot.status,
                             statusMessage = "正在下载 MNN 组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
                         )
@@ -565,7 +579,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 val projector = components.firstOrNull {
                     it.visionBundleRole == VisionModelBundleComponentRole.PROJECTOR
                 }
-                val bundleDir = modelStore.managedBundleDirFor(bundle.id)
+                val bundleDir = modelStore.managedBundleDirFor(modelBundleSourceIdentity(components, "vision:" + bundle.runtime.name))
                 val candidateDir = imageBundleCandidateDirectory(bundleDir)
                 val targets = components.map { remote ->
                     remote to modelStore.managedBundleFileFor(candidateDir, remote.path)
@@ -578,7 +592,8 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                     downloadVerifiedOrResume(remote, tempFile, finalFile) { snapshot ->
                         _uiState.update {
                             it.copy(
-                                downloadFileName = snapshot.fileName,
+                                phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
+                            downloadFileName = snapshot.fileName,
                                 downloadedBytes = completedBefore + snapshot.downloadedBytes,
                                 downloadTotalBytes = bytesToDownload.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
                                 downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
@@ -613,43 +628,40 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                         )
                     }
                 }
-                val backup = promoteImageBundleCandidate(candidateDir, bundleDir)
-                try {
-                    val installedTargets = targets.map { (remote, _) ->
-                        remote to modelStore.managedBundleFileFor(bundleDir, remote.path).also { installedFile ->
-                            check(installedFile.isFile && installedFile.length() > 0L) {
-                                "已提交的多模态组件不完整：${remote.path}"
+                modelStore.withCatalogTransaction {
+                    publishDownloadedBundleCandidate(candidateDir, bundleDir, ::logCommittedCleanupFailure) {
+                        val installedTargets = targets.map { (remote, _) ->
+                            remote to modelStore.managedBundleFileFor(bundleDir, remote.path).also { installedFile ->
+                                check(installedFile.isFile && installedFile.length() > 0L) {
+                                    "已提交的多模态组件不完整：${remote.path}"
+                                }
                             }
                         }
+                        val installedPrimary = installedTargets.firstOrNull { it.first == primary }?.second
+                            ?: error("多模态模型包提交后缺少主模型。")
+                        val installedResult = if (report == null) {
+                            val projectorRemote = projector ?: error("多模态模型包缺少 mmproj / projector。")
+                            val projectorFile = installedTargets.firstOrNull { it.first == projectorRemote }?.second
+                                ?: error("多模态模型包提交后缺少 projector。")
+                            val registered = modelStore.registerDownloadedModel(
+                                file = installedPrimary,
+                                repoId = primary.repoId,
+                                revision = primary.revision,
+                                license = primary.license,
+                                source = primary.provider.toModelSource()
+                            )
+                            VisionBundleDownloadResult.ChatModel(
+                                modelStore.attachVisionProjectorFile(registered.id, projectorFile, projectorRemote.name)
+                            )
+                        } else {
+                            VisionBundleDownloadResult.EngineBundle(
+                                displayName = model.title,
+                                bundleDir = bundleDir,
+                                report = report
+                            )
+                        }
+                        installedResult
                     }
-                    val installedPrimary = installedTargets.firstOrNull { it.first == primary }?.second
-                        ?: error("多模态模型包提交后缺少主模型。")
-                    val installedResult = if (report == null) {
-                        val projectorRemote = projector ?: error("多模态模型包缺少 mmproj / projector。")
-                        val projectorFile = installedTargets.firstOrNull { it.first == projectorRemote }?.second
-                            ?: error("多模态模型包提交后缺少 projector。")
-                        val registered = modelStore.registerDownloadedModel(
-                            file = installedPrimary,
-                            repoId = primary.repoId,
-                            revision = primary.revision,
-                            license = primary.license,
-                            source = primary.provider.toModelSource()
-                        )
-                        VisionBundleDownloadResult.ChatModel(
-                            modelStore.attachVisionProjectorFile(registered.id, projectorFile, projectorRemote.name)
-                        )
-                    } else {
-                        VisionBundleDownloadResult.EngineBundle(
-                            displayName = model.title,
-                            bundleDir = bundleDir,
-                            report = report
-                        )
-                    }
-                    backup?.deleteRecursively()
-                    installedResult
-                } catch (error: Throwable) {
-                    restoreImageBundleBackup(bundleDir, backup)
-                    throw error
                 }
         }
     }
@@ -663,7 +675,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 )
                 val primary = components.firstOrNull { it.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
                     ?: error("生图引擎包缺少 diffusion 主模型。")
-                val bundleDir = localImageModelStore.managedBundleDirFor(bundle.id)
+                val bundleDir = localImageModelStore.managedBundleDirFor(modelBundleSourceIdentity(components, "image:" + bundle.runtime.name))
                 val candidateDir = File(bundleDir.parentFile, ".${bundleDir.name}.candidate")
                 val installer = ModelBundleInstaller(
                     BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
@@ -674,7 +686,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 val savedArchive = File(bundleDir.parentFile, ".${bundleDir.name}-${managedRemoteIdentity(primary)}.zip")
                 val reusableArchive = components.size == 1 && primary.name.endsWith(".zip", true) &&
                     CompletedDownloadReceipt(savedArchive, managedRemoteIdentity(primary)).matches(primary)
-                val knownTotalBytes = components.sumOf { it.sizeBytes ?: 0L }
+                val knownTotalBytes = knownManagedBundleDownloadSize(components)
                 if (reusableArchive || isReusableDownloadedImageCandidate(installer, plan)) {
                     _uiState.update {
                         it.copy(
@@ -698,11 +710,14 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                         downloadedBytesByPath[progressPath] = snapshot.downloadedBytes
                         _uiState.update {
                             it.copy(
-                                downloadFileName = progressPath,
+                                phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
+                            downloadFileName = progressPath,
                                 downloadedBytes = downloadedBytesByPath.values.sum(),
-                                downloadTotalBytes = knownTotalBytes.takeIf { total -> total > 0L } ?: snapshot.expectedLength,
+                                downloadTotalBytes = knownTotalBytes,
                                 downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
-                                downloadRemainingSeconds = snapshot.remainingSeconds,
+                                downloadRemainingSeconds = estimateDownloadRemainingSeconds(
+                                knownTotalBytes, downloadedBytesByPath.values.sum(), snapshot.speedBytesPerSecond
+                            ),
                                 downloadStatus = if (snapshot.status == DownloadStatus.DONE) DownloadStatus.RUNNING else snapshot.status,
                                 statusMessage = "正在下载生图组件 ${(targetIndex + 1).coerceAtLeast(1)}/${plan.targets.size}：${target?.remote?.kindLabel() ?: "组件"} · $progressPath"
                             )
@@ -711,8 +726,6 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 }
                 busy("下载完成，正在校验组件并自动导入本地生图模型…")
                 integrityPassed()
-                var promoted = false
-                var previousBundleBackup: File? = null
                 try {
                     val primaryFile = if (reusableArchive) savedArchive else
                         plan.targets.firstOrNull { it.remote == primary }?.finalFile
@@ -770,38 +783,37 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                         targets = manifestTargets,
                         primarySha256 = primarySha256
                     )
-                    previousBundleBackup = promoteImageBundleCandidate(candidateDir, bundleDir)
-                    promoted = true
-                    val finalPrimary = File(bundleDir, resolvedPrimary.relativeTo(candidateDir).path)
-                    require(finalPrimary.isFile) { "生图引擎主模型在提交后不存在：${resolvedPrimary.name}" }
-                    val registered = localImageModelStore.registerDownloadedBundle(
-                        displayName = model.title,
-                        bundleDir = bundleDir,
-                        primaryFile = finalPrimary,
-                        primaryRemote = primary,
-                        componentCount = components.size,
-                        runtimeOverride = bundle.runtime.toLocalImageRuntime(),
-                        imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
-                        primarySha256 = primarySha256
-                    )
-                    val checks = _uiState.value
-                    val annotated = if (checks.executionMessage.orEmpty().isNotBlank()) {
-                        localImageModelStore.updateModel(
-                            registered.copy(
-                                verificationStatus = LocalImageVerificationStatus.UNKNOWN,
-                                verificationMessage = checks.executionMessage.orEmpty(),
-                                verifiedAt = 0L
+                    val installed = localImageModelStore.withCatalogTransaction {
+                        publishDownloadedBundleCandidate(candidateDir, bundleDir, ::logCommittedCleanupFailure) {
+                            val finalPrimary = File(bundleDir, resolvedPrimary.relativeTo(candidateDir).path)
+                            require(finalPrimary.isFile) { "生图引擎主模型在提交后不存在：${resolvedPrimary.name}" }
+                            val registered = localImageModelStore.registerDownloadedBundle(
+                                displayName = model.title,
+                                bundleDir = bundleDir,
+                                primaryFile = finalPrimary,
+                                primaryRemote = primary,
+                                componentCount = components.size,
+                                runtimeOverride = bundle.runtime.toLocalImageRuntime(),
+                                imageSizeOverride = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
+                                primarySha256 = primarySha256
                             )
-                        ).firstOrNull { it.id == registered.id } ?: registered
-                    } else registered
-                    previousBundleBackup?.deleteRecursively()
-                    savedArchive.delete()
-                    annotated
+                            val checks = _uiState.value
+                            val annotated = if (checks.executionMessage.orEmpty().isNotBlank()) {
+                                localImageModelStore.updateModel(
+                                    registered.copy(
+                                        verificationStatus = LocalImageVerificationStatus.UNKNOWN,
+                                        verificationMessage = checks.executionMessage.orEmpty(),
+                                        verifiedAt = 0L
+                                    )
+                                ).firstOrNull { it.id == registered.id } ?: registered
+                            } else registered
+                            annotated
+                        }
+                    }
+                    cleanupCommittedDownloadArtifact(savedArchive)
+                    installed
                 } catch (error: Throwable) {
                     markFailure(error)
-                    if (promoted) {
-                        restoreImageBundleBackup(bundleDir, previousBundleBackup)
-                    }
                     // Keep the candidate/parts for a resumed install after cancellation or low space.
                     throw error
                 }
@@ -829,6 +841,7 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 downloadVerifiedOrResume(remote, tempFile, finalFile) { snapshot ->
                     _uiState.update {
                         it.copy(
+                            phase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING,
                             downloadFileName = snapshot.fileName,
                             downloadedBytes = snapshot.downloadedBytes,
                             downloadTotalBytes = snapshot.expectedLength,
@@ -885,7 +898,9 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
             val expectedSize = target.remote.sizeBytes
             if (expectedSize != null && expectedSize > 0L && file.length() != expectedSize) return@all false
             val expectedSha = target.remote.sha256?.takeIf(String::isNotBlank)
-            expectedSha == null || expectedSha.equals(audit.sourceSha256, ignoreCase = true)
+            (audit.sourceIdentity == target.remote.sourceIdentity() ||
+                (expectedSha != null && expectedSha.equals(audit.observedSha256, ignoreCase = true))) &&
+                (expectedSha == null || expectedSha.equals(audit.sourceSha256, ignoreCase = true))
         }
     }
 
@@ -922,3 +937,13 @@ internal fun preferredQairtChipsets(device: DeviceProfile): List<String> =
             )
         }
 
+
+/** A partially known component list is not a known total download size. */
+internal fun knownManagedBundleDownloadSize(components: List<RemoteModelFile>): Long {
+    if (components.isEmpty() || components.any { (it.sizeBytes ?: 0L) <= 0L }) return 0L
+    return components.fold(0L) { total, file ->
+        val size = requireNotNull(file.sizeBytes)
+        if (total > Long.MAX_VALUE - size) return 0L
+        total + size
+    }
+}

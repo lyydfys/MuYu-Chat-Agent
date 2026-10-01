@@ -48,28 +48,42 @@ internal fun characterCardPreview(
     val card = success.card
     val assistant = card.toAssistantRecord()
     val embedded = parseEmbeddedCharacterBook(card, "preview")
-    val root = card.toJson()
-    val data = root.optJSONObject("data") ?: root
-    val known = setOf("name", "description", "personality", "scenario", "first_mes", "mes_example",
-        "system_prompt", "post_history_instructions", "creator_notes", "creator", "character_version",
-        "alternate_greetings", "group_only_greetings", "tags", "character_book", "extensions")
-    val unknownCount = data.keys().asSequence().count { it !in known }
     return ContentImportPreview(
         kind = "character_card", format = "${card.format.name} / ${success.source.name}",
         title = card.name.ifBlank { "Imported Assistant" },
         sourceHash = contentImportSha256(card.rawJson),
-        fields = listOf("name" to assistant.name, "system_prompt" to assistant.systemPrompt,
-            "character_book" to (embedded.book?.entries?.size?.toString() ?: "0")),
+        fields = buildList {
+            add("角色名称" to assistant.name)
+            if (card.systemPrompt.isNotBlank()) add("原卡 system_prompt" to card.systemPrompt)
+            if (card.description.isNotBlank()) add("角色描述" to card.description)
+            if (card.personality.isNotBlank()) add("性格" to card.personality)
+            if (card.scenario.isNotBlank()) add("场景" to card.scenario)
+            if (card.firstMessage.isNotBlank()) add("开场白" to card.firstMessage)
+            if (card.postHistoryInstructions.isNotBlank()) {
+                add("原卡 post_history_instructions" to card.postHistoryInstructions)
+            }
+            add("对话提示词" to assistant.systemPrompt)
+            add("提示词来源" to when (assistant.systemPromptProvenance) {
+                AssistantPromptProvenance.IMPORTED_DERIVED -> "根据导入角色卡生成"
+                AssistantPromptProvenance.USER_AUTHORED -> "用户编写的提示词"
+                AssistantPromptProvenance.LEGACY_UNKNOWN -> "历史记录，来源未记录"
+            })
+            add("character_book" to (embedded.book?.entries?.size?.toString() ?: "0"))
+            embedded.book?.let { book ->
+                val active = book.entries.count { it.enabled && (it.constant || it.keys.isNotEmpty()) }
+                if (active != book.entries.size) add("可自动触发的世界书条目" to active.toString())
+            }
+        },
         warnings = buildList {
             embedded.error?.let(::add)
             addAll(embedded.warnings)
-            if (unknownCount > 0 || card.extensionsJson != null) {
-                add("Unknown fields and extensions are preserved as data; scripts and macros are not executed.")
+            if (isMcaDefaultCharacterCardPrompt(card)) {
+                add("原卡 system_prompt 与 MCA 通用默认提示词相同；导入后的对话提示词会改用角色卡设定，若没有角色设定则根据角色名称生成。原始角色卡仍会保留。")
             }
             if (listOf(card.systemPrompt, card.description, card.personality, card.scenario,
                     card.firstMessage, card.exampleDialogue, card.postHistoryInstructions).sumOf { it.length } >
                 AssistantRecord.MAX_SYSTEM_PROMPT_CHARS
-            ) add("The editable system prompt is limited to ${AssistantRecord.MAX_SYSTEM_PROMPT_CHARS} characters; the original card is retained.")
+            ) add("对话提示词最多保留 ${AssistantRecord.MAX_SYSTEM_PROMPT_CHARS} 字；原始角色卡已完整保留。")
         },
         owner = owner, rawSource = card.rawJson, sourceKind = success.source
     )

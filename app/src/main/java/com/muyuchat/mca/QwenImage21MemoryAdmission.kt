@@ -21,8 +21,8 @@ internal data class QwenImage21MemoryAdmission(
 }
 
 internal object QwenImage21MemoryAdmissionPolicy {
-    // Observed on the pinned Android MNN conversion at 512x512.  Keep this
-    // value in one place so a future native benchmark can update the contract.
+    // Calibrated from one 512x512 CPU RSS high-water sample. GPU allocations and
+    // system pressure are not fully included; this is not a minimum RAM requirement.
     private const val OBSERVED_512_PEAK_MB = 5_529L
     private const val SAFETY_RESERVE_MB = 512
     private const val FIXED_ESTIMATE_MB = 3_000L

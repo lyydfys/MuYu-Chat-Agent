@@ -19,8 +19,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.math.BigDecimal
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -201,15 +203,19 @@ internal fun verifyAndReadQnnImageOutput(
  * Validates the native-only proof attached to Qwen-Image-2.1 results.  A
  * configured backend is not sufficient: the isolated JNI bridge must report a
  * completed native run, the effective MNN backend, and the post-run runtime
- * resolution proof.  This helper is deliberately strict so a CPU fallback
- * cannot be presented as an OpenCL result.
+ * resolution proof. This helper is deliberately strict so a CPU/OpenCL
+ * fallback cannot be presented as a QNN result.
  */
 internal fun verifyQwenNativeBackendExecutionEvidence(
     audit: JSONObject,
     expectedBackend: String
 ) {
     val normalizedExpected = expectedBackend.trim().uppercase()
-    require(normalizedExpected == "MNN_OPENCL" || normalizedExpected == "MNN_CPU") {
+    require(
+        normalizedExpected == "MNN_OPENCL" ||
+            normalizedExpected == "MNN_CPU" ||
+            normalizedExpected == "MNN_QNN"
+    ) {
         "Qwen native execution evidence requested an unsupported backend."
     }
     require(audit.optBoolean("nativeRunCompleted", false) &&
@@ -782,6 +788,8 @@ internal data class LocalImageBundleManifest(
     val qnnSmokeSpec: QnnSmokeSpec = QnnSmokeSpec.Empty,
     val qnnSmokeSpecs: List<QnnSmokeSpec> = emptyList(),
     val primaryFile: File? = null,
+    /** The authoritative diffusion path remains available when its file is missing. */
+    val declaredPrimaryPath: String? = null,
     val components: List<LocalImageBundleComponentContract> = emptyList(),
     val executionProfileRequiredPaths: List<String> = emptyList(),
     val executionProfileGraphPaths: Map<String, String> = emptyMap(),
@@ -831,8 +839,19 @@ data class LocalImageModelRecord(
     val verifiedAt: Long = 0L,
     val qnnVerificationStamp: String = "",
     val createdAt: Long = System.currentTimeMillis(),
-    val updatedAt: Long = System.currentTimeMillis()
+    val updatedAt: Long = System.currentTimeMillis(),
+    /** Retired duplicate ids retained for selections, history and Local API references. */
+    val aliases: List<String> = emptyList(),
+    /** Complete component identity; never inferred from a primary-only/source hash. */
+    val contentFingerprint: String = "",
+    val componentSnapshots: List<LocalImageComponentSnapshot> = emptyList(),
+    val physicalCopies: List<LocalImageModelPhysicalCopy> = emptyList(),
+    /** Content observed when this path actually passed native execution. */
+    val verifiedContentFingerprint: String = ""
 ) {
+    fun matchesCatalogId(candidateId: String?): Boolean =
+        candidateId != null && (id == candidateId || candidateId in aliases)
+
     val configured: Boolean
         get() {
             val primary = File(path)
@@ -864,6 +883,11 @@ data class LocalImageModelRecord(
         .put("qnnVerificationStamp", qnnVerificationStamp)
         .put("createdAt", createdAt)
         .put("updatedAt", updatedAt)
+        .put("aliases", JSONArray().apply { aliases.distinct().forEach { put(it) } })
+        .put("contentFingerprint", contentFingerprint)
+        .put("componentSnapshots", JSONArray().apply { componentSnapshots.forEach { put(it.toJson()) } })
+        .put("physicalCopies", JSONArray().apply { physicalCopies.forEach { put(it.toJson()) } })
+        .put("verifiedContentFingerprint", verifiedContentFingerprint)
 
     companion object {
         fun fromJson(json: JSONObject): LocalImageModelRecord =
@@ -886,7 +910,21 @@ data class LocalImageModelRecord(
                 verifiedAt = json.optLong("verifiedAt", 0L),
                 qnnVerificationStamp = json.optString("qnnVerificationStamp"),
                 createdAt = json.optLong("createdAt", System.currentTimeMillis()),
-                updatedAt = json.optLong("updatedAt", System.currentTimeMillis())
+                updatedAt = json.optLong("updatedAt", System.currentTimeMillis()),
+                aliases = json.optJSONArray("aliases")?.let { values ->
+                    (0 until values.length()).mapNotNull { index ->
+                        values.optString(index).takeIf { it.isNotBlank() && it != "null" }
+                    }
+                }.orEmpty(),
+                contentFingerprint = json.optString("contentFingerprint"),
+                componentSnapshots = json.optJSONArray("componentSnapshots").imageComponentSnapshots(),
+                physicalCopies = json.optJSONArray("physicalCopies")?.let { copies ->
+                    (0 until copies.length()).mapNotNull { index ->
+                        copies.optJSONObject(index)?.let(LocalImageModelPhysicalCopy::fromJson)
+                            ?.takeIf { it.path.isNotBlank() && it.fileName.isNotBlank() }
+                    }
+                }.orEmpty(),
+                verifiedContentFingerprint = json.optString("verifiedContentFingerprint")
             )
     }
 }
@@ -2777,15 +2815,30 @@ class LocalImageProvider(context: Context) {
         )
 
         val requestedBackend = options.backendMode?.trim()?.lowercase().orEmpty()
-        val useGpu = when (requestedBackend) {
-            "", "auto", "fastest", "gpu", "opencl", "mnn_opencl" -> true
-            "cpu" -> false
-            else -> error("Qwen-Image-2.1 supports the MNN OpenCL GPU path or CPU fallback only.")
+        val backend = when (requestedBackend) {
+            "", "auto", "fastest", "gpu", "opencl", "mnn_opencl" -> QwenImage21Backend.OPENCL
+            "cpu", "mnn_cpu" -> QwenImage21Backend.CPU
+            // QNN is an explicit opt-in for the experimental MNN DiT path. The
+            // text encoder and VAE remain CPU, matching the native contract.
+            "qnn", "mnn_qnn", "qnn_htp", "npu", "htp" -> QwenImage21Backend.QNN
+            else -> error(
+                "Qwen-Image-2.1 supports MNN OpenCL, MNN QNN/HTP, or CPU fallback."
+            )
+        }
+        val useGpu = backend.useGpu
+        val qnnRuntimePath = if (backend == QwenImage21Backend.QNN) {
+            qwenQnnRuntimeDirectory(bundleRoot)
+        } else {
+            null
         }
         val threads = options.threads
             ?: Runtime.getRuntime().availableProcessors().coerceIn(2, 8)
         require(threads in 1..16) { "Qwen-Image-2.1 CPU thread count must be between 1 and 16." }
-        val backendLabel = if (useGpu) "MNN OpenCL" else "MNN CPU"
+        val backendLabel = when (backend) {
+            QwenImage21Backend.CPU -> "MNN CPU"
+            QwenImage21Backend.OPENCL -> "MNN OpenCL"
+            QwenImage21Backend.QNN -> "MNN QNN/HTP"
+        }
         val operationStartedAt = SystemRuntimeMonotonicClock.nowMs()
         fun publishProgress(phase: String, message: String, step: Int) {
             val elapsed = (SystemRuntimeMonotonicClock.nowMs() - operationStartedAt).coerceAtLeast(0L)
@@ -2826,6 +2879,8 @@ class LocalImageProvider(context: Context) {
             val loaded = qwenImage21Worker.load(
                 bundleRoot = bundleRoot.absolutePath,
                 useGpu = useGpu,
+                backend = backend,
+                qnnRuntimePath = qnnRuntimePath,
                 threads = threads,
                 bundleFingerprint = profile.bindingFingerprint,
                 requestId = loadRequestId,
@@ -2841,7 +2896,7 @@ class LocalImageProvider(context: Context) {
             require(loaded.loaded && loaded.state == "READY") {
                 "Qwen-Image-2.1 worker did not confirm that the model is ready."
             }
-            require(loaded.backendConfigured == if (useGpu) "MNN_OPENCL" else "MNN_CPU") {
+            require(loaded.backendConfigured == backend.nativeAuditName) {
                 "Qwen-Image-2.1 worker did not configure the requested ${backendLabel} backend."
             }
             require(loaded.textEncoderOnCpu && loaded.vaeOnCpu) {
@@ -2867,6 +2922,8 @@ class LocalImageProvider(context: Context) {
                 seed = seed,
                 threads = threads,
                 useGpu = useGpu,
+                backend = backend,
+                qnnRuntimePath = qnnRuntimePath,
                 onProgress = { percent ->
                     publishProgress(
                         "denoising",
@@ -2993,6 +3050,36 @@ class LocalImageProvider(context: Context) {
             }
             runCatching { outputFile.delete() }
         }
+    }
+
+    /**
+     * Returns one coherent app-private or platform QNN host directory for the
+     * Qwen worker. Runtime discovery is advisory: an empty result is passed as
+     * null so the native loader can use its normal platform search path.
+     */
+    private fun qwenQnnRuntimeDirectory(bundleRoot: File): String? {
+        val resolution = runCatching {
+            qnnRuntimeDirectoryResolutionFor(appContext, bundleRoot)
+        }.getOrNull()
+        val discovered = resolution?.directories.orEmpty().asSequence()
+            .map { path -> runCatching { File(path).canonicalFile }.getOrNull() }
+            .filterNotNull()
+            .firstOrNull { directory ->
+                directory.isDirectory &&
+                    File(directory, "libQnnSystem.so").isFile &&
+                    File(directory, "libQnnHtp.so").isFile
+            }
+            ?.absolutePath
+        if (discovered != null) return discovered
+
+        // Qwen's MNN bundle predates the image-bundle QNN manifest, so it may
+        // have no bundle-specific runtime to stage. Reuse the APK's coherent
+        // Qualcomm runtime as an advisory candidate when it is packaged; an
+        // unknown device simply returns null and native loading remains the
+        // compatibility authority.
+        return runCatching {
+            LiteRtQualcommRuntimeStager.stage(appContext)?.directory?.canonicalPath
+        }.getOrNull()
     }
 
     fun nativeConfig(): JSONObject? =
@@ -6371,48 +6458,35 @@ private fun canonicalImageModelPath(path: String): String =
 private fun remoteImageModelSource(remote: RemoteModelFile): String =
     "${remote.provider.name.lowercase()}:${remote.repoId}@${remote.revision}/${remote.path}"
 
-/** Only identical catalog ids pointing at the same primary artifact are duplicates. */
-internal fun normalizeLocalImageModelRecords(records: List<LocalImageModelRecord>): List<LocalImageModelRecord> {
-    val distinct = LinkedHashMap<Pair<String, String>, LocalImageModelRecord>()
-    records.forEachIndexed { index, record ->
-        val path = if (record.path.isBlank()) "missing:$index" else canonicalImageModelPath(record.path)
-        val key = record.id to path
-        val previous = distinct[key]
-        if (previous == null || (record.configured && !previous.configured) ||
-            (record.configured == previous.configured && record.updatedAt > previous.updatedAt)
-        ) {
-            distinct[key] = record
-        }
-    }
-
-    val ownerById = distinct.values.groupBy { it.id }.mapValues { (_, candidates) ->
-        candidates.maxWithOrNull(compareBy<LocalImageModelRecord> { it.configured }.thenBy { it.updatedAt })
-    }
-    val reservedIds = records.mapTo(mutableSetOf()) { it.id }
-    val assignedIds = mutableSetOf<String>()
-    return distinct.values.map { record ->
-        if (ownerById[record.id] === record) {
-            assignedIds += record.id
-            return@map record
-        }
-        val path = canonicalImageModelPath(record.path)
-        var suffix = 0
-        var replacement: String
-        do {
-            replacement = UUID.nameUUIDFromBytes(
-                "mca.image.catalog.v1:${record.id}:$path:${suffix++}".toByteArray(Charsets.UTF_8)
-            ).toString()
-        } while (replacement in reservedIds || replacement in assignedIds)
-        assignedIds += replacement
-        record.copy(id = replacement)
-    }
-}
+internal data class LocalImageCatalogSnapshot(
+    val models: String?, val selectedModelId: String?, val selectedBackend: String?, val suppressedPaths: Set<String>
+)
 
 class LocalImageModelStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("mca_local_image_models", Context.MODE_PRIVATE)
     private val managedDir: File by lazy {
         (appContext.getExternalFilesDir("image_models") ?: File(appContext.filesDir, "image_models")).also { it.mkdirs() }
+    }
+
+    /** Serialize promotion/registration with scans; restore only this catalog's keys on failure. */
+    internal fun <T> withCatalogTransaction(block: () -> T): T = synchronized(imageModelCatalogLock) {
+        val snapshot = captureCatalogSnapshot()
+        try { block() } catch (failure: Throwable) {
+            runCatching { restoreCatalogSnapshot(snapshot) }.exceptionOrNull()?.let(failure::addSuppressed)
+            throw failure
+        }
+    }
+
+    internal fun captureCatalogSnapshot(): LocalImageCatalogSnapshot = synchronized(imageModelCatalogLock) {
+        LocalImageCatalogSnapshot(prefs.getString(KEY_MODELS, null), prefs.getString(KEY_SELECTED_MODEL_ID, null),
+            prefs.getString(KEY_SELECTED_BACKEND, null), suppressedImageModelPaths().toSet())
+    }
+
+    internal fun restoreCatalogSnapshot(snapshot: LocalImageCatalogSnapshot) = synchronized(imageModelCatalogLock) {
+        check(prefs.edit().putString(KEY_MODELS, snapshot.models).putString(KEY_SELECTED_MODEL_ID, snapshot.selectedModelId)
+            .putString(KEY_SELECTED_BACKEND, snapshot.selectedBackend).putStringSet(KEY_SUPPRESSED_PATHS, snapshot.suppressedPaths)
+            .commit()) { "无法恢复模型目录登记状态，请释放存储空间后刷新。" }
     }
 
     fun loadModels(discover: Boolean = true): List<LocalImageModelRecord> = synchronized(imageModelCatalogLock) {
@@ -6426,23 +6500,35 @@ class LocalImageModelStore(context: Context) {
             !prefs.contains("catalog_recovery_raw")) {
             prefs.edit().putString("catalog_recovery_raw", raw).apply()
         }
-        if (!discover) return@synchronized normalizeLocalImageModelRecords(persisted)
-        val migrated = persisted.map { model ->
-            if (model.sha256.matches(Regex("[0-9a-fA-F]{64}"))) model else {
-                val file = File(model.path)
-                if (!file.isFile) model else runCatching {
-                    model.copy(sha256 = sha256(file), updatedAt = System.currentTimeMillis())
-                }.getOrDefault(model)
-            }
+        if (!discover) {
+            val normalized = normalizeLocalImageModelRecords(persisted, loadSelectedModelId())
+            if (normalized != persisted) persistModels(normalized)
+            return@synchronized normalized
         }
-        if (migrated != persisted) {
-            runCatching { saveModels(migrated) }
-            persisted = migrated
+        val storedRecords = persisted
+        persisted = persisted.flatMap { it.expandPhysicalRecords() }
+        // Re-observe every companion before retaining execution proof. The digest cache
+        // is process-local and stat/ctime based; persisted metadata is never a hash source.
+        persisted = persisted.filterNot { model ->
+            model.source == "local:discovered" && imageDirectoryIsOwnedComponent(File(model.bundleRoot ?: model.path).let {
+                if (it.isDirectory) it else it.parentFile
+            }, File(model.path))
+        }.map { model ->
+            runCatching { model.withObservedContent() }.getOrElse {
+                model.copy(verificationStatus = LocalImageVerificationStatus.UNKNOWN,
+                    verificationMessage = "", verifiedAt = 0L, qnnVerificationStamp = "", verifiedContentFingerprint = "")
+            }
         }
         if (!ManagedModelDownloadWorker.isInstalling) recoverInterruptedImageBundlePromotions(managedDir) { candidate ->
             when (val inspection = inspectLocalImageBundleManifestFromRoot(candidate)) {
-                is LocalImageBundleManifestInspection.Ready -> inspection.manifest.primaryFile
-                    ?.let { it.isFile && it.length() > 0L } == true
+                is LocalImageBundleManifestInspection.Ready -> {
+                    val manifest = inspection.manifest
+                    val primaryReady = manifest.primaryFile?.let { it.isFile && it.length() > 0L } == true
+                    val requiredPaths = manifest.components.filter { it.required }.map { it.relativePath } +
+                        manifest.executionProfileRequiredPaths
+                    primaryReady && requiredPaths.all { relative -> candidate.safeDescendantOrNull(relative)
+                        ?.let { it.isFile && it.canRead() && it.length() > 0L } == true }
+                }
                 else -> false
             }
         }
@@ -6453,40 +6539,22 @@ class LocalImageModelStore(context: Context) {
         // valid QNN bundle is visible without requiring a second manual import.
         // Discovery is structural only: it never filters on chipset/profile;
         // the native load/graph path remains the execution authority.
+        val suppressed = suppressedImageModelPaths()
         val discovered = discoverInstalledImageBundles(persisted)
-            .filterNot { candidate -> canonicalImageModelPath(candidate.path) in suppressedImageModelPaths() }
+            .filterNot { candidate ->
+                localImagePhysicalIdentity(candidate) in suppressed ||
+                    canonicalImageModelPath(candidate.path) in suppressed // Legacy path-only tombstones.
+            }
         if (discovered.isEmpty()) {
-            val normalized = normalizeLocalImageModelRecords(persisted)
-            if (normalized != persisted) {
+            val normalized = normalizeLocalImageModelRecords(persisted, loadSelectedModelId())
+            if (normalized != storedRecords) {
                 runCatching { saveModels(normalized) }
             }
             return@synchronized normalized
         }
-        val discoveredByPath = discovered.associateBy { canonicalImageModelPath(it.path) }
-        val refreshed = persisted.map { existing ->
-            val candidate = discoveredByPath[canonicalImageModelPath(existing.path)]
-            if (candidate == null || candidate.sha256.equals(existing.sha256, ignoreCase = true)) {
-                existing
-            } else {
-                existing.copy(
-                    sizeBytes = candidate.sizeBytes,
-                    sha256 = candidate.sha256,
-                    componentCount = candidate.componentCount,
-                    verificationStatus = LocalImageVerificationStatus.UNKNOWN,
-                    verificationMessage = "",
-                    verifiedAt = 0L,
-                    qnnVerificationStamp = "",
-                    updatedAt = System.currentTimeMillis()
-                )
-            }
-        }
-        val merged = normalizeLocalImageModelRecords(refreshed + discovered.filterNot { candidate ->
-            persisted.any { existing ->
-                canonicalImageModelPath(existing.path) == canonicalImageModelPath(candidate.path)
-            }
-        })
+        val merged = normalizeLocalImageModelRecords(persisted + discovered, loadSelectedModelId())
             .sortedByDescending { it.updatedAt }
-        if (merged != persisted) {
+        if (merged != storedRecords) {
             // Best-effort persistence makes the next refresh stable, but a
             // read-only discovery failure must never hide the in-memory result.
             runCatching { saveModels(merged) }
@@ -6513,15 +6581,6 @@ class LocalImageModelStore(context: Context) {
         val candidatePaths = candidateDirs.map { it.path }.toSet()
         return candidateDirs.mapNotNull { bundleRoot ->
             runCatching {
-                val existing = persisted.firstOrNull { it.bundleRoot == bundleRoot.absolutePath }
-                if (existing != null && existing.sha256.matches(Regex("[0-9a-fA-F]{64}"))) {
-                    val primaryFile = File(existing.path)
-                    if (primaryFile.isFile && primaryFile.length() > 0L &&
-                        primaryFile.lastModified() <= existing.updatedAt &&
-                        File(bundleRoot, "manifest.json").lastModified() <= existing.updatedAt) {
-                        return@runCatching null
-                    }
-                }
                 // Discovery must not require a manifest as an admission gate. Older
                 // QNN/MNN archives shipped only graph files; infer the runtime and
                 // primary artifact from the concrete directory, then let readiness and
@@ -6545,7 +6604,16 @@ class LocalImageModelStore(context: Context) {
                 } else {
                     null
                 }
-                val primary = manifest?.primaryFile?.takeIf { it.isFile && it.length() > 0L }
+                // A declared diffusion primary remains authoritative when missing. Falling
+                // back to the VAE/encoder in that directory creates a second broken model.
+                // Persisted rows keep the missing-file diagnosis; a complete retained copy
+                // can take over during normalization without inheriting the old native proof.
+                val declaredPrimary = manifest?.declaredPrimaryPath
+                    ?.let(bundleRoot::safeDescendantOrNull) ?: manifest?.primaryFile
+                if (declaredPrimary != null && (!declaredPrimary.isFile || declaredPrimary.length() <= 0L)) {
+                    return@runCatching null
+                }
+                val primary = declaredPrimary
                     ?: imageDiscoveryWalk(bundleRoot).filter { it.isFile && it.extension.lowercase() in READINESS_MODEL_EXTENSIONS }
                         .maxWithOrNull(compareBy<File> { it.name.isPrimaryImageModelName() }.thenBy { it.length() })
                     ?: imageDiscoveryWalk(bundleRoot).firstOrNull {
@@ -6560,8 +6628,15 @@ class LocalImageModelStore(context: Context) {
                 // that lives inside a different candidate bundle directory; the deeper
                 // directory owns that artifact and emits the record instead.
                 val primaryCanonical = runCatching { primary.canonicalFile }.getOrDefault(primary)
+                if (!hasDirectManifest && imageDirectoryIsOwnedComponent(bundleRoot, primaryCanonical)) {
+                    return@runCatching null
+                }
+                if (!hasDirectManifest && persisted.any { registered -> registered.allPhysicalCopies().any { physical ->
+                    runCatching { File(physical.path).canonicalFile == primaryCanonical }.getOrDefault(false) &&
+                        (physical.bundleRoot.isNullOrBlank() || !sameCanonicalPath(physical.bundleRoot, bundleRoot.path))
+                } }) return@runCatching null
                 val ownedByDescendantBundle = candidatePaths.any { otherPath ->
-                    otherPath != bundleRoot.path &&
+                    otherPath.startsWith(bundleRoot.path + File.separator) &&
                         primaryCanonical.path.startsWith(otherPath + File.separator)
                 }
                 if (!hasDirectManifest && ownedByDescendantBundle) return@runCatching null
@@ -6575,7 +6650,7 @@ class LocalImageModelStore(context: Context) {
                     path = primary.absolutePath,
                     fileName = primary.name,
                     sizeBytes = imageDiscoveryWalk(bundleRoot).filter { it.isFile }.sumOf { it.length() },
-                    sha256 = sha256(primary),
+                    sha256 = observedLocalImageFileSha256(primary),
                     runtime = runtime,
                     family = manifest?.family ?: LocalImageModelFamily.infer(bundleRoot.name),
                     imageSize = manifest?.imageSize ?: defaultImageSizeFor(bundleRoot.name),
@@ -6583,7 +6658,11 @@ class LocalImageModelStore(context: Context) {
                     bundleRoot = bundleRoot.absolutePath,
                     componentCount = imageDiscoveryWalk(bundleRoot).count { it.isFile }.coerceAtLeast(1),
                     updatedAt = bundleRoot.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
-                )
+                ).withObservedContent().let { observed ->
+                    val existing = persisted.firstOrNull { localImagePhysicalIdentity(it) == localImagePhysicalIdentity(observed) &&
+                        localImageSameCompleteContents(it, observed) }
+                    observed.copy(updatedAt = existing?.updatedAt ?: (bundleRoot.lastModified().takeIf { it > 0L } ?: observed.updatedAt))
+                }
             }.getOrNull()
         }
             .distinctBy { runCatching { it.bundleRoot?.let(::File)?.canonicalPath ?: it.path }.getOrDefault(it.path) }
@@ -6592,31 +6671,62 @@ class LocalImageModelStore(context: Context) {
     private fun suppressedImageModelPaths(): Set<String> =
         prefs.getStringSet(KEY_SUPPRESSED_PATHS, emptySet()).orEmpty()
 
-    private fun persistModels(models: List<LocalImageModelRecord>, suppressedPaths: Set<String>? = null) {
+    private fun persistModels(
+        models: List<LocalImageModelRecord>, suppressedPaths: Set<String>? = null,
+        selectedModelId: String? = loadSelectedModelId(), selectedBackend: ImageBackend? = null
+    ) {
+        val normalized = normalizeLocalImageModelRecords(models, selectedModelId)
         val array = JSONArray()
-        normalizeLocalImageModelRecords(models)
-            .sortedByDescending { it.updatedAt }
-            .forEach { array.put(it.toJson()) }
+        normalized.sortedByDescending { it.updatedAt }.forEach { array.put(it.toJson()) }
+        val canonicalSelection = normalized.firstOrNull { it.matchesCatalogId(selectedModelId) }?.id ?: selectedModelId
         val editor = prefs.edit().putString(KEY_MODELS, array.toString())
+            .putString(KEY_SELECTED_MODEL_ID, canonicalSelection.orEmpty())
         suppressedPaths?.let { editor.putStringSet(KEY_SUPPRESSED_PATHS, it) }
+        selectedBackend?.let { editor.putString(KEY_SELECTED_BACKEND, it.name) }
         check(editor.commit()) {
             "无法保存模型列表。请释放存储空间后刷新或重试导入，模型文件已保留。"
         }
     }
 
+    /** The complete record, selection and backend are registered in one preferences commit. */
+    private fun registerRecord(
+        record: LocalImageModelRecord, selectWhenNew: Boolean = false,
+        backendOnSelection: ImageBackend? = null
+    ): LocalImageModelRecord {
+        val current = loadModels(discover = false)
+        val selected = loadSelectedModelId()
+        val wasRegistered = current.any { localImagePhysicalIdentity(record) in it.catalogPhysicalKeys() }
+        val normalized = normalizeLocalImageModelRecords(current + record, selected)
+        val owner = normalized.first { localImagePhysicalIdentity(record) in it.catalogPhysicalKeys() }
+        val select = owner.isReadyForLocalImageGeneration() && (selected == null || (selectWhenNew && !wasRegistered))
+        val visibleKeys = normalized.flatMapTo(mutableSetOf()) { model ->
+            model.allPhysicalCopies().flatMap { copy ->
+                listOf(localImagePhysicalIdentity(model.runtime, copy.path), canonicalImageModelPath(copy.path))
+            }
+        }
+        persistModels(normalized, suppressedImageModelPaths() - visibleKeys,
+            if (select) owner.id else selected, if (select) backendOnSelection else null)
+        return owner
+    }
+
     fun saveModels(models: List<LocalImageModelRecord>) = synchronized(imageModelCatalogLock) {
-        val visiblePaths = models.mapTo(mutableSetOf()) { canonicalImageModelPath(it.path) }
-        persistModels(models, suppressedImageModelPaths() - visiblePaths)
+        // Tombstones now include the runtime. Saving another runtime that shares
+        // this primary must not resurrect the removed row on the next scan.
+        val visibleKeys = models.flatMapTo(mutableSetOf()) {
+            it.allPhysicalCopies().flatMap { copy ->
+                listOf(localImagePhysicalIdentity(it.runtime, copy.path), canonicalImageModelPath(copy.path))
+            }
+        }
+        persistModels(models, suppressedImageModelPaths() - visibleKeys)
     }
 
     fun removeModelRecord(id: String): Boolean = synchronized(imageModelCatalogLock) {
         val models = loadModels()
-        val target = models.firstOrNull { it.id == id } ?: return@synchronized false
-        val remaining = models.filterNot { it.id == id }
-        persistModels(remaining, suppressedImageModelPaths() + canonicalImageModelPath(target.path))
-        if (loadSelectedModelId() == id) {
-            saveSelectedModelId(remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id)
-        }
+        val target = models.firstOrNull { it.matchesCatalogId(id) } ?: return@synchronized false
+        val remaining = models.filterNot { it.id == target.id }
+        val selected = if (target.matchesCatalogId(loadSelectedModelId()))
+            remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id else loadSelectedModelId()
+        persistModels(remaining, suppressedImageModelPaths() + target.catalogPhysicalKeys(), selected)
         true
     }
 
@@ -6624,42 +6734,74 @@ class LocalImageModelStore(context: Context) {
         val now = System.currentTimeMillis()
         val current = loadModels()
         val index = current.indexOfFirst { existing ->
-            existing.id == record.id &&
-                canonicalImageModelPath(existing.path) == canonicalImageModelPath(record.path)
+            existing.matchesCatalogId(record.id) &&
+                localImagePhysicalIdentity(existing) == localImagePhysicalIdentity(record)
         }
         require(index >= 0) { "Image model catalog record no longer exists at this path." }
-        val models = current.toMutableList().also { it[index] = record.copy(updatedAt = now) }
+        val owner = current[index]
+        val models = current.toMutableList().also {
+            val observed = record.withObservedContent()
+            // updateModel is the native-result persistence boundary. A changed snapshot
+            // must not be certified by a result produced for its previous components.
+            val sameRequestContent = localImageSameCompleteContents(record, observed)
+            it[index] = observed.copy(
+                id = owner.id, aliases = (owner.aliases + record.aliases).distinct(), updatedAt = now,
+                physicalCopies = owner.physicalCopies,
+                verificationStatus = if (sameRequestContent) record.verificationStatus else LocalImageVerificationStatus.UNKNOWN,
+                verificationMessage = if (sameRequestContent) record.verificationMessage else "",
+                verifiedAt = if (sameRequestContent) record.verifiedAt else 0L,
+                qnnVerificationStamp = if (sameRequestContent) record.qnnVerificationStamp else "",
+                verifiedContentFingerprint = if (sameRequestContent && record.verificationStatus != LocalImageVerificationStatus.UNKNOWN)
+                    observed.contentFingerprint else ""
+            )
+        }
         saveModels(models)
         return@synchronized models
     }
 
-    fun importFromUri(uri: Uri): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
-        val fileName = queryDisplayName(uri) ?: "image-model.task"
-        val extension = fileName.substringAfterLast('.', "").lowercase()
+    fun importFromUri(uri: Uri, checkCancelled: () -> Unit = {}): LocalImageModelRecord =
+        importFromSource(queryDisplayName(uri) ?: "image-model.task", { inputStreamFor(uri) }, checkCancelled)
+
+    /** Production import entry also usable by file fixtures, without an Android URI provider. */
+    internal fun importFromSource(
+        fileName: String, openSource: () -> InputStream, checkCancelled: () -> Unit = {},
+        source: String = "local"
+    ): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
+        checkCancelled()
+        val extension = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
         require(extension in SUPPORTED_EXTENSIONS) {
-            "请选择 .gguf、.safetensors、.ckpt、.pth、.pt、.onnx，或包含 diffusion 主模型、VAE/AE、文本编码器/LLM 的 .zip 图像生成引擎包。"
+            "请选择 .gguf、.safetensors、.ckpt、.pth、.pt、.onnx、.mnn，或包含 diffusion 主模型、VAE/AE、文本编码器/LLM 的 .zip 图像生成引擎包。"
         }
-        if (extension == "zip") {
-            return@synchronized importBundleFromUri(uri, fileName)
+        if (extension == "zip") return@synchronized importBundleFromSource(fileName, openSource, checkCancelled, source)
+        val catalogBefore = captureCatalogSnapshot()
+        val workspace = File(managedDir, ".image-import-" + UUID.randomUUID())
+        check(workspace.mkdirs()) { "无法创建图像模型导入临时目录。" }
+        var promoted: File? = null
+        try {
+            val staged = File(workspace, "model." + extension)
+            openSource().use { input -> staged.outputStream().use { output ->
+                copyImageImportInput(input, output, checkCancelled)
+            } }
+            val draft = LocalImageModelRecord(
+                displayName = fileName.substringBeforeLast('.', fileName), path = staged.absolutePath,
+                fileName = fileName, sizeBytes = staged.length(), sha256 = "",
+                runtime = LocalImageRuntime.infer(fileName), family = LocalImageModelFamily.infer(fileName),
+                imageSize = defaultImageSizeFor(fileName), source = source
+            ).withObservedContent(checkCancelled)
+            checkCancelled()
+            val target = uniqueTarget(fileName)
+            require(!target.exists() && staged.renameTo(target)) { "图像模型导入提交失败，源文件仍可重新导入。" }
+            promoted = target
+            checkCancelled()
+            return@synchronized registerRecord(draft.copy(path = target.absolutePath, fileName = target.name))
+        } catch (failure: Throwable) {
+            runCatching { restoreCatalogSnapshot(catalogBefore) }.exceptionOrNull()?.let(failure::addSuppressed)
+            promoted?.let { file -> if (!runCatching { imageFileSharesCatalogOwnership(file, loadModels(discover = false)) }.getOrDefault(true))
+                runCatching { if (file.exists()) file.delete() } }
+            throw failure
+        } finally {
+            if (workspace.exists()) runCatching { workspace.deleteRecursively() }
         }
-        managedDir.mkdirs()
-        val target = uniqueTarget(fileName)
-        inputStreamFor(uri).use { input ->
-            target.outputStream().use { output -> input.copyTo(output) }
-        }
-        val record = LocalImageModelRecord(
-            displayName = fileName.substringBeforeLast('.', fileName),
-            path = target.absolutePath,
-            fileName = target.name,
-            sizeBytes = target.length(),
-            sha256 = sha256(target),
-            runtime = LocalImageRuntime.infer(fileName),
-            family = LocalImageModelFamily.infer(fileName),
-            imageSize = defaultImageSizeFor(fileName)
-        )
-        saveModels(listOf(record) + loadModels().filterNot { it.id == record.id })
-        if (loadSelectedModelId() == null && record.isReadyForLocalImageGeneration()) saveSelectedModelId(record.id)
-        return@synchronized record
     }
 
     fun registerDownloadedModel(
@@ -6668,51 +6810,14 @@ class LocalImageModelStore(context: Context) {
     ): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         require(file.exists()) { "下载完成的图像模型文件不存在：${file.absolutePath}" }
         if (file.extension.equals("zip", ignoreCase = true)) {
-            return@synchronized importBundleFromUri(Uri.fromFile(file), file.name).also {
-                runCatching { file.delete() }
+            return@synchronized importFromSource(file.name, { file.inputStream() }, source = remoteImageModelSource(remote)).also {
+                deleteManagedDuplicate(file)
             }
         }
         val digest = sha256(file)
         val runtime = LocalImageRuntime.infer(file.name)
         val family = LocalImageModelFamily.infer("${remote.repoId}/${remote.path}/${file.name}")
         val source = remoteImageModelSource(remote)
-        val legacySource = "${remote.provider.name.lowercase()}:${remote.repoId}"
-        val existing = loadModels(discover = false).firstOrNull { candidate ->
-            candidate.sha256.equals(digest, ignoreCase = true) &&
-                candidate.sizeBytes == file.length() &&
-                candidate.runtime == runtime &&
-                (candidate.source == source || candidate.source == legacySource) &&
-                candidate.fileName == file.name
-        }
-        if (existing != null) {
-            // Keep the first durable id for this exact artifact.  Re-downloading
-            // the same file must not create a new API/runtime identity merely
-            // because the worker used a different temporary directory.
-            val existingPrimary = File(existing.path)
-            val stable = if (existingPrimary.isFile && existingPrimary.length() > 0L) {
-                if (existing.source == legacySource) existing.copy(source = source) else existing
-            } else {
-                existing.copy(
-                    path = file.absolutePath,
-                    fileName = file.name,
-                    sizeBytes = file.length(),
-                    sha256 = digest,
-                    family = family,
-                    source = source,
-                    updatedAt = System.currentTimeMillis()
-                )
-            }
-            if (stable != existing) {
-                saveModels(loadModels(discover = false).map { item ->
-                    if (item.id == existing.id) stable else item
-                })
-            }
-            if (!sameCanonicalPath(stable.path, file.absolutePath)) deleteManagedDuplicate(file)
-            if (loadSelectedModelId() == null && stable.isReadyForLocalImageGeneration()) {
-                saveSelectedModelId(stable.id)
-            }
-            return@synchronized stable
-        }
         val record = LocalImageModelRecord(
             displayName = file.name.substringBeforeLast('.', file.name),
             path = file.absolutePath,
@@ -6725,9 +6830,7 @@ class LocalImageModelStore(context: Context) {
             source = source,
             updatedAt = System.currentTimeMillis()
         )
-        saveModels(listOf(record) + loadModels())
-        if (loadSelectedModelId() == null && record.isReadyForLocalImageGeneration()) saveSelectedModelId(record.id)
-        return@synchronized record
+        return@synchronized registerDownloadedRecord(record)
     }
 
     fun managedBundleDirFor(bundleId: String): File {
@@ -6752,7 +6855,8 @@ class LocalImageModelStore(context: Context) {
         componentCount: Int,
         runtimeOverride: LocalImageRuntime? = null,
         imageSizeOverride: String? = null,
-        primarySha256: String? = null
+        primarySha256: String? = null,
+        recordTransform: (LocalImageModelRecord) -> LocalImageModelRecord = { it }
     ): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
         require(bundleDir.isDirectory) { "本地生图引擎包目录不存在：${bundleDir.absolutePath}" }
         require(primaryFile.exists()) { "Local image engine bundle is missing a diffusion model: ${primaryFile.name}" }
@@ -6762,8 +6866,16 @@ class LocalImageModelStore(context: Context) {
         }
         prepareMnnDiffusionTokenizerIfPossible(bundleDir)
         val manifest = localImageBundleManifestFromRoot(bundleDir)
-        val resolvedPrimary = manifest?.primaryFile ?: findPrimaryImageModel(bundleDir)
+        val resolvedPrimary = manifest?.primaryFile
+            ?: primaryFile.takeIf { it.isFile && !it.extension.equals("zip", ignoreCase = true) }
+            ?: findPrimaryImageModel(bundleDir)
             ?: error("Local image engine bundle is missing a diffusion model.")
+        val canonicalRoot = bundleDir.canonicalFile
+        val canonicalPrimary = resolvedPrimary.canonicalFile
+        require(canonicalPrimary.isFile && canonicalPrimary.length() > 0L &&
+            canonicalPrimary.path.startsWith(canonicalRoot.path + File.separator)) {
+            "生图引擎包主模型为空、不可读或位于包目录之外：${resolvedPrimary.name}"
+        }
         val familyHint = "$displayName/${primaryRemote.repoId}/${primaryRemote.path}/${resolvedPrimary.name}"
         val record = LocalImageModelRecord(
             displayName = displayName,
@@ -6791,46 +6903,41 @@ class LocalImageModelStore(context: Context) {
                 .coerceAtLeast(1),
             updatedAt = System.currentTimeMillis()
         )
-        record.localImageStructuralReadinessMessage()?.let { readiness ->
+        val observed = record.withObservedContent()
+        observed.localImageStructuralReadinessMessage()?.let { readiness ->
             error("图像生成引擎包不完整：$readiness")
         }
-        val existing = loadModels(discover = false).firstOrNull { candidate ->
-            candidate.bundleRoot?.let { root ->
-                runCatching { File(root).canonicalPath == bundleDir.canonicalPath }.getOrDefault(false)
-            } == true
+        val transformed = recordTransform(observed)
+        val prepared = transformed.withObservedContent()
+        require(prepared.id == observed.id && localImagePhysicalIdentity(prepared) == localImagePhysicalIdentity(observed) &&
+            sameCanonicalPath(prepared.bundleRoot, observed.bundleRoot) && prepared.contentFingerprint == observed.contentFingerprint &&
+            prepared.componentSnapshots == observed.componentSnapshots) {
+            "模型登记诊断不允许改变已经校验的文件或运行时身份。"
         }
-        if (existing != null) {
-            val stable = record.copy(
-                id = existing.id,
-                createdAt = existing.createdAt,
-                recommendationId = existing.recommendationId ?: record.recommendationId,
-                verificationStatus = LocalImageVerificationStatus.UNKNOWN,
-                verificationMessage = "",
-                verifiedAt = 0L,
-                qnnVerificationStamp = ""
-            )
-            saveModels(loadModels(discover = false).map { item ->
-                if (item.id == existing.id && sameCanonicalPath(item.bundleRoot, existing.bundleRoot)) stable else item
-            })
-            if (loadSelectedModelId() == null && stable.isReadyForLocalImageGeneration()) {
-                saveSelectedModelId(stable.id)
-            }
-            return@synchronized stable
-        }
-        saveModels(listOf(record) + loadModels())
-        if (record.isReadyForLocalImageGeneration()) {
-            saveSelectedModelId(record.id)
-            saveSelectedBackend(ImageBackend.LOCAL)
-        }
-        return@synchronized record
+        return@synchronized registerRecord(prepared, selectWhenNew = true, backendOnSelection = ImageBackend.LOCAL)
     }
 
-    private fun deleteManagedDuplicate(file: File) {
-        val root = runCatching { managedDir.canonicalFile }.getOrNull() ?: return
-        val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return
-        if (candidate.path == root.path || !candidate.path.startsWith(root.path + File.separator)) return
-        runCatching { if (candidate.isDirectory) candidate.deleteRecursively() else candidate.delete() }
+    /** Complete equal bundles share a catalog owner while retaining every physical copy. */
+    private fun registerDownloadedRecord(record: LocalImageModelRecord): LocalImageModelRecord =
+        registerRecord(record.withObservedContent())
+
+    /** Optional archive cleanup must not erase a primary or a shared bundle component. */
+    internal fun deleteManagedDuplicate(file: File): Boolean = synchronized(imageModelCatalogLock) {
+        val root = runCatching { managedDir.canonicalFile }.getOrNull() ?: return@synchronized false
+        val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return@synchronized false
+        if (candidate.path == root.path || !candidate.path.startsWith(root.path + File.separator)) {
+            return@synchronized false
+        }
+        if (imageFileSharesCatalogOwnership(candidate, loadModels(discover = false))) return@synchronized false
+        runCatching {
+            if (!candidate.exists()) true
+            else if (candidate.isDirectory) candidate.deleteRecursively() && !candidate.exists()
+            else candidate.delete() && !candidate.exists()
+        }.getOrDefault(false)
     }
+
+    private fun imageFileSharesCatalogOwnership(candidate: File, records: List<LocalImageModelRecord>): Boolean =
+        localImageFileSharesCatalogOwnership(candidate, records)
 
     private fun sameCanonicalPath(first: String?, second: String?): Boolean {
         if (first.isNullOrBlank() || second.isNullOrBlank()) return false
@@ -6844,42 +6951,39 @@ class LocalImageModelStore(context: Context) {
 
     fun deleteModel(id: String): Boolean = synchronized(imageModelCatalogLock) {
         val models = loadModels()
-        val target = models.firstOrNull { it.id == id } ?: return@synchronized false
-        val targetFile = target.bundleRoot
-            ?.takeIf(String::isNotBlank)
-            ?.let(::File)
-            ?: File(target.path)
-        val remaining = models.filterNot { it.id == id }
-        val targetRoot = runCatching { targetFile.canonicalPath }.getOrDefault(targetFile.absolutePath)
-        val shared = remaining.any { other ->
-            val otherPath = canonicalImageModelPath(other.path)
-            otherPath == canonicalImageModelPath(target.path) ||
-                (targetFile.isDirectory && otherPath.startsWith(targetRoot + File.separator))
+        val target = models.firstOrNull { it.matchesCatalogId(id) } ?: return@synchronized false
+        val remaining = models.filterNot { it.id == target.id }
+        val files = target.allPhysicalCopies().map { physical ->
+            physical.bundleRoot?.takeIf(String::isNotBlank)?.let(::File) ?: File(physical.path)
+        }.distinctBy { it.canonicalPath }
+        for (file in files) {
+            if (imageFileSharesCatalogOwnership(file, remaining)) continue
+            val deleted = runCatching {
+                if (!file.exists()) true else if (file.isDirectory) file.deleteRecursively() && !file.exists()
+                else file.delete() && !file.exists()
+            }.getOrDefault(false)
+            if (!deleted) return@synchronized false
         }
-        val deleted = if (shared) true else runCatching {
-            if (!targetFile.exists()) {
-                true
-            } else if (targetFile.isDirectory) {
-                targetFile.deleteRecursively() && !targetFile.exists()
-            } else {
-                targetFile.delete() && !targetFile.exists()
-            }
-        }.getOrDefault(false)
-        if (!deleted || (!shared && targetFile.exists())) return@synchronized false
-        if (shared) {
-            persistModels(remaining, suppressedImageModelPaths() + canonicalImageModelPath(target.path))
-        } else {
-            saveModels(remaining)
-        }
-        if (loadSelectedModelId() == id) saveSelectedModelId(remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id)
+        val selected = if (target.matchesCatalogId(loadSelectedModelId()))
+            remaining.firstOrNull { it.isReadyForLocalImageGeneration() }?.id else loadSelectedModelId()
+        persistModels(remaining, suppressedImageModelPaths() + target.catalogPhysicalKeys(), selected)
         return@synchronized true
     }
 
     fun loadSelectedModelId(): String? =
         prefs.getString(KEY_SELECTED_MODEL_ID, null)?.takeIf { it.isNotBlank() }
 
-    fun saveSelectedModelId(modelId: String?) {
-        prefs.edit().putString(KEY_SELECTED_MODEL_ID, modelId.orEmpty()).apply()
+    fun saveSelectedModelId(modelId: String?) = synchronized(imageModelCatalogLock) {
+        val persisted = parseImageCatalogRecords(prefs.getString(KEY_MODELS, null).orEmpty())
+        val normalized = normalizeLocalImageModelRecords(persisted, modelId)
+        val canonicalId = normalized.firstOrNull { it.matchesCatalogId(modelId) }?.id ?: modelId
+        val editor = prefs.edit().putString(KEY_SELECTED_MODEL_ID, canonicalId.orEmpty())
+        if (normalized != persisted) {
+            val rows = JSONArray()
+            normalized.sortedByDescending { it.updatedAt }.forEach { rows.put(it.toJson()) }
+            editor.putString(KEY_MODELS, rows.toString())
+        }
+        check(editor.commit()) { "无法保存所选模型。请释放存储空间后重试。" }
     }
 
     fun loadSelectedBackend(): ImageBackend =
@@ -6890,59 +6994,54 @@ class LocalImageModelStore(context: Context) {
         prefs.edit().putString(KEY_SELECTED_BACKEND, backend.name).apply()
     }
 
-    private fun importBundleFromUri(uri: Uri, fileName: String): LocalImageModelRecord = synchronized(imageModelCatalogLock) {
-        val bundleDir = uniqueBundleDir(fileName.substringBeforeLast('.', fileName))
-        bundleDir.mkdirs()
+    private fun importBundleFromSource(
+        fileName: String, openSource: () -> InputStream, checkCancelled: () -> Unit, source: String
+    ): LocalImageModelRecord {
+        val catalogBefore = captureCatalogSnapshot()
+        val workspace = File(managedDir, ".image-import-" + UUID.randomUUID())
+        val stagedRoot = File(workspace, "content")
+        check(stagedRoot.mkdirs()) { "无法创建图像引擎包导入临时目录。" }
+        var promoted: File? = null
         try {
-            val extraction = inputStreamFor(uri).use { input ->
-                extractBoundedImageBundleZip(input, bundleDir)
+            val extraction = openSource().use { input ->
+                extractBoundedImageBundleZip(input, stagedRoot, checkCancelled = checkCancelled)
             }
-            val extracted = extraction.extractedFiles.filter {
-                it.extension.lowercase() in MODEL_FILE_EXTENSIONS
-            }
-            prepareMnnDiffusionTokenizerIfPossible(bundleDir)
-            val manifest = localImageBundleManifestFromRoot(bundleDir)
-            val primary = manifest?.primaryFile ?: extracted.sortedWith(
-                compareByDescending<File> { it.name.isPrimaryImageModelName() }
-                    .thenByDescending { it.length() }
-            ).firstOrNull() ?: run {
-                bundleDir.deleteRecursively()
-                error("引擎包内没有找到可识别的 GGUF / safetensors / ckpt / ONNX / MNN 模型文件。")
+            checkCancelled()
+            prepareMnnDiffusionTokenizerIfPossible(stagedRoot, checkCancelled)
+            val manifest = localImageBundleManifestFromRoot(stagedRoot)
+            val primary = manifest?.primaryFile ?: extraction.extractedFiles
+                .filter { it.extension.lowercase(Locale.ROOT) in MODEL_FILE_EXTENSIONS }
+                .sortedWith(compareByDescending<File> { it.name.isPrimaryImageModelName() }.thenByDescending { it.length() })
+                .firstOrNull() ?: error("引擎包内没有找到可识别的 GGUF / safetensors / ckpt / ONNX / MNN 模型文件。")
+            require(primary.canonicalFile.toPath().startsWith(stagedRoot.canonicalFile.toPath())) {
+                "图像引擎包主模型位于导入目录之外。"
             }
             val family = manifest?.family
                 ?: LocalImageModelFamily.infer(fileName).takeIf { it != LocalImageModelFamily.CUSTOM }
                 ?: LocalImageModelFamily.infer(primary.name)
-            val displayName = manifest?.displayName ?: fileName.substringBeforeLast('.', fileName)
-            val record = LocalImageModelRecord(
-                displayName = displayName,
-                path = primary.absolutePath,
-                fileName = primary.name,
-                sizeBytes = bundleDir.walkTopDown().filter { it.isFile }.sumOf { it.length() },
-                sha256 = sha256(primary),
-                runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleDir, primary),
-                family = family,
-                imageSize = manifest?.imageSize
-                    ?: defaultImageSizeFor(if (family != LocalImageModelFamily.CUSTOM) family.name else primary.name),
-                bundleRoot = bundleDir.absolutePath,
-                componentCount = bundleDir.walkTopDown().count { it.isFile }
-                    .coerceAtLeast(manifest?.componentCount ?: 0)
-                    .coerceAtLeast(1)
-            )
-            record.localImageStructuralReadinessMessage()?.let { readiness ->
-                bundleDir.deleteRecursively()
-                error("图像生成引擎包不完整：$readiness")
-            }
-            saveModels(listOf(record) + loadModels().filterNot { it.id == record.id })
-            if (
-                loadSelectedModelId() == null &&
-                record.isReadyForLocalImageGeneration()
-            ) {
-                saveSelectedModelId(record.id)
-            }
-            return@synchronized record
-        } catch (error: Throwable) {
-            if (bundleDir.exists()) runCatching { bundleDir.deleteRecursively() }
-            throw error
+            val draft = LocalImageModelRecord(
+                displayName = manifest?.displayName ?: fileName.substringBeforeLast('.', fileName),
+                path = primary.absolutePath, fileName = primary.name, sizeBytes = 0L, sha256 = "",
+                runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(stagedRoot, primary), family = family,
+                imageSize = manifest?.imageSize ?: defaultImageSizeFor(if (family != LocalImageModelFamily.CUSTOM) family.name else primary.name),
+                bundleRoot = stagedRoot.absolutePath, source = source,
+                recommendationId = manifest?.recommendationId ?: manifest?.id
+            ).withObservedContent(checkCancelled)
+            draft.localImageStructuralReadinessMessage()?.let { readiness -> error("图像生成引擎包不完整：$readiness") }
+            checkCancelled()
+            val target = uniqueBundleDir(fileName.substringBeforeLast('.', fileName))
+            require(!target.exists() && stagedRoot.renameTo(target)) { "图像引擎包导入提交失败，源文件仍可重新导入。" }
+            promoted = target
+            val finalPrimary = File(target, primary.relativeTo(stagedRoot).path)
+            checkCancelled()
+            return registerRecord(draft.copy(path = finalPrimary.absolutePath, bundleRoot = target.absolutePath))
+        } catch (failure: Throwable) {
+            runCatching { restoreCatalogSnapshot(catalogBefore) }.exceptionOrNull()?.let(failure::addSuppressed)
+            promoted?.let { file -> if (!runCatching { imageFileSharesCatalogOwnership(file, loadModels(discover = false)) }.getOrDefault(true))
+                runCatching { if (file.exists()) file.deleteRecursively() } }
+            throw failure
+        } finally {
+            if (workspace.exists()) runCatching { workspace.deleteRecursively() }
         }
     }
 
@@ -6957,6 +7056,7 @@ class LocalImageModelStore(context: Context) {
     }
 
     private fun queryDisplayName(uri: Uri): String? {
+        if (uri.scheme.equals("file", ignoreCase = true)) return uri.path?.let { File(it).name }
         val projection = arrayOf(OpenableColumns.DISPLAY_NAME)
         return appContext.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
@@ -7037,14 +7137,53 @@ internal data class ImageBundleZipExtractionResult(
  * Extracts an image bundle without trusting zip directory sizes. Every entry path and every
  * expanded chunk is checked before bytes are committed to an app-owned target.
  */
+internal fun copyImageImportInput(input: InputStream, output: OutputStream, checkCancelled: () -> Unit = {}) {
+    val buffer = ByteArray(128 * 1_024)
+    while (true) {
+        checkCancelled()
+        val read = input.read(buffer)
+        if (read < 0) break
+        if (read > 0) output.write(buffer, 0, read)
+    }
+    checkCancelled()
+}
+
+private fun copyImageImportFile(source: File, target: File, checkCancelled: () -> Unit) {
+    if (source.canonicalFile == target.canonicalFile) return
+    val temp = File(target.parentFile, "." + target.name + ".import-" + UUID.randomUUID())
+    try {
+        source.inputStream().use { input -> temp.outputStream().use { output -> copyImageImportInput(input, output, checkCancelled) } }
+        checkCancelled()
+        if (target.exists()) require(target.delete()) { "无法替换分词器文件：" + target.name }
+        require(temp.renameTo(target)) { "无法保存分词器文件：" + target.name }
+    } finally { if (temp.exists()) temp.delete() }
+}
+
+private fun readImageImportText(file: File, checkCancelled: () -> Unit): String {
+    val builder = StringBuilder()
+    file.reader(Charsets.UTF_8).buffered().use { reader ->
+        val chars = CharArray(16 * 1_024)
+        while (true) {
+            checkCancelled()
+            val read = reader.read(chars)
+            if (read < 0) break
+            if (read > 0) builder.append(chars, 0, read)
+        }
+    }
+    checkCancelled()
+    return builder.toString()
+}
+
 internal fun extractBoundedImageBundleZip(
     source: InputStream,
     bundleDir: File,
     limits: ImageBundleZipExtractionLimits = ImageBundleZipExtractionLimits(),
     shouldSkipTarget: (File) -> Boolean = { false },
     usableSpaceProvider: (File) -> Long = { root -> root.usableSpace },
-    copyBufferSize: Int = DEFAULT_BUFFER_SIZE
+    copyBufferSize: Int = DEFAULT_BUFFER_SIZE,
+    checkCancelled: () -> Unit = {}
 ): ImageBundleZipExtractionResult {
+    checkCancelled()
     require(copyBufferSize > 0) { "Image bundle zip copy buffer must be positive." }
     val canonicalRoot = bundleDir.canonicalFile
     require(canonicalRoot.isDirectory) {
@@ -7063,6 +7202,7 @@ internal fun extractBoundedImageBundleZip(
     try {
         ZipInputStream(source.buffered()).use { zip ->
             while (true) {
+                checkCancelled()
                 val entry = zip.nextEntry ?: break
                 entryCount += 1
                 require(entryCount <= limits.maxEntryCount) {
@@ -7133,6 +7273,7 @@ internal fun extractBoundedImageBundleZip(
                 try {
                     val buffer = ByteArray(copyBufferSize)
                     while (true) {
+                        checkCancelled()
                         val read = zip.read(buffer)
                         if (read < 0) break
                         if (read == 0) continue
@@ -7186,6 +7327,7 @@ internal fun extractBoundedImageBundleZip(
                 }
             }
         }
+        checkCancelled()
         return ImageBundleZipExtractionResult(
             extractedFiles = extractedFiles.toList(),
             entryCount = entryCount,
@@ -7285,14 +7427,15 @@ internal fun File.isMcaImageBundleManifest(): Boolean =
         JSONObject(readText(Charsets.UTF_8)).optString("schema") == "mca.image_engine.bundle.v1"
     }.getOrDefault(false)
 
-internal fun prepareMnnDiffusionTokenizerIfPossible(root: File): Boolean {
+internal fun prepareMnnDiffusionTokenizerIfPossible(root: File, checkCancelled: () -> Unit = {}): Boolean {
+    checkCancelled()
     if (!root.isDirectory) return false
     val rootCanonical = root.canonicalFile
     val rootMtok = File(root, "tokenizer.mtok")
     val existingMtok = root.findDescendantFile("tokenizer.mtok")
     if (existingMtok != null) {
         if (existingMtok.parentFile?.canonicalFile != rootCanonical || !rootMtok.isFile) {
-            existingMtok.copyTo(rootMtok, overwrite = true)
+            copyImageImportFile(existingMtok, rootMtok, checkCancelled)
         }
         return true
     }
@@ -7300,22 +7443,23 @@ internal fun prepareMnnDiffusionTokenizerIfPossible(root: File): Boolean {
     if (existingTxt != null) {
         val rootTxt = File(root, "tokenizer.txt")
         val tokenizerTxt = if (existingTxt.parentFile?.canonicalFile != rootCanonical) {
-            existingTxt.copyTo(rootTxt, overwrite = true)
+            copyImageImportFile(existingTxt, rootTxt, checkCancelled)
             rootTxt
         } else {
             existingTxt
         }
-        tokenizerTxt.copyTo(rootMtok, overwrite = true)
+        copyImageImportFile(tokenizerTxt, rootMtok, checkCancelled)
         return true
     }
 
     val vocabFile = root.findDescendantFile("vocab.json") ?: return false
     val mergesFile = root.findDescendantFile("merges.txt") ?: return false
-    val vocabJson = JSONObject(vocabFile.readText(Charsets.UTF_8))
+    val vocabJson = JSONObject(readImageImportText(vocabFile, checkCancelled))
     val idToToken = mutableMapOf<Int, String>()
     var maxId = -1
     val keys = vocabJson.keys()
     while (keys.hasNext()) {
+        checkCancelled()
         val token = keys.next()
         val rawId = vocabJson.opt(token)
         val id = when (rawId) {
@@ -7330,11 +7474,12 @@ internal fun prepareMnnDiffusionTokenizerIfPossible(root: File): Boolean {
     }
     require(maxId >= 0) { "MNN-Diffusion tokenizer vocab.json has no valid token ids." }
     val decoder = (0..maxId).map { id ->
+        checkCancelled()
         idToToken[id] ?: error("MNN-Diffusion tokenizer vocab.json is missing token id $id.")
     }
-    val merges = mergesFile.readLines(Charsets.UTF_8)
-        .map { it.trim() }
-        .filter { it.isNotBlank() && !it.startsWith("#") }
+    val merges = readImageImportText(mergesFile, checkCancelled).lineSequence()
+        .map { checkCancelled(); it.trim() }
+        .filter { it.isNotBlank() && !it.startsWith("#") }.toList()
     require(merges.isNotEmpty()) { "MNN-Diffusion tokenizer merges.txt has no merge rules." }
 
     val target = File(root, "tokenizer.txt")
@@ -7344,12 +7489,12 @@ internal fun prepareMnnDiffusionTokenizerIfPossible(root: File): Boolean {
         writer.appendLine("0 0 0")
         writer.appendLine()
         writer.appendLine("${decoder.size} ${merges.size}")
-        decoder.forEach { writer.appendLine(it) }
-        merges.forEach { writer.appendLine(it) }
+        decoder.forEach { checkCancelled(); writer.appendLine(it) }
+        merges.forEach { checkCancelled(); writer.appendLine(it) }
     }
     if (target.exists()) target.delete()
     require(temp.renameTo(target)) { "Failed to write MNN-Diffusion tokenizer.txt." }
-    target.copyTo(rootMtok, overwrite = true)
+    copyImageImportFile(target, rootMtok, checkCancelled)
     return true
 }
 
@@ -8081,6 +8226,7 @@ private fun parseLocalImageBundleManifest(
         qnnSmokeSpec = qnnSmokeSpecs.firstOrNull() ?: QnnSmokeSpec.Empty,
         qnnSmokeSpecs = qnnSmokeSpecs,
         primaryFile = primaryFile,
+        declaredPrimaryPath = primaryPath ?: executionProfilePaths.graphPaths["unet"],
         components = componentContracts,
         executionProfileRequiredPaths = executionProfilePaths.requiredPaths,
         executionProfileGraphPaths = executionProfilePaths.graphPaths,

@@ -11,7 +11,6 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -19,7 +18,7 @@ import org.json.JSONObject
 /** Imports the pinned Hy-MT2 package from a user-selected SAF directory. */
 internal class OfflinePromptTranslationBundleInstaller(context: Context) {
     private val appContext = context.applicationContext
-    private val installGate = Mutex()
+    private val installGate = OfflinePromptTranslationPackageActivation.gate
 
     suspend fun install(treeUri: Uri): VerifiedOfflinePromptTranslationBundle = installGate.withLock {
         withContext(Dispatchers.IO) {
@@ -76,28 +75,18 @@ internal class OfflinePromptTranslationBundleInstaller(context: Context) {
                     1_099L,
                     OfflinePromptTranslationContract.RUNTIME_NOTICE_ARTIFACT_SHA256
                 )
-                OfflinePromptTranslationBundleVerifier.requireVerified(stage)
+                val staged = OfflinePromptTranslationBundleVerifier.requireVerified(stage)
                 currentCoroutineContext().ensureActive()
-                val preservedRoot = if (activeRoot.exists()) {
-                    require(OfflinePromptTranslationBundleVerifier.verify(activeRoot) is
-                        OfflinePromptTranslationBundleVerification.Rejected) {
-                        "An offline translation package is already installed; its files were preserved."
-                    }
-                    File(appContext.filesDir, "offline-prompt-translation.invalid-${UUID.randomUUID()}").also {
-                        check(activeRoot.renameTo(it)) {
-                            "The damaged offline translation package could not be preserved for recovery."
-                        }
-                    }
-                } else null
-                if (!stage.renameTo(activeRoot)) {
-                    if (preservedRoot != null) {
-                        check(preservedRoot.renameTo(activeRoot)) {
-                            "The verified package could not be activated and the previous package needs manual recovery: ${preservedRoot.name}"
-                        }
-                    }
-                    error("The verified offline translation package could not be activated.")
+                val existing = (OfflinePromptTranslationBundleVerifier.verify(activeRoot) as?
+                    OfflinePromptTranslationBundleVerification.Verified)?.bundle
+                if (existing?.identity?.fingerprint == staged.identity.fingerprint) {
+                    // A repeated import links to the installed package instead of replacing it.
+                    existing
+                } else {
+                    activateOfflinePromptTranslationPackage(
+                        stage, activeRoot, OfflinePromptTranslationBundleVerifier::requireVerified
+                    )
                 }
-                OfflinePromptTranslationBundleVerifier.requireVerified(activeRoot)
             } finally {
                 // Only this invocation's staging directory is disposable. Existing installs and
                 // unrelated application/model files are never touched by a failed import.

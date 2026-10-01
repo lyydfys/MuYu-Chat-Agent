@@ -58,6 +58,17 @@ class ModelStoreRepository(private val context: Context) {
         return damaged.orEmpty()
     }
 
+    /** Keep compound registration (main model + projector) atomic to catalog readers. */
+    fun <T> withCatalogTransaction(block: () -> T): T = synchronized(MODEL_IMPORT_LOCK) {
+        val previous = readPersistedModels()
+        try {
+            block()
+        } catch (error: Throwable) {
+            runCatching { save(previous) }.exceptionOrNull()?.let(error::addSuppressed)
+            throw error
+        }
+    }
+
     fun getModel(id: String): ModelManifest? = listModels().firstOrNull { it.id == id || id in it.aliases }
 
     /**
@@ -307,17 +318,18 @@ class ModelStoreRepository(private val context: Context) {
             }
         }.getOrNull()) { requireNotNull(appContext.contentResolver.openInputStream(uri)) { "无法读取组件：$name" } }
 
-    private fun importPreparedSources(
+    internal fun importPreparedSources(
         sources: List<ModelImportSource>, identity: String, kind: ModelImportKind,
         displayNameOverride: String?, options: ModelImportOptions,
         onProgress: (ModelImportProgress) -> Unit, checkCancelled: () -> Unit
     ): ModelManifest {
-        val name = displayNameOverride?.takeIf(String::isNotBlank) ?: sources.first().path.substringAfterLast('/')
+        val sourceFileName = sources.first().path.substringAfterLast('/')
+        val name = displayNameOverride?.takeIf(String::isNotBlank) ?: sourceFileName
         val transaction = ResumableModelImport(managedModelDir, "$identity\n${options.mnnMode}", options.resumeKey,
             newDestination = {
                 when (kind) {
-                    ModelImportKind.GGUF -> uniqueTarget(normalizedGgufImportName(name))
-                    ModelImportKind.LITERT_LM -> uniqueTarget(normalizedLiteRtLmImportName(name))
+                    ModelImportKind.GGUF -> uniqueTarget(normalizedGgufImportName(sourceFileName))
+                    ModelImportKind.LITERT_LM -> uniqueTarget(normalizedLiteRtLmImportName(sourceFileName))
                     else -> uniqueBundleTarget(stripKnownExtension(name, ".zip").ifBlank { "mnn-bundle" })
                 }
             }, onProgress, checkCancelled)
@@ -329,8 +341,7 @@ class ModelStoreRepository(private val context: Context) {
                 require(sha256MnnBundle(File(completed.path), readiness.requiredComponentPaths,
                     checkCancelled, onProgress) == completed.sha256) { "已导入模型的组件已变更，请重新导入或重新校验。" }
             }
-            upsert(completed)
-            return transaction.complete(completed)
+            return transaction.complete(upsert(completed))
         }
         val destination = transaction.destination
         transaction.requireOwnedDestination()
@@ -388,7 +399,7 @@ class ModelStoreRepository(private val context: Context) {
                     ModelSource.LOCAL, fileName = destination.name, sizeBytes = destination.length(),
                     sha256 = cancellableImportSha256(destination, checkCancelled) { bytes ->
                         onProgress(ModelImportProgress("verifying", destination.name, 1, 1, bytes, destination.length()))
-                    }, quant = metadata?.quant ?: "LiteRT-LM", architecture = metadata?.architecture).also {
+                    }, quant = metadata?.quant ?: "LiteRT-LM", architecture = metadata?.architecture).let {
                         checkCancelled()
                         upsert(it)
                     }
@@ -478,7 +489,6 @@ class ModelStoreRepository(private val context: Context) {
                 quant = "LiteRT-LM"
             )
             upsert(manifest)
-            manifest
         } catch (error: Throwable) {
             if (ownsTarget) target.delete()
             throw error
@@ -535,7 +545,6 @@ class ModelStoreRepository(private val context: Context) {
                 architecture = copiedMetadata.architecture
             )
             upsert(manifest)
-            manifest
         } catch (error: Throwable) {
             if (ownsTarget) target.delete()
             throw error
@@ -672,8 +681,7 @@ class ModelStoreRepository(private val context: Context) {
             architecture = metadata.architecture,
             license = license
         )
-        upsert(manifest)
-        return manifest
+        return upsert(manifest)
     }
 
     /** Registers an already-downloaded official LiteRT-LM container. */
@@ -704,8 +712,7 @@ class ModelStoreRepository(private val context: Context) {
             architecture = inferArchitectureLabel(file.name, ChatModelRuntime.LITERT_LM),
             license = license
         )
-        upsert(manifest)
-        return manifest
+        return upsert(manifest)
     }
 
     fun registerDownloadedMnnBundle(
@@ -747,8 +754,7 @@ class ModelStoreRepository(private val context: Context) {
             license = license
         )
         checkCancelled()
-        upsert(manifest)
-        return manifest
+        return upsert(manifest)
     }
 
     fun registerDownloadedQairtBundle(
@@ -781,8 +787,7 @@ class ModelStoreRepository(private val context: Context) {
             architecture = architecture,
             license = license
         )
-        upsert(manifest)
-        return manifest
+        return upsert(manifest)
     }
 
     /**
@@ -794,7 +799,7 @@ class ModelStoreRepository(private val context: Context) {
 
     fun deleteModel(id: String): Boolean = synchronized(MODEL_IMPORT_LOCK) {
         val models = listModels()
-        val target = models.firstOrNull { it.id == id } ?: return@synchronized false
+        val target = models.firstOrNull { it.id == id || id in it.aliases } ?: return@synchronized false
         val modelPath = File(target.path)
         val deletionTarget = modelPath.takeIf { it.isDirectory }
             ?: modelPath.parentFile?.takeIf { it.isMcaManagedBundleDir() }
@@ -810,7 +815,7 @@ class ModelStoreRepository(private val context: Context) {
             mainDeletionTarget = deletionTarget,
             ownedProjectorPath = ownedProjector
         ) {
-            save(models.filterNot { it.id == id })
+            save(models.filterNot { it.id == target.id })
         }
         true
     }
@@ -1014,7 +1019,7 @@ class ModelStoreRepository(private val context: Context) {
     }
 
     /** Every imported/downloaded physical copy remains addressable until explicit reconciliation. */
-    private fun upsert(model: ModelManifest) = synchronized(MODEL_IMPORT_LOCK) {
+    private fun upsert(model: ModelManifest): ModelManifest = synchronized(MODEL_IMPORT_LOCK) {
         val existingModels = readPersistedModels()
         val old = existingModels.firstOrNull { it.id == model.id } ?: existingModels.firstOrNull {
             canonicalModelPath(it.path) == canonicalModelPath(model.path) && it.componentIdentity == model.componentIdentity &&
@@ -1034,6 +1039,7 @@ class ModelStoreRepository(private val context: Context) {
             } else model.visionValidated
         )
         save(existingModels.filterNot { it.id == old?.id } + stable)
+        stable
     }
 
     private fun save(models: List<ModelManifest>) = synchronized(MODEL_IMPORT_LOCK) {

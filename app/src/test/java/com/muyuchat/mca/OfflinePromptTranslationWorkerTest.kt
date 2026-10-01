@@ -33,6 +33,52 @@ class OfflinePromptTranslationWorkerTest {
     }
 
     @Test
+    fun confirmedBinderDeathOverridesAStaleAliveProxySnapshot() {
+        assertTrue(offlinePromptTranslationWorkerReleased(confirmedWorkerDeath = true, binderAlive = true))
+        assertTrue(offlinePromptTranslationWorkerReleased(confirmedWorkerDeath = false, binderAlive = false))
+        assertTrue(offlinePromptTranslationWorkerReleased(confirmedWorkerDeath = false, binderAlive = null))
+        assertFalse(offlinePromptTranslationWorkerReleased(confirmedWorkerDeath = false, binderAlive = true))
+    }
+
+    @Test
+    fun retiredBinderDeathCannotReleaseItsReplacement() {
+        val evidence = ConnectedWorkerDeathEvidence<Any>()
+        val previous = Any()
+        val current = Any()
+        evidence.connected(previous)
+        evidence.confirmDeath(previous)
+        assertTrue(evidence.isReleased { true })
+
+        evidence.connected(current)
+        evidence.confirmDeath(previous)
+        assertFalse(evidence.confirmedDeath)
+        assertFalse(evidence.isReleased { true })
+        evidence.confirmDeath(current)
+        assertTrue(evidence.isReleased { true })
+    }
+
+    @Test
+    fun detachedWorkerCanReleaseFromItsOwnLateDeathCallback() {
+        val evidence = ConnectedWorkerDeathEvidence<Any>()
+        val endpoint = Any()
+        evidence.connected(endpoint)
+        // Detachment retains evidence until the disposable service's last-unbind exits.
+        assertFalse(evidence.isReleased { true })
+        evidence.confirmDeath(endpoint)
+        assertTrue(evidence.isReleased { true })
+        assertSame(endpoint, evidence.lastEndpoint)
+    }
+
+    @Test
+    fun neverConnectedWorkerAndDeadBinderNeedNoReplacementService() {
+        val evidence = ConnectedWorkerDeathEvidence<Any>()
+        assertTrue(evidence.isReleased { error("No endpoint may be queried.") })
+        evidence.connected(Any())
+        assertFalse(evidence.isReleased { true })
+        assertTrue(evidence.isReleased { false })
+    }
+
+    @Test
     fun lateReleaseCallbackCannotClearANewerWorkerOwner() {
         val slot = OfflinePromptTranslationWorkerSlot<WorkerState> { it.closed.get() && it.exited.get() }
         val previous = WorkerState()

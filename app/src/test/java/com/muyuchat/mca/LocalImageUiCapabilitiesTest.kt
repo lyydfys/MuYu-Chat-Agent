@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import com.muyuchat.feature.chat.ChatModelChoice
 import com.muyuchat.feature.chat.ImageGenerationUiPreviewMode
 import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import java.io.File
@@ -876,6 +877,56 @@ class LocalImageUiCapabilitiesTest {
 
             assertEquals(setOf(ImageGenerationUiTaskMode.EDIT), capabilities.supportedTaskModes)
             assertTrue(capabilities.readinessError.orEmpty().contains("PROFILE_FORMAT_INVALID"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun legacyDefaultsNeverPublishAFixedUltraFixTileWithoutUltraFixSupport() {
+        // Regression: the unresolved-profile ("legacy") defaults read the required tile straight
+        // out of the manifest, while `supportsUltraFix` is derived from runtime/family.  When a
+        // package declared a tile but the legacy flag disagreed, `ChatModelChoice` threw
+        // "A model without UltraFix support cannot publish a fixed UltraFix graph tile." from a
+        // Compose recomposition, so merely rendering the image-model list aborted the whole app.
+        val root = Files.createTempDirectory("legacy-ultrafix-tile-ui").toFile()
+        try {
+            val primary = File(root, "legacy.bin").apply { writeBytes(byteArrayOf(1)) }
+            File(root, "manifest.json").writeText(
+                JSONObject()
+                    .put("schema", "mca.image_engine.bundle.v1")
+                    .put(
+                        "executionProfile",
+                        JSONObject()
+                            .put("defaults", JSONObject())
+                            .put(
+                                "capabilities",
+                                JSONObject().put("ultraFixRequiredTileSize", 512)
+                            )
+                    )
+                    .toString(),
+                Charsets.UTF_8
+            )
+            // QNN_HTP is not the legacy stable-diffusion.cpp path, so support resolves false
+            // even though the manifest asked for a fixed tile.
+            val model = record(root, primary, LocalImageRuntime.QNN_HTP, LocalImageModelFamily.SD15)
+            val capabilities = model.imageCapabilitiesForUi()
+
+            assertFalse(capabilities.supportsUltraFix)
+            assertEquals(
+                "a model without UltraFix support must not publish a fixed UltraFix tile",
+                0,
+                capabilities.executionDefaults.ultraFixRequiredTileSize
+            )
+
+            // The presentation DTO must remain constructible from this snapshot.
+            val choice = ChatModelChoice(
+                id = "local-image:legacy-qnn",
+                displayName = "Legacy QNN",
+                supportsImageUltraFix = capabilities.supportsUltraFix,
+                imageUltraFixRequiredTileSize = capabilities.executionDefaults.ultraFixRequiredTileSize
+            )
+            assertEquals(0, choice.imageUltraFixRequiredTileSize)
         } finally {
             root.deleteRecursively()
         }

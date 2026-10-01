@@ -19,6 +19,19 @@ import org.junit.Test
 class ModelScopeClientTest {
     private val client = ModelScopeClient()
 
+    @Test fun selectedLiteRtE4bSuffixMustMatchTheActualArtifact() {
+        val gpuModel = client.recommendedModels().single { it.id == "gemma4_e4b_litertlm_gpu" }
+        val gpu = RemoteModelFile(gpuModel.repoId, gpuModel.revision, gpuModel.recommendedFileName,
+            gpuModel.recommendedFileName, 100, downloadUrl = "https://example.invalid/gpu")
+        val cpu = gpu.copy(path = "gemma-4-E4B-it-cpu.litertlm", name = "gemma-4-E4B-it-cpu.litertlm")
+
+        assertEquals(gpu, selectRecommendedModelFile(gpuModel, listOf(cpu, gpu)))
+        val error = runCatching { selectRecommendedModelFile(gpuModel, listOf(cpu)) }.exceptionOrNull()
+        assertNotNull(error)
+        assertTrue(error!!.message.orEmpty().contains(gpuModel.recommendedFileName))
+        assertTrue(error.message.orEmpty().contains("未替换"))
+    }
+
     @Test
     fun gen5ContextsKeepPublisherGraphNamesForEveryStage() {
         val expected = mapOf(

@@ -11,6 +11,32 @@ import org.json.JSONObject
 import com.muyuchat.core.engine.PrefixCacheKey
 import java.util.UUID
 
+/** Origin of the persisted prompt; missing historical metadata must never imply an authored edit. */
+enum class AssistantPromptProvenance {
+    IMPORTED_DERIVED,
+    USER_AUTHORED,
+    LEGACY_UNKNOWN;
+
+    companion object {
+        internal fun fromWireValue(value: String?): AssistantPromptProvenance =
+            values().firstOrNull { it.name == value?.trim() } ?: LEGACY_UNKNOWN
+    }
+}
+
+private const val ASSISTANT_PROMPT_PROVENANCE_KEY = "assistant_prompt_provenance"
+
+/** Inert assistant metadata stored in the existing params JSON so Room needs no schema migration. */
+internal fun String.withAssistantPromptProvenance(provenance: AssistantPromptProvenance): String =
+    JSONObject(this).put(ASSISTANT_PROMPT_PROVENANCE_KEY, provenance.name).toString()
+
+private fun assistantPromptProvenanceFromParamsJson(rawJson: String): AssistantPromptProvenance =
+    runCatching {
+        AssistantPromptProvenance.fromWireValue(JSONObject(rawJson).optString(ASSISTANT_PROMPT_PROVENANCE_KEY))
+    }.getOrDefault(AssistantPromptProvenance.LEGACY_UNKNOWN)
+
+internal fun AssistantRecord.withSystemPromptProvenance(provenance: AssistantPromptProvenance): AssistantRecord =
+    copy(paramsJson = paramsJson.withAssistantPromptProvenance(provenance))
+
 data class AssistantRecord(
     val id: String = UUID.randomUUID().toString(),
     val name: String = "默认助手",
@@ -31,6 +57,10 @@ data class AssistantRecord(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis()
 ) {
+    /** Derived from the canonical params JSON; generation parameter consumers ignore this metadata. */
+    val systemPromptProvenance: AssistantPromptProvenance
+        get() = assistantPromptProvenanceFromParamsJson(paramsJson)
+
     fun toJson(): JSONObject = JSONObject()
         .put("schema", "mca.assistant.card")
         .put("version", 1)
@@ -39,6 +69,7 @@ data class AssistantRecord(
         .put("avatar", avatar)
         .put("tag", tag)
         .put("systemPrompt", systemPrompt)
+        .put("systemPromptProvenance", systemPromptProvenance.name)
         .put("defaultModelMode", defaultModelMode)
         .put("defaultModelId", defaultModelId)
         .put("paramsJson", paramsJson)
@@ -82,14 +113,29 @@ data class AssistantRecord(
                 .ifBlank { source.toCharacterCardPrompt() }
                 .ifBlank { defaults.systemPrompt }
                 .take(MAX_SYSTEM_PROMPT_CHARS)
-            val rawParams = json.cleanAssistantString("paramsJson", "params_json")
+            val persistedParams = json.cleanAssistantString("paramsJson", "params_json")
                 .ifBlank { source.cleanAssistantString("paramsJson", "params_json") }
-                .ifBlank { defaults.paramsJson }
+            val rawParams = persistedParams.ifBlank { defaults.paramsJson }
             val defaultParams = assistantGenerationParamsFromJson(
                 defaults.paramsJson,
                 GenerationParams(),
                 defaults.systemPrompt
             )
+            val provenance = when {
+                json.has("systemPromptProvenance") ->
+                    AssistantPromptProvenance.fromWireValue(json.optString("systemPromptProvenance"))
+                source.has("systemPromptProvenance") ->
+                    AssistantPromptProvenance.fromWireValue(source.optString("systemPromptProvenance"))
+                else -> assistantPromptProvenanceFromParamsJson(persistedParams)
+            }
+            val sanitizedParams = sanitizeAssistantParamsJsonPreservingLegacyExecution(
+                rawParams, defaultParams, systemPrompt
+            ).let { sanitized ->
+                // Fallback generation defaults are not evidence of this record's authorship.
+                if (persistedParams.isBlank()) JSONObject(sanitized).apply {
+                    remove(ASSISTANT_PROMPT_PROVENANCE_KEY)
+                }.toString() else sanitized
+            }
             return AssistantRecord(
                 id = json.cleanAssistantString("id")
                     .ifBlank { source.cleanAssistantString("id", "character_id") }
@@ -108,11 +154,10 @@ data class AssistantRecord(
                     .ifBlank { defaults.defaultModelMode },
                 defaultModelId = json.cleanAssistantString("defaultModelId", "default_model_id")
                     .takeIf { it.isNotBlank() && it != "null" },
-                paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
-                    rawParams,
-                    defaultParams,
-                    systemPrompt
-                ),
+                paramsJson = if (provenance != AssistantPromptProvenance.LEGACY_UNKNOWN ||
+                    runCatching { JSONObject(persistedParams).has(ASSISTANT_PROMPT_PROVENANCE_KEY) }.getOrDefault(false)) {
+                    sanitizedParams.withAssistantPromptProvenance(provenance)
+                } else sanitizedParams,
                 characterCardJson = json.rawAssistantString("characterCardJson", "character_card_json"),
                 memoryEnabled = json.optBoolean("memoryEnabled", defaults.memoryEnabled),
                 memorySummaryInterval = json.optInt("memorySummaryInterval", defaults.memorySummaryInterval)
@@ -138,15 +183,25 @@ data class AssistantRecord(
             val imported = fromJson(card.toJson(), defaults)
             val cardRoot = card.toJson()
             val cardData = cardRoot.optJSONObject("data") ?: cardRoot
-            val systemPrompt = listOf(
-                card.systemPrompt,
-                cardData.toCharacterCardPrompt(includeGreeting = false),
+            val provenance = if (card.format == CharacterCardFormat.LEGACY_JSON &&
+                cardRoot.optString("schema") == "mca.assistant.card") {
+                // Self-exports preserve explicit authorship; old exports remain unknown.
+                imported.systemPromptProvenance
+            } else {
+                // External fields do not claim an explicit edit in this app.
+                AssistantPromptProvenance.IMPORTED_DERIVED
+            }
+            val cardUsesMcaBoilerplatePrompt = isMcaDefaultCharacterCardPrompt(card)
+            val sourcePrompt = listOf(
+                card.systemPrompt.takeUnless { cardUsesMcaBoilerplatePrompt }.orEmpty(),
+                cardData.toCharacterCardPrompt(),
                 card.postHistoryInstructions
             )
                 .filter { it.isNotBlank() }
                 .distinct()
                 .joinToString("\n\n")
-                .ifBlank { defaults.systemPrompt }
+            val systemPrompt = sourcePrompt
+                .ifBlank { characterCardFallbackSystemPrompt(card.name) }
                 .take(MAX_SYSTEM_PROMPT_CHARS)
             val defaultParams = assistantGenerationParamsFromJson(
                 defaults.paramsJson,
@@ -159,7 +214,7 @@ data class AssistantRecord(
                     imported.paramsJson,
                     defaultParams,
                     systemPrompt
-                ),
+                ).withAssistantPromptProvenance(provenance),
                 characterCardJson = card.toJsonString()
             )
         }
@@ -174,12 +229,12 @@ data class AssistantRecord(
                 (opt(key) as? String)?.takeIf { it.isNotEmpty() }
             }
 
-        private fun JSONObject.toCharacterCardPrompt(includeGreeting: Boolean = true): String {
+        private fun JSONObject.toCharacterCardPrompt(): String {
             val sections = listOf(
                 "角色描述" to cleanAssistantString("description", "desc", "char_persona"),
                 "性格" to cleanAssistantString("personality"),
                 "场景" to cleanAssistantString("scenario", "world_scenario"),
-                "开场白" to if (includeGreeting) cleanAssistantString("first_mes", "firstMessage", "greeting", "char_greeting") else "",
+                "开场白" to cleanAssistantString("first_mes", "firstMessage", "greeting", "char_greeting"),
                 "示例对话" to cleanAssistantString("mes_example", "example_dialogue")
             ).filter { (_, value) -> value.isNotBlank() }
             if (sections.isEmpty()) return ""
@@ -188,6 +243,25 @@ data class AssistantRecord(
 
     }
 }
+
+internal fun isMcaDefaultAssistantPrompt(prompt: String): Boolean {
+    // Normalize only presentation differences in the exact MCA boilerplate.
+    // A default followed by authored instructions must remain untouched.
+    fun compact(value: String): String = value
+        .filterNot(Char::isWhitespace)
+        .replace('（', '(')
+        .replace('）', ')')
+    return compact(prompt) == compact(GenerationParams().systemPrompt)
+}
+
+internal fun isMcaDefaultCharacterCardPrompt(card: CharacterCard): Boolean {
+    val isMcaAssistantExport = card.format == CharacterCardFormat.LEGACY_JSON &&
+        card.toJson().optString("schema") == "mca.assistant.card"
+    return !isMcaAssistantExport && isMcaDefaultAssistantPrompt(card.systemPrompt)
+}
+
+internal fun characterCardFallbackSystemPrompt(name: String): String =
+    "你是${name.trim().ifBlank { "当前角色" }}。请保持角色身份，自然回应。"
 
 internal fun AssistantRecord.initialGreetingMessage(): ChatMessage? {
     val rawCard = characterCardJson ?: return null
@@ -232,7 +306,9 @@ data class AssistantConversationSnapshot(
     val fileContextEnabled: Boolean,
     val capturedAt: Long,
     /** Earlier prompt versions explicitly applied to this same role and conversation. */
-    val priorSystemPromptHashes: List<String> = emptyList()
+    val priorSystemPromptHashes: List<String> = emptyList(),
+    /** Captured independently from later profile edits; absent legacy metadata remains unknown. */
+    val systemPromptProvenance: AssistantPromptProvenance = AssistantPromptProvenance.LEGACY_UNKNOWN
 ) {
     init {
         require(assistantId.isNotBlank()) { "Assistant snapshot requires an assistant id." }
@@ -257,6 +333,7 @@ data class AssistantConversationSnapshot(
         .put("fileContextEnabled", fileContextEnabled)
         .put("capturedAt", capturedAt)
         .put("priorSystemPromptHashes", JSONArray(priorSystemPromptHashes))
+        .put("systemPromptProvenance", systemPromptProvenance.name)
         .toString()
 
     companion object {
@@ -279,7 +356,8 @@ data class AssistantConversationSnapshot(
                 memoryEnabled = assistant.memoryEnabled,
                 webSearchEnabled = assistant.webSearchEnabled,
                 fileContextEnabled = assistant.fileContextEnabled,
-                capturedAt = capturedAt.coerceAtLeast(0L)
+                capturedAt = capturedAt.coerceAtLeast(0L),
+                systemPromptProvenance = assistant.systemPromptProvenance
             )
         }
 
@@ -317,7 +395,10 @@ data class AssistantConversationSnapshot(
                         (0 until values.length().coerceAtMost(32)).mapNotNull { index ->
                             values.optString(index).takeIf(PrefixCacheKey::isSha256Hex)
                         }.distinct()
-                    }.orEmpty()
+                    }.orEmpty(),
+                    systemPromptProvenance = AssistantPromptProvenance.fromWireValue(
+                        json.optString("systemPromptProvenance")
+                    )
                 )
             }.getOrNull()
         }
@@ -333,26 +414,38 @@ internal fun AssistantRecord.toConversationSnapshot(
 
 /**
  * Backfills a legacy conversation only when its recorded assistant still exists.
- * Unknown owners stay mixed and viewable; existing snapshots are untouched.
+ * Existing authored snapshots stay immutable. The one exception is an untouched, exact MCA
+ * boilerplate snapshot of the same external card whose persisted persona has just been recovered.
+ * Unknown owners stay mixed and viewable.
  */
 internal fun List<ChatSessionRecord>.withBackfilledAssistantSnapshots(
     assistants: List<AssistantRecord>
 ): List<ChatSessionRecord> {
     return map { session ->
-        if (session.assistantSnapshot != null) {
-            session
-        } else {
-            val assistant = session.assistantId
-                ?.let { assistantId -> assistants.firstOrNull { it.id == assistantId } }
-            if (assistant == null) {
-                session.copy(mixedAssistantHistory = true)
-            } else {
-                session.copy(
-                    assistantSnapshot = assistant.toConversationSnapshot(
-                        capturedAt = session.updatedAt.coerceAtLeast(0L)
-                    )
+        val assistant = session.assistantId
+            ?.let { assistantId -> assistants.firstOrNull { it.id == assistantId } }
+        val existing = session.assistantSnapshot
+        if (existing != null) {
+            if (!session.mixedAssistantHistory && assistant != null &&
+                existing.assistantId == assistant.id && existing.priorSystemPromptHashes.isEmpty() &&
+                existing.systemPromptProvenance != AssistantPromptProvenance.USER_AUTHORED &&
+                isMcaDefaultAssistantPrompt(existing.systemPrompt)) {
+                val recovered = restoreLegacyImportedCharacterCardPrompt(
+                    assistant.copy(systemPrompt = existing.systemPrompt), GenerationParams()
                 )
-            }
+                if (recovered.systemPrompt != existing.systemPrompt &&
+                    recovered.systemPrompt == assistant.systemPrompt) {
+                    session.copy(assistantSnapshot = existing.copy(systemPrompt = recovered.systemPrompt))
+                } else session
+            } else session
+        } else if (assistant == null) {
+            session.copy(mixedAssistantHistory = true)
+        } else {
+            session.copy(
+                assistantSnapshot = assistant.toConversationSnapshot(
+                    capturedAt = session.updatedAt.coerceAtLeast(0L)
+                )
+            )
         }
     }
 }
@@ -459,15 +552,54 @@ internal fun normalizeAssistantRecords(
     return withDefault
         .distinctBy { it.id }
         .map { assistant ->
-            assistant.copy(
+            val restored = restoreLegacyImportedCharacterCardPrompt(assistant, defaults)
+            restored.copy(
                 paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
-                    assistant.paramsJson,
+                    restored.paramsJson,
                     defaults,
-                    assistant.systemPrompt
+                    restored.systemPrompt
                 )
             )
         }
         .ifEmpty { listOf(fallback) }
+}
+
+/**
+ * A narrow lazy migration for old external character cards that were persisted with the exact
+ * MCA boilerplate instead of the persona prompt derived from the retained source card.
+ *
+ * The raw card is kept byte-for-byte. Only an exact boilerplate prompt is eligible, and explicit
+ * MCA assistant-card exports are excluded because their boilerplate is intentional. An explicit
+ * USER_AUTHORED record always stays untouched, even when its prompt equals the default exactly.
+ * Records without metadata remain LEGACY_UNKNOWN; this migration never guesses earlier edits.
+ * A prompt with any authored suffix, or a record without a retained source card, stays untouched.
+ */
+internal fun restoreLegacyImportedCharacterCardPrompt(
+    assistant: AssistantRecord,
+    defaults: GenerationParams
+): AssistantRecord {
+    if (assistant.systemPromptProvenance == AssistantPromptProvenance.USER_AUTHORED ||
+        assistant.id == AssistantRecord.DEFAULT_ID || !isMcaDefaultAssistantPrompt(assistant.systemPrompt)) {
+        return assistant
+    }
+    val rawCard = assistant.characterCardJson?.takeIf(String::isNotBlank) ?: return assistant
+    val card = (CharacterCardCodec.parseJson(rawCard) as? CharacterCardParseResult.Success)?.card
+        ?: return assistant
+    if (!isMcaDefaultCharacterCardPrompt(card)) return assistant
+    val restored = card.toAssistantRecord(AssistantRecord.default(defaults.systemPrompt, defaults))
+    val restoredPrompt = restored.systemPrompt
+        .take(AssistantRecord.MAX_SYSTEM_PROMPT_CHARS)
+        .takeIf(String::isNotBlank)
+        ?: return assistant
+    if (isMcaDefaultAssistantPrompt(restoredPrompt)) return assistant
+    return assistant.copy(
+        systemPrompt = restoredPrompt,
+        paramsJson = sanitizeAssistantParamsJsonPreservingLegacyExecution(
+            assistant.paramsJson,
+            defaults,
+            restoredPrompt
+        )
+    )
 }
 
 /**
@@ -487,6 +619,12 @@ internal fun sanitizeAssistantParamsJsonPreservingLegacyExecution(
         return sanitizeAssistantParamsJson(rawJson, defaults, systemPrompt)
     }
     val raw = runCatching { JSONObject(rawJson) }.getOrNull() ?: return sanitized.toString()
+    if (raw.has(ASSISTANT_PROMPT_PROVENANCE_KEY)) {
+        sanitized.put(
+            ASSISTANT_PROMPT_PROVENANCE_KEY,
+            assistantPromptProvenanceFromParamsJson(rawJson).name
+        )
+    }
     LEGACY_EXECUTION_INT_FIELDS.forEach { (canonical, aliases) ->
         val value = aliases.firstNotNullOfOrNull { key ->
             if (raw.has(key) && !raw.isNull(key)) {

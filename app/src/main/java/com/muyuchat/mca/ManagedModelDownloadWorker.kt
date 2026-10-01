@@ -35,7 +35,9 @@ class ManagedModelDownloadWorker(context: Context, parameters: WorkerParameters)
                     installer!!.progress.sample(750).collectLatest { progress ->
                             setProgress(workDataOf("file" to progress.downloadFileName,
                                 "bytes" to progress.downloadedBytes, "total" to progress.downloadTotalBytes,
-                                "speed" to progress.downloadSpeedBytesPerSecond, "message" to progress.statusMessage,
+                                "speed" to progress.downloadSpeedBytesPerSecond,
+                                "remainingSeconds" to (progress.downloadRemainingSeconds ?: -1L),
+                                "message" to progress.statusMessage,
                                 "phase" to progress.phase.name,
                                 "failureSource" to progress.failureSource?.name,
                                 "integrityStatus" to progress.integrityStatus,

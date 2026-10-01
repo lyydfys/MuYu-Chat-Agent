@@ -167,7 +167,7 @@ object WorldBookCodec {
         val entries = parsedEntries.mapNotNull(ParsedWorldBookEntry::entry)
         val unsupportedRegexEntries = parsedEntries.count(ParsedWorldBookEntry::regexUnsupported)
         require(entries.isNotEmpty()) {
-            "世界书没有可用条目。请检查 entries 中是否有非空 content，并为普通条目设置关键词。"
+            "世界书没有可用条目。请检查 entries 中是否有非空 content。"
         }
         require(entries.size <= MAX_ENTRIES) { "世界书条目超过 $MAX_ENTRIES 条，请拆分后导入。" }
         val name = source.optString("name")
@@ -298,7 +298,7 @@ object WorldBookCodec {
         val constant = source.optBoolean("constant", false)
         val selective = source.optBoolean("selective", false)
         val caseSensitive = source.optBoolean("case_sensitive", source.optBoolean("caseSensitive", false))
-        if (!constant && keys.isEmpty()) return null
+        // Tavern retains keyless non-constant entries for editing; selection cannot match them.
         return ParsedWorldBookEntry(
             entry = WorldBookEntry(
                 id = source.opt("uid")?.toString()?.takeIf { it.isNotBlank() }

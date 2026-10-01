@@ -64,4 +64,30 @@ class DownloadedBundleCommitTest {
         assertTrue(File(destination, "mmproj.gguf").isFile)
         assertEquals("complete bundle manifest", File(destination, "manifest.json").readText())
     }
+
+    @Test fun compoundPublishFailureRestoresOldBytesAndPreservesRetryCandidate() {
+        val destination = temp.newFolder("publish-bundle")
+        File(destination, "model").writeText("old")
+        val candidate = temp.newFolder(".publish-bundle.candidate")
+        File(candidate, "model").writeText("new")
+        val failure = IllegalStateException("projector registration failed")
+        val observed = runCatching {
+            publishDownloadedBundleCandidate(candidate, destination) { throw failure }
+        }.exceptionOrNull()
+        assertSame(failure, observed)
+        assertEquals("old", File(destination, "model").readText())
+        assertEquals("new", File(candidate, "model").readText())
+    }
+
+    @Test fun successfulPublicationReturnsCatalogEntryAndRemovesOnlyOwnedBackup() {
+        val destination = temp.newFolder("committed-bundle")
+        File(destination, "model").writeText("old")
+        val candidate = temp.newFolder(".committed-bundle.candidate")
+        File(candidate, "model").writeText("new")
+        val result = publishDownloadedBundleCandidate(candidate, destination) { "catalog-id" }
+        assertEquals("catalog-id", result)
+        assertEquals("new", File(destination, "model").readText())
+        assertFalse(File(temp.root, ".committed-bundle.backup").exists())
+        assertFalse(candidate.exists())
+    }
 }

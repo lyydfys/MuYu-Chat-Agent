@@ -17,7 +17,12 @@ import java.io.IOException
 import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.Properties
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.roundToLong
+import kotlin.math.pow
 
 class ResumableDownloader(
     private val client: OkHttpClient = defaultClient(),
@@ -31,7 +36,11 @@ class ResumableDownloader(
         tempFile: File,
         finalFile: File,
         onProgress: (DownloadTaskSnapshot) -> Unit = {}
-    ): DownloadTaskSnapshot = withContext(Dispatchers.IO) {
+    ): DownloadTaskSnapshot = withDownloadPathsLocked(
+        listOf(tempFile.canonicalPath, finalFile.canonicalPath).distinct().sorted()
+    ) {
+        require(tempFile.canonicalFile != finalFile.canonicalFile) { "Temporary and final download paths must differ." }
+        withContext(Dispatchers.IO) {
         tempFile.parentFile?.mkdirs()
         finalFile.parentFile?.mkdirs()
 
@@ -74,6 +83,15 @@ class ResumableDownloader(
             "下载未完成，已保留临时文件（${formatBytes(tempFile.length())}）。重新点击下载会从已下载位置续传。${friendlyError(lastError)}",
             lastError
         )
+        }
+    }
+
+    private suspend fun <T> withDownloadPathsLocked(
+        paths: List<String>, index: Int = 0, block: suspend () -> T
+    ): T = if (index == paths.size) block() else {
+        targetLocks.computeIfAbsent(paths[index]) { Mutex() }.withLock {
+            withDownloadPathsLocked(paths, index + 1, block)
+        }
     }
 
     private suspend fun downloadAttempt(
@@ -83,7 +101,16 @@ class ResumableDownloader(
         onProgress: (DownloadTaskSnapshot) -> Unit
     ): DownloadTaskSnapshot = coroutineScope {
         var downloaded = tempFile.takeIf { it.exists() }?.length() ?: 0L
-        val request = request(remote.downloadUrl, downloaded)
+        val previous = readPartialReceipt(tempFile)
+        val sourceMatches = previous?.getProperty("sourceIdentity") == remote.sourceIdentity()
+        val immutableSha = remote.sha256?.takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
+        val ifRange = if (sourceMatches) previous?.getProperty("validator")?.takeIf { it.isNotBlank() } else null
+        // Without an immutable digest or server validator, resumption could join two revisions.
+        if (downloaded > 0L && ((!sourceMatches && previous != null) || (ifRange == null && immutableSha == null))) {
+            resetPartial(tempFile)
+            downloaded = 0L
+        }
+        val request = request(remote.downloadUrl, downloaded, ifRange)
         var lastProgressAt = monotonicNanos()
         val rateEstimator = DownloadRateEstimator()
 
@@ -94,31 +121,57 @@ class ResumableDownloader(
             try { awaitCancellation() } finally { call.cancel() }
         }
         try { call.execute().use { response ->
-            val contentRangeTotal = response.header("Content-Range")?.contentRangeTotal()
+            val responseValidator = responseValidator(response)
+            val contentRange = response.header("Content-Range")
+            val contentRangeTotal = contentRange?.contentRangeTotal()
             val knownLength = remote.sizeBytes ?: contentRangeTotal ?: 0L
 
-            if (response.code == 416 && knownLength > 0L && downloaded >= knownLength) {
-                return@coroutineScope finalizeDownload(remote, tempFile, finalFile, knownLength, onProgress)
+            if (response.code == 416) {
+                val objectMatches = immutableSha != null ||
+                    (ifRange != null && ifRange == responseValidator)
+                if (objectMatches && knownLength > 0L && downloaded == knownLength) {
+                    return@coroutineScope finalizeDownload(remote, tempFile, finalFile, knownLength, onProgress)
+                }
+                resetPartial(tempFile)
+                throw IOException("服务端下载断点已失效，正在重新下载完整文件。")
+            }
+            require(response.code == 200 || response.code == 206) {
+                "模型下载失败：HTTP "+response.code
+            }
+            require(response.header("Content-Encoding")?.let { it.equals("identity", ignoreCase = true) } != false) {
+                "服务端返回了压缩内容，无法校验模型原始文件。"
             }
 
-            require(response.isSuccessful || response.code == 206) {
-                "模型下载失败：HTTP ${response.code}"
+            val append = downloaded > 0L && response.code == 206
+            if (response.code == 206) {
+                val range = contentRange?.let(RANGE_RESPONSE::matchEntire)
+                val start = range?.groupValues?.get(1)?.toLongOrNull()
+                val end = range?.groupValues?.get(2)?.toLongOrNull()
+                val total = range?.groupValues?.get(3)?.toLongOrNull()
+                val segmentLength = response.body?.contentLength()?.takeIf { it >= 0L }
+                val previousTotal = previous?.getProperty("totalBytes")?.toLongOrNull()?.takeIf { it > 0L }
+                val invalidRange = start == null || end == null || total == null ||
+                    start != downloaded || end < start || end >= total ||
+                    (segmentLength != null && segmentLength != end - start + 1L) ||
+                    (remote.sizeBytes?.takeIf { it > 0L }?.let { it != total } == true) ||
+                    (append && previousTotal != null && previousTotal != total)
+                val changedObject = append && ifRange != null && responseValidator != ifRange
+                if (invalidRange || changedObject) {
+                    resetPartial(tempFile)
+                    throw IOException(if (changedObject) "下载文件版本已变化，正在重新下载完整文件。"
+                        else "服务端续传范围不匹配，正在重新下载完整文件。")
+                }
             }
-
-            // Append only when the server explicitly honored the requested range.
-            // A 200 response is a fresh full body; appending to stale bytes corrupts it.
-            val append = downloaded > 0L && response.code == 206 &&
-                response.header("Content-Range")?.startsWith("bytes $downloaded-") == true
             if (!append) {
+                resetPartial(tempFile)
                 downloaded = 0L
-                if (tempFile.exists()) tempFile.delete()
             }
-
             val expectedLength = remote.sizeBytes
-                ?: response.header("Content-Range")?.contentRangeTotal()
-                ?: response.header("Content-Length")?.toLongOrNull()?.plus(if (append) downloaded else 0L)
+                ?: contentRangeTotal
+                ?: response.body?.contentLength()?.takeIf { it >= 0L }?.let { it + downloaded }
                 ?: 0L
 
+            writePartialReceipt(tempFile, remote, responseValidator, expectedLength)
             onProgress(snapshot(remote, tempFile, finalFile, expectedLength, downloaded, DownloadStatus.RUNNING))
 
             val body = requireNotNull(response.body) { "下载响应为空。" }
@@ -199,20 +252,66 @@ class ResumableDownloader(
         java.nio.file.Files.move(tempFile.toPath(), finalFile.toPath(),
             java.nio.file.StandardCopyOption.ATOMIC_MOVE,
             java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        partialReceiptFile(tempFile).delete()
         val done = snapshot(remote, tempFile, finalFile, finalFile.length(), finalFile.length(), DownloadStatus.DONE)
         onProgress(done)
         return done
     }
 
-    private fun request(url: String, downloaded: Long): Request {
+    private fun request(url: String, downloaded: Long, ifRange: String?): Request {
         val builder = Request.Builder()
             .url(url)
             .get()
             .header("User-Agent", USER_AGENT)
             .header("Accept", "application/octet-stream,*/*")
             .header("Accept-Encoding", "identity")
-        if (downloaded > 0L) builder.header("Range", "bytes=$downloaded-")
+        if (downloaded > 0L) {
+            builder.header("Range", "bytes=$downloaded-")
+            ifRange?.let { builder.header("If-Range", it) }
+        }
         return builder.build()
+    }
+
+    private fun partialReceiptFile(temp: File) = File(temp.parentFile, temp.name + ".resume.properties")
+
+    private fun readPartialReceipt(temp: File): Properties? = runCatching {
+        val receipt = partialReceiptFile(temp)
+        if (!receipt.isFile || receipt.length() > 64 * 1024) return null
+        Properties().apply { receipt.inputStream().use { load(it) } }
+    }.getOrNull()
+
+    private fun writePartialReceipt(temp: File, remote: RemoteModelFile, validator: String?, totalBytes: Long) {
+        val receipt = partialReceiptFile(temp)
+        val pending = File(receipt.parentFile, receipt.name + ".writing")
+        val properties = Properties().apply {
+            setProperty("sourceIdentity", remote.sourceIdentity())
+            validator?.let { setProperty("validator", it) }
+            if (totalBytes > 0L) setProperty("totalBytes", totalBytes.toString())
+        }
+        pending.outputStream().use { properties.store(it, "MCA download object identity") }
+        java.nio.file.Files.move(pending.toPath(), receipt.toPath(),
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+
+    private fun resetPartial(temp: File) {
+        if (temp.exists() && !temp.delete()) throw IOException("无法清理失效下载断点："+temp.name)
+        partialReceiptFile(temp).delete()
+    }
+
+    private fun responseValidator(response: okhttp3.Response): String? {
+        val etag = response.header("ETag")?.trim()
+        if (etag != null && etag.startsWith('"') && etag.endsWith('"') && !etag.startsWith("W/")) return etag
+        // An HTTP date can be a strong validator only when it is sufficiently
+        // older than the origin response Date. Otherwise retry from byte zero.
+        val modified = response.header("Last-Modified")?.trim() ?: return null
+        val date = response.header("Date")?.trim() ?: return null
+        val sufficientlyOld = runCatching {
+            val parser = java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+            val modifiedAt = java.time.ZonedDateTime.parse(modified, parser).toInstant()
+            val responseAt = java.time.ZonedDateTime.parse(date, parser).toInstant()
+            java.time.Duration.between(modifiedAt, responseAt).seconds >= 60L
+        }.getOrDefault(false)
+        return modified.takeIf { sufficientlyOld }
     }
 
     private fun snapshot(
@@ -232,19 +331,12 @@ class ResumableDownloader(
         expectedLength = expectedLength,
         downloadedBytes = downloaded,
         speedBytesPerSecond = speedBytesPerSecond,
-        remainingSeconds = remainingSeconds(expectedLength, downloaded, speedBytesPerSecond),
+        remainingSeconds = estimateDownloadRemainingSeconds(expectedLength, downloaded, speedBytesPerSecond),
         errorMessage = errorMessage,
         tempFile = tempFile,
         finalFile = finalFile,
         status = status
     )
-
-    private fun remainingSeconds(expectedLength: Long, downloaded: Long, speedBytesPerSecond: Long): Long? {
-        if (expectedLength <= 0L || speedBytesPerSecond <= 0L || downloaded >= expectedLength) return null
-        val remaining = expectedLength - downloaded
-        // Round up so the UI never reports "0 seconds" while bytes are still pending.
-        return ((remaining + speedBytesPerSecond - 1L) / speedBytesPerSecond).coerceAtLeast(1L)
-    }
 
     private fun retryMessage(
         error: Throwable,
@@ -320,6 +412,8 @@ class ResumableDownloader(
     }
 
     companion object {
+        private val targetLocks = ConcurrentHashMap<String, Mutex>()
+        private val RANGE_RESPONSE = Regex("bytes ([0-9]+)-([0-9]+)/([0-9]+|\\*)")
         private const val USER_AGENT = "MCA/0.1 ModelScopeDownloader"
         private const val PROGRESS_STEP_BYTES = 1L * 1024L * 1024L
 
@@ -342,22 +436,27 @@ internal class DownloadRateEstimator(
     private val smoothingFactor: Double = DEFAULT_SMOOTHING_FACTOR
 ) {
     private var smoothedBytesPerSecond = 0L
+    private var pendingBytes = 0L
 
     init {
         require(smoothingFactor in 0.0..1.0) { "smoothingFactor must be between 0 and 1" }
     }
 
     fun update(bytes: Long, elapsedMs: Long): Long {
-        if (bytes <= 0L || elapsedMs <= 0L) return smoothedBytesPerSecond
-        val instantaneous = (bytes.toDouble() * 1_000.0 / elapsedMs.toDouble())
-            .roundToLong()
-            .coerceAtLeast(1L)
-        smoothedBytesPerSecond = if (smoothedBytesPerSecond <= 0L) {
-            instantaneous
-        } else {
-            (smoothedBytesPerSecond * (1.0 - smoothingFactor) + instantaneous * smoothingFactor)
-                .roundToLong()
-                .coerceAtLeast(1L)
+        if (bytes < 0L || elapsedMs < 0L) return smoothedBytesPerSecond
+        pendingBytes = (pendingBytes.toDouble() + bytes.toDouble()).coerceAtMost(Long.MAX_VALUE.toDouble()).toLong()
+        // Several reads may complete inside one clock millisecond. Keep their bytes
+        // for the next measurable interval instead of silently discarding them.
+        if (elapsedMs == 0L || pendingBytes == 0L) return smoothedBytesPerSecond
+        val instantaneous = (pendingBytes.toDouble() * 1_000.0 / elapsedMs.toDouble())
+            .roundToLong().coerceAtLeast(1L)
+        pendingBytes = 0L
+        // Weight by elapsed time rather than number of 1 MiB callbacks. A fast
+        // connection must not amplify a single short/chunk-boundary rate spike.
+        val weight = 1.0 - (1.0 - smoothingFactor).pow(elapsedMs / 1_000.0)
+        smoothedBytesPerSecond = if (smoothedBytesPerSecond <= 0L) instantaneous else {
+            (smoothedBytesPerSecond * (1.0 - weight) + instantaneous * weight)
+                .roundToLong().coerceAtLeast(1L)
         }
         return smoothedBytesPerSecond
     }
@@ -365,4 +464,12 @@ internal class DownloadRateEstimator(
     companion object {
         private const val DEFAULT_SMOOTHING_FACTOR = 0.25
     }
+}
+
+/** Unknown lengths, no throughput, and terminal downloads do not have a download ETA. */
+fun estimateDownloadRemainingSeconds(totalBytes: Long, downloadedBytes: Long, speedBytesPerSecond: Long): Long? {
+    if (totalBytes <= 0L || downloadedBytes < 0L || speedBytesPerSecond <= 0L || downloadedBytes >= totalBytes) return null
+    val remaining = totalBytes - downloadedBytes
+    // Ceiling division without (remaining + speed - 1), which overflows for large lengths.
+    return remaining / speedBytesPerSecond + if (remaining % speedBytesPerSecond == 0L) 0L else 1L
 }

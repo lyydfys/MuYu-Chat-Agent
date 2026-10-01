@@ -302,7 +302,11 @@ internal fun ImageExecutionProfile.withDownloadedTextualInversionConsumerPins(
         .map { file ->
             val label = file.relativeTo(root).invariantSeparatorsPath
             val installedPin = if (file == primary) {
-                ImageProfileAsset(label, modelFingerprint.lowercase(), file.length())
+                // modelFingerprint identifies the complete downloaded bundle. The tokenizer
+                // asset pin must identify the exact primary bytes consumed by the native
+                // prompt path, otherwise a valid bundle fingerprint is incorrectly reused as
+                // a file hash and every later asset verification reports a mismatch.
+                ImageProfileAsset(label, file.sha256ForProfile(), file.length())
             } else {
                 declaredByLabel[label]?.takeIf { asset -> asset.sizeBytes != null }
             }

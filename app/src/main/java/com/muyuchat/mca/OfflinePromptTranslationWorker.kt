@@ -29,6 +29,35 @@ internal class OfflinePromptTranslationWorkerSlot<T : Any>(private val isRelease
     }
 }
 
+/** A Binder death callback is authoritative even if a stale proxy still reports itself alive. */
+internal fun offlinePromptTranslationWorkerReleased(
+    confirmedWorkerDeath: Boolean,
+    binderAlive: Boolean?
+): Boolean = confirmedWorkerDeath || binderAlive != true
+
+/**
+ * Tracks only the most recently accepted endpoint. The caller serializes access with its state
+ * lock; a late death callback from a retired Binder must never release a replacement worker.
+ */
+internal class ConnectedWorkerDeathEvidence<T : Any> {
+    var lastEndpoint: T? = null
+        private set
+    var confirmedDeath: Boolean = false
+        private set
+
+    fun connected(endpoint: T) {
+        lastEndpoint = endpoint
+        confirmedDeath = false
+    }
+
+    fun confirmDeath(endpoint: T) {
+        if (lastEndpoint === endpoint) confirmedDeath = true
+    }
+
+    fun isReleased(isAlive: (T) -> Boolean): Boolean =
+        offlinePromptTranslationWorkerReleased(confirmedDeath, lastEndpoint?.let(isAlive))
+}
+
 /** Cancels the image request when translation memory has not been confirmed released. */
 internal class OfflinePromptTranslationCleanupException(cause: Throwable? = null) :
     IllegalStateException(

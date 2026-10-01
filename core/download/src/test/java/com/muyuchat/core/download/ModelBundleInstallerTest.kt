@@ -507,6 +507,81 @@ class ModelBundleInstallerTest {
         }
     }
 
+    @Test
+    fun interruptedStagingWithoutPublisherDigestCannotReuseAnotherRepository() = runBlocking {
+        val root = Files.createTempDirectory("mca-bundle-source-switch").toFile()
+        try {
+            var downloads = 0
+            val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
+                downloads++
+                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.writeText(if (remote.repoId == "owner/first") "AAAA" else "BBBB")
+                check(temp.renameTo(final))
+                snapshot(remote, temp, final).also(progress)
+            })
+            val first = remote("weights.mnn", "AAAA").copy(repoId = "owner/first", sha256 = null)
+            val second = first.copy(repoId = "owner/second")
+            val bundle = File(root, "bundle")
+            val failure = runCatching {
+                installer.install(bundle, listOf(first), ModelBundleStagedTransformer { _, _ ->
+                    throw IOException("interrupted before commit")
+                })
+            }.exceptionOrNull()
+            assertNotNull(failure)
+            assertFalse(bundle.exists())
+            installer.install(bundle, listOf(second))
+            assertEquals(2, downloads)
+            assertEquals("BBBB", File(bundle, "weights.mnn").readText())
+            assertEquals(second.sourceIdentity(), installer.verifyInstalledBundle(bundle).components.single().audit.sourceIdentity)
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test
+    fun equalLengthTamperingOfCompletedStageIsDetectedBeforeRetryCommit() = runBlocking {
+        val root = Files.createTempDirectory("mca-bundle-stage-tamper").toFile()
+        try {
+            var downloads = 0
+            val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
+                downloads++
+                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.writeText("GOOD")
+                check(temp.renameTo(final))
+                snapshot(remote, temp, final).also(progress)
+            })
+            val model = remote("weights.mnn", "GOOD").copy(sha256 = null)
+            val bundle = File(root, "bundle")
+            runCatching { installer.install(bundle, listOf(model), ModelBundleStagedTransformer { _, _ ->
+                throw IOException("interrupted before commit")
+            }) }
+            installer.plan(bundle, listOf(model)).targets.single().stagedFile.writeText("EVIL")
+            installer.install(bundle, listOf(model))
+            assertEquals(2, downloads)
+            assertEquals("GOOD", File(bundle, "weights.mnn").readText())
+        } finally { root.deleteRecursively() }
+    }
+
+    @Test
+    fun installedEqualLengthBundleFromOtherSourceIsNotSilentlyReused() = runBlocking {
+        val root = Files.createTempDirectory("mca-bundle-installed-source").toFile()
+        try {
+            var downloads = 0
+            val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
+                downloads++
+                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.writeText(if (remote.revision == "revision-A") "AAAA" else "BBBB")
+                check(temp.renameTo(final))
+                snapshot(remote, temp, final).also(progress)
+            })
+            val first = remote("weights.mnn", "AAAA").copy(revision = "revision-A", sha256 = null)
+            val second = first.copy(revision = "revision-B")
+            val bundle = File(root, "bundle")
+            installer.install(bundle, listOf(first))
+            installer.install(bundle, listOf(second))
+            assertEquals(2, downloads)
+            assertEquals("BBBB", File(bundle, "weights.mnn").readText())
+        } finally { root.deleteRecursively() }
+    }
+
     private fun fakeDownloader(): BundleComponentDownloader = BundleComponentDownloader { remote, tempFile, finalFile, onProgress ->
         tempFile.parentFile?.mkdirs()
         finalFile.parentFile?.mkdirs()

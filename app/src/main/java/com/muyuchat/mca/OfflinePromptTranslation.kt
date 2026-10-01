@@ -243,6 +243,14 @@ internal class VerifiedOfflinePromptTranslationBundle internal constructor(
     val modelFile: File,
     val identity: OfflinePromptTranslationBundleIdentity
 ) {
+    private val installationSnapshot = OfflinePromptTranslationFileSnapshot.capture(
+        listOf(rootDirectory, requireNotNull(manifestFile.parentFile), manifestFile, modelFile) +
+            identity.notices.map(OfflinePromptTranslationNotice::file)
+    )
+
+    /** Rechecks presence, file identity and layout without repeatedly reading a large model. */
+    fun matchesVerifiedFiles(): Boolean = installationSnapshot?.isCurrent() == true
+
     fun createResult(
         request: OfflinePromptTranslationRequest,
         translatedText: String,
@@ -1097,7 +1105,7 @@ internal data class OfflinePromptTranslationRequest(
     val sourceLanguage: OfflinePromptTranslationLanguage = OfflinePromptTranslationLanguage.ZH_HANS,
     val targetLanguage: OfflinePromptTranslationLanguage = OfflinePromptTranslationLanguage.ENGLISH,
     val maxOutputChars: Int = OfflinePromptTranslationContract.MAX_OUTPUT_TEXT_CHARS,
-    /** Copied unchanged so a translator can never drop the user's negative prompt. */
+    /** A separate branch; any translation failure retains this exact original text. */
     val negativePrompt: String = ""
 ) {
     init {
@@ -1195,9 +1203,8 @@ internal data class OfflinePromptTranslationResult internal constructor(
         translatedText.length <= request.maxOutputChars
 
     /**
-     * Rebuilds a result after the service has appended a missing protected token. Keeping this
-     * constructor helper next to the invariant checks prevents an adapter from manufacturing a
-     * result that bypasses the ASCII/output limits.
+     * Rebuilds a result without bypassing request binding and ASCII/output limits. Missing user
+     * control syntax is never appended or guessed by the service.
      */
     internal fun withTranslatedText(value: String): OfflinePromptTranslationResult =
         OfflinePromptTranslationResult(
@@ -1250,7 +1257,12 @@ internal sealed interface OfflinePromptTranslationRuntimeOutcome {
         val message: String
     ) : OfflinePromptTranslationRuntimeOutcome
 
-    data class Failed(val message: String) : OfflinePromptTranslationRuntimeOutcome
+    data class Failed(
+        val message: String,
+        val stage: String? = null,
+        val errorCode: String? = null,
+        val nativeCode: Int? = null
+    ) : OfflinePromptTranslationRuntimeOutcome
 }
 
 /**
@@ -1299,8 +1311,11 @@ internal sealed interface OfflinePromptTranslationResolution {
         val originalNegativePrompt: String,
         val protectedTokens: List<String>,
         val reason: OfflinePromptTranslationFallbackReason,
-        /** Stable user-facing message; native exception text is never exposed here. */
-        val message: String
+        /** Stable summary plus bounded, prompt/path/secret-redacted runtime diagnostics. */
+        val message: String,
+        val stage: String? = null,
+        val errorCode: String? = null,
+        val nativeCode: Int? = null
     ) : OfflinePromptTranslationResolution
 }
 
@@ -1315,7 +1330,7 @@ internal object OfflinePromptTranslationFallbackMessages {
     const val TIMEOUT = "中文提示词转换超时，已保留原始提示词。"
     const val FAILED = "中文提示词转换失败，已保留原始提示词。"
     const val INVALID_OUTPUT = "翻译结果未通过格式校验，已保留原始提示词。"
-    const val PROTECTED_SYNTAX_LOST = "翻译结果未完整保留 LoRA 或权重标记，已保留原始提示词。"
+    const val PROTECTED_SYNTAX_LOST = "翻译结果未完整保留控制语法、权重或数字，已保留原始提示词。"
 }
 
 /**
@@ -1330,7 +1345,7 @@ internal class OfflinePromptTranslationService(
     private val timeoutMs: Long? = null
 ) {
     /**
-     * M2M100 is a heavyweight native session.  Do not let two image requests race the same
+     * Offline translation owns a heavyweight native session. Do not let two image requests race the same
      * bundle/runtime and exhaust the app's memory.  A busy translator is a normal, recoverable
      * state; the caller keeps the editable original prompt instead of waiting behind an
      * unrelated request.
@@ -1345,10 +1360,10 @@ internal class OfflinePromptTranslationService(
         bundle: VerifiedOfflinePromptTranslationBundle?,
         request: OfflinePromptTranslationRequest
     ): OfflinePromptTranslationResolution {
-        val protectedTokens = (
-            extractOfflinePromptProtectedTokens(request.sourceText) +
-                extractOfflinePromptProtectedTokens(request.negativePrompt)
-            ).distinct()
+        val positivePlan = runCatching { parseOfflinePromptTranslationSyntax(request.sourceText) }
+        val negativePlan = runCatching { parseOfflinePromptTranslationSyntax(request.negativePrompt) }
+        val protectedTokens = positivePlan.getOrNull()?.protectedTokens.orEmpty() +
+            negativePlan.getOrNull()?.protectedTokens.orEmpty()
         if (bundle == null) {
             return fallback(
                 request = request,
@@ -1358,28 +1373,46 @@ internal class OfflinePromptTranslationService(
             )
         }
 
+        val syntaxFailure = positivePlan.exceptionOrNull() ?: negativePlan.exceptionOrNull()
+        if (syntaxFailure != null) {
+            return fallback(
+                request = request,
+                protectedTokens = protectedTokens,
+                reason = OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST,
+                message = "提示词结构无法安全解析，已保留原始提示词。",
+                detail = syntaxFailure.message,
+                stage = "syntax_validation",
+                errorCode = (syntaxFailure as? OfflinePromptTranslationSyntaxException)?.errorCode
+            )
+        }
+
         val runtime = try {
             runtimeProvider.runtimeFor(bundle)
         } catch (error: CancellationException) {
             throw error
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
             return fallback(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.NATIVE_RUNTIME_NOT_INITIALIZED,
-                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_NOT_INITIALIZED
+                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_NOT_INITIALIZED,
+                detail = error.message,
+                stage = "initialization",
+                errorCode = "translation_runtime_initialization_failed"
             )
         }
 
         // Runtime adapters are injected so the contract module does not load arbitrary .so files.
         // Still bind the adapter to the verified bundle here: an adapter for another model family
-        // must never be allowed to claim that this M2M100 package was executed.
+        // must never be allowed to claim that the verified translation package was executed.
         if (runtime.nativeLibraryFileName != bundle.identity.nativeLibraryFileName) {
             return fallback(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.NATIVE_RUNTIME_UNSUPPORTED,
-                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_UNSUPPORTED
+                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_UNSUPPORTED,
+                stage = "initialization",
+                errorCode = "translation_runtime_identity_mismatch"
             )
         }
 
@@ -1388,7 +1421,9 @@ internal class OfflinePromptTranslationService(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.RUNTIME_BUSY,
-                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_BUSY
+                message = OfflinePromptTranslationFallbackMessages.NATIVE_RUNTIME_BUSY,
+                stage = "runtime",
+                errorCode = "translation_runtime_busy"
             )
         }
 
@@ -1402,7 +1437,9 @@ internal class OfflinePromptTranslationService(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.TIMEOUT,
-                message = OfflinePromptTranslationFallbackMessages.TIMEOUT
+                message = OfflinePromptTranslationFallbackMessages.TIMEOUT,
+                stage = "runtime",
+                errorCode = "translation_timeout"
             )
         } catch (error: CancellationException) {
             // Do not turn a user stop into a normal prompt result. The parent job owns cancel.
@@ -1410,12 +1447,15 @@ internal class OfflinePromptTranslationService(
         } catch (error: OfflinePromptTranslationCleanupException) {
             // A fallback may start a large image runtime, so it requires confirmed release.
             throw error
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
             return fallback(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.RUNTIME_FAILED,
-                message = OfflinePromptTranslationFallbackMessages.FAILED
+                message = OfflinePromptTranslationFallbackMessages.FAILED,
+                detail = error.message,
+                stage = "runtime",
+                errorCode = "translation_runtime_exception"
             )
         } finally {
             invocationGate.unlock()
@@ -1426,14 +1466,21 @@ internal class OfflinePromptTranslationService(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = outcome.reason.toFallbackReason(),
-                message = outcome.reason.toFallbackMessage()
+                message = outcome.reason.toFallbackMessage(),
+                detail = outcome.message,
+                stage = "initialization",
+                errorCode = "translation_" + outcome.reason.name.lowercase(java.util.Locale.ROOT)
             )
 
             is OfflinePromptTranslationRuntimeOutcome.Failed -> fallback(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.RUNTIME_FAILED,
-                message = OfflinePromptTranslationFallbackMessages.FAILED
+                message = OfflinePromptTranslationFallbackMessages.FAILED,
+                detail = outcome.message,
+                stage = outcome.stage,
+                errorCode = outcome.errorCode,
+                nativeCode = outcome.nativeCode
             )
 
             is OfflinePromptTranslationRuntimeOutcome.Translated ->
@@ -1452,24 +1499,26 @@ internal class OfflinePromptTranslationService(
                 request = request,
                 protectedTokens = protectedTokens,
                 reason = OfflinePromptTranslationFallbackReason.INVALID_OUTPUT,
-                message = OfflinePromptTranslationFallbackMessages.INVALID_OUTPUT
+                message = OfflinePromptTranslationFallbackMessages.INVALID_OUTPUT,
+                stage = "output_validation",
+                errorCode = "translation_result_identity_mismatch"
             )
         }
-        val positiveTokens = extractOfflinePromptProtectedTokens(request.sourceText)
-        val negativeTokens = extractOfflinePromptProtectedTokens(request.negativePrompt)
-        val positiveMissing = positiveTokens != extractOfflinePromptProtectedTokens(result.translatedText)
+        val positiveMissing = !hasMatchingOfflinePromptStructure(request.sourceText, result.translatedText)
         val translatedNegative = result.translatedNegativePrompt
             ?: if (request.negativePrompt.containsHanForOfflineTranslation()) {
                 return fallback(
                     request = request,
                     protectedTokens = protectedTokens,
                     reason = OfflinePromptTranslationFallbackReason.INVALID_OUTPUT,
-                    message = OfflinePromptTranslationFallbackMessages.INVALID_OUTPUT
+                    message = OfflinePromptTranslationFallbackMessages.INVALID_OUTPUT,
+                    stage = "output_validation",
+                    errorCode = "translation_negative_output_missing"
                 )
             } else {
                 request.negativePrompt
             }
-        val negativeMissing = negativeTokens != extractOfflinePromptProtectedTokens(translatedNegative)
+        val negativeMissing = !hasMatchingOfflinePromptStructure(request.negativePrompt, translatedNegative)
         if (!positiveMissing && !negativeMissing) {
             return OfflinePromptTranslationResolution.Translated(
                 originalPrompt = request.sourceText,
@@ -1485,7 +1534,13 @@ internal class OfflinePromptTranslationService(
             request = request,
             protectedTokens = protectedTokens,
             reason = OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST,
-            message = OfflinePromptTranslationFallbackMessages.PROTECTED_SYNTAX_LOST
+            message = OfflinePromptTranslationFallbackMessages.PROTECTED_SYNTAX_LOST,
+            stage = "output_validation",
+            errorCode = when {
+                positiveMissing && negativeMissing -> "translation_both_branches_structure_changed"
+                positiveMissing -> "translation_positive_structure_changed"
+                else -> "translation_negative_structure_changed"
+            }
         )
     }
 
@@ -1493,14 +1548,38 @@ internal class OfflinePromptTranslationService(
         request: OfflinePromptTranslationRequest,
         protectedTokens: List<String>,
         reason: OfflinePromptTranslationFallbackReason,
-        message: String
-    ): OfflinePromptTranslationResolution.Fallback = OfflinePromptTranslationResolution.Fallback(
-        originalPrompt = request.sourceText,
-        originalNegativePrompt = request.negativePrompt,
-        protectedTokens = protectedTokens,
-        reason = reason,
-        message = message
-    )
+        message: String,
+        detail: String? = null,
+        stage: String? = null,
+        errorCode: String? = null,
+        nativeCode: Int? = null
+    ): OfflinePromptTranslationResolution.Fallback {
+        val safeStage = stage?.takeIf { it.matches(Regex("[a-z0-9_]{1,48}")) }
+        val safeCode = errorCode?.takeIf { it.matches(Regex("[A-Za-z0-9_.:-]{1,96}")) }
+        val safeDetail = sanitizeOfflinePromptTranslationFailureDetail(
+            detail, listOf(request.sourceText, request.negativePrompt)
+        )
+        val diagnostic = buildList {
+            safeStage?.let { add("阶段=$it") }
+            safeCode?.let { add("错误码=$it") }
+            nativeCode?.let { add("native=$it") }
+        }.joinToString("，")
+        val fullMessage = buildString {
+            append(message)
+            if (diagnostic.isNotEmpty()) append(" ").append(diagnostic).append("。")
+            if (safeDetail.isNotBlank()) append(" 原因：").append(safeDetail)
+        }
+        return OfflinePromptTranslationResolution.Fallback(
+            originalPrompt = request.sourceText,
+            originalNegativePrompt = request.negativePrompt,
+            protectedTokens = protectedTokens,
+            reason = reason,
+            message = fullMessage,
+            stage = safeStage,
+            errorCode = safeCode,
+            nativeCode = nativeCode
+        )
+    }
 
     private fun OfflinePromptTranslationUnavailableReason.toFallbackReason():
         OfflinePromptTranslationFallbackReason = when (this) {
@@ -1526,22 +1605,243 @@ internal class OfflinePromptTranslationService(
     }
 }
 
-/**
- * Extracts syntax owned by the user rather than by the translator. The list is metadata for the
- * caller and validates the exact fragment order and multiplicity in each translated branch.
- */
-internal fun extractOfflinePromptProtectedTokens(prompt: String): List<String> {
-    val patterns = listOf(
-        Regex("<[^>\\r\\n]{1,200}>") ,
-        Regex("(?i)(?:lora|lyco|embedding):[A-Za-z0-9_+./-]{1,120}(?::[+-]?\\d+(?:\\.\\d+)?)?"),
-        Regex("\\([^\\r\\n()]{1,160}:[+-]?\\d+(?:\\.\\d+)?\\)")
-    )
-    val matches = patterns.flatMap { it.findAll(prompt).toList() }.sortedBy { it.range.first }
-    return matches.filterNot { match ->
-        matches.any { other -> other.range != match.range &&
-            other.range.first <= match.range.first && other.range.last >= match.range.last }
-    }.distinctBy { it.range }.map { it.value }
+/** A bounded plan separates user control syntax from language translated by a model. */
+internal data class OfflinePromptTranslationSyntaxPart(val text: String, val kind: String?)
+
+internal data class OfflinePromptTranslationSyntaxPlan(
+    val parts: List<OfflinePromptTranslationSyntaxPart>,
+    val protectedTokens: List<String>
+) {
+    /** Controls discovered in this source, rather than a catalogue of special namespaces. */
+    val bareControlTokens: Set<String>
+        get() = parts.filter { it.kind == "bare_control" }.mapTo(linkedSetOf()) { it.text }
+
+    /** Text slots retain their position around controls; numeric literals retain exact spelling. */
+    fun signature(): List<Pair<String, String>> = buildList {
+        parts.forEach { part ->
+            if (part.kind != null) {
+                add(part.kind to part.text)
+            } else if (part.text.any { it.isLetterOrDigit() }) {
+                add("text" to "")
+                OFFLINE_PROMPT_NUMBER_PATTERN.findAll(part.text).forEach { add("number" to it.value) }
+            }
+        }
+    }
 }
+
+internal class OfflinePromptTranslationSyntaxException(
+    val errorCode: String,
+    val offset: Int,
+    detail: String
+) : IllegalArgumentException("$detail (offset=$offset)")
+
+private const val MAX_OFFLINE_PROMPT_SYNTAX_DEPTH = 16
+private const val MAX_OFFLINE_PROMPT_SYNTAX_PARTS = 512
+private const val MAX_OFFLINE_PROMPT_TRANSLATABLE_PARTS = 32
+private const val MAX_OFFLINE_PROMPT_OPAQUE_TOKEN_CHARS = 200
+private val OFFLINE_PROMPT_NUMBER_PATTERN =
+    Regex("[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?")
+/* Namespaced controls are parsed generically, so new control namespaces remain opaque. */
+private val OFFLINE_PROMPT_BARE_TOKEN_PATTERN = Regex(
+    "(?i)[A-Za-z_][A-Za-z0-9_.-]{0,31}:[A-Za-z0-9_+./-]{1,128}(?::[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+))?"
+)
+
+/**
+ * This is a syntax lexer, not a catalogue of supported LoRA files or model capabilities. Any
+ * bounded angle tag is opaque, and all balanced nesting, schedule separators and escapes are
+ * preserved. Unbalanced/over-budget input is returned to the user unchanged by the service.
+ */
+internal fun parseOfflinePromptTranslationSyntax(
+    prompt: String,
+    bareControlTokens: Set<String>? = null
+): OfflinePromptTranslationSyntaxPlan {
+    if (prompt.containsUnsafeTranslationCharacters()) {
+        throw OfflinePromptTranslationSyntaxException(
+            "prompt_syntax_unsafe_character", 0, "Prompt contains hidden control or format characters."
+        )
+    }
+    if (prompt.length > OfflinePromptTranslationContract.MAX_OUTPUT_TEXT_CHARS) {
+        throw OfflinePromptTranslationSyntaxException("prompt_syntax_size_limit", 0, "Prompt exceeds the syntax parsing limit.")
+    }
+    val parts = mutableListOf<OfflinePromptTranslationSyntaxPart>()
+    val protectedRanges = mutableListOf<IntRange>()
+    val stack = java.util.ArrayDeque<Pair<Char, Int>>()
+    val text = StringBuilder()
+    var index = 0
+
+    fun addPart(value: String, kind: String?) {
+        if (value.isEmpty()) return
+        if (parts.size >= MAX_OFFLINE_PROMPT_SYNTAX_PARTS) {
+            throw OfflinePromptTranslationSyntaxException("prompt_syntax_part_limit", index, "Prompt has too many structural fragments.")
+        }
+        parts.add(OfflinePromptTranslationSyntaxPart(value, kind))
+    }
+    fun flushText() {
+        addPart(text.toString(), null)
+        text.setLength(0)
+    }
+    fun protect(value: String, kind: String) {
+        flushText()
+        addPart(value, kind)
+    }
+    fun fail(code: String, detail: String): Nothing =
+        throw OfflinePromptTranslationSyntaxException(code, index, detail)
+
+    while (index < prompt.length) {
+        val character = prompt[index]
+        when {
+            character == '\\' && index + 1 < prompt.length && prompt[index + 1] in "\\()[]{}<>:|" -> {
+                protect(prompt.substring(index, index + 2), "escape")
+                index += 2
+            }
+            character == '<' -> {
+                val end = prompt.indexOf('>', index + 1)
+                if (end < 0 || end - index + 1 > MAX_OFFLINE_PROMPT_OPAQUE_TOKEN_CHARS ||
+                    prompt.substring(index + 1, end).any { it == '<' || it == '\n' || it == '\r' }
+                ) fail("prompt_syntax_invalid_tag", "Prompt contains an incomplete or oversized control tag.")
+                protect(prompt.substring(index, end + 1), "opaque")
+                protectedRanges.add(index..end)
+                index = end + 1
+            }
+            character == '>' -> fail("prompt_syntax_unbalanced", "Prompt contains an unmatched control delimiter.")
+            character in "([{" -> {
+                if (stack.size >= MAX_OFFLINE_PROMPT_SYNTAX_DEPTH) {
+                    fail("prompt_syntax_depth_limit", "Prompt nesting exceeds the supported parsing depth.")
+                }
+                protect(character.toString(), "delimiter")
+                stack.addLast(character to index)
+                index++
+            }
+            character in ")]}" -> {
+                val opened = stack.peekLast() ?: fail("prompt_syntax_unbalanced", "Prompt contains an unmatched closing delimiter.")
+                val expected = when (opened.first) { '(' -> ')'; '[' -> ']'; else -> '}' }
+                if (character != expected) fail("prompt_syntax_unbalanced", "Prompt contains mismatched nested delimiters.")
+                protect(character.toString(), "delimiter")
+                stack.removeLast()
+                if (stack.isEmpty()) protectedRanges.add(opened.second..index)
+                index++
+            }
+            character in ":|=" || stack.isNotEmpty() && character in "@#%&*+/_-" -> {
+                protect(character.toString(), "separator")
+                index++
+                if (character == ':') {
+                    val number = OFFLINE_PROMPT_NUMBER_PATTERN.find(prompt, index)?.takeIf { it.range.first == index }
+                    if (number != null) {
+                        protect(number.value, "control_number")
+                        index = number.range.last + 1
+                    }
+                }
+            }
+            (index == 0 || !prompt[index - 1].isLetterOrDigit() && prompt[index - 1] != '_') &&
+                OFFLINE_PROMPT_BARE_TOKEN_PATTERN.matchAt(prompt, index)?.let {
+                    bareControlTokens == null || it.value in bareControlTokens
+                } == true -> {
+                val token = requireNotNull(OFFLINE_PROMPT_BARE_TOKEN_PATTERN.matchAt(prompt, index))
+                if (token.value.length > MAX_OFFLINE_PROMPT_OPAQUE_TOKEN_CHARS) {
+                    fail("prompt_syntax_invalid_tag", "Prompt contains an oversized named control token.")
+                }
+                protect(token.value, "bare_control")
+                protectedRanges.add(token.range)
+                index = token.range.last + 1
+            }
+            else -> {
+                if (character.code < 128 && !character.toString().isSafeAsciiDiffusionPrompt()) {
+                    fail("prompt_syntax_unsupported_character", "Prompt contains syntax that cannot be safely preserved by this runtime.")
+                }
+                text.append(character)
+                index++
+            }
+        }
+    }
+    if (stack.isNotEmpty()) fail("prompt_syntax_unbalanced", "Prompt contains an unclosed structural delimiter.")
+    flushText()
+    if (parts.count { it.kind == null && it.text.containsHanForOfflineTranslation() } > MAX_OFFLINE_PROMPT_TRANSLATABLE_PARTS) {
+        fail("prompt_translation_fragment_limit", "Prompt has too many independent translation fragments.")
+    }
+    // Outermost groups are display metadata only. Validation uses the complete token signature,
+    // so a translated phrase inside a group is permitted without relaxing its numeric/control data.
+    val ordered = protectedRanges.sortedBy { it.first }
+    val metadata = ordered.filterNot { range ->
+        ordered.any { other -> other != range && other.first <= range.first && other.last >= range.last }
+    }.map { prompt.substring(it.first, it.last + 1) }
+    return OfflinePromptTranslationSyntaxPlan(parts.toList(), metadata)
+}
+
+/**
+ * Reassembly owns controls and English-only fragments; the model sees only language slots. This
+ * avoids relying on model output to reconstruct nested attention/schedules or LoRA positions.
+ * The callback is bounded by the remaining branch budget and receives no opaque control tokens.
+ */
+internal fun translateOfflinePromptSyntaxPlan(
+    plan: OfflinePromptTranslationSyntaxPlan,
+    maxChars: Int,
+    translateText: (String, Int) -> String
+): String {
+    require(maxChars in 1..OfflinePromptTranslationContract.MAX_OUTPUT_TEXT_CHARS)
+    val output = StringBuilder()
+    plan.parts.forEach { part ->
+        val value = if (part.kind != null || !part.text.containsHanForOfflineTranslation()) part.text else {
+            val first = part.text.indexOfFirst { !it.isWhitespace() }
+            val last = part.text.indexOfLast { !it.isWhitespace() }
+            val source = part.text.substring(first, last + 1)
+            val leading = part.text.substring(0, first)
+            val trailing = part.text.substring(last + 1)
+            val available = maxChars - output.length - leading.length - trailing.length
+            if (available < 1) throw OfflinePromptTranslationSyntaxException(
+                "translation_output_size_limit", 0, "Translation exceeded the requested branch limit."
+            )
+            val translated = translateText(source, available).trim()
+            if (translated.isBlank() || translated.length > available ||
+                translated.containsHanForOfflineTranslation() || translated.containsUnsafeTranslationCharacters() ||
+                !translated.isSafeAsciiDiffusionPrompt()
+            ) throw OfflinePromptTranslationSyntaxException(
+                "translation_text_invalid", 0, "A translated text fragment is empty, incomplete, or outside safe prompt syntax."
+            )
+            if (!hasMatchingOfflinePromptStructure(source, translated)) {
+                throw OfflinePromptTranslationSyntaxException(
+                    "translation_fragment_syntax_changed", 0, "A translated text fragment changed numeric values or introduced control syntax."
+                )
+            }
+            leading + translated + trailing
+        }
+        if (output.length.toLong() + value.length > maxChars) throw OfflinePromptTranslationSyntaxException(
+            "translation_output_size_limit", 0, "Translation exceeded the requested branch limit."
+        )
+        output.append(value)
+    }
+    val result = output.toString()
+    if (plan.signature() != parseOfflinePromptTranslationSyntax(result, plan.bareControlTokens).signature()) {
+        throw OfflinePromptTranslationSyntaxException(
+            "translation_structure_changed", 0, "Translation changed control structure, fragment order, or numeric values."
+        )
+    }
+    return result
+}
+
+internal fun hasMatchingOfflinePromptStructure(source: String, translated: String): Boolean =
+    runCatching {
+        val sourcePlan = parseOfflinePromptTranslationSyntax(source)
+        sourcePlan.signature() ==
+            parseOfflinePromptTranslationSyntax(translated, sourcePlan.bareControlTokens).signature()
+    }.getOrDefault(false)
+
+/** Translation errors can echo a short language slot; even one-character sources are private. */
+internal fun sanitizeOfflinePromptTranslationFailureDetail(detail: String?, sourceTexts: List<String>): String {
+    val literals = sourceTexts + sourceTexts.flatMap { source ->
+        runCatching { parseOfflinePromptTranslationSyntax(source).parts }.getOrDefault(emptyList())
+            .filter { it.kind == null }.map { it.text.trim() }
+    }
+    val redacted = literals.asSequence().map(String::trim).filter(String::isNotEmpty).distinct()
+        .sortedByDescending(String::length).fold(detail.orEmpty().take(8_192)) { value, literal ->
+            value.replace(literal, "<prompt-redacted>")
+        }
+    return LocalDiagnosticRedactor.sanitize(redacted)
+        .replace(Regex("[\\p{Cc}\\p{Cf}]"), " ").take(600)
+}
+
+/** Metadata never throws; the service separately reports malformed syntax and retains the source. */
+internal fun extractOfflinePromptProtectedTokens(prompt: String): List<String> =
+    runCatching { parseOfflinePromptTranslationSyntax(prompt).protectedTokens }.getOrDefault(emptyList())
 
 /**
  * The only runtime supplied by this contract file. It intentionally does not try to load a
@@ -1573,8 +1873,10 @@ private fun String.containsHanForOfflineTranslation(): Boolean =
 
 private fun String.containsUnsafeTranslationCharacters(): Boolean =
     codePoints().anyMatch { codePoint ->
+        // Visible line breaks are valid prompt separators; hidden C0/C1 and format controls are not.
+        val isLineBreak = codePoint == '\n'.code || codePoint == '\r'.code
         val type = Character.getType(codePoint)
-        type == Character.CONTROL.toInt() || type == Character.FORMAT.toInt()
+        !isLineBreak && (type == Character.CONTROL.toInt() || type == Character.FORMAT.toInt())
     }
 
 private fun ByteArray.toLowercaseHex(): String = buildString(size * 2) {

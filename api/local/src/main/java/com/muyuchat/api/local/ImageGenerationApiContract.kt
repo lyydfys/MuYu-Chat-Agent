@@ -834,6 +834,54 @@ object ImageGenerationApiContract {
             )
         }
         when (method) {
+            PROMPT_METHOD_OFFLINE_HY_MT2 -> {
+                if ((!sourceContainsHan &&
+                        negativePromptSource != NEGATIVE_PROMPT_SOURCE_MODEL_DEFAULT) ||
+                    executedLanguageCapability != PROMPT_LANGUAGE_ENGLISH_DOMINANT ||
+                    translationContractVersion != OFFLINE_PROMPT_TRANSLATION_CONTRACT_VERSION ||
+                    effectivePrompt.containsHanScript() ||
+                    effectiveNegativePrompt.containsHanScript() ||
+                    !effectivePrompt.isSafeAsciiDiffusionPrompt() ||
+                    !effectiveNegativePrompt.isSafeAsciiDiffusionPrompt() ||
+                    (!originalPrompt.containsHanScript() && effectivePrompt != originalPrompt) ||
+                    (negativePromptSource == NEGATIVE_PROMPT_SOURCE_USER &&
+                        originalNegativePrompt != null &&
+                        !originalNegativePrompt.containsHanScript() &&
+                        effectiveNegativePrompt != originalNegativePrompt) ||
+                    translatorModelId != OFFLINE_PROMPT_TRANSLATOR_MODEL_ID ||
+                    translatorModelName != OFFLINE_PROMPT_TRANSLATOR_MODEL_NAME ||
+                    translatorRuntime != OFFLINE_PROMPT_TRANSLATOR_RUNTIME ||
+                    translatorModelSha256 != OFFLINE_PROMPT_TRANSLATOR_MODEL_SHA256 ||
+                    translationPlanSha256?.let(SHA256_PATTERN::matches) != true ||
+                    verificationReceiptSha256?.let(SHA256_PATTERN::matches) != true ||
+                    translationPhaseSystemPromptSha256?.let(SHA256_PATTERN::matches) != true ||
+                    verificationPhaseSystemPromptSha256?.let(SHA256_PATTERN::matches) != true ||
+                    translationProofFingerprint?.let(SHA256_PATTERN::matches) != true ||
+                    translationProofFingerprint != imagePromptTranslationProofFingerprint(
+                        contractVersion = translationContractVersion,
+                        originalPrompt = originalPrompt,
+                        effectivePrompt = effectivePrompt,
+                        originalNegativePrompt = originalNegativePrompt,
+                        effectiveNegativePrompt = effectiveNegativePrompt,
+                        negativePromptSource = negativePromptSource,
+                        translationPlanSha256 = translationPlanSha256.orEmpty(),
+                        verificationReceiptSha256 = verificationReceiptSha256.orEmpty(),
+                        translationPhaseSystemPromptSha256 =
+                            translationPhaseSystemPromptSha256.orEmpty(),
+                        verificationPhaseSystemPromptSha256 =
+                            verificationPhaseSystemPromptSha256.orEmpty(),
+                        translatorRuntime = translatorRuntime.orEmpty(),
+                        translatorModelSha256 = translatorModelSha256.orEmpty(),
+                        promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
+                    )
+                ) {
+                    reject(
+                        "invalid_prompt_processing_evidence",
+                        "Offline Hy-MT2 prompt_processing evidence is incomplete or does not match the pinned translator contract."
+                    )
+                }
+            }
+
             PROMPT_METHOD_LOCAL_LLM -> {
                 if (!sourceContainsHan ||
                     executedLanguageCapability != PROMPT_LANGUAGE_ENGLISH_DOMINANT ||
@@ -3808,10 +3856,17 @@ object ImageGenerationApiContract {
     )
     private const val PROMPT_PROCESSING_VERSION = 4
     private const val PROMPT_TRANSLATION_CONTRACT_VERSION = 4
+    private const val OFFLINE_PROMPT_TRANSLATION_CONTRACT_VERSION = 5
     private const val PROMPT_METHOD_DIRECT = "DIRECT"
     private const val PROMPT_METHOD_NATIVE_MULTILINGUAL = "NATIVE_MULTILINGUAL"
     private const val PROMPT_METHOD_DIRECT_UTF8_PASSTHROUGH = "DIRECT_UTF8_PASSTHROUGH"
     private const val PROMPT_METHOD_LOCAL_LLM = "LOCAL_LLM_ZH_TO_EN"
+    private const val PROMPT_METHOD_OFFLINE_HY_MT2 = "OFFLINE_HY_MT2_ZH_TO_EN"
+    private const val OFFLINE_PROMPT_TRANSLATOR_MODEL_ID = "tencent/Hy-MT2-1.8B-GGUF"
+    private const val OFFLINE_PROMPT_TRANSLATOR_MODEL_NAME = "Hy-MT2 1.8B Q4_K_M"
+    private const val OFFLINE_PROMPT_TRANSLATOR_RUNTIME = "llama.cpp/offline_translation"
+    private const val OFFLINE_PROMPT_TRANSLATOR_MODEL_SHA256 =
+        "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699"
     private const val PROMPT_LANGUAGE_ENGLISH_DOMINANT = "ENGLISH_DOMINANT"
     private const val PROMPT_LANGUAGE_NATIVE_MULTILINGUAL = "NATIVE_MULTILINGUAL"
     private const val QWEN_IMAGE_21_EXECUTION_SCHEMA = "qwen_image_21_mnn_v1"
@@ -3823,7 +3878,7 @@ object ImageGenerationApiContract {
     private const val QWEN_IMAGE_21_HEIGHT = 512
     private const val QWEN_IMAGE_21_MIN_STEPS = 2L
     private const val QWEN_IMAGE_21_MAX_STEPS = 40L
-    private val QWEN_IMAGE_21_BACKENDS = setOf("MNN_OPENCL", "MNN_CPU")
+    private val QWEN_IMAGE_21_BACKENDS = setOf("MNN_OPENCL", "MNN_CPU", "MNN_QNN")
     private const val NEGATIVE_PROMPT_SOURCE_USER = "USER"
     private const val NEGATIVE_PROMPT_SOURCE_MODEL_DEFAULT = "MODEL_DEFAULT"
     private const val NEGATIVE_PROMPT_SOURCE_EMPTY = "EMPTY"

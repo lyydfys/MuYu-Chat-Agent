@@ -244,22 +244,7 @@ class ModelScopeClient(
             return recommendedQairtChatFile(model, preferredQairtChipsets)
         }
         val files = listRecommendedFiles(model, preferredQairtChipsets)
-        return files.firstOrNull {
-            it.name.equals(model.recommendedFileName, ignoreCase = true)
-        } ?: files.firstOrNull {
-            val matchesKind = if (model.kind == ModelScopeRecommendedKind.IMAGE) {
-                it.isImageModelCandidate()
-            } else {
-                it.isChatModelCandidate()
-            }
-            matchesKind && it.name.contains(model.quant, ignoreCase = true)
-        } ?: files.firstOrNull {
-            if (model.kind == ModelScopeRecommendedKind.IMAGE) {
-                it.isImageModelCandidate()
-            } else {
-                it.isChatModelCandidate()
-            }
-        } ?: error("推荐仓库 ${model.repoId} 没有找到可下载的主模型文件。")
+        return selectRecommendedModelFile(model, files)
     }
 
     fun recommendedMnnBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> {
@@ -4008,4 +3993,26 @@ class ModelScopeClient(
             )
         )
     }
+}
+
+/** A selected LiteRT container suffix is an artifact choice, not a cosmetic label. */
+internal fun selectRecommendedModelFile(
+    model: ModelScopeRecommendedModel,
+    files: List<RemoteModelFile>
+): RemoteModelFile {
+    val selectedName = model.recommendedFileName.trim()
+    files.firstOrNull {
+        it.path.equals(selectedName, ignoreCase = true) || it.name.equals(selectedName, ignoreCase = true)
+    }?.let { return it }
+    // CPU/GPU/NPU .litertlm files have different runtime graphs. Falling back to
+    // the first container silently installs the wrong variant under a chosen card.
+    if (model.chatRuntime == RecommendedChatRuntime.LITERT_LM && selectedName.isNotBlank()) {
+        error("仓库 ${model.repoId} 缺少所选 LiteRT-LM 文件：$selectedName。未替换为其他后缀文件，请刷新仓库文件列表后选择实际文件。")
+    }
+    return files.firstOrNull {
+        val matchesKind = if (model.kind == ModelScopeRecommendedKind.IMAGE) it.isImageModelCandidate() else it.isChatModelCandidate()
+        matchesKind && it.name.contains(model.quant, ignoreCase = true)
+    } ?: files.firstOrNull {
+        if (model.kind == ModelScopeRecommendedKind.IMAGE) it.isImageModelCandidate() else it.isChatModelCandidate()
+    } ?: error("推荐仓库 ${model.repoId} 没有找到可下载的主模型文件。")
 }

@@ -1,4 +1,4 @@
-﻿@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.muyuchat.mca
 
@@ -693,8 +693,17 @@ private fun McaApp(
                                         imageUltraFixMaxHeight = imageDefaults.ultraFixMaxHeight,
                                         imageUltraFixWidthMultiple = imageDefaults.ultraFixWidthMultiple,
                                         imageUltraFixHeightMultiple = imageDefaults.ultraFixHeightMultiple,
+                                        // A fixed graph tile only means something when this same
+                                        // model advertises UltraFix support.  `ChatModelChoice`
+                                        // enforces that as a hard contract and it is built during
+                                        // Compose recomposition, so never hand it a self-contradictory
+                                        // pair -- that aborted the whole UI instead of one row.
                                         imageUltraFixRequiredTileSize =
-                                            imageDefaults.ultraFixRequiredTileSize,
+                                            if (imageCapabilities.supportsUltraFix) {
+                                                imageDefaults.ultraFixRequiredTileSize
+                                            } else {
+                                                0
+                                            },
                                         imageSupportedSamplers = imageDefaults.supportedSamplers,
                                         imageImg2ImgSupportedSamplers =
                                             imageDefaults.img2ImgSupportedSamplers
@@ -976,6 +985,20 @@ private fun McaApp(
                             failed = job.status.failed,
                             terminal = job.status.terminal,
                             message = job.message,
+                            translationPreview = job.spec?.promptExecution
+                                ?.takeIf { execution ->
+                                    execution.method in setOf(
+                                        LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN,
+                                        LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
+                                    )
+                                }
+                                ?.let { execution ->
+                                    if (execution.originalPrompt.containsHanScript()) {
+                                        execution.effectivePrompt
+                                    } else {
+                                        execution.effectiveNegativePrompt
+                                    }
+                                },
                             startedAtMillis = job.startedAtMillis,
                             startedAtElapsedMs = job.startedAtElapsedMs
                         )
@@ -1243,11 +1266,14 @@ private fun McaApp(
                 onImportChatModel = requestModelImport,
                 onImportImageModel = onImportLocalImageModel,
                 offlineTranslationStatus = state.offlineTranslationStatus,
+                offlineTranslationInstalled = state.offlineTranslationInstalled,
                 offlineTranslationInstalling = state.offlineTranslationInstalling,
                 offlineTranslationDownloading = state.offlineTranslationDownloading,
                 offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
                 onDownloadOfflineTranslation = viewModel::downloadOfflinePromptTranslationBundle,
                 onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
+                onTranslateImagePrompt = viewModel::translateImagePromptPreview,
+                onTranslateImageNegativePrompt = viewModel::translateImageNegativePromptPreview,
                 onOpenApi = { onTab(AppTab.API) },
                 onOpenSettings = {
                     startSettingsInWebSearch = false
@@ -1303,18 +1329,8 @@ private fun McaApp(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // Keep the status indicator compact and out of the app drawer. It samples only
-            // while a model/image job is active; the composable also pauses when the activity
-            // is backgrounded via repeatOnLifecycle.  It is positioned below the chat header
-            // so the overlay cannot intercept the model selector or send controls.
-            SystemLoadCompactCard(
-                visible = state.tab == AppTab.CHAT && !appMenuOpen &&
-                    (state.busy || state.isGenerating || state.imageJobs.any { !it.status.terminal }),
-                nativeStatsJson = state.nativeStatsJson,
-                modifier = Modifier
-                    .align(androidx.compose.ui.Alignment.TopCenter)
-                    .padding(top = 158.dp, start = 12.dp, end = 12.dp)
-            )
+
+
 
             SwipeBackPage(
                 visible = state.tab == AppTab.AGENT,
@@ -1604,6 +1620,7 @@ private fun McaApp(
                 onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
                 onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
                 offlineTranslationStatus = state.offlineTranslationStatus,
+                offlineTranslationInstalled = state.offlineTranslationInstalled,
                 offlineTranslationInstalling = state.offlineTranslationInstalling,
                 offlineTranslationDownloading = state.offlineTranslationDownloading,
                 offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,

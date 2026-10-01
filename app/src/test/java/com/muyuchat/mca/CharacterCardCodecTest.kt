@@ -1,9 +1,11 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.Role
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
@@ -95,6 +97,22 @@ class CharacterCardCodecTest {
     }
 
     @Test
+    fun legacyMcaAssistantExportRetainsItsExplicitDefaultPrompt() {
+        val defaultPrompt = GenerationParams().systemPrompt
+        val raw = JSONObject()
+            .put("schema", "mca.assistant.card")
+            .put("version", 1)
+            .put("name", "默认助手")
+            .put("systemPrompt", defaultPrompt)
+            .toString()
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+
+        assertEquals(defaultPrompt, card.toAssistantRecord().systemPrompt)
+        assertFalse(isMcaDefaultCharacterCardPrompt(card))
+    }
+
+    @Test
     fun parsesLegacyV1AliasesWithoutRewritingTheRawCard() {
         val raw = """{"char_name":"旧版角色","char_persona":"保留旧字段","world_scenario":"测试","char_greeting":"你好"}"""
 
@@ -107,6 +125,122 @@ class CharacterCardCodecTest {
         assertEquals("你好", success.card.firstMessage)
         assertEquals(raw, success.card.toJsonString())
         assertEquals("旧版角色", success.card.toAssistantRecord().name)
+    }
+
+    @Test
+    fun cardWithMcaBoilerplateKeepsItsGreetingInsteadOfUsingTheDefaultPrompt() {
+        val raw = """{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"空白角色","system_prompt":"${GenerationParams().systemPrompt}","first_mes":"欢迎来到故事现场。","character_book":{"entries":[{"id":1,"constant":true,"content":"角色设定"}]}}}"""
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+        val assistant = card.toAssistantRecord()
+
+        assertEquals("开场白：\n欢迎来到故事现场。", assistant.systemPrompt)
+        assertFalse(assistant.systemPrompt.contains(GenerationParams().systemPrompt))
+        assertEquals(raw, assistant.characterCardJson)
+        assertEquals("欢迎来到故事现场。", assistant.newConversationSession(null, null).messages.single().content)
+        assertEquals(assistant.systemPrompt, assistant.newConversationSession(null, null).assistantSnapshot?.systemPrompt)
+        assertEquals(assistant.systemPrompt, GenerationParams.fromJson(assistant.paramsJson).systemPrompt)
+    }
+
+    @Test
+    fun cardWithoutPromptFieldsUsesItsNameInsteadOfTheMcaAssistantPrompt() {
+        val raw = """{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"空白角色","character_book":{"entries":[{"id":1,"constant":true,"content":"角色设定"}]}}}"""
+
+        val assistant = assertSuccess(CharacterCardCodec.parseJson(raw)).card.toAssistantRecord()
+
+        assertEquals("你是空白角色。请保持角色身份，自然回应。", assistant.systemPrompt)
+        assertFalse(assistant.systemPrompt.contains(GenerationParams().systemPrompt))
+        assertEquals(raw, assistant.characterCardJson)
+        assertEquals(assistant.systemPrompt, assistant.newConversationSession(null, null).assistantSnapshot?.systemPrompt)
+    }
+
+    @Test
+    fun mcaBoilerplateDoesNotHideAuthoredCharacterCardPromptFields() {
+        val raw = """{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"港口向导","system_prompt":"${GenerationParams().systemPrompt}","description":"熟悉旧港的小巷。","personality":"耐心而谨慎。","post_history_instructions":"不要替用户决定行动。"}}"""
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+        val assistant = card.toAssistantRecord()
+
+        assertFalse(assistant.systemPrompt.contains(GenerationParams().systemPrompt))
+        assertTrue(assistant.systemPrompt.contains("熟悉旧港的小巷。"))
+        assertTrue(assistant.systemPrompt.contains("耐心而谨慎。"))
+        assertTrue(assistant.systemPrompt.contains("不要替用户决定行动。"))
+        assertEquals(raw, assistant.characterCardJson)
+        assertEquals(assistant.systemPrompt, assistant.toConversationSnapshot(1L).systemPrompt)
+    }
+
+    @Test
+    fun asciiParenthesesMcaBoilerplateIsRecognizedAsTheSameDefault() {
+        val defaultPrompt = GenerationParams().systemPrompt
+            .replace('（', '(').replace('）', ')')
+        val raw = JSONObject()
+            .put("spec", "chara_card_v3")
+            .put("spec_version", "3.0")
+            .put("data", JSONObject()
+                .put("name", "港口向导")
+                .put("system_prompt", defaultPrompt)
+                .put("description", "熟悉旧港的小巷。"))
+            .toString()
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+
+        assertTrue(isMcaDefaultCharacterCardPrompt(card))
+        assertEquals("角色描述：\n熟悉旧港的小巷。", card.toAssistantRecord().systemPrompt)
+        assertEquals(raw, card.toAssistantRecord().characterCardJson)
+    }
+
+    @Test
+    fun defaultPromptWithAuthoredInstructionsIsNotStripped() {
+        val sourcePrompt = GenerationParams().systemPrompt + "\n请始终保持港口向导的角色身份。"
+        val raw = JSONObject()
+            .put("spec", "chara_card_v3")
+            .put("spec_version", "3.0")
+            .put("data", JSONObject().put("name", "港口向导").put("system_prompt", sourcePrompt))
+            .toString()
+
+        val card = assertSuccess(CharacterCardCodec.parseJson(raw)).card
+
+        assertFalse(isMcaDefaultCharacterCardPrompt(card))
+        assertEquals(sourcePrompt, card.toAssistantRecord().systemPrompt)
+    }
+
+    @Test
+    fun authoredPromptOverridesStaleDefaultParamsThroughPersistenceAndSnapshot() {
+        val raw = JSONObject()
+            .put("spec", "chara_card_v3")
+            .put("spec_version", "3.0")
+            .put("data", JSONObject()
+                .put("name", "港口向导")
+                .put("system_prompt", "请始终保持港口向导的角色身份。")
+                .put("description", "熟悉旧港的小巷。")
+                .put("paramsJson", GenerationParams().toAssistantGenerationJson()))
+            .toString()
+
+        val imported = assertSuccess(CharacterCardCodec.parseJson(raw)).card.toAssistantRecord()
+        val persisted = AssistantRecord.fromJson(imported.toJson())
+        val snapshot = persisted.toConversationSnapshot(1L)
+
+        assertTrue(imported.systemPrompt.startsWith("请始终保持港口向导的角色身份。"))
+        assertFalse(imported.systemPrompt.contains(GenerationParams().systemPrompt))
+        assertEquals(imported.systemPrompt, persisted.systemPrompt)
+        assertEquals(imported.systemPrompt, GenerationParams.fromJson(persisted.paramsJson).systemPrompt)
+        assertEquals(imported.systemPrompt, snapshot.systemPrompt)
+        assertEquals(raw, persisted.characterCardJson)
+    }
+
+    @Test
+    fun cardsWithTheSamePromptKeepSeparateIdsAndOriginalJson() {
+        val firstRaw = """{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"甲","system_prompt":"共享提示词"}}"""
+        val secondRaw = """{"spec":"chara_card_v3","spec_version":"3.0","data":{"name":"乙","system_prompt":"共享提示词"}}"""
+
+        val first = assertSuccess(CharacterCardCodec.parseJson(firstRaw)).card.toAssistantRecord()
+        val second = assertSuccess(CharacterCardCodec.parseJson(secondRaw)).card.toAssistantRecord()
+
+        assertTrue(first.id != second.id)
+        assertEquals("共享提示词", first.systemPrompt)
+        assertEquals("共享提示词", second.systemPrompt)
+        assertEquals(firstRaw, first.characterCardJson)
+        assertEquals(secondRaw, second.characterCardJson)
     }
 
     @Test
@@ -158,7 +292,8 @@ class CharacterCardCodecTest {
         assertTrue(assistant.systemPrompt.contains("住在林间小屋的旅行者。"))
         assertTrue(assistant.systemPrompt.contains("温和、好奇。"))
         assertTrue(assistant.systemPrompt.contains("雨后的森林。"))
-        assertTrue(!assistant.systemPrompt.contains("你也在躲雨吗？"))
+        assertTrue(assistant.systemPrompt.contains("开场白"))
+        assertTrue(assistant.systemPrompt.contains("你也在躲雨吗？"))
         assertEquals("你也在躲雨吗？", assistant.initialGreetingMessage()?.content)
         assertTrue(assistant.systemPrompt.contains("喝杯热茶吧。"))
         assertEquals(assistant.systemPrompt, snapshot.systemPrompt)

@@ -1802,6 +1802,62 @@ class LocalImagePromptLanguageTest {
     }
 
     @Test
+    fun `offline Hy-MT2 evidence binds translated text to the English encoder and survives rebinding`() {
+        val profile = requireNotNull(
+            ImageExecutionProfileResolver.legacyBuiltInProfileForCompatibility(
+                recommendationId = "dreamshaper_sd15_qnn228",
+                modelFingerprint = "a".repeat(64)
+            )
+        )
+        val evidence = offlineHyMt2Execution(
+            profile = profile,
+            originalPrompt = "美女",
+            effectivePrompt = "beautiful woman"
+        )
+        val restored = requireNotNull(LocalImagePromptExecution.fromJsonOrNull(evidence.toJson()))
+        assertEquals(evidence, restored)
+
+        val nativePromptSha = com.muyuchat.api.local.imagePromptExecutionSha256(
+            evidence.effectivePrompt,
+            evidence.effectiveNegativePrompt
+        )
+        val execution = JSONObject()
+            .put("imageProfileBindingFingerprint", profile.bindingFingerprint)
+            .put("promptLanguageBindingFingerprint", profile.promptLanguageBindingFingerprint)
+            .put("textEncoderLanguageCapability", "ENGLISH_DOMINANT")
+            .put("promptExecutionSha256", nativePromptSha)
+            .put("nativePromptExecutionSha256", nativePromptSha)
+            .put("nativePromptBindingStage", "conditioning_consumed")
+            .put("nativeEffective", JSONObject()
+                .put("nativePromptExecutionSha256", nativePromptSha)
+                .put("nativePromptBindingStage", "conditioning_consumed"))
+        validateLocalImagePromptExecutionBinding(evidence, profile, execution.toString())
+
+        val modelDefault = offlineHyMt2Execution(
+            profile = profile,
+            originalPrompt = "a portrait",
+            effectivePrompt = "a portrait",
+            originalNegativePrompt = null,
+            effectiveNegativePrompt = "low quality, blurry",
+            negativePromptSource = LocalImageNegativePromptSource.MODEL_DEFAULT
+        )
+        val rebound = modelDefault.rebindToCurrentImageProfile(
+            finalNegativePrompt = LocalImageFinalNegativePrompt(
+                value = "低质量，模糊",
+                source = LocalImageNegativePromptSource.MODEL_DEFAULT
+            ),
+            imageProfileBindingFingerprint = "b".repeat(64),
+            promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint
+        )
+        assertEquals("low quality, blurry", rebound.effectiveNegativePrompt)
+        assertEquals(
+            LocalImageNegativePromptSource.MODEL_DEFAULT,
+            rebound.negativePromptSource
+        )
+        assertEquals(rebound, LocalImagePromptExecution.fromJsonOrNull(rebound.toJson()))
+    }
+
+    @Test
     fun `model default negative survives omitted seed batch children history and retry`() {
         val execution = LocalImagePromptExecution(
             originalPrompt = "studio portrait",
@@ -1934,6 +1990,58 @@ class LocalImagePromptLanguageTest {
             verificationReceiptSha256 = receiptSha,
             translationPhaseSystemPromptSha256 = translationSystemSha,
             verificationPhaseSystemPromptSha256 = verificationSystemSha,
+            translationProofFingerprint = proof
+        )
+    }
+
+    private fun offlineHyMt2Execution(
+        profile: ImageExecutionProfile,
+        originalPrompt: String,
+        effectivePrompt: String,
+        originalNegativePrompt: String? = null,
+        effectiveNegativePrompt: String = "",
+        negativePromptSource: LocalImageNegativePromptSource =
+            if (originalNegativePrompt == null) LocalImageNegativePromptSource.EMPTY
+            else LocalImageNegativePromptSource.USER
+    ): LocalImagePromptExecution {
+        val requestFingerprint = "1".repeat(64)
+        val bundleFingerprint = "2".repeat(64)
+        val translationSystemSha = "3".repeat(64)
+        val validationContractSha = "4".repeat(64)
+        val runtime = "llama.cpp/offline_translation"
+        val modelSha = HyMt2PromptTranslationContract.MODEL_SHA256
+        val proof = imagePromptTranslationProofFingerprint(
+            contractVersion = CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION,
+            originalPrompt = originalPrompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = originalNegativePrompt,
+            effectiveNegativePrompt = effectiveNegativePrompt,
+            negativePromptSource = negativePromptSource.name,
+            translationPlanSha256 = requestFingerprint,
+            verificationReceiptSha256 = bundleFingerprint,
+            translationPhaseSystemPromptSha256 = translationSystemSha,
+            verificationPhaseSystemPromptSha256 = validationContractSha,
+            translatorRuntime = runtime,
+            translatorModelSha256 = modelSha,
+            promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint
+        )
+        return LocalImagePromptExecution(
+            originalPrompt = originalPrompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = originalNegativePrompt,
+            effectiveNegativePrompt = effectiveNegativePrompt,
+            negativePromptSource = negativePromptSource,
+            method = LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN,
+            imageProfileBindingFingerprint = profile.bindingFingerprint,
+            promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint,
+            translatorModelId = HyMt2PromptTranslationContract.SOURCE_ID,
+            translatorModelName = "Hy-MT2 1.8B Q4_K_M",
+            translatorRuntime = runtime,
+            translatorModelSha256 = modelSha,
+            translationPlanSha256 = requestFingerprint,
+            verificationReceiptSha256 = bundleFingerprint,
+            translationPhaseSystemPromptSha256 = translationSystemSha,
+            verificationPhaseSystemPromptSha256 = validationContractSha,
             translationProofFingerprint = proof
         )
     }

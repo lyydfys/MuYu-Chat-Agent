@@ -114,8 +114,31 @@ internal data class ImageRecommendationEvidence(
     val artifactPaths: List<String> = emptyList()
 )
 
+/**
+ * Describes the byte scope used by [ImageExecutionProfileResolverInput.modelFingerprint].
+ *
+ * A single-file model is identified by the primary file SHA.  A model bundle is identified by
+ * the complete observed component inventory, including the manifest contract.  Keeping the scope
+ * explicit prevents a bundle digest from being accidentally interpreted as the catalog primary
+ * file SHA during legacy profile migration.
+ */
+internal enum class ImageModelFingerprintScope {
+    PRIMARY_FILE,
+    COMPLETE_BUNDLE
+}
+
+/** Evidence captured from the installed bundle at the execution boundary. */
+internal data class ImageBundleComponentEvidence(
+    val relativePath: String,
+    val role: String,
+    val sha256: String,
+    val sizeBytes: Long
+)
+
 internal data class ImageExecutionProfileResolverInput(
     val modelFingerprint: String,
+    val modelFingerprintScope: ImageModelFingerprintScope = ImageModelFingerprintScope.PRIMARY_FILE,
+    val bundleComponentEvidence: List<ImageBundleComponentEvidence> = emptyList(),
     val runtime: LocalImageRuntime,
     val family: LocalImageModelFamily,
     val recommendationId: String? = null,
@@ -1188,11 +1211,16 @@ internal object ImageExecutionProfileResolver {
             // A known Qwen bundle revision wrote the VAE decoder SHA into the profile identity
             // even though the registered model row points at the DIFFUSION primary. Permit only
             // that observed legacy value, and only after the Qwen-specific check below proves the
-            // current input is the exact pinned DIFFUSION primary. Do not generalize this exception
-            // to other models or unknown legacy hashes.
+            // current input is the exact pinned bundle. A complete bundle fingerprint is also
+            // allowed to reach that check; it must never be treated as a primary-file SHA.
             val qwenCandidate = resolveBuiltInTarget(input)
                 ?.recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID
-            if (!qwenCandidate || persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT) {
+            val completeQwenCandidate = qwenCandidate &&
+                input.modelFingerprintScope == ImageModelFingerprintScope.COMPLETE_BUNDLE
+            if (!qwenCandidate ||
+                (!completeQwenCandidate &&
+                    persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)
+            ) {
                 return persisted
             }
         }
@@ -1275,6 +1303,21 @@ internal object ImageExecutionProfileResolver {
             inputFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
                 persistedFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
                 pinnedLegacyVaeFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT
+        val inputUsesCompleteBundleIdentity =
+            input.modelFingerprintScope == ImageModelFingerprintScope.COMPLETE_BUNDLE
+        val completeBundleEvidenceAgrees = inputUsesCompleteBundleIdentity &&
+            qwenImage21CompleteBundleEvidenceAgrees(
+                evidence = input.bundleComponentEvidence,
+                bundle = bundle
+            )
+        val inputFingerprintAgrees = if (inputUsesCompleteBundleIdentity) {
+            // The complete digest is computed from the observed files by the integration layer.
+            // The resolver only accepts it when the same observation proves every pinned required
+            // component, so a catalog primary SHA can never be mistaken for the bundle digest.
+            completeBundleEvidenceAgrees && inputFingerprint.matches(Regex("^[0-9a-f]{64}$"))
+        } else {
+            inputFingerprint == pinnedFingerprint || readinessUsesKnownLegacyIdentity
+        }
         if (
             bundle.recommendationId != QWEN_IMAGE_21_RECOMMENDATION_ID ||
             bundle.requiredComponents.isEmpty() ||
@@ -1287,7 +1330,7 @@ internal object ImageExecutionProfileResolver {
                     component.fileName.contains("!/")
             } ||
             contract.modelFingerprint != pinnedFingerprint ||
-            (inputFingerprint != pinnedFingerprint && !readinessUsesKnownLegacyIdentity) ||
+            !inputFingerprintAgrees ||
             (persistedFingerprint != pinnedFingerprint &&
                 (persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT ||
                     pinnedLegacyVaeFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)) ||
@@ -1302,6 +1345,36 @@ internal object ImageExecutionProfileResolver {
         }
         return qwenImage21DirectFileSourceEvidenceAgrees(input, contract, pinnedRepository)
     }
+
+    /**
+     * Validates the actual complete bundle observation against the immutable catalog closure.
+     * Extra files are allowed because optional edit assets may be installed, but every required
+     * path must occur exactly once with the catalog role, size, and SHA-256. This is intentionally
+     * Qwen-specific: no generic complete-bundle shortcut may weaken other model migrations.
+     */
+    private fun qwenImage21CompleteBundleEvidenceAgrees(
+        evidence: List<ImageBundleComponentEvidence>,
+        bundle: ImageEngineBundleSpec
+    ): Boolean {
+        if (evidence.isEmpty()) return false
+        val observedByPath = evidence.groupBy { normalizeBundleComponentPath(it.relativePath) }
+        if (observedByPath.keys.any(String::isBlank)) return false
+        return bundle.requiredComponents.all { expected ->
+            val expectedPath = normalizeBundleComponentPath(expected.relativePath)
+            val candidates = observedByPath[expectedPath].orEmpty()
+            candidates.size == 1 && candidates.single().let { actual ->
+                actual.role.trim().uppercase() == expected.role.name &&
+                    actual.sha256.trim().equals(expected.sha256?.trim(), ignoreCase = true) &&
+                    (expected.expectedSizeBytes == null || actual.sizeBytes == expected.expectedSizeBytes)
+            }
+        }
+    }
+
+    private fun normalizeBundleComponentPath(value: String): String = value
+        .trim()
+        .replace('\\', '/')
+        .trimStart('/')
+        .lowercase()
 
     private fun qwenImage21DirectFileSourceEvidenceAgrees(
         input: ImageExecutionProfileResolverInput,

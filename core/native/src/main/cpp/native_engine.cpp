@@ -1,4 +1,4 @@
-﻿#include <jni.h>
+#include <jni.h>
 #include <android/log.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -138,6 +138,12 @@ std::uint64_t g_model_file_size_bytes = 0;
 bool g_mmap_fallback_allowed = false;
 bool g_mmap_prefetch_enabled = false;
 std::string g_last_error;
+// Warnings are diagnostics, not failures.  Keeping them out of g_last_error matters because
+// `lastError` is a hard failure contract on the Kotlin side: a benign backend note such as
+// "kleidiai: no kernel for tensor type q6_K, not accelerated by KleidiAI" (which upstream
+// llama.cpp deliberately emits while falling back to the regular CPU kernels for K-quants)
+// used to be published as lastError and aborted an otherwise healthy generation.
+std::string g_last_warning;
 std::string g_load_failure_code;
 std::string g_native_lib_dir;
 // Preserve backend registration diagnostics separately from the user-facing
@@ -335,6 +341,7 @@ void set_last_error(const std::string &message) {
 
 void clear_load_failure() {
     g_last_error.clear();
+    g_last_warning.clear();
     g_load_failure_code.clear();
 }
 
@@ -976,7 +983,10 @@ std::string stats_json(const char *backend) {
         << "},"
         << "\"nativeLibDir\":\"" << json_escape(g_native_lib_dir) << "\","
         << "\"loadFailureCode\":\"" << json_escape(g_load_failure_code) << "\","
-        << "\"lastError\":\"" << json_escape(g_last_error) << "\""
+        << "\"lastError\":\"" << json_escape(g_last_error) << "\","
+        // Non-fatal backend diagnostics.  Published separately so they stay visible in evidence
+        // without tripping the `lastError` failure contract.
+        << "\"lastWarning\":\"" << json_escape(g_last_warning) << "\""
         << "}";
     return out.str();
 }
@@ -1918,9 +1928,14 @@ void android_llama_log(ggml_log_level level, const char *text, void *) {
     const int prio = level == GGML_LOG_LEVEL_ERROR ? ANDROID_LOG_ERROR :
                      level == GGML_LOG_LEVEL_WARN ? ANDROID_LOG_WARN : ANDROID_LOG_INFO;
     __android_log_print(prio, "MCA-llama", "%s", text);
-    if (level == GGML_LOG_LEVEL_ERROR || level == GGML_LOG_LEVEL_WARN) {
+    if (text == nullptr) return;
+    if (level == GGML_LOG_LEVEL_ERROR) {
         if (g_last_error.size() < 4096) {
-            g_last_error += text == nullptr ? "" : text;
+            g_last_error += text;
+        }
+    } else if (level == GGML_LOG_LEVEL_WARN) {
+        if (g_last_warning.size() < 4096) {
+            g_last_warning += text;
         }
     }
 }
@@ -3452,6 +3467,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
         return 11;
     }
     g_last_error.clear();
+    g_last_warning.clear();
 
     const std::string fallback_policy = parse_string(params, "fallback_policy",
             requested.n_gpu_layers == -1 ? "allow_cpu" : "require_requested_backend");
@@ -3708,7 +3724,10 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
             if (g_last_error.empty()) {
                 g_last_error = "llama_model_load_from_file returned null. The file may be incomplete, unsupported, or not a chat model GGUF.";
             }
-            set_load_failure_code(load_failure_code_from_llama_error(g_last_error).c_str());
+            // Classify on the full diagnostic stream: a parser/backend failure detail may only
+            // have been logged at WARN level, but it still must not enter the lastError contract.
+            set_load_failure_code(
+                    load_failure_code_from_llama_error(g_last_error + g_last_warning).c_str());
             return 1;
         }
 
@@ -3723,7 +3742,8 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel(
             retried_auto_gpu_on_cpu = true;
             continue;
         }
-        const std::string failure_code = load_failure_code_from_llama_error(g_last_error);
+        const std::string failure_code =
+                load_failure_code_from_llama_error(g_last_error + g_last_warning);
         set_load_failure_code(
                 failure_code == "MCA_LOAD_OUT_OF_MEMORY"
                 ? "MCA_LOAD_OUT_OF_MEMORY"
@@ -3947,6 +3967,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion(
             return COMPLETION_STOPPED;
         }
         g_last_error.clear();
+        g_last_warning.clear();
         g_prompt_tokens = 0;
         g_prefill_computed_tokens = 0;
         g_completion_tokens = 0;

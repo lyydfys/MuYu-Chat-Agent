@@ -183,9 +183,20 @@ internal fun LocalImageModelRecord.imageCapabilitiesForUi(): LocalImageUiCapabil
         1,
         ImageGenerationBatchLineage.MAX_BATCH_COUNT
     )
-    val executionDefaults = resolution
-        ?.let(::executionDefaultsFromResolutionForUi)
-        ?: legacyExecutionDefaultsForUi()
+    // A fixed UltraFix tile is only meaningful when this same snapshot advertises UltraFix
+    // support.  The unresolved-profile ("legacy") defaults read `ultraFixRequiredTileSize` out
+    // of the installed manifest JSON while `supportsUltraFix` above is derived separately, so a
+    // package can declare a required tile while the legacy flag disagrees.  That combination is
+    // a hard contract in `ChatModelChoice`, which is constructed during Compose recomposition --
+    // so an incoherent pair used to abort the whole UI with
+    // "A model without UltraFix support cannot publish a fixed UltraFix graph tile."
+    // Normalising here keeps every consumer of this snapshot self-consistent.
+    val executionDefaults = (
+        resolution?.let(::executionDefaultsFromResolutionForUi)
+            ?: legacyExecutionDefaultsForUi()
+        ).let { defaults ->
+        if (supportsUltraFix) defaults else defaults.copy(ultraFixRequiredTileSize = 0)
+    }
     return LocalImageUiCapabilitiesSnapshot(
         supportedTaskModes = supportedTaskModes,
         isQwenImage21Gguf = resolution?.profile?.profileId == "sdcpp.qwen-image-2.1",

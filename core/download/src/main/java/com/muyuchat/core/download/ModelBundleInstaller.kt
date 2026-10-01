@@ -7,6 +7,7 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -72,7 +73,8 @@ data class ModelBundleComponentAudit(
     val sourceSizeBytes: Long? = null,
     val sourceSha256: String? = null,
     val sourceMetadataStatus: ImageEngineIntegrityMetadataStatus,
-    val transformed: Boolean = false
+    val transformed: Boolean = false,
+    val sourceIdentity: String? = null
 )
 
 enum class ModelBundleComponentVerificationStatus {
@@ -145,6 +147,17 @@ class ModelBundleInstaller(
         components: List<RemoteModelFile>,
         stagedTransformer: ModelBundleStagedTransformer? = null,
         onProgress: (DownloadTaskSnapshot) -> Unit = {}
+    ): ModelBundleInstallResult = installLocks.computeIfAbsent(bundleRoot.canonicalPath) {
+        kotlinx.coroutines.sync.Mutex()
+    }.withLock {
+        installLocked(bundleRoot, components, stagedTransformer, onProgress)
+    }
+
+    private suspend fun installLocked(
+        bundleRoot: File,
+        components: List<RemoteModelFile>,
+        stagedTransformer: ModelBundleStagedTransformer? = null,
+        onProgress: (DownloadTaskSnapshot) -> Unit = {}
     ): ModelBundleInstallResult {
         currentCoroutineContext().ensureActive()
         val plan = plan(bundleRoot, components)
@@ -199,6 +212,7 @@ class ModelBundleInstaller(
             }
             currentCoroutineContext().ensureActive()
             requireDownloadedFile(target)
+            recordStagedReceipt(target)
         }
 
         currentCoroutineContext().ensureActive()
@@ -258,6 +272,11 @@ class ModelBundleInstaller(
             val file = target.finalFile
             if (!file.isFile || file.length() <= 0L) return null
             val record = verification.audit
+            if (record.sourceIdentity != target.remote.sourceIdentity()) {
+                // Legacy audits without provenance may be reused only if immutable source bytes match.
+                val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256) ?: return null
+                if (record.transformed || !record.observedSha256.equals(expectedSha, ignoreCase = true)) return null
+            }
             // Derived files (for example a text-only config) intentionally no
             // longer match the publisher artifact.  Untouched files must
             // still match the catalog's immutable size/SHA declaration.
@@ -439,7 +458,30 @@ class ModelBundleInstaller(
         if (expectedLength != null && expectedLength > 0L && file.length() != expectedLength) return null
         val digest = cancellableSha256(file)
         val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256)
-        return if (expectedSha == null || digest.equals(expectedSha, ignoreCase = true)) digest else null
+        if (expectedSha != null) return digest.takeIf { it.equals(expectedSha, ignoreCase = true) }
+        val receipt = runCatching { JSONObject(stagedReceiptFile(target).readText()) }.getOrNull() ?: return null
+        return digest.takeIf {
+            receipt.optString("sourceIdentity") == target.remote.sourceIdentity() &&
+                receipt.optLong("sizeBytes", -1L) == file.length() &&
+                receipt.optString("sha256").equals(digest, ignoreCase = true)
+        }
+    }
+
+    private fun stagedReceiptFile(target: ModelBundleDownloadTarget): File =
+        File(target.tempFile.parentFile, target.tempFile.name + ".completed.json")
+
+    private suspend fun recordStagedReceipt(target: ModelBundleDownloadTarget) {
+        val digest = cancellableSha256(target.stagedFile)
+        val expectedSha = normalizedRemoteSha256OrNull(target.remote.sha256)
+        require(expectedSha == null || digest.equals(expectedSha, ignoreCase = true)) {
+            "Downloaded bundle component has an unexpected SHA-256: "+target.relativePath
+        }
+        val receipt = stagedReceiptFile(target)
+        val pending = File(receipt.parentFile, receipt.name + ".writing")
+        pending.writeText(JSONObject().put("sourceIdentity", target.remote.sourceIdentity())
+            .put("sizeBytes", target.stagedFile.length()).put("sha256", digest).toString())
+        java.nio.file.Files.move(pending.toPath(), receipt.toPath(),
+            java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
     }
 
     private fun requireDownloadedFile(target: ModelBundleDownloadTarget) {
@@ -520,7 +562,8 @@ class ModelBundleInstaller(
             } else {
                 target.remote.integrityMetadataStatus
             },
-            transformed = transformed
+            transformed = transformed,
+            sourceIdentity = target.remote.sourceIdentity()
         )
     }
 
@@ -537,6 +580,7 @@ class ModelBundleInstaller(
                     .put("sourceSha256", audit.sourceSha256 ?: JSONObject.NULL)
                     .put("sourceMetadataStatus", audit.sourceMetadataStatus.name)
                     .put("transformed", audit.transformed)
+                    .put("sourceIdentity", audit.sourceIdentity ?: JSONObject.NULL)
             )
         }
         auditFile.writeText(
@@ -571,7 +615,8 @@ class ModelBundleInstaller(
                         sourceMetadataStatus = component.optString("sourceMetadataStatus")
                             .let { value -> ImageEngineIntegrityMetadataStatus.entries.firstOrNull { it.name == value } }
                             ?: ImageEngineIntegrityMetadataStatus.UNKNOWN,
-                        transformed = component.optBoolean("transformed", false)
+                        transformed = component.optBoolean("transformed", false),
+                        sourceIdentity = component.optString("sourceIdentity").takeIf { it.matches(SHA256_HEX) }
                     )
                 )
             }
@@ -670,6 +715,7 @@ class ModelBundleInstaller(
     }
 
     companion object {
+        private val installLocks = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.sync.Mutex>()
         const val AUDIT_FILE_NAME = ".mca-component-audit.json"
         const val AUDIT_SCHEMA = "mca.model_bundle.audit.v1"
         private val WINDOWS_DRIVE_PREFIX = Regex("^[A-Za-z]:($|/)")

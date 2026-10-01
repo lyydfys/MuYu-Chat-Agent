@@ -1,29 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application>
         <activity
-            android:name=".debug.LocalImageSmokeActivity"
-            android:exported="true"
-            android:theme="@style/Theme.MuYuChatAgent" />
-        <activity
-            android:name=".debug.LocalChatSmokeActivity"
-            android:exported="true"
-            android:theme="@style/Theme.MuYuChatAgent" />
-        <activity
-            android:name=".debug.LlamaGpuBenchActivity"
-            android:exported="true"
-            android:theme="@style/Theme.MuYuChatAgent" />
-        <activity
-            android:name=".debug.QairtDryRunSmokeActivity"
-            android:exported="true"
-            android:process=":qairt_smoke"
-            android:theme="@style/Theme.MuYuChatAgent" />
-        <activity
-            android:name=".debug.QairtDryRunWorkerSmokeActivity"
-            android:exported="true"
-            android:theme="@style/Theme.MuYuChatAgent" />
-        <activity
-            android:name=".debug.LocalImageStoreSmokeActivity"
+            android:name=".QwenImage21QnnSmokeActivity"
             android:exported="true"
             android:theme="@style/Theme.MuYuChatAgent" />
     </application>

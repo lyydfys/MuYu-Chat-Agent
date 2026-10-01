@@ -21,6 +21,23 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
+/** DiT backend selection for Qwen-Image-2.1. Text encoder and VAE remain on CPU. */
+internal enum class QwenImage21Backend(
+    val wireName: String,
+    val useGpu: Boolean,
+    val nativeAuditName: String
+) {
+    CPU("CPU", false, "MNN_CPU"),
+    OPENCL("OPENCL", true, "MNN_OPENCL"),
+    QNN("QNN", true, "MNN_QNN");
+
+    companion object {
+        fun fromWire(value: String?, useGpu: Boolean): QwenImage21Backend =
+            entries.firstOrNull { it.wireName.equals(value?.trim(), ignoreCase = true) }
+                ?: if (useGpu) OPENCL else CPU
+    }
+}
+
 /** Main-process bridge for the disposable Qwen runtime service. */
 internal class QwenImage21WorkerClient(context: Context) {
     private val appContext = context.applicationContext
@@ -40,6 +57,8 @@ internal class QwenImage21WorkerClient(context: Context) {
         bundleRoot: String,
         useGpu: Boolean,
         threads: Int,
+        backend: QwenImage21Backend = QwenImage21Backend.fromWire(null, useGpu),
+        qnnRuntimePath: String? = null,
         bundleFingerprint: String? = null,
         requestId: String = UUID.randomUUID().toString(),
         onProgress: (QwenImage21WorkerProgress) -> Unit = {}
@@ -49,6 +68,8 @@ internal class QwenImage21WorkerClient(context: Context) {
             .put("bundleRoot", bundleRoot)
             .put("bundleFingerprint", bundleFingerprint.orEmpty())
             .put("useGpu", useGpu)
+            .put("backend", backend.wireName)
+            .put("qnnRuntimePath", qnnRuntimePath.orEmpty())
             .put("threads", threads.coerceIn(1, 16))
         val result = invokeAsync(
             requestId = requestId,
@@ -71,6 +92,8 @@ internal class QwenImage21WorkerClient(context: Context) {
         seed: Int,
         threads: Int,
         useGpu: Boolean,
+        backend: QwenImage21Backend = QwenImage21Backend.fromWire(null, useGpu),
+        qnnRuntimePath: String? = null,
         onProgress: (Int) -> Unit = {},
         negativePrompt: String = "",
         bundleFingerprint: String? = null
@@ -90,6 +113,8 @@ internal class QwenImage21WorkerClient(context: Context) {
             .put("seed", seed)
             .put("threads", threads.coerceIn(1, 16))
             .put("useGpu", useGpu)
+            .put("backend", backend.wireName)
+            .put("qnnRuntimePath", qnnRuntimePath.orEmpty())
         val result = invokeAsync(
             requestId = requestId,
             payload = payload,
@@ -173,6 +198,7 @@ internal class QwenImage21WorkerClient(context: Context) {
         progressListener: (QwenImage21WorkerProgress) -> Unit,
         invoke: (IQwenImage21Worker, IQwenImage21WorkerCallback) -> Unit
     ): JSONObject {
+        val requestStartedAtMs = System.currentTimeMillis()
         val service = ensureConnected()
         val result = CompletableDeferred<JSONObject>()
         val callback = object : IQwenImage21WorkerCallback.Stub() {
@@ -232,9 +258,14 @@ internal class QwenImage21WorkerClient(context: Context) {
                 throw QwenImage21WorkerException("Qwen image operation timed out; the isolated runtime is being restarted.", cancelled)
             }
             throw cancelled
+        } catch (error: QwenImage21WorkerDisconnectedException) {
+            disconnectCurrent()
+            val message = withContext(Dispatchers.IO) { readQwenWorkerExitMessage(appContext, requestStartedAtMs) }
+            throw QwenImage21WorkerException(message, error)
         } catch (error: RemoteException) {
             disconnectCurrent()
-            throw QwenImage21WorkerException("Qwen image worker process exited or became unreachable.", error)
+            val message = withContext(Dispatchers.IO) { readQwenWorkerExitMessage(appContext, requestStartedAtMs) }
+            throw QwenImage21WorkerException(message, error)
         } finally {
             synchronized(connectionLock) {
                 if (inFlight === result) {
@@ -348,10 +379,10 @@ internal class QwenImage21WorkerClient(context: Context) {
             if (connection !== expected) return
             remote = null
             remoteBinder = null
-            connected?.completeExceptionally(QwenImage21WorkerException(message))
+            connected?.completeExceptionally(QwenImage21WorkerDisconnectedException(message))
             inFlight.also { inFlight = null; inFlightRequestId = null }
         }
-        pending?.completeExceptionally(QwenImage21WorkerException(message))
+        pending?.completeExceptionally(QwenImage21WorkerDisconnectedException(message))
         disconnectCurrent(expected)
     }
 
@@ -483,4 +514,7 @@ internal open class QwenImage21WorkerException(message: String, cause: Throwable
     IllegalStateException(message, cause)
 
 internal class QwenImage21WorkerRemoteException(val code: String, message: String) :
+    QwenImage21WorkerException(message)
+
+internal class QwenImage21WorkerDisconnectedException(message: String) :
     QwenImage21WorkerException(message)

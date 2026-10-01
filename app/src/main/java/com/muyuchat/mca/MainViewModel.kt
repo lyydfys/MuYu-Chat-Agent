@@ -286,9 +286,24 @@ internal fun requiredLocalImagePromptTransformationMethod(
     !containsChinese -> LocalImagePromptTransformationMethod.DIRECT
     languageCapability == LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL ->
         LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL
-    else -> error(
-        "English-dominant image profiles must reject residual Chinese before selecting an execution method."
-    )
+    else -> LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
+}
+
+internal fun offlineImagePromptTranslationRequest(
+    prompt: String,
+    finalNegativePrompt: String
+): OfflinePromptTranslationRequest {
+    val promptHasHan = prompt.containsHanScript()
+    val negativeHasHan = finalNegativePrompt.containsHanScript()
+    require(promptHasHan || negativeHasHan)
+    return if (promptHasHan) {
+        OfflinePromptTranslationRequest(
+            sourceText = prompt,
+            negativePrompt = finalNegativePrompt.takeIf { negativeHasHan }.orEmpty()
+        )
+    } else {
+        OfflinePromptTranslationRequest(sourceText = finalNegativePrompt)
+    }
 }
 
 data class ChatSessionRecord(
@@ -934,6 +949,8 @@ internal fun resolveLocalImageApiModel(
     imageModels.asSequence().filter { model ->
         val aliases = buildSet {
             add(model.id)
+            addAll(model.aliases)
+            addAll(model.aliases.map { "image:$it" })
             add(model.displayName)
             add(model.fileName)
             model.bundleRoot?.let { root ->
@@ -1145,6 +1162,14 @@ internal fun appendLocalImagePreviewDegradationMessage(
 
 internal const val LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE =
     "图片提示词准备失败，尚未启动图片生成，请重试。"
+internal const val LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE =
+    "image_prompt_translation_cleanup_unconfirmed"
+internal const val LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE =
+    "Hy-MT2 worker 尚未确认退出，翻译未完成；图片生成尚未启动。请等待 worker 完全退出后重试。"
+internal const val LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS =
+    "Hy-MT2 worker 正在安全回收；图片生成尚未启动"
+internal const val LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS =
+    "Hy-MT2 翻译已取消；worker 已释放，图片生成尚未启动"
 
 internal fun localImagePromptPreparationFailureMessage(error: Exception): String =
     when ((error as? LocalImageProductContractException)?.code) {
@@ -1178,6 +1203,8 @@ internal fun localImagePromptPreparationFailureMessage(error: Exception): String
             "翻译结果未通过格式或语义一致性校验，尚未启动图片生成。"
         "image_prompt_translation_failed" ->
             "中文提示词转换失败，尚未启动图片生成。"
+        LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE ->
+            LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
         else -> LOCAL_IMAGE_PROMPT_PREPARATION_FALLBACK_MESSAGE
     }
 
@@ -1746,6 +1773,7 @@ data class MainUiState(
     val offlineTranslationDownloadTotalBytes: Long = 0L,
     val offlineTranslationDownloadProgress: Float? = null,
     val offlineTranslationStatus: String = "未安装",
+    val offlineTranslationInstalled: Boolean = false,
     val pendingChatImageTranslationDraft: com.muyuchat.feature.chat.ChatImageTranslationDraftUi? = null,
     val pendingChatImageActionDraft: com.muyuchat.feature.chat.ChatImageActionDraftUi? = null,
     val contentImportPreview: ContentImportPreview? = null,
@@ -2465,16 +2493,52 @@ class MainViewModel @JvmOverloads constructor(
     /** Optional, independently verified Hy-MT2 bundle. A missing bundle stays an explicit
      * fallback state and never masquerades as a completed translation. */
     @Volatile private var offlinePromptTranslationBundle: VerifiedOfflinePromptTranslationBundle? = null
-    private suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? = withContext(Dispatchers.IO) {
-        offlinePromptTranslationBundle?.let { return@withContext it }
-        val root = File(getApplication<Application>().filesDir, "offline-prompt-translation")
-        if (!File(root, OfflinePromptTranslationContract.TRANSLATION_DIRECTORY).isDirectory) {
-            null
+    private val offlineTranslationBundleMutex = Mutex()
+
+    private fun offlineTranslationBundleReadyStatus(bundle: VerifiedOfflinePromptTranslationBundle): String =
+        if (bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2) {
+            "Hy-MT2 已安装；可预览英文译文，英文模型自动翻译"
         } else {
-            runCatching {
-                (OfflinePromptTranslationBundleVerifier.verify(root) as?
-                    OfflinePromptTranslationBundleVerification.Verified)?.bundle
-            }.getOrNull().also { offlinePromptTranslationBundle = it }
+            "翻译包已安装，但当前 runtime 尚未接入该模型；可下载 Hy-MT2。"
+        }
+
+    private suspend fun cacheVerifiedOfflineTranslationBundle(bundle: VerifiedOfflinePromptTranslationBundle) {
+        offlineTranslationBundleMutex.withLock { offlinePromptTranslationBundle = bundle }
+    }
+
+    private suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? = withContext(Dispatchers.IO) {
+        offlineTranslationBundleMutex.withLock {
+            val cached = offlinePromptTranslationBundle
+            if (cached?.matchesVerifiedFiles() == true) return@withLock cached
+            offlinePromptTranslationBundle = null
+            val verification = try {
+                offlineTranslationDownloader.verifyInstalledOrRecoverCompleteDownload()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                OfflinePromptTranslationBundleVerification.Rejected(
+                    OfflinePromptTranslationBundleRejectionCode.ROOT_UNAVAILABLE,
+                    error.message ?: "离线翻译包无法校验或启用"
+                )
+            }
+            val bundle = (verification as? OfflinePromptTranslationBundleVerification.Verified)?.bundle
+            offlinePromptTranslationBundle = bundle
+            _uiState.update { state ->
+                val wasInstalled = cached != null || state.offlineTranslationInstalled
+                state.copy(
+                    offlineTranslationInstalled = bundle?.identity?.translatorFamily == OfflineTranslatorFamily.HY_MT2,
+                    offlineTranslationStatus = when {
+                        bundle != null -> offlineTranslationBundleReadyStatus(bundle)
+                        wasInstalled -> {
+                            val reason = (verification as? OfflinePromptTranslationBundleVerification.Rejected)?.message
+                                ?: "模型文件或清单已丢失"
+                            "Hy-MT2 安装已失效：$reason。请重新导入或下载。"
+                        }
+                        else -> state.offlineTranslationStatus
+                    }
+                )
+            }
+            bundle
         }
     }
     private val offlineTranslationInstaller = OfflinePromptTranslationBundleInstaller(application)
@@ -3375,10 +3439,13 @@ class MainViewModel @JvmOverloads constructor(
         observeManagedDownloads()
         observeManagedImports()
         viewModelScope.launch {
-            if (verifiedOfflineTranslationBundle() != null) {
+            verifiedOfflineTranslationBundle()?.let { bundle ->
                 _uiState.update { state ->
                     if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
-                    else state.copy(offlineTranslationStatus = "Hy-MT2 文件完整性已校验；真实翻译待执行")
+                    else state.copy(
+                        offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
+                        offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle)
+                    )
                 }
             }
         }
@@ -4721,7 +4788,7 @@ class MainViewModel @JvmOverloads constructor(
             .removePrefix(LOCAL_IMAGE_MODEL_CHOICE_PREFIX)
             .takeIf { it != modelChoiceId && it.isNotBlank() }
             ?: return@withContext null
-        val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+        val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             ?: return@withContext null
         if (!model.configured) return@withContext null
 
@@ -5640,7 +5707,7 @@ class MainViewModel @JvmOverloads constructor(
         // execution evidence captured by the failed/previous worker; the profile, tokenizer and
         // language gate must be evaluated again before a new worker is bound.
         val currentModel = originalSnapshot.localModelSnapshot?.let { previous ->
-            _uiState.value.localImageModels.firstOrNull { it.id == previous.id } ?: previous
+            _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(previous.id) } ?: previous
         }
         val retrySnapshot = originalSnapshot.copy(
             localModelSnapshot = currentModel,
@@ -5714,7 +5781,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         val snapshot = when (history.backend) {
             ImageBackend.LOCAL -> {
-                val model = state.localImageModels.firstOrNull { it.id == history.modelId }
+                val model = state.localImageModels.firstOrNull { it.matchesCatalogId(history.modelId) }
                 if (model == null) {
                     _uiState.update {
                         it.copy(statusMessage = "原本地模型已删除；重新导入同一模型后才能按原参数生成。")
@@ -5833,14 +5900,21 @@ class MainViewModel @JvmOverloads constructor(
             finalNegativePrompt = resolvedFinalNegativePrompt,
             useCfg = profile.defaults.useCfg
         )
+        val positiveContainsHan = prompt.containsHanScript()
+        val negativeContainsHan = finalNegativePrompt.value.containsHanScript()
+        val shouldTranslateWithHyMt2 =
+            languageCapability == LocalImageTextEncoderLanguageCapability.ENGLISH_DOMINANT &&
+                (positiveContainsHan || negativeContainsHan)
         // Validate the exact pair the selected CFG topology will encode. In particular, a model
         // default negative prompt discarded by useCfg=false must not reject an otherwise valid
         // positive prompt before native execution begins.
-        requireLocalImagePromptLanguageAdmission(
-            profile = profile,
-            prompt = prompt.trim(),
-            executedNegativePrompt = finalNegativePrompt.value
-        )
+        if (!shouldTranslateWithHyMt2) {
+            requireLocalImagePromptLanguageAdmission(
+                profile = profile,
+                prompt = prompt.trim(),
+                executedNegativePrompt = finalNegativePrompt.value
+            )
+        }
         // The default negative prompt is also native conditioning input. Classify the exact
         // final pair so any admitted non-ASCII native input cannot be recorded as DIRECT.
         val requiresNativeMultilingualPromptExecution =
@@ -5881,18 +5955,44 @@ class MainViewModel @JvmOverloads constructor(
             containsChinese = requiresNativeMultilingualPromptExecution,
             languageCapability = languageCapability
         )
+        val translationRequest = if (shouldTranslateWithHyMt2) {
+            runCatching {
+                offlineImagePromptTranslationRequest(
+                    prompt = prompt.trim(),
+                    finalNegativePrompt = finalNegativePrompt.value
+                )
+            }.getOrElse { error ->
+                throw LocalImageProductContractException(
+                    code = "image_prompt_translation_input_too_large",
+                    message = error.message ?: "离线翻译输入无效，尚未启动图片生成。"
+                )
+            }
+        } else {
+            null
+        }
         captured?.let { execution ->
             require(execution.originalPrompt == prompt &&
                 execution.originalNegativePrompt == options.negativePrompt
             ) { "Captured image prompt execution does not match the request." }
             if (execution.promptLanguageBindingFingerprint ==
-                profile.promptLanguageBindingFingerprint && execution.method == requiredMethod
+                profile.promptLanguageBindingFingerprint && execution.method == requiredMethod &&
+                (execution.method != LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN ||
+                    execution.translationPlanSha256 == translationRequest?.fingerprint)
             ) {
-                val rebound = execution.rebindToCurrentImageProfile(
-                    finalNegativePrompt = finalNegativePrompt,
-                    imageProfileBindingFingerprint = profile.bindingFingerprint,
-                    promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint
-                )
+                val rebound = if (execution.method ==
+                    LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
+                ) {
+                    // The request fingerprint already binds the raw effective negative. Keep its
+                    // translated value when replaying; the generic rebinder treats model defaults
+                    // as untransformed native text.
+                    execution.copy(imageProfileBindingFingerprint = profile.bindingFingerprint)
+                } else {
+                    execution.rebindToCurrentImageProfile(
+                        finalNegativePrompt = finalNegativePrompt,
+                        imageProfileBindingFingerprint = profile.bindingFingerprint,
+                        promptLanguageBindingFingerprint = profile.promptLanguageBindingFingerprint
+                    )
+                }
                 val effectiveProfile = effectiveExecutionProfile(rebound.effectiveNegativePrompt)
                 return rebound.copy(
                     imageProfileBindingFingerprint = effectiveProfile.bindingFingerprint,
@@ -5920,7 +6020,162 @@ class MainViewModel @JvmOverloads constructor(
             )
         }
 
-        error("New local image requests cannot enter the legacy V4 LLM prompt translation path.")
+        check(requiredMethod == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN)
+        val request = requireNotNull(translationRequest)
+        fun publishOfflineTranslationStatus(status: String, taskMessage: String) {
+            _uiState.update { state ->
+                val activeJobId = activeImageGenerationJobId
+                state.copy(
+                    offlineTranslationStatus = status,
+                    imageJobs = if (activeJobId.isNullOrBlank()) state.imageJobs else {
+                        state.imageJobs.map { job ->
+                            if (job.id == activeJobId &&
+                                job.status == ImageGenerationStatusRecord.GENERATING
+                            ) job.copy(message = taskMessage) else job
+                        }
+                    },
+                    statusMessage = taskMessage
+                )
+            }
+        }
+        publishOfflineTranslationStatus(
+            status = "Hy-MT2 正在真实翻译中文提示词",
+            taskMessage = "正在使用 Hy-MT2 将中文提示词翻译为英文；图片生成尚未开始。"
+        )
+        val translationResolution = try {
+            offlinePromptTranslationService.translate(
+                verifiedOfflineTranslationBundle(),
+                request
+            )
+        } catch (error: OfflinePromptTranslationCleanupException) {
+            publishOfflineTranslationStatus(
+                status = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS,
+                taskMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
+            )
+            throw LocalImageProductContractException(
+                code = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE,
+                message = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
+            )
+        } catch (error: CancellationException) {
+            publishOfflineTranslationStatus(
+                status = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS,
+                taskMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS
+            )
+            throw error
+        }
+        val translation = when (val resolution = translationResolution) {
+            is OfflinePromptTranslationResolution.Translated -> resolution
+            is OfflinePromptTranslationResolution.Fallback -> {
+                val failureCode = when (resolution.reason) {
+                    OfflinePromptTranslationFallbackReason.RUNTIME_BUSY ->
+                        "image_prompt_translation_busy"
+                    OfflinePromptTranslationFallbackReason.TIMEOUT ->
+                        "image_prompt_translation_timeout"
+                    OfflinePromptTranslationFallbackReason.INVALID_OUTPUT,
+                    OfflinePromptTranslationFallbackReason.PROTECTED_SYNTAX_LOST ->
+                        "image_prompt_translation_invalid"
+                    OfflinePromptTranslationFallbackReason.BUNDLE_UNAVAILABLE,
+                    OfflinePromptTranslationFallbackReason.NATIVE_LIBRARY_NOT_PACKAGED,
+                    OfflinePromptTranslationFallbackReason.NATIVE_RUNTIME_NOT_INITIALIZED,
+                    OfflinePromptTranslationFallbackReason.NATIVE_RUNTIME_UNSUPPORTED ->
+                        "image_prompt_translation_unavailable"
+                    OfflinePromptTranslationFallbackReason.RUNTIME_FAILED ->
+                        "image_prompt_translation_failed"
+                }
+                val failureMessage = "Hy-MT2 离线翻译未能完成（${resolution.reason.name}），原始提示词已保留，" +
+                    "尚未启动图片生成。请检查翻译模型后重试。"
+                publishOfflineTranslationStatus(
+                    status = "Hy-MT2 翻译失败：${resolution.reason.name}",
+                    taskMessage = failureMessage
+                )
+                throw LocalImageProductContractException(
+                    code = failureCode,
+                    message = failureMessage
+                )
+            }
+        }
+        val effectivePrompt: String
+        val effectiveNegativePrompt: String
+        if (positiveContainsHan) {
+            effectivePrompt = translation.translatedPrompt
+            effectiveNegativePrompt = if (negativeContainsHan) {
+                translation.effectiveNegativePrompt
+            } else {
+                finalNegativePrompt.value
+            }
+        } else {
+            effectivePrompt = prompt.trim()
+            effectiveNegativePrompt = translation.translatedPrompt
+        }
+        requireLocalImagePromptLanguageAdmission(
+            profile = profile,
+            prompt = effectivePrompt,
+            executedNegativePrompt = effectiveNegativePrompt
+        )
+        if (effectivePrompt.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS ||
+            effectiveNegativePrompt.length > LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS
+        ) {
+            throw LocalImageProductContractException(
+                code = "image_prompt_translation_invalid",
+                message = "Hy-MT2 翻译结果超过图片模型长度限制，尚未启动图片生成。"
+            )
+        }
+        val effectiveProfile = effectiveExecutionProfile(effectiveNegativePrompt)
+        val translationProof = imagePromptTranslationProofFingerprint(
+            contractVersion = 5,
+            originalPrompt = prompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = options.negativePrompt,
+            effectiveNegativePrompt = effectiveNegativePrompt,
+            negativePromptSource = finalNegativePrompt.source.name,
+            translationPlanSha256 = translation.result.requestFingerprint,
+            verificationReceiptSha256 = translation.result.bundleFingerprint,
+            translationPhaseSystemPromptSha256 = promptFingerprint(
+                "mca-offline-hy-mt2-translation-phase-v1"
+            ),
+            verificationPhaseSystemPromptSha256 = promptFingerprint(
+                "mca-offline-hy-mt2-output-validation-v1"
+            ),
+            translatorRuntime = "llama.cpp/offline_translation",
+            translatorModelSha256 = HyMt2PromptTranslationContract.MODEL_SHA256,
+            promptLanguageBindingFingerprint = effectiveProfile.promptLanguageBindingFingerprint
+        )
+        val execution = LocalImagePromptExecution(
+            originalPrompt = prompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = options.negativePrompt,
+            effectiveNegativePrompt = effectiveNegativePrompt,
+            negativePromptSource = finalNegativePrompt.source,
+            method = LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN,
+            translationContractVersion = CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION,
+            imageProfileBindingFingerprint = effectiveProfile.bindingFingerprint,
+            promptLanguageBindingFingerprint = effectiveProfile.promptLanguageBindingFingerprint,
+            translatorModelId = HyMt2PromptTranslationContract.SOURCE_ID,
+            translatorModelName = "Hy-MT2 1.8B Q4_K_M",
+            translatorRuntime = "llama.cpp/offline_translation",
+            translatorModelSha256 = HyMt2PromptTranslationContract.MODEL_SHA256,
+            translationPlanSha256 = translation.result.requestFingerprint,
+            verificationReceiptSha256 = translation.result.bundleFingerprint,
+            translationPhaseSystemPromptSha256 = promptFingerprint(
+                "mca-offline-hy-mt2-translation-phase-v1"
+            ),
+            verificationPhaseSystemPromptSha256 = promptFingerprint(
+                "mca-offline-hy-mt2-output-validation-v1"
+            ),
+            translationProofFingerprint = translationProof
+        )
+        val translatedTextForDisplay = if (positiveContainsHan) effectivePrompt else effectiveNegativePrompt
+        val translatedPreview = translatedTextForDisplay
+            .replace('\n', ' ')
+            .replace('\r', ' ')
+            .trim()
+            .take(96)
+        val previewSuffix = if (translatedTextForDisplay.length > 96) "..." else ""
+        publishOfflineTranslationStatus(
+            status = "英文译文：$translatedPreview$previewSuffix",
+            taskMessage = "中文提示词已转换为英文并用于本地生图：$translatedPreview$previewSuffix"
+        )
+        return execution
     }
 
     /** Keeps chat weights unloaded until the local image request has released its worker. */
@@ -6314,6 +6569,26 @@ class MainViewModel @JvmOverloads constructor(
                     currentCoroutineContext().ensureActive()
                     localImageWorkerClient.begin(model.runtime)
                     currentCoroutineContext().ensureActive()
+                    val translationStatusMessage = if (
+                        promptExecution.method in setOf(
+                            LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN,
+                            LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
+                        )
+                    ) {
+                        val (label, translatedText) = if (promptExecution.originalPrompt.containsHanScript()) {
+                            "英文译文" to promptExecution.effectivePrompt
+                        } else {
+                            "负向词英文译文" to promptExecution.effectiveNegativePrompt
+                        }
+                        val preview = translatedText
+                            .replace('\n', ' ')
+                            .replace('\r', ' ')
+                            .trim()
+                            .take(96)
+                        "$label：$preview${if (translatedText.length > 96) "..." else ""}"
+                    } else {
+                        null
+                    }
                     _uiState.update { state ->
                         val currentJob = state.imageJobs.firstOrNull { it.id == jobId }
                         if (currentJob?.status != ImageGenerationStatusRecord.GENERATING) {
@@ -6324,13 +6599,7 @@ class MainViewModel @JvmOverloads constructor(
                                     if (job.id == jobId) {
                                         job.copy(
                                             spec = preparedJobSpec,
-                                            message = if (promptExecution.method ==
-                                                LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN
-                                            ) {
-                                                "中文提示词已转换，正在调用本地图像生成引擎"
-                                            } else {
-                                                job.message
-                                            }
+                                            message = translationStatusMessage ?: job.message
                                         )
                                     } else {
                                         job
@@ -7551,7 +7820,7 @@ class MainViewModel @JvmOverloads constructor(
         invalidatePendingChatImagePreparation()
         viewModelScope.launch(Dispatchers.IO) {
             if (rejectImageModelSwitchWhileGenerationIsActive()) return@launch
-            val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             if (model == null) {
                 _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
                 return@launch
@@ -7569,7 +7838,7 @@ class MainViewModel @JvmOverloads constructor(
             }
             val diagnostic = model.localImageVerificationDiagnosticMessage()
             val runningModelName = activeImageGenerationModelId
-                ?.let { activeId -> _uiState.value.localImageModels.firstOrNull { it.id == activeId } }
+                ?.let { activeId -> _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(activeId) } }
                 ?.displayName
             localImageModelStore.saveSelectedModelId(model.id)
             localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
@@ -7595,7 +7864,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun verifyLocalImageModel(modelId: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val model = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             if (model == null) {
                 _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
                 return@launch
@@ -7917,7 +8186,7 @@ class MainViewModel @JvmOverloads constructor(
         preferred: LocalImageModelRecord
     ): LocalImageSelection {
         val models = localImageModelStore.loadModels()
-        val preferredModel = models.firstOrNull { it.id == preferred.id } ?: preferred
+        val preferredModel = models.firstOrNull { it.matchesCatalogId(preferred.id) } ?: preferred
         val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
         val currentSelectedId = localImageModelStore.loadSelectedModelId()
         val currentBackend = localImageModelStore.loadSelectedBackend()
@@ -7957,7 +8226,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 return@launchModelOperation
             }
-            val removed = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
             val models = localImageModelStore.loadModels()
             val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
@@ -8225,7 +8494,8 @@ class MainViewModel @JvmOverloads constructor(
                     .toList(),
                 reasoningMode = reasoningMode,
                 hideReasoning = reasoningMode == ReasoningMode.OFF
-            ).toAssistantGenerationJson(),
+            ).toAssistantGenerationJson()
+                .withAssistantPromptProvenance(AssistantPromptProvenance.USER_AUTHORED),
             memoryEnabled = memoryEnabled,
             memorySummaryInterval = memorySummaryInterval.coerceIn(2, 100),
             webSearchEnabled = webSearchEnabled,
@@ -9429,7 +9699,7 @@ class MainViewModel @JvmOverloads constructor(
                 _uiState.update { it.copy(statusMessage = "当前图片任务正在使用该模型，请结束后再移除记录。") }
                 return@launchModelOperation
             }
-            val removed = _uiState.value.localImageModels.firstOrNull { it.id == modelId }
+            val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = localImageModelStore.removeModelRecord(modelId)
             val models = localImageModelStore.loadModels()
             val verification = currentQnnImageVerificationByModelId(models)
@@ -9580,7 +9850,7 @@ class MainViewModel @JvmOverloads constructor(
         val assistant = imported.copy(
             id = commitId,
             name = imported.name.ifBlank { "导入助手" }.take(36),
-            systemPrompt = imported.systemPrompt.ifBlank { GenerationParams().systemPrompt },
+            systemPrompt = imported.systemPrompt.ifBlank { characterCardFallbackSystemPrompt(imported.name) },
             createdAt = now,
             updatedAt = now
         )
@@ -10813,6 +11083,8 @@ class MainViewModel @JvmOverloads constructor(
                 downloadTaskId = request.identity,
                 downloadPhase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED,
                 downloadFailureSource = null,
+                downloadedBytes = 0L, downloadTotalBytes = 0L,
+                downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null,
                 downloadFileName = request.remote?.name ?: request.recommendationId,
                 downloadIntegrityStatus = "RUNNING",
                 downloadIntegrityMessage = "等待文件下载完成后校验。",
@@ -10859,7 +11131,10 @@ class MainViewModel @JvmOverloads constructor(
                                 downloadFileName = progress.getString("file") ?: state.downloadFileName,
                                 downloadedBytes = progress.getLong("bytes", 0),
                                 downloadTotalBytes = progress.getLong("total", 0),
-                                downloadSpeedBytesPerSecond = progress.getLong("speed", 0),
+                                downloadSpeedBytesPerSecond = if (active.state == androidx.work.WorkInfo.State.RUNNING) progress.getLong("speed", 0) else 0L,
+                                downloadRemainingSeconds = if (active.state == androidx.work.WorkInfo.State.RUNNING) {
+                                    progress.getLong("remainingSeconds", -1L).takeIf { it >= 0L }
+                                } else null,
                                 statusMessage = progress.getString("message") ?: "下载任务已保留，正在等待网络或其他下载完成…",
                                 downloadIntegrityStatus = progress.getString("integrityStatus") ?: state.downloadIntegrityStatus,
                                 downloadIntegrityMessage = progress.getString("integrityMessage") ?: state.downloadIntegrityMessage,
@@ -10879,7 +11154,7 @@ class MainViewModel @JvmOverloads constructor(
                                 reconcileModelIdentities()
                                 refreshManagedRuntimeReadiness()
                                 val imageId = info.outputData.getString("imageId")
-                                val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.id == id } }
+                                val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.matchesCatalogId(id) } }
                                 if (image != null) {
                                     val selection = settleLocalImageSelection(image)
                                     _uiState.update { it.copy(localImageModels = selection.models,
@@ -12354,8 +12629,13 @@ class MainViewModel @JvmOverloads constructor(
         offlineTranslationInstallJob = viewModelScope.launch {
             _uiState.update { it.copy(offlineTranslationInstalling = true, offlineTranslationStatus = "正在导入并校验 Hy-MT2") }
             try {
-                offlinePromptTranslationBundle = offlineTranslationInstaller.install(uri)
-                _uiState.update { it.copy(offlineTranslationStatus = "Hy-MT2 文件完整性已校验；真实翻译待执行", statusMessage = "离线翻译包已导入。") }
+                val bundle = offlineTranslationInstaller.install(uri)
+                cacheVerifiedOfflineTranslationBundle(bundle)
+                _uiState.update { it.copy(
+                    offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
+                    offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
+                    statusMessage = "离线翻译包已导入。"
+                ) }
             } catch (cancelled: CancellationException) {
                 _uiState.update { it.copy(offlineTranslationStatus = "导入已取消") }
                 throw cancelled
@@ -12371,6 +12651,74 @@ class MainViewModel @JvmOverloads constructor(
         offlineTranslationInstallJob?.cancel()
     }
 
+    suspend fun translateImagePromptPreview(prompt: String): String =
+        translateImagePromptTextPreview(prompt, "正向提示词")
+
+    suspend fun translateImageNegativePromptPreview(prompt: String): String =
+        translateImagePromptTextPreview(prompt, "负面提示词")
+
+    private suspend fun translateImagePromptTextPreview(prompt: String, fieldLabel: String): String = withContext(Dispatchers.IO) {
+        val source = prompt.trim()
+        require(source.isNotBlank()) { "请先输入图片提示词。" }
+        require(source.containsHanScript()) { "当前提示词没有中文内容。" }
+        require(source.length <= OfflinePromptTranslationContract.MAX_SOURCE_TEXT_CHARS) {
+            "提示词超过离线翻译长度限制，请精简后重试。"
+        }
+        val request = try {
+            offlineImagePromptTranslationRequest(prompt = source, finalNegativePrompt = "")
+        } catch (error: IllegalArgumentException) {
+            throw IllegalArgumentException("提示词格式不受支持，请检查内容后重试。", error)
+        }
+        _uiState.update {
+            it.copy(offlineTranslationStatus = "Hy-MT2 正在翻译$fieldLabel")
+        }
+        val translationResolution = try {
+            offlinePromptTranslationService.translate(
+                verifiedOfflineTranslationBundle(),
+                request
+            )
+        } catch (error: OfflinePromptTranslationCleanupException) {
+            _uiState.update {
+                it.copy(
+                    offlineTranslationStatus = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS,
+                    statusMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
+                )
+            }
+            throw IllegalStateException(LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE, error)
+        } catch (error: CancellationException) {
+            _uiState.update {
+                it.copy(
+                    offlineTranslationStatus = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS,
+                    statusMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS
+                )
+            }
+            throw error
+        }
+        when (val resolution = translationResolution) {
+            is OfflinePromptTranslationResolution.Translated -> {
+                val translated = resolution.translatedPrompt
+                val preview = translated.replace('\n', ' ').replace('\r', ' ').trim().take(96)
+                _uiState.update {
+                    it.copy(
+                        offlineTranslationStatus = "$fieldLabel 英文译文：$preview${if (translated.length > 96) "..." else ""}",
+                        statusMessage = "Hy-MT2 已完成$fieldLabel 离线翻译；英文草稿已生成，可编辑并确认使用。"
+                    )
+                }
+                translated
+            }
+            is OfflinePromptTranslationResolution.Fallback -> {
+                val failureMessage = "Hy-MT2 翻译失败：${resolution.message}；原始提示词已保留。"
+                _uiState.update {
+                    it.copy(
+                        offlineTranslationStatus = failureMessage,
+                        statusMessage = failureMessage
+                    )
+                }
+                throw IllegalStateException(failureMessage)
+            }
+        }
+    }
+
     fun downloadOfflinePromptTranslationBundle() {
         if (offlineTranslationDownloadJob?.isActive == true || offlineTranslationInstallJob?.isActive == true) return
         offlineTranslationDownloadJob = viewModelScope.launch {
@@ -12382,7 +12730,7 @@ class MainViewModel @JvmOverloads constructor(
                 offlineTranslationStatus = "正在准备下载 Hy-MT2"
             ) }
             try {
-                offlinePromptTranslationBundle = offlineTranslationDownloader.download { progress ->
+                val bundle = offlineTranslationDownloader.download { progress ->
                     _uiState.update { state -> state.copy(
                         offlineTranslationDownloadBytes = progress.downloadedBytes,
                         offlineTranslationDownloadTotalBytes = progress.totalBytes,
@@ -12392,8 +12740,10 @@ class MainViewModel @JvmOverloads constructor(
                             ?: "正在下载并校验 Hy-MT2：${progress.downloadedBytes / 1_000_000} / ${progress.totalBytes / 1_000_000} MB"
                     ) }
                 }
+                cacheVerifiedOfflineTranslationBundle(bundle)
                 _uiState.update { it.copy(
-                    offlineTranslationStatus = "Hy-MT2 文件完整性已校验；真实翻译待执行",
+                    offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
+                    offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
                     statusMessage = "Hy-MT2 已下载并安装。"
                 ) }
             } catch (cancelled: CancellationException) {
@@ -15443,6 +15793,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun stopGeneration() {
+        if (rejectWhileConversationMutationInProgress()) return
         // Regeneration reserves the UI turn before its Room/KV mutation finishes.
         // Stop must invalidate that reservation even while the mutation barrier
         // is active; its eventual onCommitted callback cannot reactivate it.
@@ -15964,6 +16315,8 @@ class MainViewModel @JvmOverloads constructor(
      * reload so returning to the UI cannot create a surprise memory spike.
      */
     fun onAppForegrounded() {
+        // A file removed or replaced while backgrounded must restore the download action.
+        viewModelScope.launch { verifiedOfflineTranslationBundle() }
         uiGenerationOwnership.foreground()
         _uiState.update { state ->
             if (state.statusMessage != BACKGROUND_TASK_STATUS) {
@@ -18391,7 +18744,11 @@ class MainViewModel @JvmOverloads constructor(
                     chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)
                 }.onSuccess {
                     val persisted = reconciledChatSessionsAfterSave(snapshot)
-                    durableChatSessions = persisted
+                    if (persisted == snapshot) {
+                        durableChatSessions = snapshot
+                    } else {
+                        durableChatSessions = persisted
+                    }
                     publishReconciledChatSessions(snapshot, persisted)
                     if (!sessionCachesCleared) {
                         _uiState.update {
@@ -19971,7 +20328,8 @@ class MainViewModel @JvmOverloads constructor(
         return state.assistants.map { assistant ->
             if (assistant.id == selectedId) {
                 assistant.copy(
-                    paramsJson = params.toAssistantGenerationJson(),
+                    paramsJson = params.toAssistantGenerationJson()
+                        .withAssistantPromptProvenance(assistant.systemPromptProvenance),
                     updatedAt = System.currentTimeMillis()
                 )
             } else {
@@ -21178,6 +21536,14 @@ class MainViewModel @JvmOverloads constructor(
         val gpuExecutionObserved = statsRoot.optBoolean("gpuOffloadExecutionObserved", false)
         val verifiedGpuExecution = statsRoot.optBoolean("gpuOffloadActive", false) &&
             gpuAllocationObserved && gpuExecutionObserved
+        val executionEvidence = statsRoot.optJSONObject("executionEvidence")
+        val npuExecutionObserved = statsRoot.optBoolean("npuExecutionProven", false) ||
+            statsRoot.optBoolean("provesNpuExecution", false) ||
+            executionEvidence?.optBoolean("npuExecutionProven", false) == true ||
+            executionEvidence?.optBoolean("qnnGraphExecution", false) == true
+        val npuSupported = statsRoot.optJSONObject("backendCapabilities")
+            ?.takeIf { it.has("npuSupported") }
+            ?.optBoolean("npuSupported")
         val stats = RuntimeStats(
             loaded = statsRoot.optBoolean("loaded"),
             backend = statsRoot.optString("backend")
@@ -21185,6 +21551,20 @@ class MainViewModel @JvmOverloads constructor(
                 .let { backend ->
                     if (!verifiedGpuExecution && backend == "llama.cpp-gpu") "llama.cpp-cpu" else backend
                 },
+            requestedBackend = statsRoot.optString("requestedBackend")
+                .ifBlank { statsRoot.optString("selectedBackend") }
+                .takeIf(String::isNotBlank),
+            actualBackend = statsRoot.optString("actualBackend")
+                .takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) },
+            backendExecutionObserved = executionEvidence?.optBoolean("available", false) == true ||
+                npuExecutionObserved,
+            backendExecutionEvidence = listOf(
+                executionEvidence?.optString("source"),
+                statsRoot.optString("executionEvidenceSource"),
+                statsRoot.optString("backendExecutionProof")
+            ).firstOrNull { it?.isNotBlank() == true },
+            npuExecutionObserved = npuExecutionObserved,
+            npuSupported = npuSupported,
             loadMs = statsRoot.optLong("loadMs").coerceAtLeast(0L),
             promptTokens = statsRoot.optInt("promptTokens").coerceAtLeast(0),
             completionTokens = statsRoot.optInt("completionTokens").coerceAtLeast(0),
@@ -22126,11 +22506,51 @@ internal fun downloadedImageBundleManifestJson(
     bundle.executionProfile?.let {
         val primaryFile = primary?.second?.takeIf(File::isFile)
             ?: error("Image execution profile requires a concrete downloaded primary model file.")
-        val fingerprint = primarySha256
-            ?.trim()
-            ?.lowercase()
-            ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
-            ?: primaryFile.sha256ForProfile()
+
+        // For a multi-file bundle the execution profile must bind to the complete
+        // observed package.  The primary SHA is still useful for transfer
+        // integrity, but it is not a sufficient profile identity because VAE,
+        // tokenizer, text encoder, context and manifest changes can alter native
+        // execution.  Build the identity against the final manifest contract with
+        // a provisional fingerprint; captureLocalImageContentSnapshot removes the
+        // self-referential modelFingerprint field from that contract.
+        val provisionalFingerprint = "0".repeat(64)
+        val provisionalProfile = requireNotNull(
+            materializeDownloadedImageExecutionProfile(bundle, provisionalFingerprint)
+        ).resolveDownloadedExecutionGraphPaths(targets).let { profile ->
+            bundleRoot?.let { root ->
+                profile.withDownloadedTextualInversionConsumerPins(
+                    bundleRoot = root,
+                    primaryModel = primaryFile
+                )
+            } ?: profile
+        }
+        manifest.put("executionProfile", ImageExecutionProfileJson.toJson(provisionalProfile))
+        val fingerprint = if (bundleRoot != null) {
+            val observedRecord = LocalImageModelRecord(
+                displayName = displayName,
+                path = primaryFile.absolutePath,
+                fileName = primaryFile.name,
+                sizeBytes = primaryFile.length(),
+                sha256 = primarySha256.orEmpty(),
+                runtime = bundle.runtime.toLocalImageRuntime(),
+                family = LocalImageModelFamily.from(family),
+                imageSize = "${bundle.smokeSpec.width}x${bundle.smokeSpec.height}",
+                source = "download",
+                bundleRoot = bundleRoot.canonicalPath,
+                recommendationId = bundle.recommendationId
+            )
+            captureLocalImageContentSnapshot(
+                observedRecord,
+                manifestOverride = manifest
+            ).fingerprint
+        } else {
+            primarySha256
+                ?.trim()
+                ?.lowercase()
+                ?.takeIf { it.matches(Regex("^[0-9a-f]{64}$")) }
+                ?: primaryFile.sha256ForProfile()
+        }
         val resolvedProfile = requireNotNull(
             materializeDownloadedImageExecutionProfile(bundle, fingerprint)
         ).resolveDownloadedExecutionGraphPaths(targets)

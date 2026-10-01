@@ -304,12 +304,15 @@ class ImageExecutionProfileResolverTest {
     fun `local model source restores recommendation profile even when imported family is custom`() {
         val root = Files.createTempDirectory("image-profile-source-identity").toFile()
         try {
+            val modelContents = "sd-turbo-fixture"
+            val modelFile = root.resolve("sd_turbo.safetensors")
+            modelFile.writeText(modelContents)
             val model = LocalImageModelRecord(
                 displayName = "Stable Diffusion Turbo",
-                path = root.resolve("sd_turbo.safetensors").absolutePath,
+                path = modelFile.absolutePath,
                 fileName = "sd_turbo.safetensors",
-                sizeBytes = 1L,
-                sha256 = FINGERPRINT,
+                sizeBytes = modelFile.length(),
+                sha256 = modelContents.sha256TestFingerprint(),
                 runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
                 family = LocalImageModelFamily.CUSTOM,
                 source = "modelscope:AI-ModelScope/sd-turbo",
@@ -1619,6 +1622,110 @@ class ImageExecutionProfileResolverTest {
             )
         ) }
         assertNotMigrated(archiveSource)
+    }
+
+    @Test
+    fun `Qwen Image 2_1 migrates a complete bundle fingerprint only with matching component evidence`() {
+        val model = ModelScopeClient().recommendedModels()
+            .single { it.id == "qwen_image_21_mnn_opencl" }
+        val bundle = requireNotNull(model.imageEngineBundle)
+        val primary = bundle.requiredComponents.single { component ->
+            component.role == ImageEngineBundleComponentRole.DIFFUSION &&
+                component.fileName.equals("dit.mnn", ignoreCase = true)
+        }
+        val primaryFingerprint = requireNotNull(primary.sha256)
+        val current = requireNotNull(materializeDownloadedImageExecutionProfile(bundle, primaryFingerprint))
+        val persisted = current.copy(
+            profileRevision = 1,
+            modelFingerprint = primaryFingerprint,
+            scheduler = current.scheduler.copy(minSteps = 1)
+        )
+        val completeFingerprint = "ab".repeat(32)
+        val evidence = bundle.requiredComponents.map { component ->
+            ImageBundleComponentEvidence(
+                relativePath = component.relativePath,
+                role = component.role.name,
+                sha256 = component.sha256!!,
+                sizeBytes = component.expectedSizeBytes!!
+            )
+        }
+        val directEvidence = qwenDirectFileRecommendationEvidence(model.id)
+        fun assertNotMigratedComplete(result: Result<ImageExecutionProfileResolution>) {
+            val actual = result.getOrNull()?.profile
+            if (actual != null) {
+                assertEquals(1, actual.profileRevision)
+                assertEquals(1, actual.scheduler.minSteps)
+            } else {
+                val failure = result.exceptionOrNull()
+                assertTrue(failure is ImageProfileResolutionException)
+                assertTrue((failure as ImageProfileResolutionException).validation.issues.any { issue ->
+                    issue.code == "MODEL_FINGERPRINT_MISMATCH"
+                })
+            }
+        }
+
+        val migrated = ImageExecutionProfileResolver.resolve(
+            input(
+                recommendationId = model.id,
+                fingerprint = completeFingerprint,
+                runtime = LocalImageRuntime.MNN_DIFFUSION,
+                family = LocalImageModelFamily.QWEN_IMAGE,
+                manifestProfile = persisted,
+                recommendationEvidence = directEvidence
+            ).copy(
+                // A complete bundle migration is still pinned to the catalog revision. The
+                // shared test input defaults to a synthetic revision for generic profiles;
+                // use the real Qwen revision here so this test exercises component evidence
+                // rather than failing the independent revision guard.
+                recommendationRevision = model.revision,
+                modelFingerprintScope = ImageModelFingerprintScope.COMPLETE_BUNDLE,
+                bundleComponentEvidence = evidence
+            )
+        ).profile
+
+        assertEquals(2, migrated.profileRevision)
+        assertEquals(completeFingerprint, migrated.modelFingerprint)
+        assertEquals(model.id, migrated.provenance.recommendationId)
+
+        val missingComponent = evidence.dropLast(1)
+        val missingResult = runCatching {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = model.id,
+                    fingerprint = completeFingerprint,
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.QWEN_IMAGE,
+                    manifestProfile = persisted,
+                    recommendationEvidence = directEvidence
+                ).copy(
+                    recommendationRevision = model.revision,
+                    modelFingerprintScope = ImageModelFingerprintScope.COMPLETE_BUNDLE,
+                    bundleComponentEvidence = missingComponent
+                )
+            )
+        }
+        assertNotMigratedComplete(missingResult)
+
+        val wrongComponentSha = evidence.mapIndexed { index, component ->
+            if (index == 0) component.copy(sha256 = "00".repeat(32)) else component
+        }
+        val wrongShaResult = runCatching {
+            ImageExecutionProfileResolver.resolve(
+                input(
+                    recommendationId = model.id,
+                    fingerprint = completeFingerprint,
+                    runtime = LocalImageRuntime.MNN_DIFFUSION,
+                    family = LocalImageModelFamily.QWEN_IMAGE,
+                    manifestProfile = persisted,
+                    recommendationEvidence = directEvidence
+                ).copy(
+                    recommendationRevision = model.revision,
+                    modelFingerprintScope = ImageModelFingerprintScope.COMPLETE_BUNDLE,
+                    bundleComponentEvidence = wrongComponentSha
+                )
+            )
+        }
+        assertNotMigratedComplete(wrongShaResult)
     }
 
     @Test

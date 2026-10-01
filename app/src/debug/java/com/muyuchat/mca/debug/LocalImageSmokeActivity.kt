@@ -22,6 +22,8 @@ import com.muyuchat.mca.LocalImageWorkerClient
 import com.muyuchat.mca.ImagePixelRange
 import com.muyuchat.mca.QnnExecutionDiagnostics
 import com.muyuchat.mca.QnnSmokeSpec
+import com.muyuchat.mca.QwenImage21Backend
+import com.muyuchat.mca.QwenImage21WorkerClient
 import com.muyuchat.mca.hasCurrentQnnVerificationStamp
 import com.muyuchat.mca.qnnContextSocCompatibilityMessage
 import com.muyuchat.mca.qnnGraphSmokeSpecForHarness
@@ -414,6 +416,21 @@ class LocalImageSmokeActivity : Activity() {
                     mainLeaseHeld = mainLeaseHeld,
                     workerWaitedForNativeLease = workerWaitedForNativeLease,
                     verificationEvidence = verificationEvidence,
+                    write = ::write
+                )
+                return
+            }
+
+            // Direct Qwen QNN worker smoke is intentionally debug-only. It exercises the
+            // same isolated service used by the product while bypassing the older profile
+            // resolver, so a real QNN bundle can be validated before product admission is
+            // widened. The normal OpenCL/CPU branches above remain unchanged.
+            if (intent.getBooleanExtra("qwenWorkerDirect", false)) {
+                require(isQnnHtp) { "qwenWorkerDirect requires runtime=qnn" }
+                runQwenWorkerDirect(
+                    bundleRoot = bundleRoot.ifBlank { File(modelPath).parent.orEmpty() },
+                    requestJson = requestJson,
+                    outputFile = outputFile,
                     write = ::write
                 )
                 return
@@ -904,6 +921,108 @@ class LocalImageSmokeActivity : Activity() {
                 .put("result", result)
         )
         return result
+    }
+
+    private fun runQwenWorkerDirect(
+        bundleRoot: String,
+        requestJson: JSONObject,
+        outputFile: File,
+        write: (JSONObject) -> Unit
+    ) {
+        val root = File(bundleRoot).canonicalFile
+        require(root.isDirectory) { "Qwen bundle directory is missing: ${root.absolutePath}" }
+        val runtimePath = intent.getStringExtra("qnnRuntimePath").orEmpty().trim()
+        require(runtimePath.isNotBlank()) { "qnnRuntimePath is required for direct Qwen QNN smoke" }
+        val fingerprint = root.walkTopDown().filter(File::isFile).sumOf { it.length() }.toString()
+        val client = QwenImage21WorkerClient(applicationContext)
+        val prompt = requestJson.optString("prompt")
+        val width = requestJson.optInt("width", 320)
+        val height = requestJson.optInt("height", 320)
+        val steps = requestJson.optInt("steps", 2)
+        val seed = requestJson.optInt("seed", 1729)
+        val threads = requestJson.optInt("threads", 2)
+        try {
+            write(
+                JSONObject()
+                    .put("status", "qwen_worker_qnn_loading")
+                    .put("runtime", "qnn_htp")
+                    .put("bundleRoot", root.absolutePath)
+                    .put("runtimePath", runtimePath)
+                    .put("request", requestJson)
+            )
+            val loaded = runBlocking {
+                client.load(
+                    bundleRoot = root.absolutePath,
+                    useGpu = true,
+                    backend = QwenImage21Backend.QNN,
+                    qnnRuntimePath = runtimePath,
+                    threads = threads,
+                    bundleFingerprint = fingerprint,
+                    requestId = UUID.randomUUID().toString(),
+                    onProgress = { progress ->
+                        write(
+                            JSONObject()
+                                .put("status", "progress")
+                                .put("phase", "model_loading")
+                                .put("progress", progress.progressPercent ?: 0)
+                        )
+                    }
+                )
+            }
+            write(
+                JSONObject()
+                    .put("status", "qwen_worker_qnn_loaded")
+                    .put("loaded", loaded.rawJson)
+            )
+            require(loaded.loaded && loaded.backendConfigured == "MNN_QNN") {
+                "Qwen worker did not confirm MNN_QNN: ${loaded.rawJson}"
+            }
+            val generated = runBlocking {
+                client.generate(
+                    requestId = UUID.randomUUID().toString(),
+                    bundleRoot = root.absolutePath,
+                    prompt = prompt,
+                    inputImagePath = null,
+                    outputPath = outputFile.absolutePath,
+                    width = width,
+                    height = height,
+                    steps = steps,
+                    seed = seed,
+                    threads = threads,
+                    useGpu = true,
+                    backend = QwenImage21Backend.QNN,
+                    qnnRuntimePath = runtimePath,
+                    bundleFingerprint = fingerprint,
+                    onProgress = { progress ->
+                        write(
+                            JSONObject()
+                                .put("status", "progress")
+                                .put("phase", "denoising")
+                                .put("progress", progress)
+                        )
+                    }
+                )
+            }
+            require(outputFile.isFile && outputFile.length() > 1024L) {
+                "Qwen QNN worker returned an empty PNG: ${outputFile.absolutePath}"
+            }
+            write(
+                JSONObject()
+                    .put("status", "completed")
+                    .put("runtime", "qnn_htp")
+                    .put("qnnGraphExecution", generated.executionAudit.optBoolean("backendExecutionConfirmedByNative", false))
+                    .put("fallback", generated.executionAudit.optBoolean("fallback", false))
+                    .put("elapsedMs", generated.elapsedMs)
+                    .put("steps", generated.steps)
+                    .put("seed", generated.seed)
+                    .put("executionAudit", generated.executionAudit)
+                    .put("outputPath", outputFile.absolutePath)
+                    .put("outputBytes", outputFile.length())
+            )
+        } finally {
+            runCatching { runBlocking { client.unload(UUID.randomUUID().toString()) } }
+            runCatching { runBlocking { client.disconnect() } }
+        }
     }
 
     private fun runQnnPipelineProbe(

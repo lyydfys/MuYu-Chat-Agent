@@ -177,6 +177,26 @@ class WorldBookStoreTest {
     }
 
     @Test
+    fun keepsKeylessTavernEntriesForEditingWithoutActivatingThem() {
+        val result = WorldBookCodec.parse(
+            rawJson = """{"entries":[{"id":1,"content":"没有关键词的地图","constant":false,"enabled":true},{"id":2,"content":"常驻人物设定","constant":true,"enabled":true}]}""",
+            scope = WorldBookScope.GLOBAL
+        )
+
+        val book = requireNotNull(result.book)
+        assertEquals(2, book.entries.size)
+        assertTrue(book.entries[0].enabled)
+        assertTrue(book.entries[1].enabled)
+        assertEquals(listOf("2"), WorldBookResolver.select(
+            books = listOf(book),
+            messages = emptyList(),
+            assistantId = "assistant",
+            chatSessionId = null,
+            tokenBudget = 128
+        ).selectedEntryIds)
+    }
+
+    @Test
     fun importsTavernWorldInfoWrapperAndMapsDisabledAndInsertionOrderAliases() {
         val result = WorldBookCodec.parse(
             rawJson = """

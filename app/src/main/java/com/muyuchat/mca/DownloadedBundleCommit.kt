@@ -49,3 +49,30 @@ internal fun restoreImageBundleBackup(bundleDir: File, backup: File?) {
         throw IOException("无法恢复旧模型，文件仍保留在：$backup")
     }
 }
+
+/**
+ * Publish validated files and their catalog entry as one recoverable operation.
+ * Call inside the owning store's catalog transaction. Once publish returns, cleanup
+ * must never turn a committed install into a rollback or discard its previous copy.
+ */
+internal fun <T> publishDownloadedBundleCandidate(
+    candidateDir: File,
+    bundleDir: File,
+    onCleanupFailure: (Throwable) -> Unit = {},
+    publish: () -> T
+): T {
+    val backup = promoteImageBundleCandidate(candidateDir, bundleDir)
+    val result = try {
+        publish()
+    } catch (error: Throwable) {
+        runCatching { restoreImageBundleBackup(bundleDir, backup) }
+            .exceptionOrNull()?.let(error::addSuppressed)
+        throw error
+    }
+    if (backup != null) {
+        runCatching {
+            check(backup.deleteRecursively()) { "安装已提交，但旧模型备份清理失败：$backup" }
+        }.exceptionOrNull()?.let { error -> runCatching { onCleanupFailure(error) } }
+    }
+    return result
+}

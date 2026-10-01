@@ -636,6 +636,19 @@ class ImageGenerationApiContractTest {
             responseBody("qwen-image-21-cpu-contract", cpuExecution).toString()
         )
         assertEquals("MNN_CPU", cpuParsed.execution.getString("effectiveBackend"))
+
+        val qnnExecution = qwenImage21Execution()
+            .put("backendConfigured", "MNN_QNN")
+            .put("requestedBackend", "MNN_QNN")
+            .put("effectiveBackend", "MNN_QNN")
+        qnnExecution.getJSONObject("nativeEffective")
+            .put("requestedBackend", "MNN_QNN")
+            .put("effectiveBackend", "MNN_QNN")
+        val qnnParsed = ImageGenerationApiContract.parseResponse(
+            "qwen-image-21-qnn-contract",
+            responseBody("qwen-image-21-qnn-contract", qnnExecution).toString()
+        )
+        assertEquals("MNN_QNN", qnnParsed.execution.getString("effectiveBackend"))
     }
 
     @Test
@@ -1198,6 +1211,48 @@ class ImageGenerationApiContractTest {
                         .toString()
                 )
             }
+        }
+    }
+
+    @Test
+    fun `authenticated response accepts pinned offline Hy-MT2 proof and rejects altered provenance`() {
+        val request = ImageGenerationApiContract.parseRequest(
+            JSONObject()
+                .put("prompt", "美女")
+                .put("negative_prompt", "不要文字")
+                .toString()
+        )
+        val processing = offlineHyMt2PromptProcessing(request)
+        val effectivePrompt = processing.getString("effectivePrompt")
+        val effectiveNegative = processing.getString("effectiveNegativePrompt")
+        val execution = strictExecution("STABLE_DIFFUSION_CPP").bindPromptExecution(
+            request = request,
+            effectivePrompt = effectivePrompt,
+            effectiveNegativePrompt = effectiveNegative,
+            languageCapability = "ENGLISH_DOMINANT"
+        )
+        val response = responseBody("img-hymt2-translation", execution)
+            .put("prompt_processing", processing)
+
+        assertEquals(
+            "OFFLINE_HY_MT2_ZH_TO_EN",
+            ImageGenerationApiContract.parseResponse(
+                "img-hymt2-translation",
+                request,
+                response.toString()
+            ).promptProcessing?.method
+        )
+
+        val tampered = JSONObject(processing.toString())
+            .put("translatorModelSha256", "0".repeat(64))
+        assertRejected("invalid_prompt_processing_evidence") {
+            ImageGenerationApiContract.parseResponse(
+                "img-hymt2-translation-tampered",
+                request,
+                responseBody("img-hymt2-translation-tampered", execution)
+                    .put("prompt_processing", tampered)
+                    .toString()
+            )
         }
     }
 
@@ -2230,6 +2285,61 @@ class ImageGenerationApiContractTest {
             .put("promptLanguageBindingFingerprint", promptLanguageBindingFingerprint)
             .put("translatorModelId", "translator-model")
             .put("translatorModelName", "Translator Model")
+            .put("translatorRuntime", translatorRuntime)
+            .put("translatorModelSha256", translatorModelSha256)
+            .put("translationPlanSha256", translationPlanSha256)
+            .put("verificationReceiptSha256", verificationReceiptSha256)
+            .put("translationPhaseSystemPromptSha256", translationPhaseSystemPromptSha256)
+            .put("verificationPhaseSystemPromptSha256", verificationPhaseSystemPromptSha256)
+            .put("translationProofFingerprint", translationProofFingerprint)
+    }
+
+    private fun offlineHyMt2PromptProcessing(
+        request: ImageGenerationApiRequest,
+        effectivePrompt: String = "beautiful woman",
+        effectiveNegativePrompt: String = "text"
+    ): JSONObject {
+        val negativePromptSource = if (request.negativePrompt == null) "EMPTY" else "USER"
+        val resolvedEffectiveNegativePrompt = if (negativePromptSource == "EMPTY") {
+            ""
+        } else {
+            effectiveNegativePrompt
+        }
+        val translationPlanSha256 = "d".repeat(64)
+        val verificationReceiptSha256 = "e".repeat(64)
+        val translationPhaseSystemPromptSha256 = "f".repeat(64)
+        val verificationPhaseSystemPromptSha256 = "1".repeat(64)
+        val translatorRuntime = "llama.cpp/offline_translation"
+        val translatorModelSha256 = "dc5f44fcf1fa496ee7ad725982c0c8c553a4de00259b53af84c4b89fb0c06699"
+        val promptLanguageBindingFingerprint = "c".repeat(64)
+        val translationProofFingerprint = imagePromptTranslationProofFingerprint(
+            contractVersion = 5,
+            originalPrompt = request.prompt,
+            effectivePrompt = effectivePrompt,
+            originalNegativePrompt = request.negativePrompt,
+            effectiveNegativePrompt = resolvedEffectiveNegativePrompt,
+            negativePromptSource = negativePromptSource,
+            translationPlanSha256 = translationPlanSha256,
+            verificationReceiptSha256 = verificationReceiptSha256,
+            translationPhaseSystemPromptSha256 = translationPhaseSystemPromptSha256,
+            verificationPhaseSystemPromptSha256 = verificationPhaseSystemPromptSha256,
+            translatorRuntime = translatorRuntime,
+            translatorModelSha256 = translatorModelSha256,
+            promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
+        )
+        return JSONObject()
+            .put("version", 4)
+            .put("originalPrompt", request.prompt)
+            .put("effectivePrompt", effectivePrompt)
+            .put("originalNegativePrompt", request.negativePrompt ?: JSONObject.NULL)
+            .put("effectiveNegativePrompt", resolvedEffectiveNegativePrompt)
+            .put("negativePromptSource", negativePromptSource)
+            .put("method", "OFFLINE_HY_MT2_ZH_TO_EN")
+            .put("translationContractVersion", 5)
+            .put("imageProfileBindingFingerprint", "a".repeat(64))
+            .put("promptLanguageBindingFingerprint", promptLanguageBindingFingerprint)
+            .put("translatorModelId", "tencent/Hy-MT2-1.8B-GGUF")
+            .put("translatorModelName", "Hy-MT2 1.8B Q4_K_M")
             .put("translatorRuntime", translatorRuntime)
             .put("translatorModelSha256", translatorModelSha256)
             .put("translationPlanSha256", translationPlanSha256)

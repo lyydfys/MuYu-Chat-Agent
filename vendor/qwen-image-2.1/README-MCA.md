@@ -24,7 +24,7 @@ headers only**. It does not contain, fetch, or redistribute any model weights.
   runtime rebuilt from the pinned MNN submodule with a unique SONAME.
   SHA-256 is maintained in `SHA256SUMS.txt` and `arm64-v8a/runtime-manifest.json`.
 - `arm64-v8a/libqwenimage21_jni.so` is the matching arm64 JNI build snapshot.
-  SHA-256: `86E761B061A7A40B80B9995E96A301FCF0FF47E8A1F76C502EE51FE7FAE3DAC2`.
+  SHA-256: `1A73A0966F42D3078CB2FCA2595ADF8C7E90BA00C3E30FC9A8A64C7CA397B8A5`.
 - `arm64-v8a/libc++_shared.so` is the C++ runtime from Android NDK
   `29.0.14206865`, at
   `toolchains/llvm/prebuilt/windows-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so`.

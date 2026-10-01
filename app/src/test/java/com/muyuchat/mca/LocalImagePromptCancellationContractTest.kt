@@ -5,7 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertSame
-import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -34,7 +33,9 @@ class LocalImagePromptCancellationContractTest {
             "image_prompt_translation_invalid" to
                 "翻译结果未通过格式或语义一致性校验，尚未启动图片生成。",
             "image_prompt_translation_failed" to
-                "中文提示词转换失败，尚未启动图片生成。"
+                "中文提示词转换失败，尚未启动图片生成。",
+            LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE to
+                LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
         )
 
         expectedMessages.forEach { (code, expected) ->
@@ -63,7 +64,7 @@ class LocalImagePromptCancellationContractTest {
     }
 
     @Test
-    fun `legacy LLM prompt translation is not a local generation fallback`() {
+    fun `standalone local generation uses verified Hy-MT2 before English prompt admission`() {
         val source = mainViewModelSource()
         val prepare = functionBody(
             source,
@@ -72,13 +73,16 @@ class LocalImagePromptCancellationContractTest {
 
         assertFalse(source.contains("private suspend fun translateLocalImagePrompt("))
         assertFalse(prepare.contains("LocalImagePromptAlignmentV4"))
-        assertFalse(prepare.contains("OfflinePromptTranslation"))
+        assertTrue(prepare.contains("offlinePromptTranslationService.translate("))
+        assertTrue(prepare.contains("catch (error: OfflinePromptTranslationCleanupException)"))
+        assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
+        assertTrue(prepare.contains("OfflinePromptTranslationResolution.Fallback"))
+        val preview = functionBody(source, "suspend fun translateImagePromptPreview(")
+        assertTrue(preview.contains("catch (error: OfflinePromptTranslationCleanupException)"))
+        assertTrue(preview.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
         assertTrue(prepare.contains("requireLocalImagePromptLanguageAdmission("))
-        assertTrue(
-            prepare.contains(
-                "New local image requests cannot enter the legacy V4 LLM prompt translation path."
-            )
-        )
+        assertTrue(prepare.contains("OFFLINE_HY_MT2_ZH_TO_EN"))
+        assertFalse(prepare.contains("legacy V4 LLM prompt translation path"))
     }
 
     @Test
@@ -112,7 +116,7 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(finalNegative > originalLimit)
         assertTrue(effectiveLimit > finalNegative)
         assertTrue(evidence > effectiveLimit)
-        assertFalse(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_"))
+        assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_CODE"))
     }
 
     @Test
@@ -183,13 +187,13 @@ class LocalImagePromptCancellationContractTest {
                 languageCapability = LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL
             )
         )
-        val rejection = assertThrows(IllegalStateException::class.java) {
+        assertEquals(
+            LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN,
             requiredLocalImagePromptTransformationMethod(
                 containsChinese = true,
                 languageCapability = LocalImageTextEncoderLanguageCapability.ENGLISH_DOMINANT
             )
-        }
-        assertTrue(requireNotNull(rejection.message).contains("residual Chinese"))
+        )
     }
 
     @Test
@@ -206,7 +210,7 @@ class LocalImagePromptCancellationContractTest {
         )
         val methodCheck = prepare.indexOf("execution.method == requiredMethod", stableBindingCheck)
         val capturedRebind = prepare.indexOf(
-            "val rebound = execution.rebindToCurrentImageProfile(",
+            "execution.rebindToCurrentImageProfile(",
             methodCheck
         )
         val capturedReturn = prepare.indexOf("return rebound.copy(", capturedRebind)
@@ -310,7 +314,7 @@ class LocalImagePromptCancellationContractTest {
     }
 
     @Test
-    fun `language admission receives the final executed negative without automatic translation`() {
+    fun `English-dominant Chinese pair is translated before final language admission`() {
         val prepare = functionBody(
             mainViewModelSource(),
             "private suspend fun prepareLocalImagePromptExecution("
@@ -320,13 +324,88 @@ class LocalImagePromptCancellationContractTest {
         )
         val admission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", finalNegative)
         val method = prepare.indexOf("val requiredMethod = requiredLocalImagePromptTransformationMethod(", admission)
+        val translation = prepare.indexOf("offlinePromptTranslationService.translate(", method)
+        val translatedAdmission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", translation)
+        assertTrue(translatedAdmission > translation)
+        val argumentsEnd = prepare.indexOf(')', translatedAdmission)
+        assertTrue(argumentsEnd > translatedAdmission)
+        val translatedArguments = prepare.substring(translatedAdmission, argumentsEnd)
 
         assertTrue(finalNegative >= 0)
         assertTrue(admission > finalNegative)
         assertTrue(method > admission)
-        assertFalse(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_"))
+        assertTrue(translation > method)
+        assertTrue(translatedAdmission > translation)
+        assertTrue(Regex("profile\\s*=\\s*profile").containsMatchIn(translatedArguments))
+        assertTrue(Regex("prompt\\s*=\\s*effectivePrompt").containsMatchIn(translatedArguments))
+        assertTrue(Regex("executedNegativePrompt\\s*=\\s*effectiveNegativePrompt").containsMatchIn(translatedArguments))
         assertFalse(prepare.contains("LocalImagePromptAlignmentV4"))
-        assertTrue(prepare.contains("legacy V4 LLM prompt translation path"))
+        assertTrue(prepare.contains("translation.result.requestFingerprint"))
+        assertTrue(prepare.contains("translation.result.bundleFingerprint"))
+    }
+
+    @Test
+    fun `offline request translates Chinese positive and negative branches without retranslating English`() {
+        val both = offlineImagePromptTranslationRequest(
+            prompt = "一只红色小鸟",
+            finalNegativePrompt = "不要文字"
+        )
+        assertEquals("一只红色小鸟", both.sourceText)
+        assertEquals("不要文字", both.negativePrompt)
+
+        val negativeOnly = offlineImagePromptTranslationRequest(
+            prompt = "a red bird",
+            finalNegativePrompt = "不要文字"
+        )
+        assertEquals("不要文字", negativeOnly.sourceText)
+        assertEquals("", negativeOnly.negativePrompt)
+
+        val positiveOnly = offlineImagePromptTranslationRequest(
+            prompt = "一只红色小鸟",
+            finalNegativePrompt = "text, watermark"
+        )
+        assertEquals("一只红色小鸟", positiveOnly.sourceText)
+        assertEquals("", positiveOnly.negativePrompt)
+    }
+
+    @Test
+    fun `Hy-MT2 success binds English prompt and fallback exits before either image worker`() {
+        val source = mainViewModelSource()
+        val prepare = functionBody(
+            source,
+            "private suspend fun prepareLocalImagePromptExecution("
+        )
+        val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
+        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+
+        assertTrue(prepare.contains("effectivePrompt = translation.translatedPrompt"))
+        assertTrue(prepare.contains("translation.effectiveNegativePrompt"))
+        assertTrue(prepare.contains("throw LocalImageProductContractException("))
+        assertTrue(prepare.contains("OFFLINE_HY_MT2_ZH_TO_EN"))
+
+        val uiPrepare = enqueue.indexOf("prepareLocalImagePromptExecution(")
+        val uiWorker = enqueue.indexOf("localImageWorkerClient.begin(", uiPrepare)
+        assertTrue(uiPrepare >= 0)
+        assertTrue(uiWorker > uiPrepare)
+
+        val apiPrepare = api.indexOf("prepareLocalImagePromptExecution(")
+        val apiWorker = api.indexOf("localImageWorkerClient.generate(", apiPrepare)
+        assertTrue(apiPrepare >= 0)
+        assertTrue(apiWorker > apiPrepare)
+    }
+
+    @Test
+    fun `successful prompt translation remains visible after the image worker starts`() {
+        val enqueue = functionBody(mainViewModelSource(), "private fun enqueueImageGeneration(")
+        val workerStart = enqueue.indexOf("localImageWorkerClient.begin(model.runtime)")
+        val translatedStatus = enqueue.indexOf("val translationStatusMessage = if (", workerStart)
+        val jobMessage = enqueue.indexOf("message = translationStatusMessage ?: job.message", workerStart)
+
+        assertTrue(workerStart >= 0)
+        assertTrue(translatedStatus > workerStart)
+        assertTrue(jobMessage > translatedStatus)
+        assertTrue(enqueue.contains("\"英文译文\" to promptExecution.effectivePrompt"))
+        assertTrue(enqueue.contains("\"负向词英文译文\" to promptExecution.effectiveNegativePrompt"))
     }
 
     @Test

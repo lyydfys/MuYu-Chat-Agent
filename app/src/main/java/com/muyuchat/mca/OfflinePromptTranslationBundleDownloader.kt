@@ -8,11 +8,9 @@ import com.muyuchat.core.download.ResumableDownloader
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
-import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -29,7 +27,35 @@ internal class OfflinePromptTranslationBundleDownloader(
     private val downloader: ResumableDownloader = ResumableDownloader()
 ) {
     private val appContext = context.applicationContext
-    private val installGate = Mutex()
+    private val installGate = OfflinePromptTranslationPackageActivation.gate
+
+    /**
+     * A completed download may survive process death just before promotion. Recover it offline
+     * after full package verification; partial files never become an installed/runtime bundle.
+     */
+    suspend fun verifyInstalledOrRecoverCompleteDownload(): OfflinePromptTranslationBundleVerification =
+        installGate.withLock {
+            withContext(Dispatchers.IO) {
+                val activeRoot = File(appContext.filesDir, ACTIVE_DIRECTORY)
+                val active = OfflinePromptTranslationBundleVerifier.verify(activeRoot)
+                if (active is OfflinePromptTranslationBundleVerification.Verified &&
+                    active.bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2
+                ) return@withContext active
+                val stageRoot = File(appContext.filesDir, STAGING_DIRECTORY)
+                val manifest = File(stageRoot, OfflinePromptTranslationContract.MANIFEST_RELATIVE_PATH)
+                if (!manifest.isFile) return@withContext active
+                val staged = OfflinePromptTranslationBundleVerifier.verify(stageRoot)
+                if (staged !is OfflinePromptTranslationBundleVerification.Verified ||
+                    staged.bundle.identity.translatorFamily != OfflineTranslatorFamily.HY_MT2
+                ) return@withContext active
+                currentCoroutineContext().ensureActive()
+                OfflinePromptTranslationBundleVerification.Verified(
+                    activateOfflinePromptTranslationPackage(
+                        stageRoot, activeRoot, OfflinePromptTranslationBundleVerifier::requireVerified
+                    )
+                )
+            }
+        }
 
     suspend fun download(onProgress: (OfflineTranslationDownloadProgress) -> Unit = {}):
         VerifiedOfflinePromptTranslationBundle = installGate.withLock {
@@ -37,7 +63,8 @@ internal class OfflinePromptTranslationBundleDownloader(
             val filesDir = appContext.filesDir
             val activeRoot = File(filesDir, ACTIVE_DIRECTORY)
             (OfflinePromptTranslationBundleVerifier.verify(activeRoot) as?
-                OfflinePromptTranslationBundleVerification.Verified)?.let { return@withContext it.bundle }
+                OfflinePromptTranslationBundleVerification.Verified)?.takeIf { it.bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2 }
+                ?.let { return@withContext it.bundle }
 
             val stageRoot = File(filesDir, STAGING_DIRECTORY)
             val translation = File(stageRoot, OfflinePromptTranslationContract.TRANSLATION_DIRECTORY)
@@ -104,27 +131,9 @@ internal class OfflinePromptTranslationBundleDownloader(
             OfflinePromptTranslationBundleVerifier.requireVerified(stageRoot)
             currentCoroutineContext().ensureActive()
 
-            // A failed promotion leaves the previous directory at its original path.
-            val preserved = if (activeRoot.exists()) {
-                File(filesDir, "$ACTIVE_DIRECTORY.invalid-${UUID.randomUUID()}").also {
-                    check(activeRoot.renameTo(it)) { "无法保留原有离线翻译包。" }
-                }
-            } else null
-            try {
-                check(stageRoot.renameTo(activeRoot)) { "无法启用已校验的 Hy-MT2 包。" }
-                OfflinePromptTranslationBundleVerifier.requireVerified(activeRoot)
-            } catch (error: Throwable) {
-                if (activeRoot.exists()) {
-                    val recoverable = File(filesDir, "$ACTIVE_DIRECTORY.recovery-${UUID.randomUUID()}")
-                    check(activeRoot.renameTo(recoverable)) {
-                        "Hy-MT2 安装失败；候选包仍位于 ${activeRoot.absolutePath}。"
-                    }
-                }
-                if (preserved != null) check(preserved.renameTo(activeRoot)) {
-                    "Hy-MT2 安装失败；原有包保留在 ${preserved.absolutePath}。"
-                }
-                throw error
-            }
+            activateOfflinePromptTranslationPackage(
+                stageRoot, activeRoot, OfflinePromptTranslationBundleVerifier::requireVerified
+            )
         }
     }
 

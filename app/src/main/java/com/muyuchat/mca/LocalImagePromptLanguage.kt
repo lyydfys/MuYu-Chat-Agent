@@ -7,6 +7,7 @@ import java.util.Locale
 import org.json.JSONObject
 
 internal const val CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 4
+internal const val CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 5
 /**
  * Versioned alongside the native `native_prompt_language_contract.hpp` grammar. A bump invalidates
  * cached prompt preparation through the profile prompt-language fingerprint.
@@ -26,6 +27,7 @@ enum class LocalImagePromptTransformationMethod {
     DIRECT,
     NATIVE_MULTILINGUAL,
     LOCAL_LLM_ZH_TO_EN,
+    OFFLINE_HY_MT2_ZH_TO_EN,
     /** Original UTF-8 text reached the exact native tokenizer without an LLM translation. */
     DIRECT_UTF8_PASSTHROUGH
 }
@@ -204,9 +206,12 @@ data class LocalImagePromptExecution(
     val negativePromptSource: LocalImageNegativePromptSource,
     val method: LocalImagePromptTransformationMethod,
     val translationContractVersion: Int? = if (
-        method == LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN
+        method == LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN ||
+            method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
     ) {
-        CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION
+        if (method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN) {
+            CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION
+        } else CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION
     } else {
         null
     },
@@ -277,7 +282,50 @@ data class LocalImagePromptExecution(
                     translatorModelSha256 = requireNotNull(translatorModelSha256),
                     promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
                 )
-            ) { "Translated prompt proof fingerprint does not match its bound evidence." }
+        ) { "Translated prompt proof fingerprint does not match its bound evidence." }
+        } else if (method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN) {
+            require(originalPrompt.containsHanScript() ||
+                originalNegativePrompt?.containsHanScript() == true ||
+                negativePromptSource == LocalImageNegativePromptSource.MODEL_DEFAULT
+            )
+            require(translationContractVersion == CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION)
+            require(translatorModelId == HyMt2PromptTranslationContract.SOURCE_ID)
+            require(translatorModelName == "Hy-MT2 1.8B Q4_K_M")
+            require(translatorRuntime == "llama.cpp/offline_translation")
+            require(translatorModelSha256 == HyMt2PromptTranslationContract.MODEL_SHA256)
+            require(translationPlanSha256?.let(SHA256_PATTERN::matches) == true)
+            require(verificationReceiptSha256?.let(SHA256_PATTERN::matches) == true)
+            require(translationPhaseSystemPromptSha256?.let(SHA256_PATTERN::matches) == true)
+            require(verificationPhaseSystemPromptSha256?.let(SHA256_PATTERN::matches) == true)
+            require(translationProofFingerprint?.let(SHA256_PATTERN::matches) == true)
+            require(effectivePrompt.isSafeAsciiDiffusionPrompt() &&
+                effectiveNegativePrompt.isSafeAsciiDiffusionPrompt() &&
+                !effectivePrompt.containsHanScript() &&
+                !effectiveNegativePrompt.containsHanScript()
+            )
+            require(!originalPrompt.containsHanScript() || effectivePrompt != originalPrompt)
+            if (originalNegativePrompt != null && !originalNegativePrompt.containsHanScript()) {
+                require(effectiveNegativePrompt == originalNegativePrompt)
+            }
+            require(
+                translationProofFingerprint == imagePromptTranslationProofFingerprint(
+                    contractVersion = requireNotNull(translationContractVersion),
+                    originalPrompt = originalPrompt,
+                    effectivePrompt = effectivePrompt,
+                    originalNegativePrompt = originalNegativePrompt,
+                    effectiveNegativePrompt = effectiveNegativePrompt,
+                    negativePromptSource = negativePromptSource.name,
+                    translationPlanSha256 = requireNotNull(translationPlanSha256),
+                    verificationReceiptSha256 = requireNotNull(verificationReceiptSha256),
+                    translationPhaseSystemPromptSha256 =
+                        requireNotNull(translationPhaseSystemPromptSha256),
+                    verificationPhaseSystemPromptSha256 =
+                        requireNotNull(verificationPhaseSystemPromptSha256),
+                    translatorRuntime = requireNotNull(translatorRuntime),
+                    translatorModelSha256 = requireNotNull(translatorModelSha256),
+                    promptLanguageBindingFingerprint = promptLanguageBindingFingerprint
+                )
+            ) { "Offline translated prompt proof fingerprint does not match its bound evidence." }
         } else {
             require(translationContractVersion == null)
             require(effectivePrompt == originalPrompt)
@@ -295,6 +343,7 @@ data class LocalImagePromptExecution(
             require(translationProofFingerprint == null)
         }
         when (method) {
+            LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN -> Unit
             LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL -> require(
                 effectivePrompt.isSupportedNativeChineseHanDiffusionPrompt() &&
                     effectiveNegativePrompt.isSupportedNativeChineseHanDiffusionPrompt() &&
@@ -352,6 +401,7 @@ data class LocalImagePromptExecution(
                 if (!json.has(field) || json.isNull(field)) null else json.getString(field)
             val method = LocalImagePromptTransformationMethod.valueOf(json.getString("method"))
             if (method == LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN ||
+                method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN ||
                 method == LocalImagePromptTransformationMethod.DIRECT_UTF8_PASSTHROUGH
             ) {
                 require(version == VERSION) {
@@ -420,13 +470,20 @@ internal fun LocalImagePromptExecution.rebindToCurrentImageProfile(
             value = effectiveNegativePrompt,
             source = LocalImageNegativePromptSource.USER
         )
+    } else if (method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN) {
+        LocalImageFinalNegativePrompt(
+            value = effectiveNegativePrompt,
+            source = finalNegativePrompt.source
+        )
     } else {
         require(originalNegativePrompt == null &&
             finalNegativePrompt.source != LocalImageNegativePromptSource.USER
         ) { "Captured model negative prompt no longer matches the request." }
         finalNegativePrompt
     }
-    val reboundProof = if (method == LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN) {
+    val reboundProof = if (method == LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN ||
+        method == LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
+    ) {
         imagePromptTranslationProofFingerprint(
             contractVersion = requireNotNull(translationContractVersion),
             originalPrompt = originalPrompt,
@@ -534,9 +591,22 @@ internal fun validateLocalImagePromptExecutionBinding(
             nativeEffective.getString("nativePromptBindingStage")
     )
     when (promptExecution.method) {
-        LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN,
         LocalImagePromptTransformationMethod.DIRECT_UTF8_PASSTHROUGH -> error(
-            "Legacy prompt translation and UTF-8 pass-through evidence cannot validate a current image execution."
+            "Legacy UTF-8 pass-through evidence cannot validate a current image execution."
+        )
+        LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN -> error(
+            "Legacy chat-model translation evidence cannot validate a current image execution."
+        )
+        LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN -> require(
+            expectedCapability == LocalImageTextEncoderLanguageCapability.ENGLISH_DOMINANT &&
+                (promptExecution.originalPrompt.containsHanScript() ||
+                    promptExecution.originalNegativePrompt?.containsHanScript() == true ||
+                    promptExecution.negativePromptSource ==
+                    LocalImageNegativePromptSource.MODEL_DEFAULT) &&
+                promptExecution.effectivePrompt.isSafeAsciiDiffusionPrompt() &&
+                promptExecution.effectiveNegativePrompt.isSafeAsciiDiffusionPrompt() &&
+                !promptExecution.effectivePrompt.containsHanScript() &&
+                !promptExecution.effectiveNegativePrompt.containsHanScript()
         )
         LocalImagePromptTransformationMethod.NATIVE_MULTILINGUAL -> require(
             expectedCapability == LocalImageTextEncoderLanguageCapability.NATIVE_MULTILINGUAL &&

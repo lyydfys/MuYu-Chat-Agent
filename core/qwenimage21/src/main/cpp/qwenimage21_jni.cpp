@@ -10,6 +10,11 @@
 #include <stdexcept>
 #include <string>
 #include <sstream>
+#include <vector>
+#if !defined(_WIN32)
+#include <dlfcn.h>
+#include <sys/stat.h>
+#endif
 #include "diffusion/qwen_image21_diffusion.hpp"
 
 using namespace MNN::DIFFUSION;
@@ -21,6 +26,11 @@ using namespace MNN::DIFFUSION;
 namespace {
 constexpr size_t kMaxNativeErrorBytes = 512;
 thread_local std::string g_lastBoundaryError;
+std::mutex g_qnnRuntimeMutex;
+std::string g_qnnRuntimePath;
+#if !defined(_WIN32)
+std::vector<void*> g_qnnRuntimeHandles;
+#endif
 
 struct Handle {
     std::unique_ptr<Diffusion> model;
@@ -33,6 +43,7 @@ struct Handle {
     bool backendResolved = false;
     bool nativeRunCompleted = false;
     bool backendExecutionConfirmed = false;
+    bool qnnRequested = false;
     int generationCount = 0;
 };
 
@@ -46,6 +57,11 @@ const char* backendName(MNNForwardType backend) noexcept {
         case MNN_FORWARD_HEXAGON: return "MNN_HEXAGON";
         default: return "MNN_UNKNOWN";
     }
+}
+
+const char* effectiveBackendName(const Handle& handle) noexcept {
+    if (handle.qnnRequested && handle.effectiveBackend == MNN_FORWARD_NN) return "MNN_QNN";
+    return backendName(handle.effectiveBackend);
 }
 
 std::string executionAuditJson(const Handle& handle) {
@@ -69,13 +85,135 @@ std::string executionAuditJson(const Handle& handle) {
          << (handle.backendExecutionConfirmed ? "true" : "false") << ","
          << "\"backendExecutionProof\":\"mnn_runtime_resolution_after_native_run\","
          << "\"backendExecutionScope\":\"primary_runtime\","
-         << "\"requestedBackend\":\"" << backendName(handle.requestedBackend) << "\","
-         << "\"effectiveBackend\":\"" << backendName(handle.effectiveBackend) << "\","
+         << "\"requestedBackend\":\"" << (handle.qnnRequested ? "MNN_QNN" : backendName(handle.requestedBackend)) << "\","
+         << "\"effectiveBackend\":\"" << effectiveBackendName(handle) << "\","
          << "\"backendResolved\":" << (handle.backendResolved ? "true" : "false") << ","
          << "\"nativeGenerationCount\":" << handle.generationCount << ","
          << "\"backendMatch\":" << (backendMatch ? "true" : "false")
          << "}";
     return json.str();
+}
+
+void setBoundedError(std::string& destination, const char* message) noexcept;
+const char* errorOrFallback(const std::string& error, const char* fallback) noexcept;
+std::string toString(JNIEnv* env, jstring s);
+
+bool isDirectory(const std::string& path) noexcept {
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
+    struct stat info{};
+    return !path.empty() && ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+#endif
+}
+
+bool isReadableFile(const std::string& path) noexcept {
+#if defined(_WIN32)
+    (void)path;
+    return false;
+#else
+    struct stat info{};
+    return !path.empty() && ::stat(path.c_str(), &info) == 0 && S_ISREG(info.st_mode);
+#endif
+}
+
+bool preloadQnnRuntime(const std::string& path, std::string& error) {
+    std::lock_guard<std::mutex> lock(g_qnnRuntimeMutex);
+    if (path.empty()) return true;
+    if (!isDirectory(path)) {
+        error = "QNN runtime path is not a readable directory";
+        return false;
+    }
+    if (!g_qnnRuntimePath.empty() && g_qnnRuntimePath != path) {
+        error = "QNN runtime path cannot change while the isolated worker is alive";
+        return false;
+    }
+    if (!g_qnnRuntimeHandles.empty()) return true;
+#if defined(_WIN32)
+    error = "QNN runtime preload is unavailable on Windows";
+    return false;
+#else
+    const std::string systemPath = path + "/libQnnSystem.so";
+    const std::string htpPath = path + "/libQnnHtp.so";
+    // Keep the host handles resident. MNN_QNN resolves these SONAMEs through
+    // its normal dlopen("libQnnHtp.so") path after this preload.
+    void* system = ::dlopen(systemPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!system) {
+        const char* detail = ::dlerror();
+        error = std::string("cannot load ") + systemPath + ": " + (detail ? detail : "unknown error");
+        return false;
+    }
+    void* htp = ::dlopen(htpPath.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    if (!htp) {
+        const char* detail = ::dlerror();
+        error = std::string("cannot load ") + htpPath + ": " + (detail ? detail : "unknown error");
+        ::dlclose(system);
+        return false;
+    }
+    g_qnnRuntimeHandles.push_back(system);
+    g_qnnRuntimeHandles.push_back(htp);
+
+    // QAIRT's Android HTP host is split across the prepare plugin and the
+    // SoC-specific transport stubs. They are not DT_NEEDED by libQnnHtp.so;
+    // QNN loads them lazily while finalizing the graph. Preload every matching
+    // library present in the supplied directory so an app-private runtime is
+    // self-contained, while still accepting platform runtimes that expose only
+    // the host pair. A missing optional transport is reported by QNN at the
+    // real graph boundary and is never treated as a device admission failure.
+    const char* optionalNames[] = {
+        "libQnnHtpPrepare.so",
+        "libQnnHtpV68Stub.so", "libQnnHtpV68CalculatorStub.so",
+        "libQnnHtpV69Stub.so", "libQnnHtpV69CalculatorStub.so",
+        "libQnnHtpV73Stub.so", "libQnnHtpV73CalculatorStub.so",
+        "libQnnHtpV75Stub.so", "libQnnHtpV75CalculatorStub.so",
+        "libQnnHtpV79Stub.so", "libQnnHtpV79CalculatorStub.so",
+        "libQnnHtpV81Stub.so", "libQnnHtpV81CalculatorStub.so"
+    };
+    for (const char* name : optionalNames) {
+        const std::string candidate = path + "/" + name;
+        if (!isReadableFile(candidate)) continue;
+        void* handle = ::dlopen(candidate.c_str(), RTLD_NOW | RTLD_GLOBAL);
+        if (handle != nullptr) {
+            g_qnnRuntimeHandles.push_back(handle);
+        } else {
+            const char* detail = ::dlerror();
+            LOGI("QNN optional runtime %s not preloaded: %s", name,
+                 detail ? detail : "unknown error");
+        }
+    }
+    g_qnnRuntimePath = path;
+    return true;
+#endif
+}
+
+jlong createRuntime(JNIEnv* env, jstring modelDir, jint backendCode,
+                    jboolean textEncoderOnCpu, jboolean vaeOnCpu,
+                    jint memoryMode, jint threads) {
+    const std::string dir = toString(env, modelDir);
+    const bool qnn = backendCode == 2;
+    const MNNForwardType backend = backendCode == 0
+        ? MNN_FORWARD_CPU
+        : (qnn ? MNN_FORWARD_NN : MNN_FORWARD_OPENCL);
+    auto handle = std::make_unique<Handle>();
+    handle->model.reset(Diffusion::createDiffusion(dir, QWEN_IMAGE_21, backend, memoryMode, 512,
+                                                   512, textEncoderOnCpu, vaeOnCpu, GPU_MEMORY_BUFFER,
+                                                   PRECISION_LOW, CFG_MODE_AUTO, std::max(1, (int)threads)));
+    handle->qwen = static_cast<QwenImage21Diffusion*>(handle->model.get());
+    if (!handle->model || !handle->model->load()) {
+        const char* detail = handle->qwen ? handle->qwen->lastError().c_str() : nullptr;
+        setBoundedError(g_lastBoundaryError,
+                        detail && *detail ? detail : "Failed to load Qwen-Image-2.1 runtime");
+        LOGE("create failed: %s", errorOrFallback(g_lastBoundaryError, "Failed to load Qwen-Image-2.1 runtime"));
+        return 0;
+    }
+    handle->requestedBackend = backend;
+    handle->qnnRequested = qnn;
+    handle->backendResolved = handle->qwen->resolveEffectiveBackendType(&handle->effectiveBackend);
+    if (!handle->backendResolved) handle->effectiveBackend = static_cast<MNNForwardType>(-1);
+    handle->nativeRunCompleted = false;
+    handle->backendExecutionConfirmed = false;
+    return reinterpret_cast<jlong>(handle.release());
 }
 
 void setBoundedError(std::string& destination, const char* message) noexcept {
@@ -121,27 +259,7 @@ Java_com_scsonic_qwenimage21_QwenImage21_nativeCreate(JNIEnv* env, jclass, jstri
                                                       jint memoryMode, jint threads) {
     g_lastBoundaryError.clear();
     try {
-        const std::string dir = toString(env, modelDir);
-        auto handle = std::make_unique<Handle>();
-        handle->model.reset(Diffusion::createDiffusion(dir, QWEN_IMAGE_21,
-                                                       useGpu ? MNN_FORWARD_OPENCL : MNN_FORWARD_CPU, memoryMode, 512,
-                                                       512, textEncoderOnCpu, vaeOnCpu, GPU_MEMORY_BUFFER,
-                                                       PRECISION_LOW, CFG_MODE_AUTO, threads));
-        handle->qwen = static_cast<QwenImage21Diffusion*>(handle->model.get());
-        if (!handle->model || !handle->model->load()) {
-            const char* detail = handle->qwen ? handle->qwen->lastError().c_str() : nullptr;
-            setBoundedError(g_lastBoundaryError,
-                            detail && *detail ? detail : "Failed to load Qwen-Image-2.1 runtime");
-            LOGE("create failed: %s",
-                 errorOrFallback(g_lastBoundaryError, "Failed to load Qwen-Image-2.1 runtime"));
-            return 0;
-        }
-        handle->requestedBackend = useGpu ? MNN_FORWARD_OPENCL : MNN_FORWARD_CPU;
-        handle->backendResolved = handle->qwen->resolveEffectiveBackendType(&handle->effectiveBackend);
-        if (!handle->backendResolved) handle->effectiveBackend = static_cast<MNNForwardType>(-1);
-        handle->nativeRunCompleted = false;
-        handle->backendExecutionConfirmed = false;
-        return reinterpret_cast<jlong>(handle.release());
+        return createRuntime(env, modelDir, useGpu ? 1 : 0, textEncoderOnCpu, vaeOnCpu, memoryMode, threads);
     } catch (const std::bad_alloc&) {
         setBoundedError(g_lastBoundaryError, "Out of memory while creating Qwen-Image-2.1 runtime");
         LOGE("create failed: %s",
@@ -157,6 +275,53 @@ Java_com_scsonic_qwenimage21_QwenImage21_nativeCreate(JNIEnv* env, jclass, jstri
         LOGE("create failed: %s",
              errorOrFallback(g_lastBoundaryError, "Unknown native exception while creating Qwen-Image-2.1 runtime"));
         return 0;
+    }
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_scsonic_qwenimage21_QwenImage21_nativeCreateWithBackend(JNIEnv* env, jclass, jstring modelDir,
+                                                                  jint backendCode, jboolean textEncoderOnCpu,
+                                                                  jboolean vaeOnCpu, jint memoryMode, jint threads) {
+    g_lastBoundaryError.clear();
+    try {
+        if (backendCode < 0 || backendCode > 2) {
+            setBoundedError(g_lastBoundaryError, "Unsupported Qwen-Image-2.1 backend code");
+            return 0;
+        }
+        return createRuntime(env, modelDir, backendCode, textEncoderOnCpu, vaeOnCpu, memoryMode, threads);
+    } catch (const std::bad_alloc&) {
+        setBoundedError(g_lastBoundaryError, "Out of memory while creating Qwen-Image-2.1 runtime");
+        LOGE("create failed: %s", errorOrFallback(g_lastBoundaryError, "Out of memory while creating Qwen-Image-2.1 runtime"));
+        return 0;
+    } catch (const std::exception& e) {
+        setBoundedError(g_lastBoundaryError, e.what());
+        LOGE("create failed: %s", errorOrFallback(g_lastBoundaryError, "Native exception while creating Qwen-Image-2.1 runtime"));
+        return 0;
+    } catch (...) {
+        setBoundedError(g_lastBoundaryError, "Unknown native exception while creating Qwen-Image-2.1 runtime");
+        LOGE("create failed: %s", errorOrFallback(g_lastBoundaryError, "Unknown native exception while creating Qwen-Image-2.1 runtime"));
+        return 0;
+    }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_scsonic_qwenimage21_QwenImage21_nativeSetQnnRuntimePath(JNIEnv* env, jclass, jstring path) {
+    g_lastBoundaryError.clear();
+    try {
+        const std::string value = toString(env, path);
+        std::string error;
+        if (!preloadQnnRuntime(value, error)) {
+            setBoundedError(g_lastBoundaryError, error.c_str());
+            LOGE("QNN runtime preload failed: %s", errorOrFallback(g_lastBoundaryError, "QNN runtime preload failed"));
+            return JNI_FALSE;
+        }
+        return JNI_TRUE;
+    } catch (const std::exception& e) {
+        setBoundedError(g_lastBoundaryError, e.what());
+        return JNI_FALSE;
+    } catch (...) {
+        setBoundedError(g_lastBoundaryError, "Unknown exception while preloading QNN runtime");
+        return JNI_FALSE;
     }
 }
 

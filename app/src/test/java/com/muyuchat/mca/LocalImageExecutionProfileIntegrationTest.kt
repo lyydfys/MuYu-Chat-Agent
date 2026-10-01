@@ -82,16 +82,21 @@ class LocalImageExecutionProfileIntegrationTest {
                     root.resolve(relative).takeUnless { it.exists() }?.writeBytes(byteArrayOf(4))
                     artifact.copy(relativePath = relative, graphName = "model")
                 }
-                val old = current.copy(profileRevision = 2, graph = current.graph.copy(
+                val oldWithInstalledPaths = current.copy(profileRevision = 2, graph = current.graph.copy(
                     textEncoder = current.graph.textEncoder.installedV2(),
                     unet = current.graph.unet.installedV2(),
                     vae = current.graph.vae.installedV2(),
                     controlNet = current.graph.controlNet.installedV2()
                 ))
                 val components = JSONArray()
-                listOfNotNull(old.graph.textEncoder, old.graph.unet, old.graph.vae, old.graph.controlNet).forEach { graph ->
+                listOfNotNull(
+                    oldWithInstalledPaths.graph.textEncoder,
+                    oldWithInstalledPaths.graph.unet,
+                    oldWithInstalledPaths.graph.vae,
+                    oldWithInstalledPaths.graph.controlNet
+                ).forEach { graph ->
                     components.put(JSONObject()
-                        .put("role", if (graph == old.graph.unet) "DIFFUSION" else "CONFIG")
+                        .put("role", if (graph == oldWithInstalledPaths.graph.unet) "DIFFUSION" else "CONFIG")
                         .put("path", graph.relativePath).put("required", true)
                         .put("sourceRepo", recommendation.repoId)
                         .put("sourcePath", "${recommendation.recommendedFileName}!/${graph.relativePath}"))
@@ -123,16 +128,26 @@ class LocalImageExecutionProfileIntegrationTest {
                     .put("id", bundle.id).put("recommendationId", recommendation.id)
                     .put("runtime", "QNN_HTP").put("family", current.family.name)
                     .put("task", current.task.name).put("components", components)
-                    .put("executionProfile", ImageExecutionProfileJson.toJson(old))
+                    .put("executionProfile", ImageExecutionProfileJson.toJson(oldWithInstalledPaths))
+                root.resolve("manifest.json").writeText(manifest.toString())
+                val installedModel = LocalImageModelRecord(
+                    id = recommendation.id, displayName = recommendation.title,
+                    path = primary.absolutePath, fileName = primary.name,
+                    sizeBytes = primary.length(), sha256 = primary.sha256ForProfile(),
+                    runtime = LocalImageRuntime.QNN_HTP, family = current.family,
+                    bundleRoot = root.absolutePath, source = "hugging_face:${recommendation.repoId}"
+                )
+                // A persisted installed profile is bound to the complete bundle inventory,
+                // including the manifest contract and all publisher sidecars. The built-in
+                // profile above intentionally starts with the primary-artifact hash, so this
+                // fixture updates the persisted value to the observed installed-bundle hash.
+                val persisted = oldWithInstalledPaths.copy(
+                    modelFingerprint = captureLocalImageContentSnapshot(installedModel).fingerprint
+                )
+                manifest.put("executionProfile", ImageExecutionProfileJson.toJson(persisted))
                 root.resolve("manifest.json").writeText(manifest.toString())
                 val resolution = resolveLocalImageExecutionProfile(
-                    model = LocalImageModelRecord(
-                        id = recommendation.id, displayName = recommendation.title,
-                        path = primary.absolutePath, fileName = primary.name,
-                        sizeBytes = primary.length(), sha256 = primary.sha256ForProfile(),
-                        runtime = LocalImageRuntime.QNN_HTP, family = current.family,
-                        bundleRoot = root.absolutePath, source = "hugging_face:${recommendation.repoId}"
-                    ),
+                    model = installedModel,
                     options = LocalImageGenerationOptions(), bundleRoot = root
                 )
                 assertEquals(3, resolution.profile.profileRevision)
@@ -146,6 +161,97 @@ class LocalImageExecutionProfileIntegrationTest {
                 // Resolution is request-scoped; the user's installed metadata is not rewritten.
                 assertEquals(2, JSONObject(root.resolve("manifest.json").readText())
                     .getJSONObject("executionProfile").getInt("profileRevision"))
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `installed bundles that still carry the primary-artifact digest keep resolving`() {
+        // Regression: the complete-bundle execution identity was introduced without a migration
+        // for already-installed packages.  Those manifests still declare the catalog's
+        // primary-artifact digest, so comparing it against a whole-bundle digest rejected every
+        // previously installed image engine with MODEL_FINGERPRINT_MISMATCH -- which also pushed
+        // them onto the legacy capability path and aborted the UI for UltraFix packages.
+        val ids = setOf("qualcomm_sd15_gen5_qnn", "qualcomm_sd21_gen5_qnn", "qualcomm_controlnet_canny_gen5_qnn")
+        ModelScopeClient().recommendedModels().filter { it.id in ids }.forEach { recommendation ->
+            val root = Files.createTempDirectory("gen5-legacy-scope").toFile()
+            try {
+                val bundle = requireNotNull(recommendation.imageEngineBundle)
+                val wrapper = recommendation.recommendedFileName.removeSuffix(".zip")
+                val directory = root.resolve(wrapper).apply { mkdirs() }
+                val primary = directory.resolve("unet.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+                // Deliberately the primary artifact's digest: what a pre-migration install keeps.
+                val current = requireNotNull(
+                    materializeDownloadedImageExecutionProfile(bundle, primary.sha256ForProfile())
+                )
+                fun ImageGraphArtifactContract?.installedLegacy() = this?.let { artifact ->
+                    val relative = "$wrapper/${artifact.relativePath}"
+                    root.resolve(relative).takeUnless { it.exists() }?.writeBytes(byteArrayOf(4))
+                    artifact.copy(relativePath = relative, graphName = "model")
+                }
+                val installed = current.copy(profileRevision = 2, graph = current.graph.copy(
+                    textEncoder = current.graph.textEncoder.installedLegacy(),
+                    unet = current.graph.unet.installedLegacy(),
+                    vae = current.graph.vae.installedLegacy(),
+                    controlNet = current.graph.controlNet.installedLegacy()
+                ))
+                val components = JSONArray()
+                listOfNotNull(
+                    installed.graph.textEncoder,
+                    installed.graph.unet,
+                    installed.graph.vae,
+                    installed.graph.controlNet
+                ).forEach { graph ->
+                    components.put(JSONObject()
+                        .put("role", if (graph == installed.graph.unet) "DIFFUSION" else "CONFIG")
+                        .put("path", graph.relativePath).put("required", true)
+                        .put("sourceRepo", recommendation.repoId)
+                        .put("sourcePath", "${recommendation.recommendedFileName}!/${graph.relativePath}"))
+                }
+                bundle.requiredComponents.filterNot { it.fileName.endsWith(".zip") }.forEach { sidecar ->
+                    val content = when (sidecar.relativePath.substringAfterLast('/')) {
+                        "scheduler_config.json" -> JSONObject()
+                            .put("_class_name", if (current.family == LocalImageModelFamily.SD21) "DDIMScheduler" else "PNDMScheduler")
+                            .put("beta_start", 0.00085).put("beta_end", 0.012)
+                            .put("beta_schedule", "scaled_linear").put("num_train_timesteps", 1_000)
+                            .put("set_alpha_to_one", false).put("skip_prk_steps", true)
+                            .put("steps_offset", 1).put("clip_sample", false)
+                            .apply {
+                                if (current.family == LocalImageModelFamily.SD21) put("prediction_type", "v_prediction")
+                            }
+                        "tokenizer_config.json" -> JSONObject().put("model_max_length", 77)
+                            .put("bos_token", "<|startoftext|>").put("eos_token", "<|endoftext|>")
+                            .put("pad_token", "<|endoftext|>")
+                        else -> JSONObject()
+                    }
+                    root.resolve(sidecar.relativePath).apply { parentFile.mkdirs(); writeText(content.toString()) }
+                    components.put(JSONObject().put("role", sidecar.role.name)
+                        .put("path", sidecar.relativePath).put("required", true)
+                        .put("sourceRepo", sidecar.repoId).put("sourcePath", sidecar.fileName))
+                }
+                val manifest = JSONObject().put("schema", "mca.image_engine.bundle.v1")
+                    .put("id", bundle.id).put("recommendationId", recommendation.id)
+                    .put("runtime", "QNN_HTP").put("family", current.family.name)
+                    .put("task", current.task.name).put("components", components)
+                    .put("executionProfile", ImageExecutionProfileJson.toJson(installed))
+                root.resolve("manifest.json").writeText(manifest.toString())
+                val installedModel = LocalImageModelRecord(
+                    id = recommendation.id, displayName = recommendation.title,
+                    path = primary.absolutePath, fileName = primary.name,
+                    sizeBytes = primary.length(), sha256 = primary.sha256ForProfile(),
+                    runtime = LocalImageRuntime.QNN_HTP, family = current.family,
+                    bundleRoot = root.absolutePath, source = "hugging_face:${recommendation.repoId}"
+                )
+
+                // Must resolve: the declared digest equals this bundle's own primary artifact.
+                val resolution = resolveLocalImageExecutionProfile(
+                    model = installedModel,
+                    options = LocalImageGenerationOptions(), bundleRoot = root
+                )
+                assertEquals(current.profileId, resolution.profile.profileId)
+                assertTrue(resolution.profile.profileRevision >= 2)
             } finally {
                 root.deleteRecursively()
             }
@@ -739,6 +845,7 @@ class LocalImageExecutionProfileIntegrationTest {
                     .toString(),
                 Charsets.UTF_8
             )
+            val primary = root.resolve("model.bin").apply { writeBytes(byteArrayOf(1, 2, 3)) }
             root.resolve("manifest.json").writeText(
                 JSONObject()
                     .put("id", "sd15_mnn_512_quality")
@@ -756,10 +863,10 @@ class LocalImageExecutionProfileIntegrationTest {
             val resolution = resolveLocalImageExecutionProfile(
                 model = LocalImageModelRecord(
                     displayName = "Local image model",
-                    path = root.resolve("model.bin").absolutePath,
-                    fileName = "model.bin",
-                    sizeBytes = 1L,
-                    sha256 = FINGERPRINT,
+                    path = primary.absolutePath,
+                    fileName = primary.name,
+                    sizeBytes = primary.length(),
+                    sha256 = primary.sha256ForProfile(),
                     runtime = LocalImageRuntime.MNN_DIFFUSION,
                     family = LocalImageModelFamily.SDXL,
                     bundleRoot = root.absolutePath

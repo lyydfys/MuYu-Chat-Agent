@@ -4,11 +4,14 @@ import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.app.ActivityManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
+import android.os.BatteryManager
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
@@ -44,6 +47,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -112,6 +117,7 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Translate
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -156,6 +162,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.rotate
@@ -171,8 +178,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
@@ -182,8 +192,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role as SemanticsRole
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -252,6 +264,9 @@ private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商�
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
 private const val CHAT_BACKGROUND_MAX_DECODE_EDGE = 2048
 private val McaPrimaryBlue = Color(0xFF3F7DE8)
+
+/** Thermal / pressure warning tone for the device-status overlay. */
+private val McaStatusAmber = Color(0xFFD98324)
 private val McaInputShell = Color(0xFFFEFEFF)
 private val McaInputField = Color(0xFFF3F7FF)
 private val McaInputIconSurface = Color(0xFFEAF1FF)
@@ -693,6 +708,7 @@ data class ImageGenerationUiJob(
     val failed: Boolean = false,
     val terminal: Boolean = false,
     val message: String = "",
+    val translationPreview: String? = null,
     val startedAtMillis: Long = System.currentTimeMillis(),
     val startedAtElapsedMs: Long? = null
 )
@@ -2056,6 +2072,8 @@ fun ChatScreen(
     onUseFileAsset: (String) -> Unit = {},
     onDeleteFileAsset: (String) -> Unit = {},
     onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Boolean = { _, _ -> false },
+    onTranslateImagePrompt: (suspend (String) -> String)? = null,
+    onTranslateImageNegativePrompt: (suspend (String) -> String)? = null,
     onRetryImageGeneration: (String) -> Unit = {},
     onRetryChatImageRequest: (String) -> Unit = {},
     onCancelChatImageGeneration: (String) -> Unit = {},
@@ -2082,6 +2100,7 @@ fun ChatScreen(
     onImportChatModel: () -> Unit = onOpenModels,
     onImportImageModel: () -> Unit = onOpenModels,
     offlineTranslationStatus: String = "未安装",
+    offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
     offlineTranslationDownloading: Boolean = false,
     offlineTranslationDownloadProgress: Float? = null,
@@ -2856,7 +2875,7 @@ fun ChatScreen(
         if (!dimensionsValid) {
             val message = when {
                 localControls?.isQwenImage21Model() == true ->
-                    "Qwen-Image-2.1 只能使用模型已验证的 21 个尺寸组合，请按比例/档位选择"
+                    "Qwen-Image-2.1 当前 runtime 提供 21 个尺寸组合，请按比例/档位选择；本机结果以实际生成为准"
                 imageUltraFixEnabled && imageInputDimensionsProbing ->
                     "正在检查 UltraFix 源图尺寸，请稍后重试"
                 imageUltraFixEnabled && ultraFixSourceTarget == null ->
@@ -3262,6 +3281,9 @@ fun ChatScreen(
     BackHandler(enabled = historyBackEnabled) {
         scope.launch { drawerState.close() }
     }
+    var bottomChromeHeightPx by remember { mutableStateOf(0) }
+    val bottomChromeHeight = with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
+        .coerceAtLeast(120.dp)
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -3329,11 +3351,15 @@ fun ChatScreen(
                     PromptContextUsageLine(usage)
                 }
 
-                LazyColumn(
-                    state = listState,
+                Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
+                ) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
                         .padding(horizontal = 18.dp),
                     contentPadding = PaddingValues(top = 26.dp, bottom = 118.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp)
@@ -3486,13 +3512,20 @@ fun ChatScreen(
                         }
                     }
                 }
+                ChatDeviceStatusOverlay(
+                    state = state,
+                    modifier = Modifier.matchParentSize().padding(bottom = bottomChromeHeight)
+                )
+                }
             }
 
             if (state.conversationReadOnly) {
                 Text(
                     "此会话仅供查看。可从历史菜单创建角色分支。",
                     modifier = Modifier.align(Alignment.BottomCenter)
-                        .fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
+                        .fillMaxWidth()
+                        .onSizeChanged { bottomChromeHeightPx = it.height }
+                        .padding(horizontal = 20.dp, vertical = 16.dp),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -3544,6 +3577,7 @@ fun ChatScreen(
                 onToggleWebSearchForTurn = onToggleWebSearchForTurn,
                 onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
+                onMeasuredHeight = { bottomChromeHeightPx = it },
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
 
@@ -3691,11 +3725,14 @@ fun ChatScreen(
                     onOpenModels = onOpenRecommendedModels,
                     onImportModel = onImportImageModel,
                     offlineTranslationStatus = offlineTranslationStatus,
+                    offlineTranslationInstalled = offlineTranslationInstalled,
                     offlineTranslationInstalling = offlineTranslationInstalling,
                     offlineTranslationDownloading = offlineTranslationDownloading,
                     offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
                     onDownloadOfflineTranslation = onDownloadOfflineTranslation,
                     onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
+                    onTranslateImagePrompt = onTranslateImagePrompt,
+                    onTranslateImageNegativePrompt = onTranslateImageNegativePrompt,
                     statusMessage = imageValidationError ?: state.statusMessage,
                     onDismissStatusMessage = { imageValidationError = null; onDismissStatusMessage() },
                     images = state.images,
@@ -5817,11 +5854,14 @@ private fun ImagesWorkspaceScreen(
     onOpenModels: () -> Unit,
     onImportModel: () -> Unit,
     offlineTranslationStatus: String,
+    offlineTranslationInstalled: Boolean,
     offlineTranslationInstalling: Boolean,
     offlineTranslationDownloading: Boolean,
     offlineTranslationDownloadProgress: Float?,
     onDownloadOfflineTranslation: () -> Unit,
     onCancelOfflineTranslationDownload: () -> Unit,
+    onTranslateImagePrompt: (suspend (String) -> String)?,
+    onTranslateImageNegativePrompt: (suspend (String) -> String)?,
     statusMessage: String?,
     onDismissStatusMessage: () -> Unit,
     images: List<ImageAssetUiItem>,
@@ -6188,6 +6228,7 @@ private fun ImagesWorkspaceScreen(
                 OutlinedButton(onClick = onImportModel) { Text("导入已有模型") }
                 ImageTranslationDownloadRow(
                     status = offlineTranslationStatus,
+                    installed = offlineTranslationInstalled,
                     installing = offlineTranslationInstalling,
                     downloading = offlineTranslationDownloading,
                     progress = offlineTranslationDownloadProgress,
@@ -6198,6 +6239,7 @@ private fun ImagesWorkspaceScreen(
         } else {
             ImageGalleryHome(
                 offlineTranslationStatus = offlineTranslationStatus,
+                offlineTranslationInstalled = offlineTranslationInstalled,
                 offlineTranslationInstalling = offlineTranslationInstalling,
                 offlineTranslationDownloading = offlineTranslationDownloading,
                 offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
@@ -6417,6 +6459,10 @@ private fun ImagesWorkspaceScreen(
             onPromptChange = onPromptChange,
             modelId = selectedImageModelId,
             onMeasureTokens = onMeasureImagePromptTokens,
+            onTranslatePrompt = onTranslateImagePrompt,
+            negativePrompt = if (supportsNegativePrompt) negativePrompt else "",
+            onNegativePromptChange = onNegativePromptChange,
+            onTranslateNegativePrompt = onTranslateImageNegativePrompt,
             onOpenPhoto = {
                 when (taskMode) {
                     ImageGenerationUiTaskMode.CONTROL -> onPickImageRole("control")
@@ -6866,6 +6912,7 @@ private val ImageGenerationUiJob.isWorking: Boolean
 @Composable
 private fun ImageTranslationDownloadRow(
     status: String,
+    installed: Boolean,
     installing: Boolean,
     downloading: Boolean,
     progress: Float?,
@@ -6875,7 +6922,7 @@ private fun ImageTranslationDownloadRow(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .testTag("image.translation.download"),
+            .testTag("image.translation.status"),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Row(
@@ -6888,20 +6935,32 @@ private fun ImageTranslationDownloadRow(
                 Text(
                     status,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
-            OutlinedButton(
-                onClick = if (downloading) onCancel else onDownload,
-                enabled = downloading || !installing
-            ) {
-                Icon(
-                    if (downloading) Icons.Default.Stop else Icons.Default.Download,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
+            if (installed && !downloading) {
+                Text(
+                    "已安装",
+                    modifier = Modifier.testTag("image.translation.installed"),
+                    color = MaterialTheme.colorScheme.primary,
+                    style = MaterialTheme.typography.labelLarge
                 )
-                Spacer(Modifier.width(6.dp))
-                Text(if (downloading) "取消" else "下载")
+            } else {
+                OutlinedButton(
+                    onClick = if (downloading) onCancel else onDownload,
+                    enabled = downloading || (!installing && !installed),
+                    modifier = Modifier.testTag(if (downloading) "image.translation.download.cancel" else "image.translation.download")
+                ) {
+                    Icon(
+                        if (downloading) Icons.Default.Stop else Icons.Default.Download,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (downloading) "取消" else "下载")
+                }
             }
         }
         if (downloading) {
@@ -6922,6 +6981,7 @@ private fun ImageTranslationDownloadRow(
 @Composable
 private fun ImageGalleryHome(
     offlineTranslationStatus: String,
+    offlineTranslationInstalled: Boolean,
     offlineTranslationInstalling: Boolean,
     offlineTranslationDownloading: Boolean,
     offlineTranslationDownloadProgress: Float?,
@@ -7092,6 +7152,7 @@ private fun ImageGalleryHome(
         item {
             ImageTranslationDownloadRow(
                 status = offlineTranslationStatus,
+                installed = offlineTranslationInstalled,
                 installing = offlineTranslationInstalling,
                 downloading = offlineTranslationDownloading,
                 progress = offlineTranslationDownloadProgress,
@@ -8355,7 +8416,7 @@ private fun ImageInputOptionsPanel(
                 val fixedHeight = displayedMinHeight == displayedMaxHeight
                 if (isQwenImage21Model) {
                     Text(
-                        "Qwen-Image-2.1 已验证 21 个尺寸组合：Standard（7 种比例）512×512、576×448、448×576、640×416、416×640、672×384、384×672；Fast 384×384、448×320、320×448、480×320、320×480、512×288、288×512；Tiny 320×320、384×288、288×384、384×256、256×384、416×256、256×416。任意 32 对齐尺寸不代表可运行。",
+                        "Qwen-Image-2.1 当前 runtime 的 21 个预设尺寸组合：Standard（7 种比例）512×512、576×448、448×576、640×416、416×640、672×384、384×672；Fast 384×384、448×320、320×448、480×320、320×480、512×288、288×512；Tiny 320×320、384×288、288×384、384×256、256×384、416×256、256×416。任意 32 对齐尺寸不代表可运行。",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -8371,7 +8432,7 @@ private fun ImageInputOptionsPanel(
                         supportingText = {
                             Text(
                                 if (isQwenImage21Model) {
-                                    "只能使用模型已验证的宽高组合"
+                                    "请选择当前 runtime 提供的宽高组合"
                                 } else if (fixedWidth) {
                                     "模型固定尺寸"
                                 } else {
@@ -8381,7 +8442,7 @@ private fun ImageInputOptionsPanel(
                         },
                         singleLine = true,
                         readOnly = fixedWidth,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("image.width")
                     )
                     OutlinedTextField(
                         value = heightText,
@@ -8390,7 +8451,7 @@ private fun ImageInputOptionsPanel(
                         supportingText = {
                             Text(
                                 if (isQwenImage21Model) {
-                                    "只能使用模型已验证的宽高组合"
+                                    "请选择当前 runtime 提供的宽高组合"
                                 } else if (fixedHeight) {
                                     "模型固定尺寸"
                                 } else {
@@ -8400,7 +8461,7 @@ private fun ImageInputOptionsPanel(
                         },
                         singleLine = true,
                         readOnly = fixedHeight,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("image.height")
                     )
                 }
                 Row(
@@ -8415,7 +8476,7 @@ private fun ImageInputOptionsPanel(
                             Text("${executionModel.imageMinSteps}-${executionModel.imageMaxSteps}")
                         },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("image.steps")
                     )
                     OutlinedTextField(
                         value = cfgScaleText,
@@ -8430,7 +8491,7 @@ private fun ImageInputOptionsPanel(
                         label = { Text("Seed") },
                         placeholder = { Text("随机") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f).testTag("image.seed")
                     )
                 }
                 if (executionModel.isQwenImage21Gguf) {
@@ -9307,15 +9368,40 @@ private fun ImageAssistantResultCard(
                 job = requireNotNull(job),
                 onRetry = onRetry
             )
-            ImageAssistantCardKind.CREATING -> ImageCreatingPlaceholder(
-                statusText = job?.statusLabel ?: "正在创建图片",
-                statusMessage = job?.message.orEmpty(),
-                startedAtElapsedMs = job?.startedAtElapsedMs ?: fallbackStartedAtElapsedMs,
-                previewUriString = job?.previewUriString,
-                previewStep = job?.previewStep ?: 0,
-                previewRevision = job?.previewRevision ?: 0L,
-                onCancel = onCancelGeneration
-            )
+            ImageAssistantCardKind.CREATING -> {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ImageCreatingPlaceholder(
+                        statusText = job?.statusLabel ?: "正在创建图片",
+                        statusMessage = job?.message.orEmpty(),
+                        startedAtElapsedMs = job?.startedAtElapsedMs ?: fallbackStartedAtElapsedMs,
+                        previewUriString = job?.previewUriString,
+                        previewStep = job?.previewStep ?: 0,
+                        previewRevision = job?.previewRevision ?: 0L,
+                        onCancel = onCancelGeneration
+                    )
+                    job?.translationPreview?.takeIf(String::isNotBlank)?.let { translated ->
+                        Column(
+                            modifier = Modifier
+                                .widthIn(max = 360.dp)
+                                .testTag("image.generation.translation-preview"),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                "英文草稿（可编辑）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = McaPrimaryBlue
+                            )
+                            SelectionContainer {
+                                Text(
+                                    translated,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -9436,7 +9522,7 @@ private fun ImageCreatingPlaceholder(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-                TextButton(onClick = onCancel) {
+                TextButton(onClick = onCancel, modifier = Modifier.testTag("image.cancel")) {
                     Text("取消生成")
                 }
             }
@@ -9725,7 +9811,7 @@ private fun ImageEngineSwitcher(
         val sourceModels = if (source == ImageEngineSource.CLOUD) cloudModels else localModels
         Box(modifier = Modifier.weight(1f)) {
                 Surface(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().testTag("image.model.selector"),
                     onClick = { modelMenuSource = source },
                     enabled = enabled,
                     color = modelChipColor,
@@ -11142,6 +11228,10 @@ private fun ImagePromptBar(
     placeholder: String = "描述图像",
     isGenerating: Boolean = false,
     onStop: () -> Unit = {},
+    onTranslatePrompt: (suspend (String) -> String)? = null,
+    negativePrompt: String = "",
+    onNegativePromptChange: (String) -> Unit = {},
+    onTranslateNegativePrompt: (suspend (String) -> String)? = null,
     modifier: Modifier = Modifier
 ) {
     val darkTheme = isSystemInDarkTheme()
@@ -11155,11 +11245,28 @@ private fun ImagePromptBar(
         mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length)))
     }
     var focused by remember { mutableStateOf(false) }
+    var translationSource by remember { mutableStateOf<String?>(null) }
+    var translationPreview by remember { mutableStateOf<String?>(null) }
+    var translationError by remember { mutableStateOf<String?>(null) }
+    var translationBusy by remember { mutableStateOf(false) }
+    var negativeTranslationBusy by remember { mutableStateOf(false) }
+    var translationJob by remember { mutableStateOf<Job?>(null) }
+    val scope = rememberCoroutineScope()
+
+    fun clearStaleTranslation(nextText: String) {
+        if (translationSource != nextText) {
+            translationJob?.cancel()
+            translationSource = null
+            translationPreview = null
+            translationError = null
+        }
+    }
 
     LaunchedEffect(prompt) {
         if (prompt != fieldValue.text) {
             fieldValue = TextFieldValue(prompt, TextRange(prompt.length))
             editHistory.replace()
+            clearStaleTranslation(prompt)
         }
     }
 
@@ -11167,6 +11274,7 @@ private fun ImagePromptBar(
     val tokenOverflow = tokenState.measurementOrNull?.overflows == true
 
     fun commitFieldValue(next: TextFieldValue) {
+        if (next.text != fieldValue.text) clearStaleTranslation(next.text)
         fieldValue = next
         if (next.text != prompt) onPromptChange(next.text)
     }
@@ -11258,6 +11366,7 @@ private fun ImagePromptBar(
                                     cursorBrush = SolidColor(McaPrimaryBlue),
                                     modifier = Modifier
                                         .fillMaxWidth()
+                                        .testTag("image.prompt.editor")
                                         .onFocusChanged { focused = it.isFocused }
                                 )
                             }
@@ -11271,9 +11380,71 @@ private fun ImagePromptBar(
                         }
                     }
                 }
+                if (fieldValue.text.containsHanScriptForTranslationUi() && onTranslatePrompt != null) {
+                    TextButton(
+                        onClick = {
+                            if (isGenerating) return@TextButton
+                            if (translationBusy) {
+                                translationJob?.cancel()
+                                return@TextButton
+                            }
+                            val source = fieldValue.text
+                            val translate = onTranslatePrompt
+                            translationSource = source
+                            translationJob = scope.launch {
+                                translationBusy = true
+                                translationError = null
+                                try {
+                                    val translated = translate(source)
+                                    if (fieldValue.text == source) {
+                                        translationSource = source
+                                        translationPreview = translated
+                                    }
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    if (fieldValue.text == source) {
+                                        translationError = error.message ?: "Hy-MT2 翻译失败，请重试。"
+                                    }
+                                } finally {
+                                    translationBusy = false
+                                    translationJob = null
+                                }
+                            }
+                        },
+                        enabled = !isGenerating && !negativeTranslationBusy,
+                        modifier = Modifier
+                            .height(40.dp)
+                            .testTag("image.prompt.translate")
+                            .semantics { contentDescription = if (translationBusy) "取消翻译" else "翻译为英文" },
+                        contentPadding = PaddingValues(horizontal = 4.dp)
+                    ) {
+                        if (translationBusy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text("取消", style = MaterialTheme.typography.labelMedium)
+                        } else {
+                            Icon(
+                                Icons.Default.Translate,
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp)
+                            )
+                            Spacer(Modifier.width(2.dp))
+                            Text("译成英文", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
                 Spacer(modifier = Modifier.width(10.dp))
                 FloatingActionButton(
-                    onClick = if (isGenerating) onStop else onSubmit,
+                    onClick = {
+                        when {
+                            isGenerating -> onStop()
+                            !translationBusy && !negativeTranslationBusy -> onSubmit()
+                        }
+                    },
                     containerColor = when {
                         isGenerating -> McaPrimaryBlue
                         prompt.isBlank() -> if (darkTheme) {
@@ -11285,7 +11456,7 @@ private fun ImagePromptBar(
                     },
                     elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                     shape = CircleShape,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp).testTag(if (isGenerating) "image.stop" else "image.generate")
                 ) {
                     if (isGenerating) {
                         Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = Color.White)
@@ -11299,8 +11470,151 @@ private fun ImagePromptBar(
                 }
             }
         }
+        translationError?.let { error ->
+            Text(
+                error,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 2.dp)
+                    .testTag("image.prompt.translation.error"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        if (translationSource == fieldValue.text && translationPreview != null) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 24.dp, end = 18.dp, bottom = 4.dp)
+                    .testTag("image.prompt.translation.preview"),
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "英文译文",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = McaPrimaryBlue
+                    )
+                    BasicTextField(
+                        value = translationPreview.orEmpty(),
+                        onValueChange = { translationPreview = it },
+                        modifier = Modifier.fillMaxWidth().testTag("image.prompt.translation.draft"),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(
+                            color = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
+                        ),
+                        cursorBrush = SolidColor(McaPrimaryBlue),
+                        maxLines = 4
+                    )
+                }
+                TextButton(
+                    onClick = {
+                        val translated = translationPreview.orEmpty()
+                        applyDiscreteFieldValue(TextFieldValue(translated, TextRange(translated.length)))
+                    },
+                    modifier = Modifier.testTag("image.prompt.translation.apply")
+                ) {
+                    Text("使用英文")
+                }
+            }
+        }
+        if (negativePrompt.containsHanScriptForTranslationUi() && onTranslateNegativePrompt != null) {
+            ImagePromptTranslationDraft(
+                source = negativePrompt,
+                label = "负面提示词",
+                translatingOtherField = translationBusy,
+                enabled = !isGenerating,
+                onTranslate = onTranslateNegativePrompt,
+                onApply = onNegativePromptChange,
+                onBusyChange = { negativeTranslationBusy = it },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
+                testTagPrefix = "image.negative.translation"
+            )
+        }
     }
 }
+
+@Composable
+private fun ImagePromptTranslationDraft(
+    source: String,
+    label: String,
+    translatingOtherField: Boolean,
+    enabled: Boolean,
+    onTranslate: suspend (String) -> String,
+    onApply: (String) -> Unit,
+    onBusyChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    testTagPrefix: String
+) {
+    val scope = rememberCoroutineScope()
+    val currentSource by rememberUpdatedState(source)
+    var busy by remember { mutableStateOf(false) }
+    var job by remember { mutableStateOf<Job?>(null) }
+    var translatedSource by remember { mutableStateOf<String?>(null) }
+    var draft by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(source) {
+        if (translatedSource != source) {
+            job?.cancel()
+            translatedSource = null
+            draft = null
+            error = null
+        }
+    }
+    Column(modifier) {
+        TextButton(
+            enabled = enabled && (!translatingOtherField || busy),
+            modifier = Modifier.testTag("$testTagPrefix.start"),
+            onClick = {
+                if (busy) {
+                    job?.cancel()
+                } else {
+                    val requestedSource = source
+                    translatedSource = requestedSource
+                    error = null
+                    job = scope.launch {
+                        busy = true
+                        onBusyChange(true)
+                        try {
+                            val translated = onTranslate(requestedSource)
+                            if (currentSource == requestedSource) draft = translated
+                        } catch (cancelled: CancellationException) {
+                            if (currentSource == requestedSource) error = "翻译已取消，原始$label 已保留。"
+                            throw cancelled
+                        } catch (failure: Exception) {
+                            if (currentSource == requestedSource) error = failure.message ?: "翻译失败，原始$label 已保留。"
+                        } finally {
+                            busy = false
+                            onBusyChange(false)
+                        }
+                    }
+                }
+            }
+        ) { Text(if (busy) "取消$label 翻译" else "翻译$label 为英文") }
+        error?.let {
+            Text(it, color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.testTag("$testTagPrefix.error"))
+        }
+        if (translatedSource == source && draft != null) {
+            Text("$label 英文草稿（可编辑）", style = MaterialTheme.typography.labelSmall)
+            OutlinedTextField(
+                value = draft.orEmpty(), onValueChange = { draft = it },
+                modifier = Modifier.fillMaxWidth().testTag("$testTagPrefix.draft"),
+                minLines = 2, maxLines = 4
+            )
+            TextButton(
+                enabled = enabled && !busy && draft?.isNotBlank() == true,
+                modifier = Modifier.testTag("$testTagPrefix.apply"),
+                onClick = { draft?.takeIf(String::isNotBlank)?.let(onApply) }
+            ) { Text("使用英文$label") }
+        }
+    }
+}
+
+private fun String.containsHanScriptForTranslationUi(): Boolean =
+    codePoints().anyMatch { codePoint ->
+        Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN
+    }
 
 private fun loadImageBitmap(
     context: Context,
@@ -12648,8 +12962,6 @@ private fun ChatStatusBar(
             )
         }
         Spacer(modifier = Modifier.width(12.dp))
-        ChatDeviceStatusMenu(state = state)
-        Spacer(modifier = Modifier.width(8.dp))
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
@@ -12676,52 +12988,297 @@ internal data class ChatDeviceStatusItem(
     val value: String,
     val detail: String,
     val active: Boolean,
-    val known: Boolean = true
+    val known: Boolean = true,
+    val tone: ChatDeviceStatusTone =
+        if (known) ChatDeviceStatusTone.NEUTRAL else ChatDeviceStatusTone.UNKNOWN
 )
+
+/**
+ * How loudly one status row is drawn.
+ *
+ * Deliberately separate from [ChatDeviceStatusItem.active]: `active` records whether an
+ * accelerator is executing *with native proof*, while `tone` decides emphasis.  Keeping
+ * them apart is what lets unprobed evidence be drawn as unknown instead of being painted
+ * like a reading, so the panel cannot dress configuration up as execution.
+ */
+internal enum class ChatDeviceStatusTone { NEUTRAL, ACTIVE, WARN, CRITICAL, UNKNOWN }
+
+@Composable
+private fun chatDeviceStatusToneColor(tone: ChatDeviceStatusTone): Color = when (tone) {
+    ChatDeviceStatusTone.ACTIVE -> McaPrimaryBlue
+    ChatDeviceStatusTone.WARN -> McaStatusAmber
+    ChatDeviceStatusTone.CRITICAL -> MaterialTheme.colorScheme.error
+    ChatDeviceStatusTone.UNKNOWN -> MaterialTheme.colorScheme.outline
+    ChatDeviceStatusTone.NEUTRAL -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+/** Normalizes a user/native backend label to the accelerator family it names. */
+internal fun normalizeChatAcceleratorBackend(raw: String?): String? {
+    val value = raw?.trim()?.lowercase().orEmpty()
+    if (value.isBlank() || value == "unknown" || value == "unavailable" || value == "none") return null
+    return when {
+        value == "cpu" || value.contains("cpu") -> "cpu"
+        value == "gpu" || value.contains("gpu") || value.contains("opencl") ||
+            value.contains("adreno") -> "gpu"
+        value == "npu" || value.contains("npu") || value.contains("htp") ||
+            value.contains("qnn") || value.contains("qairt") || value.contains("qualcomm") -> "npu"
+        else -> value
+    }
+}
+
+/**
+ * Pure projection for one accelerator row.  `supported`, `selectedBackend`,
+ * and `actualBackend` are intentionally independent so a configured delegate
+ * cannot be presented as an executing delegate without native proof.
+ */
+internal fun chatAcceleratorStatusItem(
+    key: String,
+    label: String,
+    accelerator: String,
+    cloud: Boolean,
+    supported: Boolean?,
+    selectedBackend: String?,
+    actualBackend: String?,
+    executionObserved: Boolean,
+    unavailableValue: String = "不可用",
+    unknownValue: String = "待检测",
+    idleValue: String = "未使用",
+    extraDetail: String? = null
+): ChatDeviceStatusItem {
+    val selected = normalizeChatAcceleratorBackend(selectedBackend)
+    val actual = normalizeChatAcceleratorBackend(actualBackend)
+    val running = !cloud && executionObserved && actual == accelerator
+    val selectedHere = !cloud && selected == accelerator
+    val value = when {
+        cloud -> idleValue
+        running -> "运行中"
+        supported == false -> unavailableValue
+        selectedHere -> "已选择"
+        supported == true -> "可用"
+        else -> unknownValue
+    }
+    val supportLabel = when (supported) {
+        true -> "支持：可用"
+        false -> "支持：不可用"
+        null -> "支持：未探测"
+    }
+    val selectedLabel = when {
+        cloud -> "已选：云端"
+        selectedHere -> "已选：${selectedBackend?.trim().orEmpty().ifBlank { accelerator }}"
+        selected != null -> "已选：${selectedBackend?.trim().orEmpty()}"
+        else -> "已选：未指定"
+    }
+    val actualLabel = when {
+        cloud -> "实际：未使用本机"
+        running -> "实际：${actualBackend?.trim().orEmpty().ifBlank { accelerator }}（原生证据）"
+        actual != null -> "实际：${actualBackend?.trim().orEmpty()}（未确认执行）"
+        else -> "实际：未确认"
+    }
+    // Proof first.  This line is the narrowest thing in the panel, so whichever fragment
+    // survives must be the one that says whether execution was actually proven.
+    val details = buildList {
+        add(actualLabel)
+        add(supportLabel)
+        add(selectedLabel)
+        extraDetail?.takeIf(String::isNotBlank)?.let(::add)
+    }.joinToString(" · ")
+    val known = cloud || supported != null || selected != null || actual != null || executionObserved
+    return ChatDeviceStatusItem(
+        key = key,
+        label = label,
+        value = value,
+        detail = details,
+        active = running,
+        known = known,
+        tone = when {
+            running -> ChatDeviceStatusTone.ACTIVE
+            !known -> ChatDeviceStatusTone.UNKNOWN
+            else -> ChatDeviceStatusTone.NEUTRAL
+        }
+    )
+}
+
+internal data class ChatDeviceMemorySample(
+    val totalKb: Long,
+    val availableKb: Long,
+    val lowMemory: Boolean
+)
+
+internal data class ChatDeviceTemperatureSample(
+    val celsius: Float,
+    val source: String
+)
+
+/**
+ * Absolute ball-size presets.
+ *
+ * The chosen size is stored as an absolute dp value rather than a fraction of the screen.
+ * A screen fraction made the same setting produce 21.6dp on a 360dp phone and 26.9dp on a
+ * 448dp one, and let the soft keyboard resize the ball whenever it changed the overlay
+ * host's height.  An absolute value means the number the user picks is the size they get,
+ * on every device, in every orientation.
+ */
+internal enum class FloatingDeviceStatusSize(val dp: Float, val label: String) {
+    SMALL(28f, "小"),
+    MEDIUM(36f, "中"),
+    LARGE(44f, "大"),
+    EXTRA_LARGE(52f, "特大");
+
+    companion object {
+        fun nearest(storedDp: Float): FloatingDeviceStatusSize =
+            entries.minByOrNull { kotlin.math.abs(it.dp - storedDp) } ?: LARGE
+    }
+}
+
+internal const val DEFAULT_FLOATING_DEVICE_STATUS_SIZE_DP = 44f
+
+/** Ceiling on how much of the short side the ball may take on an unusually small host. */
+private const val MAX_FLOATING_DEVICE_STATUS_SHORT_SIDE_SHARE = 0.16f
+private const val MIN_FLOATING_DEVICE_STATUS_SIZE_DP = 16f
+
+/**
+ * Resolves the drawn size from the user's absolute choice.
+ *
+ * The available area only acts as a safety clamp for very small or split-screen hosts.
+ * There is deliberately no fixed lower/upper bound inside the selectable range: the old
+ * `coerceIn(18f, 56f)` around a screen fraction made the first 12.5% of the slider dead
+ * on a 360dp phone and left the 56dp ceiling unreachable on every phone.
+ */
+internal fun floatingDeviceStatusBallSize(
+    chosenDp: Float,
+    availableShortSideDp: Float
+): Dp {
+    val ceiling = (availableShortSideDp * MAX_FLOATING_DEVICE_STATUS_SHORT_SIDE_SHARE)
+        .takeIf { it.isFinite() && it > 0f }
+        ?: chosenDp
+    return chosenDp.coerceAtMost(ceiling).coerceAtLeast(MIN_FLOATING_DEVICE_STATUS_SIZE_DP).dp
+}
+
+/**
+ * Content tiers, one per preset.
+ *
+ * The previous single `ballSize >= 32.dp` branch made the ball's contents reflow all at
+ * once part-way through the range.  Each tier now has a designed layout, so growing the
+ * ball adds detail progressively instead of jumping.
+ */
+internal enum class FloatingDeviceStatusBallTier { COMPACT, STANDARD, FULL }
+
+internal fun floatingDeviceStatusBallTier(ballDp: Float): FloatingDeviceStatusBallTier = when {
+    ballDp < 40f -> FloatingDeviceStatusBallTier.COMPACT
+    ballDp < 48f -> FloatingDeviceStatusBallTier.STANDARD
+    else -> FloatingDeviceStatusBallTier.FULL
+}
+
+/**
+ * Ring weight scales with the ball so the small presets stay legible and the large ones
+ * stay elegant.  The old fixed 2.5dp stroke was invisible on a 52dp ball.
+ */
+internal fun floatingDeviceStatusRingStrokeDp(ballDp: Float): Float =
+    (ballDp * 0.085f).coerceIn(2.5f, 4.5f)
+
+/**
+ * "4.7 GB" -> "4.7G".  The compact form is what lets the 28dp and 36dp presets render the
+ * value inside the ring without clipping; the full form measured ~24dp against ~21.6dp of
+ * available width at the old default size.
+ */
+internal fun compactMemoryLabel(label: String): String =
+    label.replace(" ", "").replace("GB", "G").replace("MB", "M")
+
+internal fun chatTemperatureTone(celsius: Float): ChatDeviceStatusTone = when {
+    celsius >= 65f -> ChatDeviceStatusTone.CRITICAL
+    celsius >= 45f -> ChatDeviceStatusTone.WARN
+    else -> ChatDeviceStatusTone.NEUTRAL
+}
+
+internal fun chatTemperatureBandLabel(celsius: Float): String = when {
+    celsius >= 65f -> "偏热，可能接近降频"
+    celsius >= 45f -> "偏热"
+    else -> "正常"
+}
+
+internal fun memoryUsedFraction(totalKb: Long, availableKb: Long): Float? =
+    if (totalKb > 0L) {
+        (1f - availableKb.coerceIn(0L, totalKb).toFloat() / totalKb.toFloat()).coerceIn(0f, 1f)
+    } else {
+        null
+    }
 
 /**
  * Converts the native runtime evidence already present in [ChatUiState] into
  * concise status rows. Unknown GPU/NPU evidence stays visibly unknown; it is
  * never presented as a device rejection.
  */
-internal fun ChatUiState.deviceStatusItems(): List<ChatDeviceStatusItem> {
+internal fun ChatUiState.deviceStatusItems(
+    memorySample: ChatDeviceMemorySample? = null,
+    temperatureSample: ChatDeviceTemperatureSample? = null
+): List<ChatDeviceStatusItem> {
     val backend = stats.backend.trim().lowercase()
-    val runtime = listOfNotNull(
-        backend,
-        stats.backendDevices,
-        selectedModelRuntimeLabel
-    ).joinToString(" ").lowercase()
-    val runtimeTokens = runtime.split(Regex("[^a-z0-9]+"))
-        .filter(String::isNotBlank)
-        .toSet()
-    val npuActive = runtimeTokens.any { it in setOf("npu", "htp", "qnn", "qairt", "litert") }
-    val gpuActive = stats.hasVerifiedGpuExecution ||
-        (stats.loaded && (backend.contains("gpu") || backend.contains("opencl") ||
-            runtime.contains("adreno")))
-    val gpuKnown = selectedModelIsCloud || stats.gpuOffloadSupported != null || stats.loaded
-    val gpuValue = when {
-        selectedModelIsCloud -> "未使用"
-        stats.hasVerifiedGpuExecution || gpuActive -> "运行中"
-        stats.gpuOffloadSupported == false -> "不可用"
-        stats.gpuOffloadSupported == true -> "可用"
-        else -> "待检测"
+    val selectedLocalModel = localModels.firstOrNull { it.id == selectedModelId }
+    val selectedBackend = if (selectedModelIsCloud) {
+        null
+    } else {
+        selectedLocalModel?.selectedBackendId
+            ?: runCatching { JSONObject(generationParams.advancedJson.ifBlank { "{}" }) }
+                .getOrNull()
+                ?.let { root ->
+                    root.optString("backend")
+                        .ifBlank { root.optString("backend_type") }
+                        .takeIf(String::isNotBlank)
+                }
     }
-    val gpuDetail = when {
+    val nativeActualBackend = stats.actualBackend
+    val gpuExecutionObserved = stats.hasVerifiedGpuExecution ||
+        (stats.backendExecutionObserved &&
+            normalizeChatAcceleratorBackend(nativeActualBackend) == "gpu")
+    val npuExecutionObserved = stats.npuExecutionObserved ||
+        (stats.backendExecutionObserved &&
+            normalizeChatAcceleratorBackend(nativeActualBackend) == "npu")
+    val gpuActualBackend = if (gpuExecutionObserved) {
+        nativeActualBackend?.takeIf(String::isNotBlank) ?: "gpu"
+    } else {
+        nativeActualBackend
+    }
+    val npuActualBackend = if (npuExecutionObserved) {
+        nativeActualBackend?.takeIf(String::isNotBlank) ?: "npu"
+    } else {
+        nativeActualBackend
+    }
+    val gpuExtraDetail = when {
         stats.hasVerifiedGpuExecution && stats.gpuOffloadLayersKnown ->
             "${stats.gpuOffloadLayers} 层已验证"
         stats.hasVerifiedGpuExecution -> "已完成原生执行验证"
-        stats.gpuOffloadSupported == false -> "当前运行时未报告 GPU 后端"
-        stats.gpuOffloadSupported == true -> "可在模型加载时使用"
-        else -> "加载模型后检测"
+        stats.backendExecutionEvidence?.isNotBlank() == true -> stats.backendExecutionEvidence
+        else -> null
     }
-    val npuValue = when {
-        selectedModelIsCloud -> "未使用"
-        npuActive && stats.loaded -> "运行中"
-        npuActive -> "可用"
-        else -> "未使用"
-    }
-    val memoryTotal = stats.totalMemKb
-    val memoryAvailable = stats.availMemKb.coerceAtLeast(0L)
+    val gpuItem = chatAcceleratorStatusItem(
+        key = "gpu",
+        label = "GPU",
+        accelerator = "gpu",
+        cloud = selectedModelIsCloud,
+        supported = stats.gpuOffloadSupported,
+        selectedBackend = selectedBackend,
+        actualBackend = gpuActualBackend,
+        executionObserved = gpuExecutionObserved,
+        extraDetail = gpuExtraDetail
+    )
+    val npuItem = chatAcceleratorStatusItem(
+        key = "npu",
+        label = "NPU",
+        accelerator = "npu",
+        cloud = selectedModelIsCloud,
+        supported = stats.npuSupported,
+        selectedBackend = selectedBackend,
+        actualBackend = npuActualBackend,
+        executionObserved = npuExecutionObserved,
+        // Without an explicit capability probe or execution proof, NPU is
+        // idle/unknown.  A configured LiteRT NPU delegate is not execution.
+        unknownValue = "未使用",
+        extraDetail = stats.backendExecutionEvidence
+    )
+    val freshMemory = memorySample?.takeIf { it.totalKb > 0L }
+    val memoryTotal = freshMemory?.totalKb ?: stats.totalMemKb
+    val memoryAvailable = (freshMemory?.availableKb ?: stats.availMemKb)
+        .coerceIn(0L, memoryTotal.coerceAtLeast(0L))
     val memoryUsed = (memoryTotal - memoryAvailable).coerceAtLeast(0L)
     val memoryValue = if (memoryTotal > 0L) {
         "${formatMemoryMb(memoryUsed)} / ${formatMemoryMb(memoryTotal)}"
@@ -12737,33 +13294,48 @@ internal fun ChatUiState.deviceStatusItems(): List<ChatDeviceStatusItem> {
         ChatDeviceStatusItem(
             key = "cpu",
             label = "CPU",
-            value = if (stats.loaded && backend.contains("cpu")) "运行中" else "在线",
-            detail = "系统线程与回退执行",
-            active = stats.loaded && backend.contains("cpu")
+            value = if (!selectedModelIsCloud && stats.loaded && backend.contains("cpu")) "运行中" else "在线",
+            // CPU previously carried an unconditional "系统线程与回退执行" blurb, so the one
+            // backend that is always available was the only one with no proof statement.
+            detail = when {
+                selectedModelIsCloud -> "实际：未使用本机 · 支持：可用"
+                !selectedModelIsCloud && stats.loaded && backend.contains("cpu") ->
+                    "实际：本机 CPU 执行（原生证据） · 支持：可用"
+                else -> "支持：可用 · 实际：未确认"
+            },
+            active = !selectedModelIsCloud && stats.loaded && backend.contains("cpu"),
+            tone = if (!selectedModelIsCloud && stats.loaded && backend.contains("cpu")) {
+                ChatDeviceStatusTone.ACTIVE
+            } else {
+                ChatDeviceStatusTone.NEUTRAL
+            }
         ),
-        ChatDeviceStatusItem(
-            key = "gpu",
-            label = "GPU",
-            value = gpuValue,
-            detail = gpuDetail,
-            active = gpuActive,
-            known = gpuKnown
-        ),
-        ChatDeviceStatusItem(
-            key = "npu",
-            label = "NPU",
-            value = npuValue,
-            detail = if (npuActive) "当前后端：${stats.backend.ifBlank { "native" }}" else "当前模型未使用 NPU",
-            active = npuActive && stats.loaded,
-            known = npuActive || selectedModelIsCloud || stats.loaded
-        ),
+        gpuItem,
+        npuItem,
         ChatDeviceStatusItem(
             key = "memory",
             label = "内存",
             value = memoryValue,
             detail = memoryDetail,
-            active = stats.isLowMemory,
-            known = memoryTotal > 0L
+            active = freshMemory?.lowMemory ?: stats.isLowMemory,
+            known = memoryTotal > 0L,
+            tone = when {
+                memoryTotal <= 0L -> ChatDeviceStatusTone.UNKNOWN
+                freshMemory?.lowMemory ?: stats.isLowMemory -> ChatDeviceStatusTone.CRITICAL
+                else -> ChatDeviceStatusTone.NEUTRAL
+            }
+        ),
+        ChatDeviceStatusItem(
+            key = "temperature",
+            label = "温度",
+            value = temperatureSample?.let { "%.1f°C".format(java.util.Locale.US, it.celsius) } ?: "不可用",
+            detail = temperatureSample?.let {
+                "传感器：${it.source} · ${chatTemperatureBandLabel(it.celsius)}"
+            } ?: "未检测到可读的系统温度传感器",
+            active = temperatureSample?.celsius?.let { it >= 45f } ?: false,
+            known = temperatureSample != null,
+            tone = temperatureSample?.let { chatTemperatureTone(it.celsius) }
+                ?: ChatDeviceStatusTone.UNKNOWN
         )
     )
 }
@@ -12777,86 +13349,523 @@ private fun formatMemoryMb(kb: Long): String {
     }
 }
 
+internal fun moveFloatingDeviceStatusFraction(current: Float, deltaPx: Float, travelPx: Float): Float =
+    if (travelPx > 0f && travelPx.isFinite()) {
+        (current.coerceIn(0f, 1f) + deltaPx / travelPx).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+private fun Context.readChatDeviceMemorySample(): ChatDeviceMemorySample? = runCatching {
+    val manager = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return@runCatching null
+    val info = ActivityManager.MemoryInfo()
+    manager.getMemoryInfo(info)
+    if (info.totalMem <= 0L) null else ChatDeviceMemorySample(
+        totalKb = info.totalMem / 1024L,
+        availableKb = info.availMem / 1024L,
+        lowMemory = info.lowMemory
+    )
+}.getOrNull()
+
+/** Reads whichever real thermal sensor is readable; zone numbers are never assumed. */
+internal fun readChatDeviceTemperatureSample(
+    thermalRoot: File = File("/sys/class/thermal")
+): ChatDeviceTemperatureSample? = runCatching {
+    if (!thermalRoot.isDirectory) return@runCatching null
+    val zones = thermalRoot.listFiles { file ->
+        file.isDirectory && file.name.startsWith("thermal_zone")
+    }.orEmpty()
+    val candidates = zones.mapNotNull { zone ->
+        val raw = zone.resolve("temp").readText().trim().toFloatOrNull() ?: return@mapNotNull null
+        if (!raw.isFinite()) return@mapNotNull null
+        val celsius = if (kotlin.math.abs(raw) > 200f) raw / 1000f else raw
+        if (!celsius.isFinite() || celsius !in -40f..150f) return@mapNotNull null
+        val type = zone.resolve("type").takeIf { it.isFile }?.readText()?.trim().orEmpty()
+        val normalized = type.lowercase()
+        val priority = when {
+            normalized.contains("soc") -> 0
+            normalized.contains("cpu") -> 1
+            normalized.contains("gpu") -> 2
+            normalized.contains("tsens") -> 3
+            normalized.isNotBlank() -> 4
+            else -> 5
+        }
+        Triple(priority, celsius, type.ifBlank { zone.name })
+    }
+    candidates.minWithOrNull(compareBy<Triple<Int, Float, String>> { it.first }.thenBy { it.third })
+        ?.let { ChatDeviceTemperatureSample(it.second, it.third) }
+}.getOrNull()
+
+/** Battery temperature is the fallback exposed by Android when vendor thermal zones are hidden. */
+internal fun batteryTemperatureSample(rawTenthsCelsius: Int): ChatDeviceTemperatureSample? {
+    if (rawTenthsCelsius == Int.MIN_VALUE) return null
+    val celsius = rawTenthsCelsius / 10f
+    return celsius.takeIf { it.isFinite() && it in -40f..100f }
+        ?.let { ChatDeviceTemperatureSample(it, "battery") }
+}
+
+internal fun readChatDeviceTemperatureSample(
+    context: Context,
+    thermalRoot: File = File("/sys/class/thermal")
+): ChatDeviceTemperatureSample? = readChatDeviceTemperatureSample(thermalRoot) ?: runCatching {
+    val battery = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+    batteryTemperatureSample(
+        battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE) ?: Int.MIN_VALUE
+    )
+}.getOrNull()
+
 @Composable
-private fun ChatDeviceStatusMenu(
+private fun ChatDeviceStatusOverlay(
     state: ChatUiState,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current.applicationContext
+    val preferences = remember(context) {
+        context.getSharedPreferences("chat_device_status_overlay", Context.MODE_PRIVATE)
+    }
+    var horizontalFraction by rememberSaveable {
+        mutableStateOf(preferences.getFloat("x_fraction", 1f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f)
+    }
+    var verticalFraction by rememberSaveable {
+        mutableStateOf(preferences.getFloat("y_fraction", 0.70f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0.70f)
+    }
+    var sizeDp by rememberSaveable {
+        mutableStateOf(
+            preferences.getFloat("ball_size_dp", DEFAULT_FLOATING_DEVICE_STATUS_SIZE_DP)
+                .takeIf { it.isFinite() && it > 0f }
+                ?: DEFAULT_FLOATING_DEVICE_STATUS_SIZE_DP
+        )
+    }
     var expanded by rememberSaveable { mutableStateOf(false) }
-    val items = state.deviceStatusItems()
-    val hasActive = items.any { it.active }
+    var memorySample by remember { mutableStateOf<ChatDeviceMemorySample?>(null) }
+    var temperatureSample by remember { mutableStateOf<ChatDeviceTemperatureSample?>(null) }
+    var lastSampleAtMs by remember { mutableStateOf(0L) }
+    var clockMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(context) {
+        while (true) {
+            memorySample = context.readChatDeviceMemorySample()
+            temperatureSample = readChatDeviceTemperatureSample(context)
+            lastSampleAtMs = System.currentTimeMillis()
+            delay(5_000L)
+        }
+    }
+    // Only ticks while the panel is open, and only the panel reads this clock, so the
+    // closed ball never re-composes.
+    LaunchedEffect(expanded) {
+        if (!expanded) return@LaunchedEffect
+        clockMs = System.currentTimeMillis()
+        while (true) {
+            clockMs = System.currentTimeMillis()
+            delay(1_000L)
+        }
+    }
+    val items = state.deviceStatusItems(memorySample, temperatureSample)
+    val memoryItem = items.first { it.key == "memory" }
+    val memoryTotalKb = memorySample?.totalKb?.takeIf { it > 0L } ?: state.stats.totalMemKb
+    val memoryAvailableKb = (memorySample?.availableKb ?: state.stats.availMemKb)
+        .coerceIn(0L, memoryTotalKb.coerceAtLeast(0L))
+    val usedFraction = memoryUsedFraction(memoryTotalKb, memoryAvailableKb)
+    val ballMemoryLabel = if (memoryTotalKb > 0L) formatMemoryMb(memoryAvailableKb) else "--"
+    val ballCompactMemoryLabel = compactMemoryLabel(ballMemoryLabel)
+    val hasActive = items.any { it.key != "memory" && it.active }
+    val ringTrackColor = MaterialTheme.colorScheme.surfaceVariant
+    // The ring and the bar plot *used* memory, so they stay blue in normal conditions and
+    // only take a warning tone when the reading is actually remarkable.
+    val memoryAccent = when (memoryItem.tone) {
+        ChatDeviceStatusTone.WARN -> McaStatusAmber
+        ChatDeviceStatusTone.CRITICAL -> MaterialTheme.colorScheme.error
+        else -> McaPrimaryBlue
+    }
+    val memoryHeadlineColor = when (memoryItem.tone) {
+        ChatDeviceStatusTone.WARN, ChatDeviceStatusTone.CRITICAL -> chatDeviceStatusToneColor(memoryItem.tone)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    val headerTone = when {
+        items.any { it.tone == ChatDeviceStatusTone.CRITICAL } -> ChatDeviceStatusTone.CRITICAL
+        items.any { it.tone == ChatDeviceStatusTone.WARN } -> ChatDeviceStatusTone.WARN
+        items.any { it.tone == ChatDeviceStatusTone.ACTIVE } -> ChatDeviceStatusTone.ACTIVE
+        else -> ChatDeviceStatusTone.NEUTRAL
+    }
+    val freshnessLabel = if (lastSampleAtMs <= 0L || clockMs <= lastSampleAtMs) {
+        "刚刚更新"
+    } else {
+        "更新于 ${(clockMs - lastSampleAtMs) / 1000L}s 前"
+    }
     val statusSummary = items.joinToString("，") { "${it.label}${it.value}" }
-    Box(modifier = modifier) {
+
+    BoxWithConstraints(modifier = modifier) {
+        val shortSide = minOf(maxWidth, maxHeight)
+        val ballSize = floatingDeviceStatusBallSize(sizeDp, shortSide.value)
+        val ballTier = floatingDeviceStatusBallTier(ballSize.value)
+        val edge = 12.dp
+        if (maxWidth < ballSize + edge * 2 || maxHeight < ballSize + edge * 2) return@BoxWithConstraints
+        val density = LocalDensity.current
+        val horizontalTravel = (maxWidth - ballSize - edge * 2).coerceAtLeast(0.dp)
+        val verticalTravel = (maxHeight - ballSize - edge * 2).coerceAtLeast(0.dp)
+        val horizontalTravelPx = with(density) { horizontalTravel.toPx() }
+        val verticalTravelPx = with(density) { verticalTravel.toPx() }
+        val edgePx = with(density) { edge.toPx() }
+
+        fun savePosition() {
+            preferences.edit()
+                .putFloat("x_fraction", horizontalFraction)
+                .putFloat("y_fraction", verticalFraction)
+                .apply()
+        }
+
+        fun saveSize() {
+            preferences.edit().putFloat("ball_size_dp", sizeDp).apply()
+        }
+
+        fun moveBy(x: Float, y: Float): Boolean {
+            horizontalFraction = (horizontalFraction + x).coerceIn(0f, 1f)
+            verticalFraction = (verticalFraction + y).coerceIn(0f, 1f)
+            savePosition()
+            return true
+        }
+
+        if (expanded) {
+            val ballX = edge + horizontalTravel * horizontalFraction
+            val ballY = edge + verticalTravel * verticalFraction
+            val panelWidth = (maxWidth - edge * 2).coerceAtMost(324.dp)
+            val spaceAbove = (ballY - edge - 10.dp).coerceAtLeast(0.dp)
+            val spaceBelow = (maxHeight - ballY - ballSize - edge - 10.dp).coerceAtLeast(0.dp)
+            val panelBelow = spaceBelow >= spaceAbove
+            // Height is content-driven with a cap, instead of the old fixed 236dp that
+            // clipped the accelerator rows on every device.
+            val panelHeight = maxOf(spaceAbove, spaceBelow).coerceAtMost(560.dp)
+            val panelX = (ballX + ballSize - panelWidth)
+                .coerceIn(edge, (maxWidth - panelWidth - edge).coerceAtLeast(edge))
+            val panelY = if (panelBelow) {
+                ballY + ballSize + 10.dp
+            } else {
+                (ballY - panelHeight - 10.dp).coerceAtLeast(edge)
+            }
+
+            Surface(
+                modifier = Modifier
+                    .offset(x = panelX, y = panelY)
+                    .width(panelWidth)
+                    .heightIn(max = panelHeight)
+                    .testTag("chat-device-status-panel"),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.97f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                shadowElevation = 10.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 13.dp, vertical = 11.dp),
+                    verticalArrangement = Arrangement.spacedBy(9.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(9.dp)
+                                .clip(CircleShape)
+                                .background(chatDeviceStatusToneColor(headerTone))
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(1.dp)
+                        ) {
+                            Text(
+                                "MCA 设备状态",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                freshnessLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        IconButton(onClick = { expanded = false }) {
+                            Icon(Icons.Default.Close, contentDescription = "收起设备状态", modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Column(
+                        modifier = Modifier.testTag("chat-device-status-memory"),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.Bottom) {
+                            Text("内存", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                if (memoryTotalKb > 0L) "可用 $ballMemoryLabel" else "内存待检测",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = memoryHeadlineColor
+                            )
+                        }
+                        usedFraction?.let { fraction ->
+                            LinearProgressIndicator(
+                                progress = { fraction },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(5.dp)
+                                    .clip(RoundedCornerShape(3.dp)),
+                                color = memoryAccent,
+                                trackColor = MaterialTheme.colorScheme.surfaceVariant
+                            )
+                        }
+                        // The bar plots *used* memory, so it is captioned in used terms.
+                        // Labelling the row "可用" directly above a 68%-filled bar made the
+                        // two read as opposites.
+                        Text(
+                            if (memoryTotalKb > 0L) {
+                                "已用 ${formatMemoryMb((memoryTotalKb - memoryAvailableKb).coerceAtLeast(0L))} / 共 ${formatMemoryMb(memoryTotalKb)}"
+                            } else {
+                                "系统内存数据尚未返回"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    items.filter { it.key != "memory" }.forEach { item ->
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("chat-device-status-${item.key}"),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Box(
+                                    Modifier.size(6.dp).clip(CircleShape)
+                                        .background(chatDeviceStatusToneColor(item.tone))
+                                )
+                                Spacer(Modifier.width(7.dp))
+                                Text(
+                                    item.label,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1
+                                )
+                                Spacer(Modifier.weight(1f))
+                                Text(
+                                    item.value,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = chatDeviceStatusToneColor(item.tone),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            // Full-width rows give the evidence line roughly 296dp instead of
+                            // the ~135dp a two-column cell allowed, so 支持/已选/实际 is no
+                            // longer guaranteed to collapse into an ellipsis.
+                            Text(
+                                item.detail,
+                                modifier = Modifier.padding(start = 13.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    // The size control used to be a continuous screen-fraction slider sitting
+                    // in the middle of the readout, with a dead first eighth on 360dp phones.
+                    // It is now a labelled absolute-dp preset row at the bottom of the panel.
+                    Column(
+                        modifier = Modifier.testTag("chat-device-status-size"),
+                        verticalArrangement = Arrangement.spacedBy(7.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("悬浮球大小", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.weight(1f))
+                            Text("${ballSize.value.toInt()} dp", style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FloatingDeviceStatusSize.entries.forEach { preset ->
+                                val selected = preset == FloatingDeviceStatusSize.nearest(sizeDp)
+                                Surface(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(11.dp))
+                                        .clickable {
+                                            sizeDp = preset.dp
+                                            saveSize()
+                                        },
+                                    shape = RoundedCornerShape(11.dp),
+                                    color = if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.outlineVariant
+                                    )
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            "${preset.label} ${preset.dp.toInt()}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                            color = if (selected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Surface(
             modifier = Modifier
-                .size(44.dp)
-                .semantics(mergeDescendants = true) {
-                    contentDescription = if (expanded) {
-                        "收起设备状态（$statusSummary）"
-                    } else {
-                        "设备状态：$statusSummary，点击展开"
-                    }
-                    role = SemanticsRole.Button
-                    stateDescription = if (hasActive) "有运行中的硬件" else "设备状态"
+                // Read drag position during placement so pointer updates do not recompose the overlay.
+                .offset {
+                    IntOffset(
+                        (edgePx + horizontalTravelPx * horizontalFraction).roundToInt(),
+                        (edgePx + verticalTravelPx * verticalFraction).roundToInt()
+                    )
                 }
-                .clickable { expanded = !expanded },
+                .size(ballSize)
+                // The open panel already shows these numbers, so the ball steps back
+                // instead of competing with it, while staying usable as the drag anchor.
+                .alpha(if (expanded) 0.62f else 1f)
+                .testTag("chat-device-status-ball")
+                .semantics(mergeDescendants = true) {
+                    contentDescription = "MCA 设备状态，可用内存 $ballMemoryLabel。点击${if (expanded) "收起" else "展开"}；可拖动位置。$statusSummary"
+                    role = SemanticsRole.Button
+                    stateDescription = if (expanded) "已展开" else "已收起"
+                    customActions = listOf(
+                        CustomAccessibilityAction("向左移动悬浮球") { moveBy(-0.15f, 0f) },
+                        CustomAccessibilityAction("向右移动悬浮球") { moveBy(0.15f, 0f) },
+                        CustomAccessibilityAction("向上移动悬浮球") { moveBy(0f, -0.15f) },
+                        CustomAccessibilityAction("向下移动悬浮球") { moveBy(0f, 0.15f) }
+                    )
+                }
+                .pointerInput(horizontalTravelPx, verticalTravelPx, ballSize) {
+                    // Keep tap and drag in one pointer scope.  A sibling clickable modifier can
+                    // consume the initial down event before detectDragGestures reaches touch
+                    // slop, which made the ball feel immovable on some Compose/MIUI builds.
+                    // This state machine only toggles on a real tap and consumes movement after
+                    // a small slop, so every pixel of a drag updates the persisted position.
+                    val touchSlopPx = with(density) { 8.dp.toPx() }
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        down.consume()
+                        var dragged = false
+                        var distance = 0f
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: break
+                            if (change.changedToUp()) {
+                                change.consume()
+                                if (!dragged) expanded = !expanded
+                                savePosition()
+                                break
+                            }
+                            if (!change.pressed) {
+                                savePosition()
+                                break
+                            }
+                            val delta = change.positionChange()
+                            if (delta != Offset.Zero) {
+                                distance += delta.getDistance()
+                                if (!dragged && distance >= touchSlopPx) {
+                                    dragged = true
+                                    // A drag should never leave the details panel open over the
+                                    // moving ball.
+                                    expanded = false
+                                }
+                                if (dragged) {
+                                    change.consume()
+                                    horizontalFraction = moveFloatingDeviceStatusFraction(
+                                        horizontalFraction, delta.x, horizontalTravelPx
+                                    )
+                                    verticalFraction = moveFloatingDeviceStatusFraction(
+                                        verticalFraction, delta.y, verticalTravelPx
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 6.dp
+            shadowElevation = 8.dp,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                McaLogoMark(size = 28.dp, cornerRadius = 14.dp)
+                val ringStroke = floatingDeviceStatusRingStrokeDp(ballSize.value).dp
+                usedFraction?.let { fraction ->
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        val inset = ringStroke.toPx() / 2f + 1.dp.toPx()
+                        val arcSize = Size(size.width - inset * 2, size.height - inset * 2)
+                        drawArc(
+                            color = ringTrackColor,
+                            startAngle = -90f,
+                            sweepAngle = 360f,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = ringStroke.toPx(), cap = StrokeCap.Round)
+                        )
+                        drawArc(
+                            color = memoryAccent,
+                            startAngle = -90f,
+                            sweepAngle = fraction * 360f,
+                            useCenter = false,
+                            topLeft = Offset(inset, inset),
+                            size = arcSize,
+                            style = Stroke(width = ringStroke.toPx(), cap = StrokeCap.Round)
+                        )
+                    }
+                }
+                // Designed per preset instead of one hard `ballSize >= 32.dp` branch, so
+                // resizing adds detail progressively rather than reflowing mid-range.
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    when (ballTier) {
+                        FloatingDeviceStatusBallTier.FULL -> {
+                            McaLogoMark(size = (ballSize * 0.30f).coerceIn(14.dp, 22.dp), cornerRadius = 6.dp)
+                            Text(if (memoryTotalKb > 0L) "可用" else "内存",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(ballMemoryLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 11.sp),
+                                fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        FloatingDeviceStatusBallTier.STANDARD -> {
+                            McaLogoMark(size = (ballSize * 0.28f).coerceIn(12.dp, 18.dp), cornerRadius = 5.dp)
+                            Text(ballCompactMemoryLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp, lineHeight = 10.sp),
+                                fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        FloatingDeviceStatusBallTier.COMPACT -> {
+                            // The compact label is what keeps this readable: the full
+                            // "4.7 GB" measured wider than the whole ball at 28dp.
+                            Text(ballCompactMemoryLabel,
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 8.sp, lineHeight = 9.sp),
+                                fontWeight = FontWeight.SemiBold, maxLines = 1,
+                                color = MaterialTheme.colorScheme.onSurface)
+                        }
+                    }
+                }
                 if (hasActive) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .padding(top = 7.dp, end = 7.dp)
-                            .size(7.dp)
+                            .size(6.dp)
                             .clip(CircleShape)
-                            .background(Color(0xFF34A853))
-                    )
-                }
-            }
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-            shape = RoundedCornerShape(20.dp),
-            containerColor = MaterialTheme.colorScheme.surface,
-            tonalElevation = 2.dp,
-            shadowElevation = 12.dp,
-            modifier = Modifier.widthIn(min = 232.dp, max = 280.dp)
-        ) {
-            Text(
-                "设备状态",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold
-            )
-            items.forEach { item ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("chat-device-status-${item.key}")
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(item.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-                        Spacer(modifier = Modifier.weight(1f))
-                        Text(
-                            item.value,
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (item.active) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Text(
-                        item.detail,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                            .background(McaPrimaryBlue)
                     )
                 }
             }
@@ -14622,6 +15631,7 @@ private fun ChatInputBar(
     onToggleWebSearchForTurn: () -> Unit,
     onSelectWebSearchResearchMode: (String) -> Unit,
     onOpenWebSearchSettings: () -> Unit,
+    onMeasuredHeight: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showActionSheet by rememberSaveable { mutableStateOf(false) }
@@ -14750,6 +15760,7 @@ private fun ChatInputBar(
     Surface(
         modifier = modifier
             .fillMaxWidth()
+            .onSizeChanged { onMeasuredHeight(it.height) }
             .padding(horizontal = 16.dp, vertical = 10.dp),
         color = inputShellColor,
         shape = RoundedCornerShape(36.dp),

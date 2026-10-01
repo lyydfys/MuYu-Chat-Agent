@@ -1980,7 +1980,7 @@ private fun DownloadProgressPanel(
             }
             val transferSummary = buildString {
                 if (state.downloadSpeedBytesPerSecond > 0L) {
-                    append(formatBytes(state.downloadSpeedBytesPerSecond)).append("/s")
+                    append(formatDownloadRate(state.downloadSpeedBytesPerSecond))
                 }
                 state.downloadRemainingSeconds?.let { seconds ->
                     if (isNotEmpty()) append(" · ")
@@ -2048,16 +2048,21 @@ private fun DownloadDetailsDialog(
                         MaterialTheme.colorScheme.onSurfaceVariant
                     }
                 )
-                if (state.downloadSpeedBytesPerSecond > 0L || state.downloadRemainingSeconds != null) {
+                if (state.downloadStatus == DownloadStatus.RUNNING &&
+                    (state.downloadPhase == null || state.downloadPhase == ModelHubDownloadPhase.DOWNLOADING)) {
                     Text(
-                        buildString {
-                            if (state.downloadSpeedBytesPerSecond > 0L) {
-                                append(formatBytes(state.downloadSpeedBytesPerSecond)).append("/s")
-                            }
-                            state.downloadRemainingSeconds?.let { seconds ->
-                                if (isNotEmpty()) append(" · ")
-                                append("剩余约 ").append(formatDuration(seconds))
-                            }
+                        "当前速率：" + if (state.downloadSpeedBytesPerSecond > 0L) {
+                            formatDownloadRate(state.downloadSpeedBytesPerSecond)
+                        } else "正在估算",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "预计剩余下载时间：" + when {
+                            total <= 0L -> "总大小未知"
+                            state.downloadRemainingSeconds != null -> "约 " + formatDuration(state.downloadRemainingSeconds)
+                            downloaded >= total -> "下载完成，正在处理文件"
+                            else -> "正在估算"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2103,6 +2108,8 @@ private fun downloadDiagnostics(state: ModelHubUiState): String = buildString {
     appendLine("阶段: ${state.downloadPhase ?: "UNKNOWN"}")
     state.downloadFailureSource?.let { appendLine("失败来源: $it") }
     appendLine("进度: ${state.downloadedBytes}/${state.downloadTotalBytes} bytes")
+    appendLine("当前速率: ${state.downloadSpeedBytesPerSecond} bytes/s")
+    appendLine("预计剩余下载时间: ${state.downloadRemainingSeconds?.let { "$it 秒" } ?: "未知"}")
     appendLine("文件完整性: ${state.downloadIntegrityStatus}: ${state.downloadIntegrityMessage.orEmpty()}")
     appendLine("本机执行: ${state.downloadExecutionStatus}: ${state.downloadExecutionMessage.orEmpty()}")
     state.statusMessage?.let { appendLine("说明: $it") }
@@ -2882,6 +2889,13 @@ private fun formatBytes(bytes: Long): String {
     val gb = bytes / 1024.0 / 1024.0 / 1024.0
     val mb = bytes / 1024.0 / 1024.0
     return if (gb >= 1.0) "%.2f GB".format(gb) else "%.1f MB".format(mb)
+}
+
+private fun formatDownloadRate(bytesPerSecond: Long): String = when {
+    bytesPerSecond >= 1024L * 1024L * 1024L -> "%.2f GB/s".format(bytesPerSecond / (1024.0 * 1024.0 * 1024.0))
+    bytesPerSecond >= 1024L * 1024L -> "%.2f MB/s".format(bytesPerSecond / (1024.0 * 1024.0))
+    bytesPerSecond >= 1024L -> "%.1f KB/s".format(bytesPerSecond / 1024.0)
+    else -> "${bytesPerSecond.coerceAtLeast(0L)} B/s"
 }
 
 private fun formatDuration(seconds: Long): String {

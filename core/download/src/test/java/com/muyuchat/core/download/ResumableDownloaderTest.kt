@@ -25,6 +25,78 @@ class ResumableDownloaderTest {
         assertTrue("The displayed rate should still react to faster transfer", spike > first)
     }
 
+    @Test fun sameMillisecondReadsContributeToNextMeasuredRate() {
+        val estimator = DownloadRateEstimator()
+        assertEquals(0L, estimator.update(100L, 0L))
+        assertEquals(0L, estimator.update(200L, 0L))
+        assertEquals(1_000L, estimator.update(700L, 1_000L))
+    }
+
+    @Test fun estimatorUsesElapsedTimeRatherThanNumberOfChunks() {
+        val whole = DownloadRateEstimator()
+        val split = DownloadRateEstimator()
+        whole.update(1000L, 1000L)
+        split.update(1000L, 1000L)
+        val wholeRate = whole.update(4000L, 1000L)
+        repeat(4) { split.update(1000L, 250L) }
+        assertTrue(kotlin.math.abs(wholeRate - split.update(0L, 0L)) <= 2L)
+    }
+
+    @Test fun etaUsesCeilingDivisionAndDoesNotOverflow() {
+        assertEquals(4L, estimateDownloadRemainingSeconds(10L, 0L, 3L))
+        assertEquals(Long.MAX_VALUE, estimateDownloadRemainingSeconds(Long.MAX_VALUE, 0L, 1L))
+        assertEquals(1L, estimateDownloadRemainingSeconds(Long.MAX_VALUE, 1L, Long.MAX_VALUE))
+        assertEquals(null, estimateDownloadRemainingSeconds(0L, 0L, 1L))
+        assertEquals(null, estimateDownloadRemainingSeconds(10L, 0L, 0L))
+        assertEquals(null, estimateDownloadRemainingSeconds(10L, 10L, 1L))
+        assertEquals(null, estimateDownloadRemainingSeconds(10L, -1L, 1L))
+    }
+
+    @Test
+    fun pendingSameMillisecondBytesAreConsumedOnceAndInvalidSamplesDoNotDiscardThem() {
+        val estimator = DownloadRateEstimator(smoothingFactor = 1.0)
+        assertEquals(1_000L, estimator.update(1_000L, 1_000L))
+        assertEquals(1_000L, estimator.update(100L, 0L))
+        assertEquals(1_000L, estimator.update(200L, -1L))
+        assertEquals(1_000L, estimator.update(-20L, 1L))
+
+        // Only the valid pending 100 bytes and the new 300 bytes count.
+        assertEquals(400L, estimator.update(300L, 1_000L))
+        assertEquals(400L, estimator.update(0L, 0L))
+        // A later interval must not recount the consumed pending bytes.
+        assertEquals(600L, estimator.update(600L, 1_000L))
+    }
+
+    @Test
+    fun pendingByteAndInstantaneousRateOverflowSaturateThenRecover() {
+        val estimator = DownloadRateEstimator(smoothingFactor = 1.0)
+        assertEquals(0L, estimator.update(Long.MAX_VALUE, 0L))
+        assertEquals(0L, estimator.update(Long.MAX_VALUE, 0L))
+        assertEquals(Long.MAX_VALUE, estimator.update(1L, 1L))
+        assertEquals(100L, estimator.update(100L, 1_000L))
+    }
+
+    @Test
+    fun etaRetainsLongPrecisionAndRoundsOnlyIncompleteSecondsUp() {
+        val halfMax = Long.MAX_VALUE / 2L
+        assertEquals(3L, estimateDownloadRemainingSeconds(Long.MAX_VALUE, 0L, halfMax))
+        assertEquals(2L, estimateDownloadRemainingSeconds(Long.MAX_VALUE, 1L, halfMax))
+        assertEquals(2_147_483_648L,
+            estimateDownloadRemainingSeconds(2_147_483_648L, 0L, 1L))
+        assertEquals(1L, estimateDownloadRemainingSeconds(Long.MAX_VALUE, Long.MAX_VALUE - 1L, 1L))
+    }
+
+    @Test
+    fun etaIsUnavailableForUnknownSizesInvalidRatesAndFinishedTransfers() {
+        assertEquals(null, estimateDownloadRemainingSeconds(-1L, 0L, 100L))
+        assertEquals(null, estimateDownloadRemainingSeconds(0L, 10L, 100L))
+        assertEquals(null, estimateDownloadRemainingSeconds(100L, 20L, -1L))
+        assertEquals(null, estimateDownloadRemainingSeconds(100L, 20L, 0L))
+        assertEquals(null, estimateDownloadRemainingSeconds(100L, -1L, 100L))
+        assertEquals(null, estimateDownloadRemainingSeconds(100L, 100L, 100L))
+        assertEquals(null, estimateDownloadRemainingSeconds(100L, 101L, 100L))
+    }
+
     @Test
     fun progressSpeedUsesMonotonicElapsedTime() = runBlocking {
         val bytes = ByteArray(1024 * 1024 + 1024) { 0x41 }
@@ -191,7 +263,7 @@ class ResumableDownloaderTest {
         private fun writeFirstPartial(client: Socket) {
             val output = client.getOutputStream()
             output.write(
-                "HTTP/1.1 200 OK\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 200 OK\r\nETag: \"stable-object\"\r\nContent-Length: ${bytes.size}\r\nConnection: close\r\n\r\n"
                     .toByteArray(Charsets.ISO_8859_1)
             )
             output.write(bytes, 0, firstChunkBytes)
@@ -202,7 +274,7 @@ class ResumableDownloaderTest {
             val output = client.getOutputStream()
             val remaining = bytes.size - firstChunkBytes
             output.write(
-                "HTTP/1.1 206 Partial Content\r\nContent-Length: $remaining\r\nContent-Range: bytes $firstChunkBytes-${bytes.lastIndex}/${bytes.size}\r\nConnection: close\r\n\r\n"
+                "HTTP/1.1 206 Partial Content\r\nETag: \"stable-object\"\r\nContent-Length: $remaining\r\nContent-Range: bytes $firstChunkBytes-${bytes.lastIndex}/${bytes.size}\r\nConnection: close\r\n\r\n"
                     .toByteArray(Charsets.ISO_8859_1)
             )
             output.write(bytes, firstChunkBytes, remaining)

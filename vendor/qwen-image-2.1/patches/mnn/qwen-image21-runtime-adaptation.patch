@@ -1,5 +1,5 @@
 diff --git a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
-index 1f0b7d54..21cb9250 100644
+index 1f0b7d54..9c233563 100644
 --- a/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
 +++ b/transformers/diffusion/engine/include/diffusion/qwen_image21_diffusion.hpp
 @@ -38,10 +38,11 @@ public:
@@ -18,13 +18,16 @@ index 1f0b7d54..21cb9250 100644
                   std::function<void(int)> progressCallback);
      // Image editing: one condition image (also chosen by run(..., inputImagePath)). Output keeps the input's
      // aspect ratio at the configured pixel area.
-@@ -69,15 +70,15 @@ private:
+@@ -68,16 +69,17 @@ public:
+ private:
      std::shared_ptr<Module> loadModule(const std::string& file, const std::vector<std::string>& inputs,
                                         const std::vector<std::string>& outputs,
-                                        std::shared_ptr<Executor::RuntimeManager> rt);
+-                                       std::shared_ptr<Executor::RuntimeManager> rt);
 -    // "past_kv_0".."past_kv_31" / "present_kv_0".."present_kv_31": one K/V tensor per layer, see runPrefix.
 -    static std::vector<std::string> kvNames(const char* prefix);
 -    std::vector<VARP> runPrefix(VARP hidden, const std::vector<float>& cosTab, const std::vector<float>& sinTab,
++                                       std::shared_ptr<Executor::RuntimeManager> rt,
++                                       bool shapeMutable = true);
 +    // dit.mnn exposes one packed "past_kv" input and one packed "present_kv" output.
 +    VARP runPrefix(VARP hidden, const std::vector<float>& cosTab, const std::vector<float>& sinTab,
                     const std::vector<float>& mask);
@@ -39,7 +42,7 @@ index 1f0b7d54..21cb9250 100644
      bool fail(int code, const std::string& message);
      bool failStage(const char* stage);
 diff --git a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
-index 04edf969..7efc216f 100644
+index 04edf969..8d82f6c3 100644
 --- a/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
 +++ b/transformers/diffusion/engine/src/qwen_image21_diffusion.cpp
 @@ -10,8 +10,15 @@
@@ -97,7 +100,30 @@ index 04edf969..7efc216f 100644
  VARP hostCopy(VARP v) {
      auto conv = _Convert(v, NCHW);
      auto info = conv->getInfo();
-@@ -226,6 +265,7 @@ VARP QwenImage21Diffusion::encodePrompt(const std::string& prompt) {
+@@ -104,10 +143,11 @@ QwenImage21Diffusion::~QwenImage21Diffusion() {
+ 
+ std::shared_ptr<Module> QwenImage21Diffusion::loadModule(const std::string& file, const std::vector<std::string>& inputs,
+                                                          const std::vector<std::string>& outputs,
+-                                                         std::shared_ptr<Executor::RuntimeManager> rt) {
++                                                         std::shared_ptr<Executor::RuntimeManager> rt,
++                                                         bool shapeMutable) {
+     AUTOTIME;
+     Module::Config config;
+-    config.shapeMutable = true;
++    config.shapeMutable = shapeMutable;
+     config.rearrange = true;
+     std::string path = mModelPath + "/" + file;
+     rt->setExternalFile(path + ".weight");
+@@ -155,7 +195,7 @@ bool QwenImage21Diffusion::load() {
+     }
+     if (mMemoryMode == 1) {
+         // keep everything resident
+-        mTxtIn = loadModule("txt_in.mnn", {"txt"}, {"txt_h"}, runtime_manager_);
++        mTxtIn = loadModule("txt_in.mnn", {"txt"}, {"txt_h"}, runtime_manager_, false);
+         mImgIn = loadModule("img_in.mnn", {"lat"}, {"img_h"}, runtime_manager_);
+         mVae = loadModule("vae_decoder.mnn", {"latent"}, {"image"},
+                           runtime_manager_vae_cpu_ ? runtime_manager_vae_cpu_ : runtime_manager_);
+@@ -226,6 +266,7 @@ VARP QwenImage21Diffusion::encodePrompt(const std::string& prompt) {
      if (mMemoryMode != 1) {
          mTextEncoder.reset();
          MNN_PRINT("[QwenImage21] text encoder unloaded\n");
@@ -105,7 +131,7 @@ index 04edf969..7efc216f 100644
      }
      return result;
  }
-@@ -283,6 +323,9 @@ void QwenImage21Diffusion::ropeTables(int textLen, int hTokens, int wTokens, std
+@@ -283,6 +324,9 @@ void QwenImage21Diffusion::ropeTables(int textLen, int hTokens, int wTokens, std
  }
  
  std::vector<float> QwenImage21Diffusion::sigmas(int steps, int imageSeqLen) {
@@ -115,7 +141,7 @@ index 04edf969..7efc216f 100644
      // FlowMatchEulerDiscreteScheduler: exponential time shift (mu from image_seq_len) + shift_terminal 0.02
      const double baseSeq = 256, maxSeq = 8192, baseShift = 0.5, maxShift = 0.9, terminal = 0.02;
      double m = (maxShift - baseShift) / (maxSeq - baseSeq);
-@@ -296,44 +339,41 @@ std::vector<float> QwenImage21Diffusion::sigmas(int steps, int imageSeqLen) {
+@@ -296,51 +340,48 @@ std::vector<float> QwenImage21Diffusion::sigmas(int steps, int imageSeqLen) {
      std::vector<float> out(steps + 1);
      for (int i = 0; i < steps; ++i) {
          out[i] = (float)(1.0 - (1.0 - s[i]) / scale);
@@ -183,7 +209,15 @@ index 04edf969..7efc216f 100644
      out.clear();
      prefix.reset();
      return kv;
-@@ -349,7 +389,7 @@ VARP QwenImage21Diffusion::embedText(VARP textHidden) {
+ }
+ 
+ VARP QwenImage21Diffusion::embedText(VARP textHidden) {
+-    if (!mTxtIn) mTxtIn = loadModule("txt_in.mnn", {"txt"}, {"txt_h"}, runtime_manager_);
++    if (!mTxtIn) mTxtIn = loadModule("txt_in.mnn", {"txt"}, {"txt_h"}, runtime_manager_, false);
+     if (!mTxtIn) return nullptr;
+     auto txtH = mTxtIn->onForward({textHidden});
+     if (txtH.empty()) return nullptr;
+@@ -349,7 +390,7 @@ VARP QwenImage21Diffusion::embedText(VARP textHidden) {
      return hidden;
  }
  
@@ -192,7 +226,7 @@ index 04edf969..7efc216f 100644
      int L = textHidden->getInfo()->dim[1];
      auto hidden = embedText(textHidden);
      if (hidden.get() == nullptr) return {};
-@@ -365,16 +405,23 @@ std::vector<VARP> QwenImage21Diffusion::buildPrefixCache(VARP textHidden) {
+@@ -365,16 +406,23 @@ std::vector<VARP> QwenImage21Diffusion::buildPrefixCache(VARP textHidden) {
      return runPrefix(hidden, cosTab, sinTab, mask);
  }
  
@@ -220,7 +254,7 @@ index 04edf969..7efc216f 100644
          mDitStep = loadModule("dit.mnn", inputNames, {"out"}, runtime_manager_);
      }
      if (!mImgIn || !mDitStep) return nullptr;
-@@ -383,7 +430,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+@@ -383,7 +431,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
      auto ropeSin = hostTensor({N, 64}, sinTarget);
      ropeCos.fix(VARP::CONSTANT);
      ropeSin.fix(VARP::CONSTANT);
@@ -231,7 +265,7 @@ index 04edf969..7efc216f 100644
      auto mask = hostTensor({1, 1, N, prefixLen + N}, zeroMask.data());
      mask.fix(VARP::CONSTANT);
  
-@@ -402,11 +451,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+@@ -402,11 +452,9 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
          // Own copy: feeding another module's output directly lets the DiT reuse that buffer (seen with long prefixes).
          auto imgH = hostCopy(imgOut[0]);
          imgOut.clear();
@@ -245,7 +279,7 @@ index 04edf969..7efc216f 100644
              std::vector<VARP> saved;
              for (size_t k = 0; k < ins.size(); ++k) {
                  auto c = hostCopy(ins[k]);
-@@ -432,6 +479,13 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
+@@ -432,6 +480,13 @@ VARP QwenImage21Diffusion::denoise(const std::vector<VARP>& prefixKV, int prefix
          }
          MNN_PRINT("[QwenImage21] step %d/%d sigma=%.4f %.2f s%s\n", i + 1, steps, sig[i], (nowUs() - st) / 1e6,
                    bad ? " (non-finite!)" : "");
@@ -259,9 +293,9 @@ index 04edf969..7efc216f 100644
          if (mBackendType == MNN_FORWARD_OPENCL) {
              ExecutorScope::Current()->gc(Executor::PART);
          }
-@@ -561,11 +615,13 @@ void QwenImage21Diffusion::setImageSize(int width, int height) {
+@@ -561,11 +616,13 @@ void QwenImage21Diffusion::setImageSize(int width, int height) {
  }
-
+ 
  bool QwenImage21Diffusion::failStage(const char* stage) {
 +    // Preserve a concrete failure already reported by the stage (for example,
 +    // non-finite latents). MemAvailable alone cannot establish an allocation failure.
@@ -274,9 +308,9 @@ index 04edf969..7efc216f 100644
 +    snprintf(buf, sizeof(buf), "%s failed (available memory %d MB; see native runtime logs for the cause)", stage, avail);
 +    return fail(kRuntimeError, buf);
  }
-
+ 
  bool QwenImage21Diffusion::fail(int code, const std::string& message) {
-@@ -598,16 +654,74 @@ int vaeEncodeNeedMB(int w, int h) { return (int)(1200.0 * w * h / 262144.0); }
+@@ -598,16 +655,74 @@ int vaeEncodeNeedMB(int w, int h) { return (int)(1200.0 * w * h / 262144.0); }
  bool QwenImage21Diffusion::ensureMemory(const char* stage, int needMB) {
      const int marginMB = 400;
      int avail = availableMemoryMB();
@@ -356,7 +390,7 @@ index 04edf969..7efc216f 100644
  // ---------------------------------------------------------------------------------------------- edit
  
  void QwenImage21Diffusion::editSize(int srcW, int srcH, int& w, int& h) const {
-@@ -804,11 +918,11 @@ bool QwenImage21Diffusion::runEdit(const std::string& prompt, const std::string&
+@@ -804,11 +919,11 @@ bool QwenImage21Diffusion::runEdit(const std::string& prompt, const std::string&
      dump("edit_cond_h", condH->readMap<float>(), (size_t)nc * kDim);
      dump("edit_prefix", prefix.data(), prefix.size());
      auto kv = runPrefix(hostTensor({1, P, kDim}, prefix.data()), cosP, sinP, mask);
@@ -371,7 +405,7 @@ index 04edf969..7efc216f 100644
      if (latents.get() == nullptr) return failStage("DiT denoising");
      if (!ensureMemory("VAE decoder", vaeDecodeNeedMB(w, h))) return false;
      auto image = decode(latents);
-@@ -830,6 +944,9 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+@@ -830,6 +945,9 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
      mError.clear();
      try {
          if (iterNum < 1) iterNum = 20;
@@ -381,7 +415,7 @@ index 04edf969..7efc216f 100644
          if (iterNum > 100) iterNum = 100;
          int seed = randomSeed < 0 ? (int)(nowUs() & 0x7fffffff) : randomSeed;
          if (!inputImagePath.empty()) {
-@@ -845,15 +962,17 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
+@@ -845,15 +963,17 @@ bool QwenImage21Diffusion::run(const std::string prompt, const std::string outpu
          int L = text->getInfo()->dim[1];
          MNN_PRINT("[QwenImage21] text encoder done: %.2f s\n", (nowUs() - st) / 1e6);
          if (progressCallback) progressCallback(5);

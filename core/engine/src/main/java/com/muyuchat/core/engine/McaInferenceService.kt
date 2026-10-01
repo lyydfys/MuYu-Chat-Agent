@@ -77,6 +77,94 @@ private data class NativeGpuOffloadEvidence(
 )
 
 /**
+ * Native execution evidence for delegate families that do not expose the
+ * llama.cpp GPU allocation counters.  A requested/selected backend and a
+ * registered delegate are deliberately not treated as execution proof.
+ */
+private data class NativeBackendExecutionEvidence(
+    val requestedBackend: String?,
+    val actualBackend: String?,
+    val executionObserved: Boolean,
+    val evidenceSource: String?,
+    val npuExecutionObserved: Boolean,
+    val npuSupported: Boolean?
+)
+
+private fun normalizeNativeBackend(raw: String?): String? {
+    val value = raw?.trim()?.lowercase().orEmpty()
+    if (value.isBlank() || value == "unknown" || value == "unavailable" || value == "none") {
+        return null
+    }
+    return when {
+        value == "cpu" || value.contains("cpu") -> "cpu"
+        value == "gpu" || value.contains("opencl") || value.contains("adreno") ||
+            value.contains("gpu") -> "gpu"
+        value == "npu" || value.contains("qnn") || value.contains("qairt") ||
+            value.contains("htp") || value.contains("qualcomm") || value.contains("npu") -> "npu"
+        else -> value
+    }
+}
+
+/**
+ * Parses only explicit execution/capability fields from a native stats
+ * payload.  Strings such as `backendDevices=LiteRT-LM NPU` describe a
+ * selected delegate and are intentionally not accepted as proof.
+ */
+private fun nativeBackendExecutionEvidence(
+    nativeStats: JSONObject?,
+    fallback: RuntimeStats
+): NativeBackendExecutionEvidence {
+    if (nativeStats == null) {
+        return NativeBackendExecutionEvidence(
+            requestedBackend = fallback.requestedBackend,
+            actualBackend = fallback.actualBackend,
+            executionObserved = fallback.backendExecutionObserved,
+            evidenceSource = fallback.backendExecutionEvidence,
+            npuExecutionObserved = fallback.npuExecutionObserved,
+            npuSupported = fallback.npuSupported
+        )
+    }
+    val executionEvidence = nativeStats.optJSONObject("executionEvidence")
+    val requested = listOf(
+        nativeStats.optString("requestedBackend"),
+        nativeStats.optString("selectedBackend"),
+        nativeStats.optString("backendMode")
+    ).firstOrNull { it.isNotBlank() }?.trim()
+    val actual = normalizeNativeBackend(
+        nativeStats.optString("actualBackend").takeIf { it.isNotBlank() }
+            ?: nativeStats.optString("effectiveBackend").takeIf { it.isNotBlank() }
+    )
+    val explicitNpuProof = nativeStats.optBoolean("npuExecutionProven", false) ||
+        nativeStats.optBoolean("provesNpuExecution", false) ||
+        executionEvidence?.optBoolean("npuExecutionProven", false) == true ||
+        executionEvidence?.optBoolean("qnnGraphExecution", false) == true
+    val evidenceAvailable = executionEvidence?.optBoolean("available", false) == true
+    val decodeObserved = executionEvidence?.optBoolean("decodeObserved", false) == true ||
+        nativeStats.optBoolean("nativeExecution", false)
+    val executionObserved = explicitNpuProof ||
+        (evidenceAvailable && decodeObserved && actual != null)
+    val source = listOf(
+        executionEvidence?.optString("source"),
+        nativeStats.optString("executionEvidenceSource"),
+        nativeStats.optString("backendExecutionProof")
+    ).firstOrNull { it?.isNotBlank() == true }?.trim()
+    val capabilities = nativeStats.optJSONObject("backendCapabilities")
+    val npuSupported = if (capabilities?.has("npuSupported") == true) {
+        capabilities.optBoolean("npuSupported")
+    } else {
+        null
+    }
+    return NativeBackendExecutionEvidence(
+        requestedBackend = requested ?: fallback.requestedBackend,
+        actualBackend = actual ?: fallback.actualBackend,
+        executionObserved = executionObserved || fallback.backendExecutionObserved,
+        evidenceSource = source ?: fallback.backendExecutionEvidence,
+        npuExecutionObserved = explicitNpuProof || fallback.npuExecutionObserved,
+        npuSupported = npuSupported ?: fallback.npuSupported
+    )
+}
+
+/**
  * Mirrors the native MNN visual-package discovery used before load.  Some
  * exporter bundles omit the optional JSON declaration yet ship visual.mnn;
  * native enables vision for those packages, so their load-bound mmap policy
@@ -1434,6 +1522,7 @@ class McaInferenceService(
                     }
                     val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
                     val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, _stats.value)
+                    val backendEvidence = nativeBackendExecutionEvidence(nativeStats, _stats.value)
                     val prefillTokens = if (shouldSampleStats) {
                         nativeStats?.optInt("prefillTokens", -1)?.takeIf { it >= 0 }
                     } else {
@@ -1474,6 +1563,12 @@ class McaInferenceService(
                         maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: _stats.value.maxAllTokens,
                         maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: _stats.value.maxNewTokens,
                         backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: _stats.value.backendDevices,
+                        requestedBackend = backendEvidence.requestedBackend,
+                        actualBackend = backendEvidence.actualBackend,
+                        backendExecutionObserved = backendEvidence.executionObserved,
+                        backendExecutionEvidence = backendEvidence.evidenceSource,
+                        npuExecutionObserved = backendEvidence.npuExecutionObserved,
+                        npuSupported = backendEvidence.npuSupported,
                         gpuOffloadActive = gpuEvidence.active,
                         gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
                         gpuOffloadExecutionObserved = gpuEvidence.executionObserved,
@@ -2415,6 +2510,7 @@ class McaInferenceService(
         val nativeStats = runCatching { JSONObject(nativeStatsJson()) }.getOrNull()
         val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
         val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, RuntimeStats())
+        val backendEvidence = nativeBackendExecutionEvidence(nativeStats, RuntimeStats())
         return RuntimeStats(
             loaded = true,
             modelPath = modelPath,
@@ -2440,6 +2536,12 @@ class McaInferenceService(
             maxAllTokens = nativeStats?.optInt("maxAllTokens")?.takeIf { it > 0 } ?: params.nCtx,
             maxNewTokens = nativeStats?.optInt("maxNewTokens")?.takeIf { it > 0 } ?: 0,
             backendDevices = nativeStats?.optJSONArray("backendDevices")?.toString() ?: "[]",
+            requestedBackend = backendEvidence.requestedBackend,
+            actualBackend = backendEvidence.actualBackend,
+            backendExecutionObserved = backendEvidence.executionObserved,
+            backendExecutionEvidence = backendEvidence.evidenceSource,
+            npuExecutionObserved = backendEvidence.npuExecutionObserved,
+            npuSupported = backendEvidence.npuSupported,
             gpuOffloadSupported = nativeGpuOffloadSupported(nativeStats, RuntimeStats()),
             gpuOffloadActive = gpuEvidence.active,
             gpuOffloadAllocationObserved = gpuEvidence.allocationObserved,
@@ -2545,9 +2647,16 @@ class McaInferenceService(
         val prefillMs = nativeStats?.optLong("prefillMs") ?: base.prefillMs
         val cacheReuse = nativeStats?.optJSONObject("cacheReuse")
         val gpuEvidence = nativeGpuOffloadEvidence(nativeStats, base)
+        val backendEvidence = nativeBackendExecutionEvidence(nativeStats, base)
         val totalMs = max(1L, lastTokenAt - started)
         return base.copy(
             backend = nativeStats?.optString("backend")?.takeIf { it.isNotBlank() } ?: base.backend,
+            requestedBackend = backendEvidence.requestedBackend,
+            actualBackend = backendEvidence.actualBackend,
+            backendExecutionObserved = backendEvidence.executionObserved,
+            backendExecutionEvidence = backendEvidence.evidenceSource,
+            npuExecutionObserved = backendEvidence.npuExecutionObserved,
+            npuSupported = backendEvidence.npuSupported,
             promptTokens = promptTokens,
             completionTokens = completionTokens,
             promptTokensEstimated = if ((nativeStats?.optInt("promptTokens") ?: 0) > 0) {

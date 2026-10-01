@@ -502,7 +502,7 @@ class RecommendationCatalogTest {
             catalog.npuChat.map { it.id }
         )
 
-        assertEquals(7, catalog.cpuImage.size)
+        assertEquals(8, catalog.cpuImage.size)
         assertEquals(
             listOf(
                 "sd_turbo_512_experimental",
@@ -511,6 +511,7 @@ class RecommendationCatalogTest {
                 "mnn_sana_edit_v2",
                 "z_image_turbo_q4",
                 "longcat_image_q4",
+                "qwen_image_21_q4_k_m",
                 "qwen_image_2512_q2"
             ),
             catalog.cpuImage.map { it.id }

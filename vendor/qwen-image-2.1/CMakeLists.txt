@@ -24,4 +24,4 @@ add_library(qwenimage21_jni SHARED
 target_include_directories(qwenimage21_jni PRIVATE "${CMAKE_CURRENT_LIST_DIR}/include")
 target_compile_features(qwenimage21_jni PRIVATE cxx_std_17)
 target_compile_options(qwenimage21_jni PRIVATE -fexceptions)
-target_link_libraries(qwenimage21_jni PRIVATE mca_qwenimage21_mnn log android)
+target_link_libraries(qwenimage21_jni PRIVATE mca_qwenimage21_mnn log android dl)

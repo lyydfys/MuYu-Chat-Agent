@@ -681,6 +681,26 @@ data class RuntimeStats(
     /** `n_gpu_layers=auto` retried the current load using CPU. */
     val gpuAutoFallbackApplied: Boolean = false,
     val gpuAutoFallbackReason: String? = null,
+    /**
+     * Backend selected by the request/profile.  This is kept separate from
+     * [backend] (the runtime family id) and [actualBackend] because a model
+     * may be loaded with a requested delegate that later falls back.
+     */
+    val requestedBackend: String? = null,
+    /**
+     * Native read-back of the backend that executed the current request.
+     * `null`/`unknown` means the runtime did not expose an execution read-back;
+     * it must never be inferred from a configured backend string.
+     */
+    val actualBackend: String? = null,
+    /** True only when the native runtime supplied backend execution evidence. */
+    val backendExecutionObserved: Boolean = false,
+    /** Optional source/reason for [backendExecutionObserved] or its absence. */
+    val backendExecutionEvidence: String? = null,
+    /** Explicit NPU execution proof; configuration or delegate initialization is insufficient. */
+    val npuExecutionObserved: Boolean = false,
+    /** Native capability probe for an NPU path, when the runtime exposes one. */
+    val npuSupported: Boolean? = null,
     /** In-memory longest-common-prefix KV reuse for the current request. */
     val cacheReuseHit: Boolean = false,
     val cacheReusedTokens: Int = 0,
