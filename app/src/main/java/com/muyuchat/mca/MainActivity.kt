@@ -135,37 +135,16 @@ import com.muyuchat.mca.presentation.cloudApiFormats
 import com.muyuchat.mca.presentation.cloudImageApiFormats
 import com.muyuchat.mca.presentation.cloudProviderPresets
 import com.muyuchat.mca.presentation.imageSizePresetsFor
+import com.muyuchat.mca.presentation.toUiState
+import com.muyuchat.mca.presentation.toAppearance
+import com.muyuchat.mca.presentation.toAppearanceScope
+import com.muyuchat.mca.presentation.toWebSearchBackupConfigs
+import com.muyuchat.mca.presentation.toWebSearchTurnModeLabel
+import com.muyuchat.mca.presentation.formatAppUpdateBytes
+import com.muyuchat.mca.presentation.formatAssetBytes
+import com.muyuchat.mca.presentation.toTuningTrialItems
 
 private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
-
-private fun ChatAppearance.toUiState(): ChatBackgroundState = ChatBackgroundState(
-    imageUri = backgroundImagePath,
-    scrimAlpha = backgroundAlpha,
-    blurRadius = backgroundBlur,
-    scaleMode = when (backgroundScaleMode) {
-        ChatBackgroundScaleMode.CROP -> UiChatBackgroundScaleMode.CROP
-        ChatBackgroundScaleMode.FIT -> UiChatBackgroundScaleMode.FIT
-        ChatBackgroundScaleMode.CENTER -> UiChatBackgroundScaleMode.CENTER
-    }
-)
-
-private fun ChatBackgroundState.toAppearance(): ChatAppearance = ChatAppearance(
-    backgroundImagePath = imageUri,
-    backgroundAlpha = scrimAlpha.coerceIn(0f, 1f),
-    backgroundBlur = blurRadius.coerceIn(0f, ChatAppearance.MAX_BLUR),
-    backgroundScaleMode = when (scaleMode) {
-        UiChatBackgroundScaleMode.CROP -> ChatBackgroundScaleMode.CROP
-        UiChatBackgroundScaleMode.FIT -> ChatBackgroundScaleMode.FIT
-        UiChatBackgroundScaleMode.CENTER -> ChatBackgroundScaleMode.CENTER
-    }
-)
-
-private fun ChatBackgroundScope.toAppearanceScope(): ChatAppearanceScope = when (this) {
-    ChatBackgroundScope.GLOBAL -> ChatAppearanceScope.GLOBAL
-    ChatBackgroundScope.ASSISTANT -> ChatAppearanceScope.ASSISTANT
-    ChatBackgroundScope.SESSION -> ChatAppearanceScope.SESSION
-}
-
 internal fun existingImageModelChoiceIds(
     localModelIds: Iterable<String>,
     cloudImageModelIds: Iterable<String>
@@ -1958,45 +1937,6 @@ private fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
         }
     )
 )
-
-private fun formatAppUpdateBytes(bytes: Long): String {
-    if (bytes <= 0L) return "0 B"
-    val units = listOf("B", "KB", "MB", "GB")
-    var value = bytes.toDouble()
-    var index = 0
-    while (value >= 1024.0 && index < units.lastIndex) {
-        value /= 1024.0
-        index++
-    }
-    return if (index == 0) "${value.toLong()} ${units[index]}" else "%.1f %s".format(value, units[index])
-}
-
-private fun List<WebSearchBackupProviderDraft>.toWebSearchBackupConfigs(): List<WebSearchBackupProviderConfig> =
-    take(3).map { draft ->
-        WebSearchBackupProviderConfig(
-            enabled = draft.enabled,
-            provider = WebSearchProviderType.from(draft.provider),
-            endpoint = draft.endpoint.trim(),
-            apiKey = draft.apiKey.trim()
-        )
-    }
-
-private fun MainUiState.toWebSearchTurnModeLabel(): String {
-    if (!webSearchConfig.enabled) return "未启用"
-    val assistantDefault = assistants.firstOrNull { it.id == selectedAssistantId }?.webSearchEnabled == true
-    return when (webSearchTurnMode) {
-        WebSearchTurnMode.ON -> "本轮开启"
-        WebSearchTurnMode.OFF -> "本轮关闭"
-        WebSearchTurnMode.FOLLOW -> when {
-            assistantDefault -> "助手默认"
-            webSearchConfig.triggerMode == WebSearchTriggerMode.ALWAYS -> "始终"
-            webSearchConfig.triggerMode == WebSearchTriggerMode.SMART -> "智能"
-            else -> "手动"
-        }
-    }
-
-}
-
 internal fun ImageGenerationUiOptions.toLocalImagePreviewOptions(): LocalImagePreviewOptions? {
     val interval = previewInterval ?: return null
     val uiMode = requireNotNull(previewMode) {
@@ -2107,38 +2047,6 @@ private fun MainUiState.chatVisionCapability(): VisionCapabilityUi {
             label = "本地识图未启用",
             detail = "纯文本模型不能识图，请使用 MNN 多模态包或绑定匹配 mmproj。",
             ready = false
-        )
-    }
-}
-
-private fun formatAssetBytes(bytes: Long): String {
-    if (bytes <= 0L) return "0 B"
-    val units = listOf("B", "KB", "MB", "GB")
-    var value = bytes.toDouble()
-    var unitIndex = 0
-    while (value >= 1024.0 && unitIndex < units.lastIndex) {
-        value /= 1024.0
-        unitIndex += 1
-    }
-    return if (unitIndex == 0) {
-        "${value.toLong()} ${units[unitIndex]}"
-    } else {
-        "%.1f %s".format(value, units[unitIndex])
-    }
-}
-private fun BenchmarkResult.toTuningTrialItems(): List<TuningTrialItem> {
-    val trials = runCatching { org.json.JSONArray(threadResultsJson) }.getOrNull() ?: return emptyList()
-    return (0 until trials.length()).mapNotNull { index ->
-        val item = trials.optJSONObject(index) ?: return@mapNotNull null
-        val threads = item.optInt("threads")
-        if (threads <= 0) return@mapNotNull null
-        TuningTrialItem(
-            threads = threads,
-            decodeTps = item.optDouble("decodeTps"),
-            ttftMs = item.optLong("ttftMs"),
-            genTokens = item.optInt("genTokens"),
-            stable = item.optBoolean("stable", true) && item.optString("error").isBlank(),
-            selected = threads == bestThreadCount
         )
     }
 }
