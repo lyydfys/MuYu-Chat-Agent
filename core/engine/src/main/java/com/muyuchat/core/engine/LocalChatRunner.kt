@@ -1917,12 +1917,6 @@ internal class LiteRtLmChatRunner(
         else -> null
     }
 
-    private fun integerValue(value: Any?): Int? = when (value) {
-        is Number -> value.toInt()
-        is String -> value.trim().toIntOrNull()
-        else -> null
-    }
-
     private fun estimateTokens(text: String): Int =
         (text.length / 3).coerceAtLeast(if (text.isBlank()) 0 else 1)
 

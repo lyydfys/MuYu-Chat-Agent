@@ -1136,12 +1136,6 @@ class LiteRtLmRuntimeParameterAdapter(
         }
     }
 
-    private fun integerValue(value: Any?): Int? = when (value) {
-        is Number -> value.toInt()
-        is String -> value.trim().toIntOrNull()
-        else -> null
-    }
-
     private fun canonicalBackend(raw: String?): String? {
         val value = raw?.trim()?.lowercase()?.replace('-', '_') ?: return null
         return when (value) {
