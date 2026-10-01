@@ -170,16 +170,6 @@ data class QairtGraphMemoryProfile(
         private const val KV_RUNTIME_FIXED_HEADROOM_BYTES = 1L * 1024L * 1024L * 1024L
         private const val KV_RUNTIME_MULTIPLIER = 4L
 
-        private fun saturatingMultiply(left: Long, right: Long): Long {
-            if (left == 0L || right == 0L) return 0L
-            if (left > Long.MAX_VALUE / right) return Long.MAX_VALUE
-            return left * right
-        }
-
-        private fun saturatingAdd(left: Long, right: Long): Long {
-            if (Long.MAX_VALUE - left < right) return Long.MAX_VALUE
-            return left + right
-        }
     }
 }
 
@@ -295,17 +285,6 @@ object QairtBundleRiskAnalyzer {
         else -> null
     }
 
-    private fun saturatingMultiply(left: Long, right: Long): Long {
-        if (left == 0L || right == 0L) return 0L
-        if (left > Long.MAX_VALUE / right) return Long.MAX_VALUE
-        return left * right
-    }
-
-    private fun saturatingAdd(left: Long, right: Long): Long {
-        if (Long.MAX_VALUE - left < right) return Long.MAX_VALUE
-        return left + right
-    }
-
     private fun emptyProfile() = QairtGraphMemoryProfile(
         metadataFileCount = 0,
         parsedMetadataFileCount = 0,
@@ -331,4 +310,27 @@ object QairtBundleRiskAnalyzer {
     )
 
     private const val MAX_SAFE_KV_INPUT_BYTES = 256L * 1024L * 1024L
+}
+
+
+/**
+ * Multiplication that clamps at Long.MAX_VALUE instead of wrapping.
+ *
+ * Hoisted to file level because the identical pair existed twice in this file, once in a
+ * private companion object and once in QairtBundleRiskAnalyzer itself. Both estimate memory --
+ * KV cache bytes and tensor bytes -- and a wrap would turn an oversized estimate into a small
+ * plausible-looking one, which is the wrong direction for a risk check.
+ *
+ * internal rather than private so the tests can reach it; every caller is in this module.
+ */
+internal fun saturatingMultiply(left: Long, right: Long): Long {
+    if (left == 0L || right == 0L) return 0L
+    if (left > Long.MAX_VALUE / right) return Long.MAX_VALUE
+    return left * right
+}
+
+/** Addition that clamps at Long.MAX_VALUE instead of wrapping. See saturatingMultiply. */
+internal fun saturatingAdd(left: Long, right: Long): Long {
+    if (Long.MAX_VALUE - left < right) return Long.MAX_VALUE
+    return left + right
 }
