@@ -1,0 +1,432 @@
+# User-visible Chinese strings in SettingsScreens.kt, sorted and de-duplicated.
+# Generated from the source; reviewed before committing. See SettingsSurfaceGoldenTest.
+# A line disappearing means a settings label or help text was removed from the UI.
+   摘要: ${source.snippet}
+   类型: ${listOf(source.trustLabel, source.hostLabel).filter { it.isNotBlank() }.joinToString(
+$openBaseAddress（需开启开放端口）
+${item.sourceCount} 源
+${state.diagnostics.size} 条本机诊断记录
+.format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms
+/v1/models 可用于模型列表；/health 可用于连接检测；/ 是内置网页对话入口。
+API Key 已填写。
+API Key（可选）
+API使用文档
+Android content:// 不能稳定跨应用传给本机 HTTP API，建议转成 base64 或文件路径。本地识图需要先加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj；/v1/models 会返回 vision_ready，也可以在本地 API 页面直接运行“测试识图接口”。云端识图需要在对应云端推理引擎中开启图片输入能力，实际效果由所选模型和服务商决定。
+Brave LLM Context 路径正确
+Brave Web Search 路径正确
+Brave 官方根地址会自动补全为完整 Web Search API 路径
+Brave 常规搜索推荐完整 Web Search API 路径 https://api.search.brave.com/res/v1/web/search；填写官方根地址 https://api.search.brave.com 时 MCA 会自动补全到 Web Search，AI grounding/RAG 可手动填写 /res/v1/llm/context。不要填控制台或聊天模型接口。
+Brave 需要 Search API 路径
+CPU $cpu · 进程 $processCpu · 内存 $memory
+JSON 请求体使用 OpenAI Chat Completions 格式；stream=true 时返回 SSE 流式输出。
+Jina Search 地址正确
+Jina Search 推荐使用 s.jina.ai
+Jina Search 推荐填写 https://s.jina.ai；Jina Reader 只用于网页正文增强，不要把 Reader 地址填到搜索服务里。
+Jina Search 需要 Key；开启正文抓取后，MCA 会先尝试本机直连读取公开网页，内容不足时再用 Jina Reader 获取 Markdown 摘要。
+MCA 会兼容常见连接测试请求，包括多条 system 消息、无 user 的探测消息，以及 Accept: text/event-stream。
+MCA 局域网 Base URL
+MCA 支持 {query}/{max_results} URL 模板，也会尝试 q/query/max_results 参数，并解析 results、items、data、hits、organic_results 等常见结构。请确保返回项包含 url/link/href 和 title/snippet，API Key 只会以 Bearer 形式发送。
+MCA 本地 AI
+MCA 本机 Base URL
+MCA 联网检索诊断
+MCA 诊断报告
+MCA 默认不读取 localhost、局域网、链路本地和保留地址，这是防止网页读取误扫内网的安全策略。
+Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}
+OpenAI 兼容接口与网页对话
+SDK/模型默认
+SearxNG 地址
+SearxNG 适合自建或可信实例
+SearxNG 通常填写实例根地址即可，MCA 会自动访问 /search?format=json；如果实例禁用 JSON，请换可信实例或自建。
+Tavily Search 路径正确
+Tavily 官方根地址会自动补全 /search
+Tavily 应填写 Search API 地址
+Tavily 推荐 https://api.tavily.com/search；填写官方根地址 https://api.tavily.com 时 MCA 会自动补全 /search，并使用 POST JSON 调用。
+http://本机局域网IP:11435/v1
+上传的文本、Markdown、JSON、代码文件会保存为本机文本索引，便于从输入框重新添加到当前聊天。
+上次检查：${state.lastCheckedText}
+下载
+下载中
+下载失败
+下载进度 ${(progress * 100).toInt()}%
+不可用
+不是所有文本模型都能识图；MNN 需要完整多模态包，GGUF 需要匹配的视觉投影器。
+不是通用搜索服务
+不确定性：$it
+不要把 Base URL 填成完整的 /v1/chat/completions，除非客户端明确要求填写完整请求地址。
+主搜索源限流、鉴权失败或没有可用结果时，MCA 只会按这里显式配置过的服务接力，不会调用未授权服务。
+仅在客户端要求填写完整请求地址，或你手动发起 HTTP 请求时使用。
+仅缓存固定的系统提示词和角色设定前缀，且只保存在本机；每次请求中的消息、附件和其他请求范围内容不会写入缓存。
+从官方 GitHub Releases 检查并安装稳定版更新。
+代理
+会发起一次 SSE 流式短输出，并检查 [DONE] 终止帧；未加载本地模型时会返回 503。
+会发送一张极小的 base64 测试图；本地识图需 vision_ready=true。
+会额外读取前几个公开网页正文，提高回答质量，但速度会慢一点；本机、局域网、链路本地和保留地址会被安全拦截。
+低相关
+使用说明
+供同一台设备上的客户端、浏览器或本机组件访问。
+保存
+健康 ${item.healthLabel} ${item.healthScore}/100
+健康依据: ${healthReasons.joinToString(
+先做网络预检；如需关键词搜索，请配置真实搜索源。
+先开启“本机调用”并确认 API Key 已生成。
+先测试完整 URL 直读，再测试关键词搜索，最后回到聊天页确认来源卡片。
+先用手机浏览器打开任意公网网页；仍失败时检查应用联网权限、Wi-Fi 登录页、私人 DNS、VPN、代理和系统安全中心。
+公共 SearxNG 可能限流，稳定使用建议自建或使用带 Key 的搜索服务。Jina 配置 Key 后可在普通网页抓取内容不足时用 Reader 增强正文读取。
+公开 JSON
+公开 JSON 自检源
+公开 JSON 自检源只适合验证链路
+公开协议自检无需 Key，用于验证 JSON 接入、上下文注入、来源卡片和诊断链路；它不是通用搜索服务。
+公网
+关闭时不会发起请求
+兼容 messages 里的 image_url，也兼容 Responses 风格 input_image。支持 data:image base64、本地可读路径、file: URL、可访问的 http(s) 图片。
+兼容接口
+内存
+内存不足，建议换小模型或降低上下文。
+冲突/不确定性: ${researchConflictWarnings.joinToString(
+刷新
+协议自检
+协议自检、研究闭环、清空记录
+取消下载
+取消导入
+受限地址
+另一台设备访问 MCA 时使用；需要开启“开放端口”，并确保两台设备在同一可信网络。
+只做轻量检索，不强制扩展为研究查询
+只在本轮开关或助手默认开启时联网
+可填写实例根地址，MCA 会自动请求 /search?format=json。公共实例经常限流或关闭 JSON，产品化使用建议自建，必要时再配置带 Key 的备用搜索源。
+可安装
+可更新
+可由助手默认开关或输入框本轮开关触发。MCA 会显示来源卡片，并只把搜索摘要注入当前轮。
+同网段连接
+同设备连接
+后续扩展
+启用联网检索
+命中调研、评测、方案、对比等问题时启用多源研究
+图片占用 ${formatBytes(state.imageAssetBytes)} · 文件索引 ${formatBytes(state.fileAssetBytes)}。使用云端模型时，发送的消息、图片和启用的上下文会按所选服务商接口规则传输。
+图片清理会移除 MCA 管理的本地图片副本；文件库清理只移除 MCA 保存的文本索引，不会删除外部原文件。
+图片输入
+在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。
+填入公开 JSON 协议自检源
+处理建议
+处理建议:
+备用 1
+备用 2
+备用 3
+备用搜索源
+复制
+复制 API Key
+复制 Key
+复制局域网地址
+复制本机地址
+复制诊断
+失败
+如何获取搜索源
+如果同设备 127.0.0.1 不通，通常改用同网段地址即可定位问题。开放端口用完后建议关闭。
+如果客户端必须手动填写模型名，可复制 /v1/models 返回的 id。
+如果返回 503，说明接口已连通但本地聊天模型尚未加载。
+始终
+它只用于验证联网链路、上下文注入和来源卡片，不是通用搜索服务。正式使用请配置自己的 SearxNG、Brave、Tavily、Jina 或可信自建搜索源。
+它能证明 App 可以发起请求、解析 JSON、生成上下文和来源卡片，但覆盖范围有限，不是全网搜索服务。正式搜索请切换到自建 SearxNG、Brave、Tavily、Jina 或可信自定义 JSON。
+安全中心
+安全拦截
+安全边界
+安装
+安装包：${state.apkSizeText}
+安装包：${state.apkSizeText} · 已下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(state.downloadTotalBytes)}
+完成
+完成一次测试或聊天联网后会显示在这里。
+完整信息已保留在诊断报告中。
+完整聊天接口
+完整记录只保存在本机，可按需导出。
+实时负载
+实验功能
+客户端和 MCA 在同一台 Android 设备上运行时优先使用。若客户端无法访问 127.0.0.1，可开启“开放端口”后改用同网段地址。
+客户端的 Key、Token 或 Authorization 字段填写这个值。请求头格式：Authorization: Bearer <api-key>。
+导出
+尚未检查
+尚未测试 /v1/chat/completions。
+尚未测试 /v1/models。
+尚未测试图片输入接口。
+局域网
+局域网 Base URL
+展开
+工作方式
+工具 / MCP
+已加入故障接力链路
+已启用 ${listOf(backup0Enabled, backup1Enabled, backup2Enabled).count { it }} 个
+已启用：可读取网页链接
+已安装
+已执行（无公开占用率）
+已是最新稳定版
+已生成，可复制或导出
+已生成，复制后填入客户端 Key/Token
+已索引 ${state.fileAssetCount} 个文件
+已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。
+已配置真实搜索：${state.realSearchProviderLabel.ifBlank { state.providerLabel }}
+已配置：${state.providerLabel}
+已配置：${state.webSearch.providerLabel}
+已配置：公开 JSON 自检源（仅用于自检）
+已预留助手记忆入口
+常见错误
+常规搜索推荐：https://api.search.brave.com/res/v1/web/search；直接填写 https://api.search.brave.com 时 MCA 会自动补全到 Web Search。AI grounding/RAG 可填写：https://api.search.brave.com/res/v1/llm/context。MCA 会使用 X-Subscription-Token 发送 Key。$keyHint 如果你使用自建代理并返回兼容 JSON，也可以改用“自定义”。
+应用更新
+应用联网权限
+建议：$it
+开启后可读取用户提供的网页链接；关键词搜索还需要配置搜索服务。
+开启后同网段设备可通过 HTTP 访问本机模型服务。
+开放端口
+开放端口已开启，请只在可信网络中使用。
+引擎后端没有初始化，请重启 APP 或重新加载模型。
+引用
+引用审计
+当前优先保持 MCA 本地模型、API 服务和助手角色卡主线稳定。
+当前使用的是公开 JSON 协议自检源。
+当前填写的是公开协议自检源，只适合测试链路，不建议保存为日常搜索服务。
+当前搜索服务被限流，建议稍后重试、降低结果数量、配置备用搜索源，或改用自建 SearxNG / 付费 Key。
+当前是协议自检源，只能验证请求、JSON 解析、上下文注入和来源卡片；正式搜索请切换到自建 SearxNG、Brave、Tavily、Jina 或可信自定义 JSON。
+当前服务建议
+当前未填写 API Key。
+当前模型
+当前测试结果
+当前版本
+当前版本先提供助手侧的记忆开关；后续会在这里集中查看、编辑和删除本机记忆。
+当前配置可用于聊天页和助手默认联网检索。
+快速可用选 Tavily 或 Brave：到服务商官网注册并创建 Search API Key。
+性能
+手动
+手机端本地 AI 生图方案优缺点 生态 可行性 最新评测
+打开 Release
+打开网络设置
+把当前问题扩展为官方、评测、限制和社区等多角度查询
+抓取网页正文
+报告包含引擎、模型、内存、参数和最近错误，默认不直接展示。
+持久化前缀缓存
+按问题判断是否需要联网
+换更明确的关键词，加入官网/文档/评测等限定词；如果公共 SearxNG 返回空结果，建议自建或切换 Brave/Tavily/Jina。
+接口信息
+接口地址
+接口状态
+接口路径
+推荐地址：https://api.tavily.com/search；直接填写 https://api.tavily.com 时 MCA 会自动补全 /search。MCA 会用 POST JSON + Authorization: Bearer Key 调用，并可通过“抓取网页正文”切换 basic/advanced 深度。$keyHint
+推荐地址：https://s.jina.ai。MCA 会用 Bearer Key 请求搜索；开启正文抓取时，普通网页正文不足会尝试 Jina Reader 增强摘要。$keyHint
+推荐校验流程
+推荐配置
+搜索接口地址
+搜索服务端暂时异常，先切换备用源或稍后重试；自建服务请检查服务日志和反代状态。
+搜索源配置、测试步骤、隐私边界
+收起
+文件不是可加载的 GGUF 模型。
+文件库索引
+无响应正文
+无法解析
+无结果
+日志/诊断
+时间: $createdAtText
+普通
+智能
+智能调参
+暂无健康评估
+暂无文件索引
+暂无研究综合评估
+暂无记录
+更多测试
+更新说明
+最新版本
+最近检索
+最近问题
+有可用更新
+服务: $providerLabel
+服务开关
+服务状态
+服务端异常
+未加载
+未加载模型时，聊天接口会返回 503；开放端口只建议在可信 Wi-Fi 或热点环境中临时开启。
+未安装
+未完成
+未开启
+未执行关键词检索
+未提交
+未检查
+未生成
+未登录 Wi-Fi
+未知
+未通过
+本地 API
+本地 API 未开启。先开启“本机调用”；需要电脑访问时再开启“开放端口”。
+本地多模态
+本地导入
+本地数据
+本地模型不会直接联网，MCA 只把搜索摘要注入当前轮对话。
+本地生图
+本地生图速度取决于设备、模型包和分辨率；生成任务应在图片页显示状态、耗时、取消和失败重试。
+本机
+本机 Base URL
+本机调用
+本机调用已开启；同设备客户端优先使用 127.0.0.1 地址。
+来源:
+来源数: $sourceCount
+来源相关性不足时，尝试把问题改成具体产品名、版本号、接口名或错误码，必要时开启研究模式。
+来源类型: ${sourceTrustSummary.joinToString(
+来源质量
+校验
+校验中
+检查
+检查 Base URL 和协议路径是否是搜索接口，不要把聊天模型接口、控制台页面或网页地址填到联网检索服务里。
+检查中
+检查协议类型和 Base URL 是否匹配；自建网关可使用 /search?q={query}&limit={max_results} 这类 URL 模板，返回 results/items/data/hits/organic_results 等常见 JSON 结构。
+检索
+检索健康
+检索健康: $healthLabel ($healthScore/100)
+检索成功
+检索未完成
+检索警告:
+检索词:
+检索词：${item.searchedQueries.joinToString(
+模型列表请求成功
+模型已加载。
+正在测试...
+每轮非空问题都会先检索
+没有可用来源
+没有可评估来源
+没有命中自动联网线索
+没有活动网络
+流式聊天接口请求成功
+流式输出
+测试会使用当前表单内容，不需要先保存。
+测试当前填写
+测试检索
+测试模型列表
+测试结果会显示在这里，不再依赖顶部通知。
+测试聊天接口
+测试识图接口
+测试问题
+浏览器打开后可直接使用网页界面，支持文本聊天和图片附件；同网段访问同样需要开启“开放端口”。
+深度
+清理只影响 MCA 本机数据；模型文件和云端 API 配置不会被删除。
+清理能力
+清空前缀缓存
+清空图片
+清空文件库
+清空聊天
+清空记录
+点击在应用内查看
+状态: ${if (success) 
+状态：$statusLabel
+生成诊断
+用于确认 Base URL、Key 和模型列表路径是否正确。
+用途
+相关性较弱
+相关性过滤
+省电策略
+研究协议自检
+研究模式
+研究综合
+研究置信度: $researchConfidenceLabel ($researchConfidenceScore/100)
+研究闭环自检
+确认清空前缀缓存
+确认清空图片
+确认清空文件库
+确认清空聊天
+离线图片提示词翻译 · Hy-MT2
+私人 DNS
+移动数据
+空结果
+空问题
+粘贴服务商 Key
+系统尚未验证
+系统设置
+结果: $message
+结果数量
+综合建议: ${researchSynthesisGuidance.joinToString(
+缓存: $cacheStatus
+缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}
+网络受限
+网络连接中断，可稍后继续下载。
+网络预检
+网络预检需检查
+网页:
+网页内容中的指令不会被当作系统指令执行；本机、局域网、链路本地和保留地址默认会被拦截。API Key 只保存在本机。
+网页对话
+网页：${item.directUrls.joinToString(
+置信度 ${item.researchConfidenceLabel} · ${item.researchConfidenceScore}/100
+耗时 ${item.elapsedMs}ms
+耗时: ${elapsedMs}ms
+聊天 ${state.chatSessionCount} 条 · 图片 ${state.imageAssetCount} 张 · 文件 ${state.fileAssetCount} 个
+聊天接口已连接，但流式响应缺少 [DONE] 终止帧，请检查本地 API 服务状态。
+联网检索
+自动
+自定义
+自定义 JSON 适合自建搜索网关
+自定义接口需要鉴权时填写
+若提示未启用识图，请先加载 MNN 多模态包，或加载多模态 GGUF 并绑定匹配 mmproj。
+覆盖范围提示
+视觉
+视觉 runner 已就绪
+角色设定
+触发
+触发: $triggerModeLabel
+触发依据:
+触发方式
+触发：${state.triggerModeLabel} · 研究：${state.researchModeLabel}
+触发：${triggerModes.firstOrNull { it.first == triggerMode }?.second.orEmpty()} · 研究：${researchModes.firstOrNull { it.first == researchMode }?.second.orEmpty()}
+警告：$it
+让通用第三方 OpenAI-compatible 客户端调用 MCA 已加载的本地聊天模型。
+记录只保存在本机，包含检索词、来源数、耗时和失败摘要，不保存 API Key。
+记忆管理
+证据分组: ${researchEvidenceGroups.joinToString(
+识图接口请求成功
+诊断
+诊断报告
+请先
+请先在模型页加载模型。
+请求参数
+请求示例
+请求超时通常来自移动网络波动、公共实例拥堵或正文抓取过慢；可关闭抓取网页正文、降低结果数量或换更稳定的搜索源。
+请用一句中文说明这张测试图。
+请确认本机调用已开启，Base URL 填到 /v1，API Key 正确。
+调参记录（最近 ${visibleAgentLogs.size} 条 / 共 ${state.agentLogs.size} 条）
+质量 ${item.qualityLabel} ${item.qualityScore}/100
+质量依据: ${qualityReasons.joinToString(
+资料质量: $qualityLabel ($qualityScore/100)
+超时
+路径不存在
+输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}
+运行
+运行、日志、隐私与实验功能
+运行中
+运行正常
+运行状态
+运行记录
+运行记录（最近 ${visibleLogs.size} 条 / 共 ${state.logs.size} 条）
+返回
+返回聊天
+这可以兼容通用第三方 OpenAI-compatible 客户端的角色卡，同时避免模型重载后丢失 MCA 当前助手。
+连接前准备
+连接参数、接口路径、流式输出与排错
+连接自检
+适用于同一设备、本地浏览器、同网段电脑或其他受信任设备；模型仍在手机端本地运行。
+速度 ${
+配置步骤
+重新复制 API Key，确认账号已开通对应搜索接口和额度；Brave 使用 X-Subscription-Token，Tavily/Jina 使用 Bearer Key。
+重试下载
+鉴权失败
+鉴权或权限
+错误
+闭环
+闭环自检
+闭环证据:
+问题
+问题: ${query.ifBlank { 
+问题：${latestDiagnostic.query}
+限流
+隐私与数据
+隐私可控选自建 SearxNG；网页正文增强选 Jina；团队或高级用户可接自建 JSON 网关。公开 JSON 自检源只验证链路，不能当正式搜索源。
+需检查
+需要 MNN 多模态包或 GGUF+mmproj
+需要启用或配置搜索服务
+需要在联网检索页配置服务
+需要排错时，可到“日志与接口”导出完整诊断。
+音频
+首 token ${state.stats.ttftMs} ms · 速度 ${
+高级设置
+：选择 
+；实际 
