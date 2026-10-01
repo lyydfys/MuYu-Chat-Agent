@@ -19181,32 +19181,6 @@ class MainViewModel @JvmOverloads constructor(
             imageEndpointPath = imageEndpointPath.trim().trim('/')
         ).normalizedForImageRequest(preserveProviderName = true)
 
-    private fun ChatSessionRecord.toMarkdown(): String = buildString {
-        append("# ").append(title).append("\n\n")
-        append("- 导出时间：").append(java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())).append("\n")
-        append("- 消息数量：").append(messages.size).append("\n")
-        append("- 会话 ID：").append(id).append("\n\n")
-        messages.forEach { message ->
-            append("## ").append(message.role.displayLabel()).append("\n\n")
-            if (message.role == Role.ASSISTANT && message.reasoningContent.isNotBlank()) {
-                append("### 思考过程")
-                if (message.reasoningDurationMs > 0L) {
-                    append("（用时 ").append(message.reasoningDurationMs / 1000).append(" 秒）")
-                }
-                append("\n\n")
-                append(message.reasoningContent).append("\n\n")
-                append("### 最终回答\n\n")
-            }
-            append(message.content.ifBlank { "（空消息）" }).append("\n\n")
-        }
-    }
-
-    private fun Role.displayLabel(): String = when (this) {
-        Role.SYSTEM -> "系统"
-        Role.USER -> "用户"
-        Role.ASSISTANT -> "MCA"
-    }
-
     private fun displayNameForUri(uri: Uri): String {
         val resolver = getApplication<Application>().contentResolver
         val queriedName = if (uri.scheme.equals("content", ignoreCase = true)) {
