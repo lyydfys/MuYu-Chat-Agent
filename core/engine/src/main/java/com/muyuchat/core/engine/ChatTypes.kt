@@ -416,12 +416,6 @@ data class GenerationParams(
             }
         }
 
-        private fun JSONArray.toStringList(): List<String> = buildList {
-            for (index in 0 until length()) {
-                val value = optString(index)
-                if (value.isNotBlank()) add(value)
-            }
-        }
     }
 
     fun effectiveNPredict(): Int {

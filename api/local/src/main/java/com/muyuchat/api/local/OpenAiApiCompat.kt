@@ -9,6 +9,7 @@ import com.muyuchat.core.engine.Role
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import com.muyuchat.core.engine.toStringList
 
 internal sealed interface OpenAiChatParseResult {
     data class Success(val request: ChatRequest) : OpenAiChatParseResult
@@ -370,13 +371,6 @@ internal object OpenAiApiCompat {
             }.trim().takeIf { it.isNotBlank() }?.let(::add)
         }
     }.joinToString("\n")
-
-    private fun JSONArray.toStringList(): List<String> = buildList {
-        for (index in 0 until length()) {
-            val value = optString(index)
-            if (value.isNotBlank()) add(value)
-        }
-    }
 
     private fun String.inferImageMimeType(): String {
         if (startsWith("data:", ignoreCase = true)) {
