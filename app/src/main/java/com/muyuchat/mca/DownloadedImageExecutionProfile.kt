@@ -4,6 +4,7 @@ import com.muyuchat.core.download.ImageEngineBundleRuntime
 import com.muyuchat.core.download.ImageEngineBundleComponentRole
 import com.muyuchat.core.download.ImageEngineBundleSpec
 import java.io.File
+import com.muyuchat.core.engine.compareUtf8Unsigned
 
 /**
  * Converts the catalog-owned contract into the exact app/runtime contract stored beside downloaded

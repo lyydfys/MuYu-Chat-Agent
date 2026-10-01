@@ -4,6 +4,8 @@ import java.io.File
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
+import com.muyuchat.core.engine.compareUtf8Unsigned
+import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
 /**
  * Product contract for a textual-inversion (custom-word) artifact.
@@ -146,18 +148,6 @@ enum class TextualInversionRuntime(
     STABLE_DIFFUSION_CPP("STABLE_DIFFUSION_CPP", "SDCPP_CUSTOM_WORDS"),
     QNN_HTP("QNN_HTP", "MNN_CLIP_INPUT_EMBEDDING"),
     MNN_DIFFUSION("MNN_DIFFUSION", "MNN_CLIP_INPUT_EMBEDDING")
-}
-
-internal fun compareUtf8Unsigned(left: String, right: String): Int {
-    val leftBytes = left.toByteArray(Charsets.UTF_8)
-    val rightBytes = right.toByteArray(Charsets.UTF_8)
-    val commonLength = minOf(leftBytes.size, rightBytes.size)
-    for (index in 0 until commonLength) {
-        val comparison = (leftBytes[index].toInt() and 0xff)
-            .compareTo(rightBytes[index].toInt() and 0xff)
-        if (comparison != 0) return comparison
-    }
-    return leftBytes.size.compareTo(rightBytes.size)
 }
 
 data class TextualInversionExecutionAssetDescriptor(
@@ -498,9 +488,6 @@ object TextualInversionContract {
         fun Char.asciiLowercase(): Char = if (this in 'A'..'Z') this + ('a' - 'A') else this
         return asciiLowercase() == other.asciiLowercase()
     }
-
-    private fun Char.isAsciiTriggerWordCharacter(): Boolean =
-        this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' || this == '_'
 
     fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
         .digest(value.toByteArray(Charsets.UTF_8))

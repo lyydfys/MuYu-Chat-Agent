@@ -6,6 +6,7 @@ import java.math.BigDecimal
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.Base64
+import com.muyuchat.core.engine.compareUtf8Unsigned
 
 fun imagePromptExecutionSha256(prompt: String, negativePrompt: String?): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -63,18 +64,6 @@ internal data class ImageTextualInversionExecutionAsset(
     val sizeBytes: Long,
     val sha256: String
 )
-
-internal fun compareImageExecutionAssetLabelsUtf8(left: String, right: String): Int {
-    val leftBytes = left.toByteArray(Charsets.UTF_8)
-    val rightBytes = right.toByteArray(Charsets.UTF_8)
-    val commonLength = minOf(leftBytes.size, rightBytes.size)
-    for (index in 0 until commonLength) {
-        val comparison = (leftBytes[index].toInt() and 0xff)
-            .compareTo(rightBytes[index].toInt() and 0xff)
-        if (comparison != 0) return comparison
-    }
-    return leftBytes.size.compareTo(rightBytes.size)
-}
 
 internal fun imageTextualInversionExecutionAssetsSha256(
     runtime: String,
@@ -2147,7 +2136,7 @@ object ImageGenerationApiContract {
                     }
                 if (invalidLabel || label != nativeLabel ||
                     previousLabel?.let { previous ->
-                        compareImageExecutionAssetLabelsUtf8(label, previous) <= 0
+                        compareUtf8Unsigned(label, previous) <= 0
                     } == true ||
                     !SHA256_PATTERN.matches(sha256) || sha256 != nativeSha256 ||
                     sizeBytes != nativeSizeBytes ||

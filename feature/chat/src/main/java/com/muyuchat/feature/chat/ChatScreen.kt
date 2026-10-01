@@ -260,6 +260,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
+import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
 private const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
@@ -1315,8 +1316,8 @@ private fun imageTextualInversionTriggerRegex(trigger: String): Regex {
     require(IMAGE_TEXTUAL_INVERSION_TRIGGER_PATTERN.matches(trigger)) {
         "Textual inversion trigger is invalid."
     }
-    val startsWithWord = trigger.first().isAsciiImageTriggerWordCharacter()
-    val endsWithWord = trigger.last().isAsciiImageTriggerWordCharacter()
+    val startsWithWord = trigger.first().isAsciiTriggerWordCharacter()
+    val endsWithWord = trigger.last().isAsciiTriggerWordCharacter()
     return Regex(
         buildString {
             if (startsWithWord) append("(?<![A-Za-z0-9_])")
@@ -1326,9 +1327,6 @@ private fun imageTextualInversionTriggerRegex(trigger: String): Regex {
         RegexOption.IGNORE_CASE
     )
 }
-
-private fun Char.isAsciiImageTriggerWordCharacter(): Boolean =
-    this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' || this == '_'
 
 internal data class GenerationImageGrantReconciliationPlan(
     val retainedOwnedUris: Set<String>,

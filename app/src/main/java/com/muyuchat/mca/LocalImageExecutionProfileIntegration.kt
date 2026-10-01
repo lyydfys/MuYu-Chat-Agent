@@ -7,6 +7,7 @@ import java.nio.file.LinkOption
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import org.json.JSONObject
+import com.muyuchat.core.engine.compareUtf8Unsigned
 
 internal typealias LocalImageManifestProfileResolver =
     (ImageExecutionProfileResolverInput) -> ImageExecutionProfileResolution
