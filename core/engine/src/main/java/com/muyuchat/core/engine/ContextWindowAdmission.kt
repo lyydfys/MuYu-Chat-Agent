@@ -445,9 +445,6 @@ private fun contextWindowErrorMessage(
 private fun scaledInputLimit(tokens: Int, perToken: Long, absoluteLimit: Long): Long =
     (tokens.toLong().coerceAtLeast(0L) * perToken).coerceAtMost(absoluteLimit)
 
-private fun saturatedAdd(left: Long, right: Long): Long =
-    if (right > 0L && left > Long.MAX_VALUE - right) Long.MAX_VALUE else left + right
-
 private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
 private const val MESSAGE_TEMPLATE_ESTIMATE_TOKENS = 2
 private const val SPARSE_CHARACTERS_PER_TOKEN = 3L

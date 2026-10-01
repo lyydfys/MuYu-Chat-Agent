@@ -999,9 +999,6 @@ class PersistentPrefixCacheStore private constructor(
         private fun isManagedName(name: String): Boolean =
             METADATA_FILE_NAME.matches(name) || STATE_FILE_NAME.matches(name) || TEMP_FILE_NAME.matches(name)
 
-        private fun saturatedAdd(left: Long, right: Long): Long =
-            if (right > 0L && left > Long.MAX_VALUE - right) Long.MAX_VALUE else left + right
-
         private fun ByteArray.toLowercaseHex(): String {
             val digits = "0123456789abcdef"
             return buildString(size * 2) {
