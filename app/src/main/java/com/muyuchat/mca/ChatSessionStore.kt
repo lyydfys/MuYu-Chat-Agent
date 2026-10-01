@@ -366,7 +366,7 @@ class ChatSessionStore(context: Context) {
             val array = JSONArray(legacyFile.readText(Charsets.UTF_8))
             List(array.length()) { index ->
                 array.getJSONObject(index).toChatSessionRecord()
-            }.sortedForHistory()
+            }.sortedForHistoryOffThread()
         }.getOrElse { return emptyList() }
         val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
         database.chatSessionDao().replaceAll(boundedRecords)
@@ -2625,12 +2625,16 @@ private fun AssistantEntity.toAssistantRecord(): AssistantRecord =
         updatedAt = updatedAt
     )
 
-private suspend fun List<ChatSessionRecord>.sortedForHistory(): List<ChatSessionRecord> =
+/**
+ * Conversation history order, computed off the caller's thread.
+ *
+ * The comparator itself lives in DisplayOrdering so it cannot drift from the ordering the
+ * rest of the app uses; this wrapper only keeps the legacy-migration sort off the calling
+ * thread, which is why it stays suspend.
+ */
+private suspend fun List<ChatSessionRecord>.sortedForHistoryOffThread(): List<ChatSessionRecord> =
     withContext(Dispatchers.Default) {
-        sortedWith(
-            compareByDescending<ChatSessionRecord> { it.pinned }
-                .thenByDescending { it.updatedAt }
-        )
+        sortedForHistory()
     }
 
 private fun JSONArray?.toImageAttachments(): List<ChatImageAttachment> {

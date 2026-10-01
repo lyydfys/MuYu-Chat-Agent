@@ -18965,18 +18965,6 @@ class MainViewModel @JvmOverloads constructor(
         else -> "图片库备份失败：${message ?: "未知错误"}"
     }
 
-    private fun List<ChatSessionRecord>.sortedForHistory(): List<ChatSessionRecord> =
-        sortedWith(
-            compareByDescending<ChatSessionRecord> { it.pinned }
-                .thenByDescending { it.updatedAt }
-        )
-
-    private fun List<ImageAssetRecord>.sortedImagesForLibrary(): List<ImageAssetRecord> =
-        sortedByDescending { it.createdAt }
-
-    private fun List<FileAssetRecord>.sortedFilesForLibrary(): List<FileAssetRecord> =
-        sortedByDescending { it.createdAt }
-
     private fun List<CloudModelRecord>.matchingCloudModel(
         kind: CloudModelKind,
         format: CloudApiFormat,
