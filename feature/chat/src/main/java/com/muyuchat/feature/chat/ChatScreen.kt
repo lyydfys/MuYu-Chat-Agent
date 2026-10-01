@@ -11853,11 +11853,6 @@ private fun appMenuPageEnter() = slideInHorizontally(
     initialOffsetX = { it }
 ) + fadeIn(animationSpec = tween(durationMillis = 140))
 
-private fun appMenuPageExit() = slideOutHorizontally(
-    animationSpec = tween(durationMillis = 240),
-    targetOffsetX = { it }
-) + fadeOut(animationSpec = tween(durationMillis = 140))
-
 @Composable
 private fun SystemBackMotionHandler(
     enabled: Boolean,
@@ -19135,59 +19130,6 @@ private fun cleanReasoningForDisplay(value: String): String {
         .trim()
 }
 
-private fun String.removeEnglishReasoningScaffold(): String {
-    val parts = split(Regex("""(?=\s*\*\s+)"""))
-    if (parts.size <= 1) return this
-    val kept = parts.filterNot { part ->
-        val compact = part.trim().lowercase()
-        ENGLISH_REASONING_SCAFFOLD_PREFIXES.any { compact.startsWith(it) }
-    }
-    return kept.joinToString("").ifBlank { this }
-}
-
-private fun String.removePromptEchoScaffold(): String {
-    val parts = split(REASONING_SCAFFOLD_SEGMENT_SPLIT)
-    if (parts.size <= 1) {
-        return this
-    }
-    return parts
-        .filterNot { it.isEnglishPromptScaffold() }
-        .joinToString("")
-        .ifBlank { this }
-}
-
-private fun String.isEnglishPromptScaffold(): Boolean {
-    val compact = trim()
-    if (compact.isBlank()) return false
-    val lower = compact.lowercase()
-    val hasScaffoldKeyword = ENGLISH_REASONING_SCAFFOLD_KEYWORDS.any { it in lower }
-    if (!hasScaffoldKeyword) return false
-    val latin = compact.count { it in 'a'..'z' || it in 'A'..'Z' }
-    val cjk = compact.count { it.isCjkLike() }
-    return latin >= 24 && latin > cjk * 2
-}
-
-private fun String.preferChineseReasoningWhenEnglishDominates(): String {
-    val compact = trim()
-    if (compact.isBlank()) return compact
-    val latin = compact.count { it in 'a'..'z' || it in 'A'..'Z' }
-    val cjk = compact.count { it.isCjkLike() }
-    if (cjk <= 0 || latin <= cjk * 2) return compact
-
-    val chinese = compact
-        .split(Regex("""(?<=[。！？.!?])\s+|\n+"""))
-        .map { it.trim() }
-        .filter { segment ->
-            val segmentCjk = segment.count { it.isCjkLike() }
-            val segmentLatin = segment.count { it in 'a'..'z' || it in 'A'..'Z' }
-            segmentCjk >= 6 && segmentCjk >= segmentLatin
-        }
-        .joinToString("\n")
-        .trim()
-
-    return chinese.ifBlank { compact }
-}
-
 private fun reasoningPreview(value: String): String {
     val lines = value
         .lineSequence()
@@ -19204,11 +19146,6 @@ private fun reasoningPreview(value: String): String {
         }
     }
 }
-
-private fun cleanInlineMarkdown(value: String): String =
-    value
-        .replace("**", "")
-        .replace("__", "")
 
 private fun buildInlineMarkdown(
     value: String,

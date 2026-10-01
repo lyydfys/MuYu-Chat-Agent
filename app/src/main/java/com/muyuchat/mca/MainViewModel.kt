@@ -20684,19 +20684,6 @@ class MainViewModel @JvmOverloads constructor(
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
 
-    private fun tuningSummary(result: BenchmarkResult, recommendation: AgentRecommendation): String {
-        val plan = recommendation.tuningPlan
-        return buildString {
-            append("decode=${"%.2f".format(result.decodeTps)} token/s")
-            append("，TTFT=${result.ttftMs}ms")
-            append("，n_ctx=${plan.nCtx}")
-            append("，threads=${plan.nThreads}")
-            append("，n_predict=${plan.nPredict}")
-            if (result.bestThreadCount > 0) append("，最佳线程=${result.bestThreadCount}")
-            if (result.error != null) append("，error=${result.error}")
-        }
-    }
-
     private fun buildDiagnosticReport(): String {
         val state = _uiState.value
         val loadedModel = state.models.firstOrNull { it.id == state.loadedModelId }
@@ -20748,78 +20735,6 @@ class MainViewModel @JvmOverloads constructor(
         AgentDebugMode.Standard -> TuningSearchDepth.STANDARD
         AgentDebugMode.Deep -> TuningSearchDepth.DEEP
         AgentDebugMode.PowerSave -> TuningSearchDepth.POWER_SAVE
-    }
-
-    private fun AgentDebugMode.sweepConfig(): BenchmarkSweepConfig = when (this) {
-        AgentDebugMode.Quick -> BenchmarkSweepConfig.quick()
-        AgentDebugMode.Standard -> BenchmarkSweepConfig.quick()
-        AgentDebugMode.Deep -> BenchmarkSweepConfig.deep()
-        AgentDebugMode.PowerSave -> BenchmarkSweepConfig.powerSave()
-    }
-
-    private fun threadSweepCandidates(
-        device: DeviceProfile,
-        recommendedThreads: Int?,
-        debugMode: AgentDebugMode
-    ): List<Int> {
-        val cores = device.cpuCores.coerceAtLeast(1)
-        val bigCores = device.estimatedBigCores.coerceIn(1, cores)
-        val quickCandidates = TuningCandidatePolicy.quickThreadCandidates(
-            cpuCores = cores,
-            estimatedBigCores = bigCores,
-            recommendedThreads = recommendedThreads
-        )
-        val standardCandidates = quickCandidates + listOf(
-            (recommendedThreads ?: bigCores) - 2,
-            (recommendedThreads ?: bigCores) + 2,
-            bigCores - 2,
-            bigCores + 2
-        ) + (1..cores)
-        val base = when (debugMode) {
-            AgentDebugMode.Quick -> quickCandidates
-            AgentDebugMode.Standard -> standardCandidates
-            AgentDebugMode.Deep -> listOf(
-                recommendedThreads ?: bigCores,
-                bigCores,
-                bigCores - 1,
-                bigCores + 1
-            ) + (1..cores)
-            AgentDebugMode.PowerSave -> listOf(
-                recommendedThreads?.coerceAtMost(4) ?: bigCores.coerceAtMost(4),
-                bigCores.coerceAtMost(4),
-                2,
-                1,
-                3,
-                4
-            )
-        }
-        return base
-            .map { it.coerceIn(1, cores) }
-            .distinct()
-            .filter { debugMode != AgentDebugMode.PowerSave || it <= 4 }
-            .take(
-                when (debugMode) {
-                    AgentDebugMode.Quick -> TuningCandidatePolicy.QUICK_MAX_CANDIDATES
-                    AgentDebugMode.Standard -> 6
-                    AgentDebugMode.Deep -> 12
-                    AgentDebugMode.PowerSave -> 4
-                }
-            )
-    }
-
-    private fun AgentRecommendation.withBenchmarkThread(result: BenchmarkResult): AgentRecommendation {
-        val bestThreads = result.bestThreadCount.takeIf { it > 0 } ?: return this
-        if (bestThreads == tuningPlan.nThreads) return this
-        val updatedPlan = tuningPlan.copy(
-            nThreads = bestThreads,
-            reason = listOf(tuningPlan.reason, "短基准线程扫描选择 ${bestThreads} 线程。")
-                .filter { it.isNotBlank() }
-                .joinToString(" ")
-        )
-        return copy(
-            tuningPlan = updatedPlan,
-            explanation = "$explanation 线程扫描显示 ${bestThreads} 线程最快，已按实测结果调整。"
-        )
     }
 
     private fun appendBenchmarkHistory(
