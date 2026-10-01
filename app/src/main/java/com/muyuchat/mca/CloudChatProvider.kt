@@ -315,7 +315,15 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
         )
     }
 
-    fun save(config: CloudApiConfig) {
+    /**
+     * Persist the cloud API configuration.
+     *
+     * @return [CredentialSaveResult.Stored] or [CredentialSaveResult.Cleared] when the API
+     * key is in a durable state. The remaining fields are always saved; a failed credential
+     * write leaves the previously stored API key untouched and must not be reported to the
+     * user as a completed save.
+     */
+    fun save(config: CloudApiConfig): CredentialSaveResult {
         val normalized = config.normalizedForStore()
         prefs.edit()
             .putBoolean(KEY_ENABLED, normalized.enabled)
@@ -332,7 +340,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             .putString(KEY_IMAGE_SIZE, normalized.imageSize)
             .putString(KEY_IMAGE_ENDPOINT_PATH, normalized.imageEndpointPath)
             .apply()
-        saveEncryptedApiKey(normalized.apiKey)
+        return saveEncryptedApiKey(normalized.apiKey)
     }
 
     fun loadModels(): List<CloudModelRecord> {
@@ -497,37 +505,57 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
         val cipherText = prefs.getString(KEY_API_KEY_CIPHER, null)
         val iv = prefs.getString(KEY_API_KEY_IV, null)
         if (cipherText.isNullOrBlank() || iv.isNullOrBlank()) {
-            return prefs.getString(KEY_API_KEY_LEGACY, null).orEmpty()
+            val legacy = prefs.getString(KEY_API_KEY_LEGACY, null).orEmpty()
+            // Upgrade a configuration written before encryption existed. The plaintext
+            // slot is only removed inside a successful encrypted commit, so an
+            // encryption failure here leaves the working credential untouched.
+            if (legacy.isNotBlank()) saveEncryptedApiKey(legacy)
+            return legacy
         }
         return runCatching {
             decryptApiKeyPayload(cipherText, iv)
         }.getOrDefault("")
     }
 
-    private fun saveEncryptedApiKey(apiKey: String) {
-        if (apiKey.isBlank()) {
-            prefs.edit()
-                .remove(KEY_API_KEY_CIPHER)
-                .remove(KEY_API_KEY_IV)
-                .remove(KEY_API_KEY_LEGACY)
-                .apply()
-            return
-        }
-        runCatching { encryptApiKey(apiKey) }
-            .onSuccess { encrypted ->
-                val cipherText = encrypted?.first.orEmpty()
-                val iv = encrypted?.second.orEmpty()
-                if (cipherText.isBlank() || iv.isBlank()) return@onSuccess
+    /**
+     * Persist the API key and report a typed outcome.
+     *
+     * Order matters (plan section 11.3 items 3-4): the encrypted pair is written and read
+     * back first, and the plaintext slot is retired only after the stored value decrypts
+     * to exactly the submitted key. An encryption failure writes nothing at all — it never
+     * degrades to plaintext — and an unverifiable write leaves any existing plaintext
+     * credential in place so the user does not silently lose a working configuration.
+     */
+    private fun saveEncryptedApiKey(apiKey: String): CredentialSaveResult =
+        when (val write = planCredentialWrite(apiKey, ::encryptApiKey)) {
+            CredentialWrite.Clear -> {
                 prefs.edit()
-                    .putString(KEY_API_KEY_CIPHER, cipherText)
-                    .putString(KEY_API_KEY_IV, iv)
+                    .remove(KEY_API_KEY_CIPHER)
+                    .remove(KEY_API_KEY_IV)
                     .remove(KEY_API_KEY_LEGACY)
                     .apply()
+                CredentialSaveResult.Cleared
             }
-            .onFailure {
-                prefs.edit().putString(KEY_API_KEY_LEGACY, apiKey).apply()
+
+            is CredentialWrite.Store -> {
+                prefs.edit()
+                    .putString(KEY_API_KEY_CIPHER, write.cipherText)
+                    .putString(KEY_API_KEY_IV, write.iv)
+                    .apply()
+                // SharedPreferences.apply() publishes to the in-memory map synchronously,
+                // so this read observes exactly what will be persisted.
+                val readable = runCatching { decryptApiKeyPayload(write.cipherText, write.iv) }
+                    .getOrNull()
+                if (readable != apiKey) {
+                    CredentialSaveResult.VerificationFailed
+                } else {
+                    prefs.edit().remove(KEY_API_KEY_LEGACY).apply()
+                    CredentialSaveResult.Stored
+                }
             }
-    }
+
+            CredentialWrite.Unavailable -> CredentialSaveResult.EncryptionUnavailable
+        }
 
     private fun encryptApiKey(apiKey: String): Pair<String, String>? {
         if (apiKey.isBlank()) return null
@@ -545,18 +573,6 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP))
         )
         return cipher.doFinal(Base64.decode(cipherText, Base64.NO_WRAP)).toString(Charsets.UTF_8)
-    }
-
-    private fun saveLegacyApiKey(apiKey: String) {
-        if (apiKey.isBlank()) {
-            prefs.edit()
-                .remove(KEY_API_KEY_CIPHER)
-                .remove(KEY_API_KEY_IV)
-                .remove(KEY_API_KEY_LEGACY)
-                .apply()
-        } else {
-            prefs.edit().putString(KEY_API_KEY_LEGACY, apiKey).apply()
-        }
     }
 
     private fun secretKey(): SecretKey {

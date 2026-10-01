@@ -1,4 +1,4 @@
-﻿package com.muyuchat.mca
+package com.muyuchat.mca
 
 import android.app.Application
 import android.content.Context
@@ -10634,12 +10634,16 @@ class MainViewModel @JvmOverloads constructor(
             busy("正在快速测试云端 API...")
             cloudChatProvider.quickTest(config)
                 .onSuccess {
-                    cloudApiStore.save(config)
+                    val credential = cloudApiStore.save(config)
                     _uiState.update {
                         it.copy(
                             busy = false,
                             cloudApiConfig = config,
-                            statusMessage = "云端 API 快速测试成功：${config.safeDisplayName()}"
+                            // The request succeeded either way, but the API key is only
+                            // usable later if it is durably stored. Never claim a completed
+                            // save when encryption was unavailable or unverifiable.
+                            statusMessage = credentialFailureMessage(credential)
+                                ?: "云端 API 快速测试成功：${config.safeDisplayName()}"
                         )
                     }
                 }
@@ -20198,6 +20202,24 @@ class MainViewModel @JvmOverloads constructor(
         CloudProviderPreset("responses", "OpenAI Responses", "自定义推理引擎", CloudApiFormat.OPENAI_RESPONSES, "", ""),
         CloudProviderPreset("anthropic", "Anthropic Messages", "自定义推理引擎", CloudApiFormat.ANTHROPIC, "", "")
     )
+
+    /**
+     * User-facing message for a credential write that did not reach a durable state, or
+     * null when the credential was stored (or intentionally cleared).
+     *
+     * A failed credential write must never be presented as a successful save, and the
+     * message must not suggest that a plaintext copy was created (plan section 11.3).
+     */
+    private fun credentialFailureMessage(result: CredentialSaveResult): String? = when (result) {
+        CredentialSaveResult.Stored, CredentialSaveResult.Cleared -> null
+
+        CredentialSaveResult.EncryptionUnavailable ->
+            "连接成功，但 API Key 未能安全保存：系统密钥库当前不可用，本次未写入明文。" +
+                "恢复系统密钥库后请重新保存。"
+
+        CredentialSaveResult.VerificationFailed ->
+            "连接成功，但 API Key 写入后校验失败，已保留原有配置且未写入明文。请重试保存。"
+    }
 
     private fun loadOrCreateApiKey(application: Application): String {
         val prefs = application.getSharedPreferences("mca_api", Context.MODE_PRIVATE)

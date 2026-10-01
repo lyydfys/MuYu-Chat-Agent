@@ -1148,7 +1148,15 @@ class WebSearchStore(context: Context) {
             backupProviders = decryptBackupProviders()
         )
 
-    fun save(config: WebSearchConfig) {
+    /**
+     * Persist the web search configuration.
+     *
+     * @return [CredentialSaveResult.Stored] or [CredentialSaveResult.Cleared] when the API
+     * key is in a durable state. The remaining fields are always saved; a failed credential
+     * write leaves the previously stored key untouched and must not be reported to the user
+     * as a completed save.
+     */
+    fun save(config: WebSearchConfig): CredentialSaveResult {
         prefs.edit()
             .putBoolean("enabled", config.enabled)
             .putString("provider", config.provider.name)
@@ -1158,45 +1166,61 @@ class WebSearchStore(context: Context) {
             .putString("trigger_mode", config.triggerMode.name)
             .putString("research_mode", config.researchMode.name)
             .apply()
-        saveEncryptedApiKey(config.apiKey.trim())
         saveEncryptedBackupProviders(config.backupProviders)
+        return saveEncryptedApiKey(config.apiKey.trim())
     }
 
     private fun decryptApiKey(): String {
         val cipherText = prefs.getString(KEY_API_KEY_CIPHER, null)
         val iv = prefs.getString(KEY_API_KEY_IV, null)
         if (cipherText.isNullOrBlank() || iv.isNullOrBlank()) {
-            return prefs.getString(KEY_API_KEY_LEGACY, "").orEmpty()
+            val legacy = prefs.getString(KEY_API_KEY_LEGACY, "").orEmpty()
+            // Upgrade a configuration written before encryption existed. The plaintext
+            // slot is only removed inside a successful encrypted commit, so an
+            // encryption failure here leaves the working credential untouched.
+            if (legacy.isNotBlank()) saveEncryptedApiKey(legacy)
+            return legacy
         }
         return runCatching {
             decryptPayload(cipherText, iv)
         }.getOrDefault("")
     }
 
-    private fun saveEncryptedApiKey(apiKey: String) {
-        if (apiKey.isBlank()) {
-            prefs.edit()
-                .remove(KEY_API_KEY_CIPHER)
-                .remove(KEY_API_KEY_IV)
-                .remove(KEY_API_KEY_LEGACY)
-                .apply()
-            return
-        }
-        runCatching { encryptPayload(apiKey) }
-            .onSuccess { encrypted ->
-                val cipherText = encrypted?.first.orEmpty()
-                val iv = encrypted?.second.orEmpty()
-                if (cipherText.isBlank() || iv.isBlank()) return@onSuccess
+    /**
+     * Persist the search API key and report a typed outcome.
+     *
+     * The encrypted pair is written and read back first; the plaintext slot is retired only
+     * after the stored value decrypts to exactly the submitted key. Encryption failure
+     * writes nothing and never degrades to plaintext.
+     */
+    private fun saveEncryptedApiKey(apiKey: String): CredentialSaveResult =
+        when (val write = planCredentialWrite(apiKey, ::encryptPayload)) {
+            CredentialWrite.Clear -> {
                 prefs.edit()
-                    .putString(KEY_API_KEY_CIPHER, cipherText)
-                    .putString(KEY_API_KEY_IV, iv)
+                    .remove(KEY_API_KEY_CIPHER)
+                    .remove(KEY_API_KEY_IV)
                     .remove(KEY_API_KEY_LEGACY)
                     .apply()
+                CredentialSaveResult.Cleared
             }
-            .onFailure {
-                prefs.edit().putString(KEY_API_KEY_LEGACY, apiKey).apply()
+
+            is CredentialWrite.Store -> {
+                prefs.edit()
+                    .putString(KEY_API_KEY_CIPHER, write.cipherText)
+                    .putString(KEY_API_KEY_IV, write.iv)
+                    .apply()
+                val readable = runCatching { decryptPayload(write.cipherText, write.iv) }
+                    .getOrNull()
+                if (readable != apiKey) {
+                    CredentialSaveResult.VerificationFailed
+                } else {
+                    prefs.edit().remove(KEY_API_KEY_LEGACY).apply()
+                    CredentialSaveResult.Stored
+                }
             }
-    }
+
+            CredentialWrite.Unavailable -> CredentialSaveResult.EncryptionUnavailable
+        }
 
     private fun decryptBackupProviders(): List<WebSearchBackupProviderConfig> {
         val cipherText = prefs.getString(KEY_BACKUP_CONFIGS_CIPHER, null)
