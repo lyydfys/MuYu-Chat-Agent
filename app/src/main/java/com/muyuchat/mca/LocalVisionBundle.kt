@@ -107,9 +107,6 @@ private fun JSONArray.toVisionComponents(root: File): List<LocalVisionBundleComp
     }
 }
 
-private fun File.findDescendantFile(fileName: String): File? =
-    walkTopDown().firstOrNull { it.isFile && it.name.equals(fileName, ignoreCase = true) }
-
 private fun File.safeDescendantOrNull(relativePath: String): File? {
     val normalized = relativePath.replace('\\', '/').trim().trimStart('/')
     if (normalized.isBlank()) return null

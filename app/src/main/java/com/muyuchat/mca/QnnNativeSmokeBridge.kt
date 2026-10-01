@@ -431,16 +431,6 @@ private fun JSONArray?.toTensorBufferDiagnostics(): List<QnnTensorBufferDiagnost
     }
 }
 
-private fun JSONArray?.toIntList(): List<Int> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val value = optInt(index, 0)
-            if (value > 0) add(value)
-        }
-    }
-}
-
 private fun JSONArray?.toStringList(): List<String> {
     if (this == null) return emptyList()
     return buildList {

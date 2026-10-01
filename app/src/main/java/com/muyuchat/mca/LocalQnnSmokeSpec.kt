@@ -293,16 +293,6 @@ private fun JSONArray?.toTensorSpecs(defaultRole: String): List<QnnSmokeTensorSp
     }
 }
 
-private fun JSONArray?.toIntList(): List<Int> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val value = optInt(index, 0)
-            if (value > 0) add(value)
-        }
-    }
-}
-
 private fun JSONObject.optDoubleOrNull(name: String): Double? =
     if (has(name)) optDouble(name) else null
 

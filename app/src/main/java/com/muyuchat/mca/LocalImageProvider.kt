@@ -8868,9 +8868,6 @@ private fun File.isTextEncoderComponentFile(): Boolean {
         "llm" in lower
 }
 
-private fun File.findDescendantFile(fileName: String): File? =
-    walkTopDown().firstOrNull { it.isFile && it.name.equals(fileName, ignoreCase = true) }
-
 private fun String.isPrimaryImageModelName(): Boolean {
     val lower = lowercase()
     val extension = substringAfterLast('.', missingDelimiterValue = "").lowercase()
