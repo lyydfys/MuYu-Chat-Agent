@@ -1028,27 +1028,6 @@ class ModelScopeClient(
             )
         )
 
-        private fun gemmaMnnComponents(): List<MnnModelBundleComponentSpec> = listOf(
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.CONFIG, "config.json"),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.MODEL, "llm.mnn"),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "llm.mnn.weight"),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.TOKENIZER, "tokenizer.mtok"),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.LLM_CONFIG, "llm_config.json"),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "llm.mnn.json", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "configuration.json", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "export_args.json", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "visual.mnn", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "visual.mnn.weight", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "audio.mnn", required = false),
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.OPTIONAL, "audio.mnn.weight", required = false),
-            // Gemma 4's llm_config.json declares this as `ple_embed_file`.
-            // It is not an optional UI modality asset: MNN 3.6 feeds it into
-            // the exported graph as the `ple_embeddings` input during every
-            // text or multimodal request.  Keeping it optional allowed an
-            // incomplete bundle to be registered and fail only at native load.
-            MnnModelBundleComponentSpec(MnnModelBundleComponentRole.WEIGHT, "ple_embeddings_int4.bin")
-        )
-
         private fun sanaEditV2MnnComponents(): List<ImageEngineBundleComponentSpec> {
             val repoId = "MNN/MNN-Sana-Edit-V2"
             val revision = SANA_EDIT_V2_REVISION
