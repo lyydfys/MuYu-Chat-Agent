@@ -1,4 +1,4 @@
-﻿import java.nio.charset.StandardCharsets
+import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Properties
 import kotlin.io.path.createTempFile
@@ -486,7 +486,13 @@ val verifyMcaMnnRuntimeStamp = tasks.register("verifyMcaMnnRuntimeStamp") {
 val mcaLlamaSourceRoot = rootProject.file("third_party/llama.cpp")
 val mcaLlamaStqPatch = rootProject.file("vendor/llama/llama-stq1_0.patch")
 val mcaLlamaVulkanPatch = rootProject.file("vendor/llama/llama-vulkan-no-coopmat.patch")
-val mcaLlamaPatches = listOf(mcaLlamaStqPatch, mcaLlamaVulkanPatch)
+// KleidiAI only provides packing/kernel paths for Q4_0, Q8_0 and F32.  Without this
+// patch the CPU_KLEIDIAI buffer callbacks leave a KleidiAI traits pointer on K-quant
+// tensors such as Q6_K, so an ordinary Q4_K_M GGUF can fail at graph compute time on
+// arm64.  The patch keeps those tensors on the regular CPU path and reports the
+// fallback as a warning instead of a failure.
+val mcaLlamaKleidiaiPatch = rootProject.file("vendor/llama/llama-kleidiai-kquant-fallback.patch")
+val mcaLlamaPatches = listOf(mcaLlamaStqPatch, mcaLlamaVulkanPatch, mcaLlamaKleidiaiPatch)
 val applyMcaLlamaPatches = tasks.register("applyMcaLlamaPatches") {
     group = "verification"
     description = "Applies the audited MCA patches to the pinned llama.cpp checkout."

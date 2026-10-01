@@ -1,0 +1,170 @@
+diff --git a/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp b/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
+index dbd198780..0d0177f2b 100644
+--- a/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
++++ b/ggml/src/ggml-cpu/kleidiai/kleidiai.cpp
+@@ -58,6 +58,13 @@ static constexpr uint32_t GGML_KLEIDIAI_PACK_MAGIC       = 0x4b4c4149; // "KLAI"
+ static constexpr uint16_t GGML_KLEIDIAI_PACK_VERSION     = 1;
+ static constexpr size_t   GGML_KLEIDIAI_PACK_ALIGN       = 64;
+ 
++// Capability gate shared by buffer callbacks and graph dispatch.  Keeping the
++// check in one place prevents unsupported quantized tensors from being packed
++// or dispatched through KleidiAI when a stale/externally-created buffer uses
++// the CPU_KLEIDIAI type.
++static bool kleidiai_weight_type_supported(ggml_type type);
++static void kleidiai_warn_unsupported_weight_type(ggml_type type);
++
+ struct ggml_kleidiai_context {
+     cpu_feature features;
+     ggml_kleidiai_kernels * kernels_q4;
+@@ -1716,6 +1723,14 @@ static ggml::cpu::tensor_traits * get_tensor_traits(ggml_backend_buffer_t, struc
+ }  // namespace ggml::cpu::kleidiai
+ 
+ static enum ggml_status ggml_backend_cpu_kleidiai_buffer_init_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor) {
++    if (!kleidiai_weight_type_supported(tensor->type)) {
++        // Keep unsupported formats as ordinary CPU tensors.  A stale planner
++        // assignment must not leave a KleidiAI traits pointer on Q6_K/K-quants.
++        tensor->extra = nullptr;
++        kleidiai_warn_unsupported_weight_type(tensor->type);
++        return GGML_STATUS_SUCCESS;
++    }
++
+     tensor->extra = (void *) ggml::cpu::kleidiai::get_tensor_traits(buffer, tensor);
+ 
+     return GGML_STATUS_SUCCESS;
+@@ -1724,11 +1739,22 @@ static enum ggml_status ggml_backend_cpu_kleidiai_buffer_init_tensor(ggml_backen
+ 
+ static void ggml_backend_cpu_kleidiai_buffer_set_tensor(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor,
+                                                        const void * data, size_t offset, size_t size) {
++    if (!kleidiai_weight_type_supported(tensor->type)) {
++        // The wrapper allocates storage using the regular CPU allocator.  For
++        // an unsupported type, copy the bytes exactly as CPU would; never call
++        // tensor_traits::repack(), whose contract intentionally asserts on
++        // non-Q4_0/Q8_0/F32 tensors.
++        memcpy((char *) tensor->data + offset, data, size);
++        GGML_UNUSED(buffer);
++        return;
++    }
++
+     GGML_ASSERT(offset == 0);
+     GGML_ASSERT(size == ggml_nbytes(tensor));
+ 
+     auto tensor_traits = (ggml::cpu::kleidiai::tensor_traits *) tensor->extra;
+-    auto OK            = tensor_traits->repack(tensor, data, size);
++    GGML_ASSERT(tensor_traits != nullptr);
++    auto OK = tensor_traits->repack(tensor, data, size);
+ 
+     GGML_ASSERT(OK == 0);
+     GGML_UNUSED(buffer);
+@@ -1815,6 +1841,37 @@ static size_t ggml_backend_cpu_kleidiai_buffer_type_get_alloc_size(ggml_backend_
+     return std::max(cursor, ggml_nbytes(tensor));
+ }
+ 
++static bool kleidiai_weight_type_supported(ggml_type type) {
++    switch (type) {
++        case GGML_TYPE_Q4_0:
++            return ctx.kernels_q4 != nullptr;
++        case GGML_TYPE_Q8_0:
++            return ctx.kernels_q8 != nullptr;
++        case GGML_TYPE_F32:
++            return ctx.kernels_f32 != nullptr;
++        default:
++            // K-quants, IQ quants, and all other weight formats have no
++            // KleidiAI packing/kernel path.  They must remain on the regular
++            // CPU backend even when their buffer happens to be a CPU_KLEIDIAI
++            // buffer allocated by an older graph planner.
++            return false;
++    }
++}
++
++static void kleidiai_warn_unsupported_weight_type(ggml_type type) {
++    if (!ggml_is_quantized(type) ||
++        type == GGML_TYPE_Q4_0 || type == GGML_TYPE_Q8_0) {
++        return;
++    }
++
++    static std::atomic<bool> warned(false);
++    if (!warned.exchange(true)) {
++        GGML_LOG_WARN("kleidiai: no kernel for tensor type %s, not accelerated by KleidiAI "
++                      "(kernels available for Q4_0 and Q8_0)\n",
++                      ggml_type_name(type));
++    }
++}
++
+ namespace ggml::cpu::kleidiai {
+ class extra_buffer_type : ggml::cpu::extra_buffer_type {
+     bool supports_op(ggml_backend_dev_t, const struct ggml_tensor * op) override {
+@@ -1861,38 +1918,44 @@ class extra_buffer_type : ggml::cpu::extra_buffer_type {
+     }
+ 
+     ggml::cpu::tensor_traits * get_tensor_traits(const struct ggml_tensor * op) override {
+-        if (op->op == GGML_OP_MUL_MAT || op->op == GGML_OP_GET_ROWS) {
+-            if (op->src[0]->buffer && op->src[0]->buffer->buft->context == this) {
+-                return (ggml::cpu::tensor_traits *) op->src[0]->extra;
+-            } else {
+-                // KleidiAI only has kernels for Q4_0 and Q8_0. For a quantized weight of any
+-                // other type (K-quants, IQ) it declines the op and returns nullptr below, so
+-                // KleidiAI does not accelerate it. Another CPU backend may still take the op,
+-                // and this can run during graph planning, so the message says what KleidiAI
+-                // did rather than what ends up executing. Warn once per process.
+-                if (ggml_is_quantized(op->src[0]->type) &&
+-                    op->src[0]->type != GGML_TYPE_Q4_0 && op->src[0]->type != GGML_TYPE_Q8_0) {
+-                    static std::atomic<bool> warned(false);
+-                    if (!warned.exchange(true)) {
+-                        GGML_LOG_WARN("kleidiai: no kernel for tensor type %s, not accelerated by KleidiAI "
+-                                      "(kernels available for Q4_0 and Q8_0)\n",
+-                                      ggml_type_name(op->src[0]->type));
+-                    }
+-                }
+-                if (op->src[0]->type != GGML_TYPE_F16) {
+-                    return nullptr;
+-                }
+-                std::array<ggml_kleidiai_kernels *, GGML_KLEIDIAI_MAX_KERNEL_SLOTS> kernel_chain;
+-                const int slot_total = kleidiai_collect_kernel_chain(op, kernel_chain);
+-                if (slot_total > 0 && op->src[1]->ne[1] > 1) {
+-                    if ((op->src[0]->nb[1] * op->src[0]->ne[1] != op->src[0]->nb[2]) ||
+-                        (op->src[1]->nb[1] * op->src[1]->ne[1] != op->src[1]->nb[2])) {
+-                        return nullptr;
+-                    }
+-                    return ggml::cpu::kleidiai::get_tensor_traits(NULL, NULL);
+-                }
++        if (op == nullptr || (op->op != GGML_OP_MUL_MAT && op->op != GGML_OP_GET_ROWS) ||
++            op->src[0] == nullptr) {
++            return nullptr;
++        }
++
++        const struct ggml_tensor * src0 = op->src[0];
++        if (src0->buffer && src0->buffer->buft->context == this) {
++            // A tensor can still carry a CPU_KLEIDIAI buffer after graph
++            // planning, even though its quantization is not supported by
++            // KleidiAI.  Never hand such a tensor's traits to the extra CPU
++            // dispatcher: doing so calls the KleidiAI kernel selector for
++            // Q6_K/K-quants and produces "no kernel for tensor type" at
++            // decode time instead of falling through to llama.cpp CPU.
++            if (!kleidiai_weight_type_supported(src0->type)) {
++                kleidiai_warn_unsupported_weight_type(src0->type);
++                return nullptr;
++            }
++            return (ggml::cpu::tensor_traits *) src0->extra;
++        }
++
++        // KleidiAI's unbuffered path is the F16 activation path.  Quantized
++        // weights (including Q6_K) must never reach it; returning nullptr lets
++        // the regular CPU implementation execute the operation.
++        kleidiai_warn_unsupported_weight_type(src0->type);
++        if (src0->type != GGML_TYPE_F16 || op->src[1] == nullptr) {
++            return nullptr;
++        }
++
++        std::array<ggml_kleidiai_kernels *, GGML_KLEIDIAI_MAX_KERNEL_SLOTS> kernel_chain;
++        const int slot_total = kleidiai_collect_kernel_chain(op, kernel_chain);
++        if (slot_total > 0 && op->src[1]->ne[1] > 1) {
++            if ((src0->nb[1] * src0->ne[1] != src0->nb[2]) ||
++                (op->src[1]->nb[1] * op->src[1]->ne[1] != op->src[1]->nb[2])) {
++                return nullptr;
+             }
++            return ggml::cpu::kleidiai::get_tensor_traits(NULL, NULL);
+         }
++
+         return nullptr;
+     }
+ };

@@ -1,6 +1,9 @@
 [submodule "third_party/llama.cpp"]
 	path = third_party/llama.cpp
 	url = https://github.com/ggml-org/llama.cpp.git
+	# The checkout is intentionally dirty: vendor/llama/*.patch are applied on top of
+	# the pinned commit by the applyMcaLlamaPatches task, same as stable-diffusion.cpp.
+	ignore = dirty
 
 [submodule "third_party/stable-diffusion.cpp"]
 	path = third_party/stable-diffusion.cpp
