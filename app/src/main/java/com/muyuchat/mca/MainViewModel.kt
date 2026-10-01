@@ -20040,23 +20040,6 @@ class MainViewModel @JvmOverloads constructor(
         _uiState.update { state -> state.copy(localImageModels = models) }
     }
 
-    private fun imageExtension(name: String): String {
-        val extension = name.substringAfterLast('.', "png").lowercase()
-        return when (extension) {
-            "jpg", "jpeg", "png", "webp", "heic", "heif" -> extension
-            else -> "png"
-        }
-    }
-
-    private fun imageExtensionForMime(mimeType: String): String =
-        when (mimeType.lowercase().substringBefore(";").trim()) {
-            "image/jpeg", "image/jpg" -> "jpg"
-            "image/webp" -> "webp"
-            "image/heic" -> "heic"
-            "image/heif" -> "heif"
-            else -> "png"
-        }
-
     private data class CloudProviderPreset(
         val key: String,
         val providerName: String,
