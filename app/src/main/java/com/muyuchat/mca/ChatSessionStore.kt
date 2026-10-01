@@ -1315,8 +1315,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 "projectId"
             )
             if (columns.containsAll(expectedColumns) && "contentPreview" !in columns && "uriString" !in columns) return
-            val textExpression = legacyFirstColumnOrDefault(columns, listOf("text", "contentPreview", "preview"), "''")
-            val previewExpression = legacyFirstColumnOrDefault(columns, listOf("preview", "contentPreview", "text"), "''")
+            val textExpression = firstColumnOrDefault(columns, listOf("text", "contentPreview", "preview"), "''")
+            val previewExpression = firstColumnOrDefault(columns, listOf("preview", "contentPreview", "text"), "''")
             db.execSQL("DROP TABLE IF EXISTS file_assets_new")
             db.execSQL(
                 """
@@ -1438,11 +1438,8 @@ abstract class McaRoomDatabase : RoomDatabase() {
         private fun legacyNullableColumn(columns: Set<String>, name: String): String =
             if (name in columns) "`$name`" else "NULL"
 
-        private fun legacyFirstColumnOrDefault(columns: Set<String>, names: List<String>, defaultSql: String): String =
-            names.firstOrNull { it in columns }?.let { "`$it`" } ?: defaultSql
     }
 }
-
 @Dao
 interface ChatSessionDao {
     @Query("SELECT * FROM chat_sessions ORDER BY pinned DESC, updatedAt DESC")
