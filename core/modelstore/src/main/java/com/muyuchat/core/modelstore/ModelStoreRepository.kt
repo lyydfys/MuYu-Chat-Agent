@@ -305,12 +305,6 @@ class ModelStoreRepository(private val context: Context) {
             directoryName, options, onProgress, checkCancelled)
     }
 
-    private fun isReadableGgufFile(file: File): Boolean {
-        if (!file.isFile || !file.canRead() || file.length() <= 0L) return false
-        if (!file.name.endsWith(".gguf", ignoreCase = true)) return false
-        return runCatching { GgufMetadataReader.read(file).isGguf }.getOrDefault(false)
-    }
-
     private fun modelImportSource(uri: Uri, name: String): ModelImportSource =
         ModelImportSource(uri.toString(), name, querySize(uri), runCatching {
             appContext.contentResolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_LAST_MODIFIED), null, null, null)?.use {
@@ -415,36 +409,6 @@ class ModelStoreRepository(private val context: Context) {
     fun importFromUri(uri: Uri, displayNameOverride: String? = null): ModelManifest =
         importFromUris(listOf(uri), displayNameOverride)
 
-    private fun importSingleUriLocked(
-        uri: Uri,
-        displayNameOverride: String?,
-        allowMnnZip: Boolean
-    ): ModelManifest {
-        val providedName = displayNameOverride?.takeIf { it.isNotBlank() } ?: queryDisplayName(uri)
-        val providerReportedSize = querySize(uri)
-        return appContext.contentResolver.openInputStream(uri).use { rawInput ->
-            requireNotNull(rawInput) { "无法读取所选文件。" }
-            val source = PushbackInputStream(rawInput.buffered(), IMPORT_MAGIC_BYTES)
-            val header = source.readPrefix(IMPORT_MAGIC_BYTES)
-            if (header.isNotEmpty()) source.unread(header)
-            when (classifyModelImport(providedName, header)) {
-                ModelImportKind.GGUF -> importGgufFromStreamLocked(source, providedName, providerReportedSize)
-                ModelImportKind.LITERT_LM ->
-                    importLiteRtLmFromStreamLocked(source, providedName, providerReportedSize)
-                ModelImportKind.MNN_ZIP -> {
-                    require(allowMnnZip) { "请选择有效的 GGUF 模型文件。" }
-                    importMnnBundleFromZipStream(
-                        source = source,
-                        fileName = providedName?.trim().orEmpty().ifBlank { "mnn-bundle.zip" }
-                    )
-                }
-                ModelImportKind.MNN_COMPONENT ->
-                    error("MNN 高速引擎需要同时选择 config.json、llm_config.json、llm.mnn、llm.mnn.weight、tokenizer，以及 embeddings_bf16.bin / llm.mnn.json；或导入完整 zip 包。")
-                ModelImportKind.UNKNOWN -> error("无法识别所选文件。请选择 GGUF / LiteRT-LM 模型，或选择完整 MNN 组件 / zip 包。")
-            }
-        }
-    }
-
     private fun importLiteRtLmFromStreamLocked(
         source: InputStream,
         providedName: String?,
@@ -547,71 +511,6 @@ class ModelStoreRepository(private val context: Context) {
             upsert(manifest)
         } catch (error: Throwable) {
             if (ownsTarget) target.delete()
-            throw error
-        }
-    }
-
-    private fun importMnnBundleFromUris(uris: List<Uri>, displayNameOverride: String? = null): ModelManifest {
-        val namedUris = uris.mapIndexed { index, uri ->
-            val name = queryDisplayName(uri)?.takeIf { it.isNotBlank() } ?: "mnn-component-$index"
-            uri to name
-        }
-        // Do not pre-classify by a fixed set of basenames here.  The readiness
-        // analyzer below is config-driven and accepts valid exporters that use
-        // renamed component files (and keeps the legacy flat layout compatible).
-        // A multi-select import cannot preserve directory parents, however, so
-        // reject sanitized basename collisions instead of silently overwriting
-        // one selected component with another.
-        val fileNames = namedUris.map { it.second }
-        val sanitizedNames = fileNames.map(::safeFileName)
-        require(sanitizedNames.distinct().size == sanitizedNames.size) {
-            "MNN 组件导入包含重名文件；请一次只选择每个组件的唯一文件名，或改用完整 ZIP 包。"
-        }
-
-        val bundleDir = uniqueBundleTarget(displayNameOverride ?: inferMnnBundleName(fileNames))
-        val stagingDir = File(bundleDir.parentFile, ".${bundleDir.name}.importing-${UUID.randomUUID()}")
-        var ownsBundleDir = false
-        try {
-            require(stagingDir.mkdirs()) { "无法创建 MNN 组件导入暂存目录。" }
-            namedUris.forEach { (uri, name) ->
-                val target = managedBundleFileFor(stagingDir, name)
-                val sourceDigest = appContext.contentResolver.openInputStream(uri).use { input ->
-                    requireNotNull(input) { "无法读取 MNN 组件：$name" }
-                    copyWithSha256(input, target)
-                }
-                verifyProviderCopyAgainstAdvisorySize(querySize(uri), target.length())
-                require(sha256(target).equals(sourceDigest, ignoreCase = true)) { "MNN 组件复制校验失败：$name" }
-                val importedKind = target.inputStream().use { input ->
-                    classifyModelImport(name, input.readPrefix(IMPORT_MAGIC_BYTES))
-                }
-                require(
-                    importedKind != ModelImportKind.GGUF &&
-                        importedKind != ModelImportKind.LITERT_LM &&
-                        importedKind != ModelImportKind.MNN_ZIP
-                ) {
-                    "一次只能导入一个 GGUF / LiteRT-LM 主模型或一个 MNN ZIP；MNN 多选仅用于完整组件文件。"
-                }
-            }
-            val readiness = MnnBundleReadinessAnalyzer.analyze(stagingDir)
-            require(readiness.canLoad) { "MNN 模型包不完整：${readiness.diagnosticSummary()}" }
-            require(commitAtomicImportPath(stagingDir, bundleDir)) { "无法原子提交导入的 MNN 模型包。" }
-            ownsBundleDir = true
-        } catch (error: Throwable) {
-            stagingDir.deleteRecursively()
-            if (ownsBundleDir) bundleDir.deleteRecursively()
-            throw error
-        }
-        return try {
-            registerDownloadedMnnBundle(
-                displayName = displayNameOverride ?: inferMnnDisplayName(bundleDir.name),
-                bundleDir = bundleDir,
-                repoId = null,
-                revision = null,
-                source = ModelSource.LOCAL,
-                requiredFiles = requiredMnnFilesForDirectory(bundleDir)
-            )
-        } catch (error: Throwable) {
-            if (ownsBundleDir) bundleDir.deleteRecursively()
             throw error
         }
     }

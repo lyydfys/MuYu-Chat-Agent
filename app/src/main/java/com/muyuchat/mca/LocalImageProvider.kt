@@ -5019,25 +5019,6 @@ class LocalImageProvider(context: Context) {
             localImageProgressFromJson(JSONObject(getProgress()))
         }.getOrNull()
 
-    private fun NativeQnnBridge.currentImageProgressOrNull(
-        threads: Int,
-        width: Int,
-        height: Int
-    ): LocalImageProgress? = runCatching {
-        val json = JSONObject(getImageGenerationProgressJson())
-        if (!json.optBoolean("active") &&
-            !json.optBoolean("cancelRequested") &&
-            (json.optJSONArray("stageTrace")?.length() ?: 0) == 0
-        ) {
-            return@runCatching null
-        }
-        localImageProgressFromJson(json).copy(
-            threads = threads,
-            width = width,
-            height = height
-        )
-    }.getOrNull()
-
     private fun localImageProgressFromJson(json: JSONObject): LocalImageProgress =
         LocalImageProgress(
             phase = json.optString("phase"),

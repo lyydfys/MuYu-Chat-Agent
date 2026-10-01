@@ -1843,11 +1843,6 @@ private fun drawerPageEnter() = slideInHorizontally(
     initialOffsetX = { it }
 ) + fadeIn(animationSpec = tween(durationMillis = 180))
 
-private fun drawerPageExit() = slideOutHorizontally(
-    animationSpec = tween(durationMillis = 260),
-    targetOffsetX = { it }
-) + fadeOut(animationSpec = tween(durationMillis = 180))
-
 @Composable
 private fun Modifier.edgeSwipeBack(onBack: () -> Unit): Modifier {
     val density = LocalDensity.current
