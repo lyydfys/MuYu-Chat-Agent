@@ -116,7 +116,6 @@ import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.QairtExecutionVerificationStore
 import com.muyuchat.core.engine.localContextWindowAdmission
 import com.muyuchat.core.engine.estimateLocalPromptTokens
-import com.muyuchat.core.engine.localPromptTextFootprint
 import com.muyuchat.core.engine.qairtRuntimeIdentityFor
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
@@ -1726,42 +1725,6 @@ private class ImagePromptTokenMeasurementCache(
     fun put(key: String, value: ImagePromptTokenMeasurement) {
         synchronized(entries) { entries[key] = value }
     }
-}
-
-private fun utf8ByteOffsetToUtf16(prompt: String, byteOffset: Int): Int? {
-    if (byteOffset !in 0..prompt.toByteArray(Charsets.UTF_8).size) return null
-    val bytes = prompt.toByteArray(Charsets.UTF_8)
-    val prefixBytes = bytes.copyOf(byteOffset)
-    val prefix = runCatching { String(prefixBytes, Charsets.UTF_8) }.getOrNull() ?: return null
-    return prefix.toByteArray(Charsets.UTF_8)
-        .takeIf { it.contentEquals(prefixBytes) }
-        ?.let { prefix.length }
-}
-
-private data class Utf8BoundedText(val text: String, val truncated: Boolean)
-
-private fun String.takeUtf8Prefix(maxBytes: Int): Utf8BoundedText {
-    require(maxBytes > 0)
-    if (localPromptTextFootprint(this).utf8Bytes <= maxBytes) {
-        return Utf8BoundedText(this, truncated = false)
-    }
-    val output = StringBuilder(minOf(length, maxBytes))
-    var used = 0
-    var index = 0
-    while (index < length) {
-        val codePoint = Character.codePointAt(this, index)
-        val size = when {
-            codePoint <= 0x7f -> 1
-            codePoint <= 0x7ff -> 2
-            codePoint <= 0xffff -> 3
-            else -> 4
-        }
-        if (used > maxBytes - size) break
-        output.appendCodePoint(codePoint)
-        used += size
-        index += Character.charCount(codePoint)
-    }
-    return Utf8BoundedText(output.toString(), truncated = true)
 }
 
 data class MainUiState(
