@@ -364,9 +364,6 @@ class QairtDryRunWorkerService : Service() {
         }
     }
 
-    private fun requestIdFromMalformedPayload(raw: String): String =
-        runCatching { JSONObject(raw).optString("requestId") }.getOrDefault("")
-
     private class ActiveRequest(
         val request: QairtDryRunWorkerProtocol.Request,
         val callback: IQairtDryRunWorkerCallback

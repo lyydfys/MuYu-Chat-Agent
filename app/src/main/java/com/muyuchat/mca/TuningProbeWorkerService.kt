@@ -934,9 +934,6 @@ class TuningProbeWorkerService : Service() {
         }
     }
 
-    private fun requestIdFromMalformedPayload(raw: String): String =
-        runCatching { JSONObject(raw).optString("requestId") }.getOrDefault("")
-
     private data class FixedCanaryRun(
         val purpose: String,
         val requestId: String,

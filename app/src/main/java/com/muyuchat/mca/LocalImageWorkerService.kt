@@ -1388,9 +1388,6 @@ class LocalImageWorkerService : Service() {
 
     private fun resultDirectory(): File = File(cacheDir, RESULT_DIRECTORY)
 
-    private fun requestIdFromMalformedPayload(raw: String): String =
-        runCatching { JSONObject(raw).optString("requestId") }.getOrDefault("")
-
     private class ActiveGeneration(
         val requestId: String,
         val callback: ILocalImageWorkerCallback
