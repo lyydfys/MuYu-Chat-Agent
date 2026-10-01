@@ -2281,16 +2281,9 @@ class McaLoopbackServer(
         }
 
     private fun JSONObject.visionReadyFlag(): Boolean? =
-        explicitBoolean("vision_ready", "visionReady", "supports_vision", "supportsVision")
+        firstBoolean("vision_ready", "visionReady", "supports_vision", "supportsVision")
             ?: optJSONObject("stats")?.visionReadyFlag()
-            ?: optJSONObject("capabilities")?.explicitBoolean("supportsVision", "supports_vision")
-
-    private fun JSONObject.explicitBoolean(vararg keys: String): Boolean? {
-        for (key in keys) {
-            if (has(key) && !isNull(key)) return optBoolean(key)
-        }
-        return null
-    }
+            ?: optJSONObject("capabilities")?.firstBoolean("supportsVision", "supports_vision")
 
     private data class LocalApiVisionCapability(
         val displayName: String,

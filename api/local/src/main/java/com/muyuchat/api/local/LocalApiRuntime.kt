@@ -921,13 +921,6 @@ object LocalApiRuntime {
             .map { optString(it).trim() }
             .firstOrNull { it.isNotBlank() }
 
-    private fun JSONObject.firstBoolean(vararg keys: String): Boolean? {
-        for (key in keys) {
-            if (has(key) && !isNull(key)) return optBoolean(key)
-        }
-        return null
-    }
-
     private fun JSONObject.firstPositiveInt(vararg keys: String): Int? {
         for (key in keys) {
             if (!has(key) || isNull(key)) continue
