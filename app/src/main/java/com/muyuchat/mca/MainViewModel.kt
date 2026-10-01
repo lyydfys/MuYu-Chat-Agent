@@ -1680,8 +1680,6 @@ private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收�
 private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
 private const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
-private const val MAX_VISION_IMAGE_EDGE = 1280
-private const val MAX_VISION_DECODE_PIXELS = 4_000_000L
 
 data class ImageLibraryBackupState(
     val running: Boolean = false,
@@ -20520,7 +20518,7 @@ class MainViewModel @JvmOverloads constructor(
         createdFiles: MutableList<File>
     ): ChatImageAttachment {
         val bitmap = decodeBitmapForLocalVision()
-        val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
+        val prepared = bitmap.scaledToMaxEdge(VisionDecodeBudget.MAX_EDGE)
         val width = prepared.width
         val height = prepared.height
         val visionDir = File(getApplication<Application>().cacheDir, "vision_inputs").apply { mkdirs() }
@@ -20565,7 +20563,7 @@ class MainViewModel @JvmOverloads constructor(
             require(bounds.outWidth > 0 && bounds.outHeight > 0) {
                 "内联图片没有可识别的尺寸：${name.ifBlank { "api-image" }}"
             }
-            val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+            val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
             return BitmapFactory.decodeByteArray(
                 bytes,
                 0,
@@ -20580,7 +20578,7 @@ class MainViewModel @JvmOverloads constructor(
         require(bounds.outWidth > 0 && bounds.outHeight > 0) {
             "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
         }
-        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+        val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
         return resolver.openInputStream(uri)?.use { input ->
             BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
         } ?: error("无法读取图片：${name.ifBlank { uriString }}")
@@ -20633,11 +20631,11 @@ class MainViewModel @JvmOverloads constructor(
         require(bounds.outWidth > 0 && bounds.outHeight > 0) {
             "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
         }
-        val sampleSize = calculateImageSampleSize(bounds.outWidth, bounds.outHeight, MAX_VISION_IMAGE_EDGE)
+        val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
         val bitmap = resolver.openInputStream(uri)?.use { input ->
             BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
         } ?: error("无法读取图片：${name.ifBlank { uriString }}")
-        val prepared = bitmap.scaledToMaxEdge(MAX_VISION_IMAGE_EDGE)
+        val prepared = bitmap.scaledToMaxEdge(VisionDecodeBudget.MAX_EDGE)
         val width = prepared.width
         val height = prepared.height
         val bytes = try {
@@ -20670,19 +20668,6 @@ class MainViewModel @JvmOverloads constructor(
             (height * scale).toInt().coerceAtLeast(1),
             true
         )
-    }
-
-    private fun calculateImageSampleSize(width: Int, height: Int, maxEdge: Int): Int {
-        if (width <= 0 || height <= 0) return 1
-        var sample = 1
-        while (
-            maxOf(width / sample, height / sample) > maxEdge * 2 ||
-            (width.toLong() / sample.toLong()) * (height.toLong() / sample.toLong()) > MAX_VISION_DECODE_PIXELS
-        ) {
-            if (sample >= (1 shl 29)) break
-            sample *= 2
-        }
-        return sample.coerceAtLeast(1)
     }
 
     private fun visionBitmapOptions(sampleSize: Int): BitmapFactory.Options =
