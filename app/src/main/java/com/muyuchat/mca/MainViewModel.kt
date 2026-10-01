@@ -10363,31 +10363,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun backendLabel(family: ChatBackendFamily, backendId: String): String = when (family) {
-        ChatBackendFamily.MNN -> if (backendId == "opencl") "GPU / OpenCL" else "CPU"
-        ChatBackendFamily.LITERT_LM -> when (backendId) {
-            "npu" -> "NPU"
-            "gpu" -> "GPU"
-            else -> "CPU"
-        }
-        ChatBackendFamily.QAIRT -> "NPU"
-        ChatBackendFamily.LLAMA_CPP -> when (backendId) {
-            "gpu" -> "GPU（全量）"
-            "auto" -> "自动调配"
-            "custom" -> "自定义 GPU 层数"
-            else -> com.muyuchat.feature.chat.customGpuLayerCountFromBackendId(backendId)
-                ?.let { "自定义 GPU 层数（$it）" }
-                ?: "CPU"
-        }
-        ChatBackendFamily.GENIEX_LLAMA_CPP -> when (backendId) {
-            "gpu" -> "GPU"
-            "npu" -> "NPU / HTP"
-            "hybrid" -> "NPU + CPU"
-            else -> "CPU"
-        }
-        ChatBackendFamily.UNKNOWN -> backendId.ifBlank { "默认" }
-    }
-
     /** Read a target model's persisted generation profile for the model selector UI. */
     fun generationParamsForChatModel(modelId: String): GenerationParams =
         loadModelGenerationParams(
