@@ -17684,120 +17684,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun runAgentDebug(debugMode: AgentDebugMode, preference: UserPreference) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val profileOwner = _uiState.value
-            _uiState.update { it.copy(preference = preference) }
-            busy("Agent 正在运行${debugMode.label}...")
-            runCatching {
-                val device = currentDeviceProfile()
-                val basePlan = profileOwner.agentRecommendation?.tuningPlan
-                    ?: buildRecommendation(preference, device, null).tuningPlan
-                val result = benchmarkRunner.runThreadSweep(
-                    plan = basePlan,
-                    candidates = threadSweepCandidates(device, basePlan.nThreads, debugMode),
-                    config = debugMode.sweepConfig()
-                )
-                val recommendation = buildRecommendation(preference, device, result.decodeTps)
-                    .withBenchmarkThread(result)
-                val previousParams = profileOwner.params
-                val updatedParams = recommendation.tuningPlan.applyTo(profileOwner.params)
-                appendBenchmarkHistory(device, result, updatedParams)
-                agentLogger.append(
-                    device = device,
-                    recommendation = recommendation,
-                    benchmark = result,
-                    appliedPlan = recommendation.tuningPlan,
-                    userConfirmed = true
-                )
-                persistGenerationParams(updatedParams)
-                persistModelGenerationParams(profileOwner, updatedParams)
-                _uiState.update {
-                    it.copy(
-                        deviceProfile = device,
-                        agentRecommendation = recommendation,
-                        benchmark = result,
-                        benchmarkHistory = benchmarkHistoryLogger.recent(),
-                        preference = preference,
-                        params = updatedParams,
-                        rollbackParams = previousParams,
-                        agentLogs = agentLogger.recent(),
-                        busy = false,
-                        lastAutoTuningSummary = tuningSummary(result, recommendation),
-                        statusMessage = result.error ?: "${debugMode.label}完成并已应用 Agent 参数：decode ${"%.2f".format(result.decodeTps)} token/s"
-                    )
-                }
-            }.onFailure { error ->
-                fail("${debugMode.label}失败：${error.message}")
-            }
-        }
-    }
-
-    private suspend fun runPostLoadBenchmarkAndTune(model: ModelManifest) {
-        runCatching {
-            val device = currentDeviceProfile()
-            val initialRecommendation = advisor.recommend(
-                device = device,
-                localModels = listOf(model),
-                remoteFiles = emptyList(),
-                preference = _uiState.value.preference
-            )
-            val result = benchmarkRunner.runThreadSweep(
-                initialRecommendation.tuningPlan,
-                threadSweepCandidates(device, initialRecommendation.tuningPlan.nThreads, AgentDebugMode.Quick),
-                AgentDebugMode.Quick.sweepConfig()
-            )
-            val recommendation = advisor.recommend(
-                device = currentDeviceProfile(),
-                localModels = listOf(model),
-                remoteFiles = emptyList(),
-                preference = _uiState.value.preference,
-                lastDecodeTps = result.decodeTps.takeIf { it > 0.0 }
-            ).withBenchmarkThread(result)
-            val previousParams = _uiState.value.params
-            val updatedParams = recommendation.tuningPlan.applyTo(_uiState.value.params)
-            appendBenchmarkHistory(device, result, updatedParams)
-            agentLogger.append(
-                device = device,
-                recommendation = recommendation,
-                benchmark = result,
-                appliedPlan = recommendation.tuningPlan,
-                userConfirmed = false
-            )
-            persistGenerationParams(updatedParams)
-            persistModelGenerationParams(ChatBackend.LOCAL, model.id, updatedParams)
-            _uiState.update {
-                it.copy(
-                    params = updatedParams,
-                    deviceProfile = device,
-                    agentRecommendation = recommendation,
-                    benchmark = result,
-                    benchmarkHistory = benchmarkHistoryLogger.recent(),
-                    agentLogs = agentLogger.recent(),
-                    logs = engine.recentLogs(),
-                    busy = false,
-                    autoTuningInProgress = false,
-                    rollbackParams = previousParams,
-                    lastAutoTuningSummary = tuningSummary(result, recommendation),
-                    nativeStatsJson = engine.nativeStatsJson(),
-                    statusMessage = result.error
-                        ?: "Agent 短基准完成并已应用安全参数：decode ${"%.2f".format(result.decodeTps)} token/s，n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}",
-                    tab = AppTab.CHAT
-                )
-            }
-        }.onFailure { error ->
-            _uiState.update {
-                it.copy(
-                    busy = false,
-                    autoTuningInProgress = false,
-                    nativeStatsJson = engine.nativeStatsJson(),
-                    statusMessage = "模型已加载，但 Agent 短基准失败：${error.message}。可先聊天，或稍后在 Agent 页手动重跑短基准。",
-                    tab = AppTab.CHAT
-                )
-            }
-        }
-    }
-
     fun toggleApi(enabled: Boolean) {
         val restEnabled = if (enabled) _uiState.value.restEnabled else false
         persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
@@ -18280,56 +18166,6 @@ class MainViewModel @JvmOverloads constructor(
      * Drains only the output owned by the UI run that process backgrounding invalidated. A newer
      * foreground request advances the sequence and leaves its buffer untouched.
      */
-    private fun drainCancelledAssistantOutput(
-        cancelledRunId: Long,
-        invalidatedRunId: Long
-    ): BackgroundCancelledAssistantOutput? {
-        if (generationRunSequence.get() != invalidatedRunId) return null
-        return synchronized(assistantOutputBufferLock) {
-            if (generationRunSequence.get() != invalidatedRunId ||
-                assistantOutputBufferGenerationId != cancelledRunId
-            ) {
-                null
-            } else {
-                BackgroundCancelledAssistantOutput(
-                    content = pendingAssistantOutput.toString(),
-                    reasoning = pendingAssistantReasoning.toString(),
-                    reasoningDurationMs = pendingAssistantReasoningDurationMs
-                ).also {
-                    assistantOutputPublishJob?.cancel()
-                    assistantOutputPublishJob = null
-                    pendingAssistantOutput.setLength(0)
-                    pendingAssistantReasoning.setLength(0)
-                    pendingAssistantReasoningDurationMs = 0L
-                    assistantOutputBufferGenerationId = null
-                    assistantOutputLastPublishedAtMs = android.os.SystemClock.elapsedRealtime()
-                }
-            }
-        }
-    }
-
-    private fun MainUiState.finalizeBackgroundCancelledAssistant(
-        pending: BackgroundCancelledAssistantOutput?
-    ): MainUiState {
-        val updated = messages.withBackgroundCancellationFinalized(pending)
-        if (updated === messages) return this
-        val sessionId = activeChatSessionId
-        return copy(
-            messages = updated,
-            chatSessions = if (sessionId == null) {
-                chatSessions
-            } else {
-                chatSessions.upsertSession(
-                    sessionId = sessionId,
-                    messages = updated,
-                    assistantId = selectedAssistantId,
-                    modelMode = selectedChatBackend.bindingValue(),
-                    modelId = currentChatModelId()
-                )
-            }
-        )
-    }
-
     private fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
         discardPendingAssistantOutput(generationRunId)
         _uiState.update { state ->
@@ -18835,21 +18671,6 @@ class MainViewModel @JvmOverloads constructor(
         return "$label ${fileName}: $progress$speed$remaining$error"
     }
 
-    private fun downloadFailureAdvice(message: String?): String {
-        val raw = message.orEmpty()
-        return when {
-            raw.contains("SHA-256", ignoreCase = true) -> raw
-            raw.contains("大小不匹配") -> raw
-            raw.contains("空间不足") -> raw
-            raw.contains("Software caused connection abort", ignoreCase = true) ||
-                raw.contains("unexpected end of stream", ignoreCase = true) ||
-                raw.contains("timeout", ignoreCase = true) ||
-                raw.contains("中断") ->
-                "$raw。临时文件已保留，再次点击下载会尝试续传。"
-            else -> raw.ifBlank { "未知错误。可重新点击下载，MCA 会优先尝试续传。" }
-        }
-    }
-
     private fun List<ChatSessionRecord>.upsertSession(
         sessionId: String,
         messages: List<ChatMessage>,
@@ -19062,11 +18883,6 @@ class MainViewModel @JvmOverloads constructor(
         cloudModels
             .firstOrNull { it.id == selectedCloudImageModelId && it.kind == CloudModelKind.IMAGE }
             ?.toImageConfig()
-
-    private fun MainUiState.canOfferAssistantImageTool(): Boolean = when (selectedImageBackend) {
-        ImageBackend.LOCAL -> selectedLocalImageModel() != null
-        ImageBackend.CLOUD -> selectedImageCloudConfig() != null
-    }
 
     private fun MainUiState.chatImageModelBinding(): AssistantImageModelBinding? {
         val state = this
@@ -20250,17 +20066,6 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun MainUiState.selectedAssistant(): AssistantRecord? =
         assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
-
-    private fun MainUiState.shouldUseWebSearchForTurn(plan: WebSearchPlan): Boolean =
-        when {
-            webSearchOneShotEnabled || webSearchTurnMode == WebSearchTurnMode.ON ->
-                webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())
-            webSearchTurnMode == WebSearchTurnMode.OFF -> false
-            selectedAssistant()?.webSearchEnabled == true ->
-                webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())
-            else -> (webSearchConfig.realSearchConfigured || (webSearchConfig.canReadDirectUrls && plan.directUrls.isNotEmpty())) &&
-                plan.shouldUseWebSearchAutomatically(webSearchConfig.triggerMode)
-        }
 
     private fun apiUrl(host: String): String =
         "http://$host:$REST_PORT/v1"
@@ -22207,43 +22012,6 @@ class MainViewModel @JvmOverloads constructor(
                 model.id
             }
         )
-    }
-
-    private fun localImageDeviceFitScore(model: ModelScopeRecommendedModel, device: DeviceProfile): Int {
-        val engineTier = model.localImageEngineTier ?: return 0
-        val bundle = model.imageEngineBundle
-        val ramGb = device.displayTotalRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
-        val memoryFit = when {
-            ramGb <= 0.0 -> 0
-            model.minRamGb <= ramGb -> 4
-            model.minRamGb <= ramGb + 2.0 -> 2
-            else -> 0
-        }
-        val qualityFit = when {
-            bundle?.accelerator == ImageEngineAccelerator.QNN_HTP &&
-                bundle.minDeviceTier == ImageEngineMinDeviceTier.SNAPDRAGON_8_GEN3 -> 8
-            bundle?.accelerator == ImageEngineAccelerator.QNN_HTP &&
-                bundle.minDeviceTier == ImageEngineMinDeviceTier.SNAPDRAGON_8_ELITE -> 8
-            engineTier == LocalImageEngineTier.COMPACT_QUALITY -> 6
-            engineTier == LocalImageEngineTier.HEAVY_EXPERIMENTAL -> 5
-            engineTier == LocalImageEngineTier.LARGE_QUALITY -> 4
-            engineTier == LocalImageEngineTier.STANDARD -> 3
-            engineTier == LocalImageEngineTier.QUICK -> 2
-            else -> 0
-        }
-        val acceleration = device.accelerationProfile
-        val npuFit = if (bundle?.accelerator == ImageEngineAccelerator.QNN_HTP) {
-            when {
-                !acceleration.localImage.deviceCapable -> -4
-                bundle.requiresQnnRuntime && acceleration.qnnRuntime.usableForSmoke -> 6
-                bundle.requiresQnnRuntime -> 3
-                else -> 1
-            }
-        } else {
-            0
-        }
-        val runtimeReadyBonus = if (acceleration.qnnRuntime.usableForSmoke && npuFit > 0) 2 else 0
-        return memoryFit + qualityFit + npuFit + runtimeReadyBonus
     }
 
     private fun buildRecommendation(
