@@ -4,6 +4,7 @@
 /v1/images/generations
 /v1/images/textual-inversions
 /v1/mca/benchmark
+/v1/mca/capabilities
 /v1/mca/device
 /v1/mca/profile
 /v1/mca/recommend

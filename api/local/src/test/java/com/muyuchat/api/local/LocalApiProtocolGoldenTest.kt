@@ -73,6 +73,25 @@ class LocalApiProtocolGoldenTest {
     }
 
     @Test
+    fun `a route reached through a constant stays inside the frozen contract`() {
+        val golden = goldenFile(ROUTES_GOLDEN).readText()
+            .lines().map { it.trim() }.filter { it.isNotEmpty() }
+
+        // This is the specific hole the literal scan left: the registry endpoint is matched
+        // as LocalApiCapabilityRegistry.PATH, so it was served but never frozen.
+        assertTrue(
+            "${LocalApiCapabilityRegistry.PATH} is served through a constant, so a literal " +
+                "scan omits it; it must be pinned in $ROUTES_GOLDEN explicitly",
+            golden.contains(LocalApiCapabilityRegistry.PATH)
+        )
+        assertEquals(
+            "constantRoutedPaths() must stay in step with the frozen route list",
+            emptyList<String>(),
+            constantRoutedPaths() - golden.toSet()
+        )
+    }
+
+    @Test
     fun `the capability registry covers every documented protocol scope`() {
         val registry = LocalApiCapabilityRegistry.all()
         assertTrue("the registry must not be empty", registry.isNotEmpty())
@@ -154,14 +173,26 @@ class LocalApiProtocolGoldenTest {
         }
     }
 
-    /** `/v1/...` request paths the router matches, in source order. */
+    /**
+     * `/v1/...` request paths the router matches, in source order.
+     *
+     * Most are string literals, but a route reached through a constant is invisible to a
+     * literal scan: `/v1/mca/capabilities` is matched as `LocalApiCapabilityRegistry.PATH`,
+     * so the first version of this scan silently omitted it and left a served endpoint
+     * outside the frozen contract. Constants are listed explicitly below, and
+     * `everyRoutedConstantIsFrozen` fails if a new one is introduced without being added.
+     */
     private fun routedPaths(): List<String> =
         Regex("\"(/v1/[A-Za-z0-9/_.\\-]*)\"")
             .findAll(sourceFile("api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt"))
             .map { it.groupValues[1] }
+            .plus(constantRoutedPaths())
             .distinct()
             .sorted()
             .toList()
+
+    /** Routes the router matches through a constant rather than a literal. */
+    private fun constantRoutedPaths(): List<String> = listOf(LocalApiCapabilityRegistry.PATH)
 
     /** Sorted-key canonical form, so key order is never treated as part of the contract. */
     private fun canonicalize(json: String, pretty: Boolean = false): String =
