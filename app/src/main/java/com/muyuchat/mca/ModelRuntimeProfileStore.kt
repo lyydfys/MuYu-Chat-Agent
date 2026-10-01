@@ -953,7 +953,9 @@ internal interface ModelRuntimeProfileDao {
         CandidateMeasurementEntity::class
     ],
     version = 1,
-    exportSchema = false
+    // Exported so the migration chain can be checked against the exact structure Room
+    // validates at runtime; see the room.schemaLocation argument in app/build.gradle.kts.
+    exportSchema = true
 )
 internal abstract class ModelRuntimeProfileDatabase : RoomDatabase() {
     abstract fun dao(): ModelRuntimeProfileDao

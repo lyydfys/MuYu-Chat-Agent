@@ -447,3 +447,19 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
+
+// Room schema export.
+//
+// Both databases used exportSchema = false, so nothing on disk recorded what structure each
+// version expects. The migration tests build their own minimal tables and run the Migration
+// objects against them, which proves data is preserved but cannot detect a mismatch between
+// what the migration chain produces and what Room validates at runtime -- that mismatch
+// surfaces only on a real upgrade, as "Room cannot verify the data integrity".
+//
+// Exporting the schemas makes every version reviewable in diffs and lets the migration tests
+// compare their result against the exact structure Room expects.
+//
+// This changes no schema and no runtime behaviour; it only writes JSON during compilation.
+ksp {
+    arg("room.schemaLocation", file("schemas").absolutePath)
+}

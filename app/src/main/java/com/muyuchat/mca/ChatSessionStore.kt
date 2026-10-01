@@ -535,7 +535,9 @@ class ChatSessionStore(context: Context) {
         ChatKnowledgeBaseBindingEntity::class
     ],
     version = 27,
-    exportSchema = false
+    // Exported so the migration chain can be checked against the exact structure Room
+    // validates at runtime; see the room.schemaLocation argument in app/build.gradle.kts.
+    exportSchema = true
 )
 abstract class McaRoomDatabase : RoomDatabase() {
     abstract fun chatSessionDao(): ChatSessionDao

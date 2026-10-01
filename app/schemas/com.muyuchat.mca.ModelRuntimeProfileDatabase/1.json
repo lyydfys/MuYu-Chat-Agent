@@ -1,0 +1,810 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "f13cfd69926f658e2b8f3a5305e48ec8",
+    "entities": [
+      {
+        "tableName": "runtime_installation_scope",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scopeKey` TEXT NOT NULL, `installationScopeId` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`scopeKey`))",
+        "fields": [
+          {
+            "fieldPath": "scopeKey",
+            "columnName": "scopeKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "installationScopeId",
+            "columnName": "installationScopeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scopeKey"
+          ]
+        }
+      },
+      {
+        "tableName": "runtime_identity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`identityKey` TEXT NOT NULL, `modelId` TEXT NOT NULL, `runtime` TEXT NOT NULL, `artifactFingerprint` TEXT NOT NULL, `deviceCapabilityFingerprint` TEXT NOT NULL, `installationScopeId` TEXT NOT NULL, `runtimeFingerprint` TEXT NOT NULL, `fieldPolicyFingerprint` TEXT NOT NULL, `ruleFingerprint` TEXT NOT NULL, `evaluatorFingerprint` TEXT NOT NULL, `schemaVersion` INTEGER NOT NULL, `identityJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`identityKey`))",
+        "fields": [
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "modelId",
+            "columnName": "modelId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runtime",
+            "columnName": "runtime",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artifactFingerprint",
+            "columnName": "artifactFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceCapabilityFingerprint",
+            "columnName": "deviceCapabilityFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "installationScopeId",
+            "columnName": "installationScopeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runtimeFingerprint",
+            "columnName": "runtimeFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fieldPolicyFingerprint",
+            "columnName": "fieldPolicyFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleFingerprint",
+            "columnName": "ruleFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "evaluatorFingerprint",
+            "columnName": "evaluatorFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "schemaVersion",
+            "columnName": "schemaVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityJson",
+            "columnName": "identityJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "identityKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_runtime_identity_modelId",
+            "unique": false,
+            "columnNames": [
+              "modelId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_runtime_identity_modelId` ON `${TABLE_NAME}` (`modelId`)"
+          },
+          {
+            "name": "index_runtime_identity_runtime",
+            "unique": false,
+            "columnNames": [
+              "runtime"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_runtime_identity_runtime` ON `${TABLE_NAME}` (`runtime`)"
+          },
+          {
+            "name": "index_runtime_identity_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_runtime_identity_updatedAt` ON `${TABLE_NAME}` (`updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "execution_profile",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`profileId` TEXT NOT NULL, `identityKey` TEXT NOT NULL, `revision` INTEGER NOT NULL, `parentCommittedProfileId` TEXT, `recordState` TEXT NOT NULL, `verificationLevel` TEXT NOT NULL, `desiredProfileSignature` TEXT NOT NULL, `resolvedLoadSignature` TEXT NOT NULL, `activeLoadedSignature` TEXT NOT NULL, `committedExecutionSignature` TEXT NOT NULL, `runtimeOverrideSignature` TEXT NOT NULL, `effectiveExecutionSignature` TEXT NOT NULL, `resolvedLoadJson` TEXT NOT NULL, `committedExecutionJson` TEXT NOT NULL, `quarantinedOverridesJson` TEXT NOT NULL, `sourceSummaryJson` TEXT NOT NULL, `profileJson` TEXT NOT NULL, `failureStage` TEXT, `failureCode` TEXT, `failureSummary` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`profileId`))",
+        "fields": [
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentCommittedProfileId",
+            "columnName": "parentCommittedProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "recordState",
+            "columnName": "recordState",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "verificationLevel",
+            "columnName": "verificationLevel",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "desiredProfileSignature",
+            "columnName": "desiredProfileSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resolvedLoadSignature",
+            "columnName": "resolvedLoadSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeLoadedSignature",
+            "columnName": "activeLoadedSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "committedExecutionSignature",
+            "columnName": "committedExecutionSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "runtimeOverrideSignature",
+            "columnName": "runtimeOverrideSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "effectiveExecutionSignature",
+            "columnName": "effectiveExecutionSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resolvedLoadJson",
+            "columnName": "resolvedLoadJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "committedExecutionJson",
+            "columnName": "committedExecutionJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "quarantinedOverridesJson",
+            "columnName": "quarantinedOverridesJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceSummaryJson",
+            "columnName": "sourceSummaryJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileJson",
+            "columnName": "profileJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureStage",
+            "columnName": "failureStage",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureCode",
+            "columnName": "failureCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureSummary",
+            "columnName": "failureSummary",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "profileId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_execution_profile_identityKey",
+            "unique": false,
+            "columnNames": [
+              "identityKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_execution_profile_identityKey` ON `${TABLE_NAME}` (`identityKey`)"
+          },
+          {
+            "name": "index_execution_profile_identityKey_revision",
+            "unique": true,
+            "columnNames": [
+              "identityKey",
+              "revision"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_execution_profile_identityKey_revision` ON `${TABLE_NAME}` (`identityKey`, `revision`)"
+          },
+          {
+            "name": "index_execution_profile_recordState",
+            "unique": false,
+            "columnNames": [
+              "recordState"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_execution_profile_recordState` ON `${TABLE_NAME}` (`recordState`)"
+          },
+          {
+            "name": "index_execution_profile_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_execution_profile_updatedAt` ON `${TABLE_NAME}` (`updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "runtime_resource_binding",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`bindingId` TEXT NOT NULL, `identityKey` TEXT NOT NULL, `profileId` TEXT NOT NULL, `field` TEXT NOT NULL, `installationScopeId` TEXT NOT NULL, `resourceFingerprint` TEXT NOT NULL, `resourceValue` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`bindingId`))",
+        "fields": [
+          {
+            "fieldPath": "bindingId",
+            "columnName": "bindingId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "field",
+            "columnName": "field",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "installationScopeId",
+            "columnName": "installationScopeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resourceFingerprint",
+            "columnName": "resourceFingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resourceValue",
+            "columnName": "resourceValue",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "bindingId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_runtime_resource_binding_identityKey",
+            "unique": false,
+            "columnNames": [
+              "identityKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_runtime_resource_binding_identityKey` ON `${TABLE_NAME}` (`identityKey`)"
+          },
+          {
+            "name": "index_runtime_resource_binding_profileId",
+            "unique": false,
+            "columnNames": [
+              "profileId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_runtime_resource_binding_profileId` ON `${TABLE_NAME}` (`profileId`)"
+          },
+          {
+            "name": "index_runtime_resource_binding_profileId_field",
+            "unique": true,
+            "columnNames": [
+              "profileId",
+              "field"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_runtime_resource_binding_profileId_field` ON `${TABLE_NAME}` (`profileId`, `field`)"
+          }
+        ]
+      },
+      {
+        "tableName": "profile_pointers",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`identityKey` TEXT NOT NULL, `activeProfileId` TEXT, `pendingProfileId` TEXT, `lastKnownGoodProfileId` TEXT, `rollbackTargetProfileId` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`identityKey`))",
+        "fields": [
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeProfileId",
+            "columnName": "activeProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pendingProfileId",
+            "columnName": "pendingProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastKnownGoodProfileId",
+            "columnName": "lastKnownGoodProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rollbackTargetProfileId",
+            "columnName": "rollbackTargetProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "identityKey"
+          ]
+        }
+      },
+      {
+        "tableName": "tuning_job",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`jobId` TEXT NOT NULL, `identityKey` TEXT NOT NULL, `state` TEXT NOT NULL, `candidateProfileId` TEXT, `phase` TEXT NOT NULL, `autoApplyLoadChanges` INTEGER NOT NULL, `cancellationRequested` INTEGER NOT NULL, `failureCode` TEXT, `failureSummary` TEXT, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `lastHeartbeatAt` INTEGER NOT NULL, PRIMARY KEY(`jobId`))",
+        "fields": [
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "candidateProfileId",
+            "columnName": "candidateProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "autoApplyLoadChanges",
+            "columnName": "autoApplyLoadChanges",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cancellationRequested",
+            "columnName": "cancellationRequested",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureCode",
+            "columnName": "failureCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "failureSummary",
+            "columnName": "failureSummary",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastHeartbeatAt",
+            "columnName": "lastHeartbeatAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "jobId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_tuning_job_identityKey",
+            "unique": false,
+            "columnNames": [
+              "identityKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_job_identityKey` ON `${TABLE_NAME}` (`identityKey`)"
+          },
+          {
+            "name": "index_tuning_job_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_job_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_tuning_job_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_job_updatedAt` ON `${TABLE_NAME}` (`updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "tuning_journal",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`transactionId` TEXT NOT NULL, `identityKey` TEXT NOT NULL, `jobId` TEXT, `pendingProfileId` TEXT NOT NULL, `rollbackTargetProfileId` TEXT, `resolvedLoadSignature` TEXT NOT NULL, `state` TEXT NOT NULL, `stage` TEXT NOT NULL, `recoveryAttempts` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`transactionId`))",
+        "fields": [
+          {
+            "fieldPath": "transactionId",
+            "columnName": "transactionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pendingProfileId",
+            "columnName": "pendingProfileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rollbackTargetProfileId",
+            "columnName": "rollbackTargetProfileId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "resolvedLoadSignature",
+            "columnName": "resolvedLoadSignature",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "stage",
+            "columnName": "stage",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "recoveryAttempts",
+            "columnName": "recoveryAttempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "transactionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_tuning_journal_identityKey",
+            "unique": false,
+            "columnNames": [
+              "identityKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_journal_identityKey` ON `${TABLE_NAME}` (`identityKey`)"
+          },
+          {
+            "name": "index_tuning_journal_jobId",
+            "unique": false,
+            "columnNames": [
+              "jobId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_journal_jobId` ON `${TABLE_NAME}` (`jobId`)"
+          },
+          {
+            "name": "index_tuning_journal_state",
+            "unique": false,
+            "columnNames": [
+              "state"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_journal_state` ON `${TABLE_NAME}` (`state`)"
+          },
+          {
+            "name": "index_tuning_journal_updatedAt",
+            "unique": false,
+            "columnNames": [
+              "updatedAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tuning_journal_updatedAt` ON `${TABLE_NAME}` (`updatedAt`)"
+          }
+        ]
+      },
+      {
+        "tableName": "candidate_measurement",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`measurementId` TEXT NOT NULL, `profileId` TEXT NOT NULL, `jobId` TEXT, `correctnessPassed` INTEGER NOT NULL, `safetyPassed` INTEGER NOT NULL, `effectiveSignatureMatched` INTEGER NOT NULL, `accepted` INTEGER NOT NULL, `metricsJson` TEXT NOT NULL, `failureCode` TEXT, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`measurementId`))",
+        "fields": [
+          {
+            "fieldPath": "measurementId",
+            "columnName": "measurementId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "profileId",
+            "columnName": "profileId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jobId",
+            "columnName": "jobId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "correctnessPassed",
+            "columnName": "correctnessPassed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "safetyPassed",
+            "columnName": "safetyPassed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "effectiveSignatureMatched",
+            "columnName": "effectiveSignatureMatched",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accepted",
+            "columnName": "accepted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metricsJson",
+            "columnName": "metricsJson",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureCode",
+            "columnName": "failureCode",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "measurementId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_candidate_measurement_profileId",
+            "unique": false,
+            "columnNames": [
+              "profileId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_measurement_profileId` ON `${TABLE_NAME}` (`profileId`)"
+          },
+          {
+            "name": "index_candidate_measurement_jobId",
+            "unique": false,
+            "columnNames": [
+              "jobId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_measurement_jobId` ON `${TABLE_NAME}` (`jobId`)"
+          },
+          {
+            "name": "index_candidate_measurement_createdAt",
+            "unique": false,
+            "columnNames": [
+              "createdAt"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_candidate_measurement_createdAt` ON `${TABLE_NAME}` (`createdAt`)"
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f13cfd69926f658e2b8f3a5305e48ec8')"
+    ]
+  }
+}
