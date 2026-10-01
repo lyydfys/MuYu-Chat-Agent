@@ -18860,21 +18860,6 @@ class MainViewModel @JvmOverloads constructor(
         return "$label ${fileName}: $progress$speed$remaining$error"
     }
 
-    private fun formatPercent(value: Double): String = "%.1f%%".format(value)
-
-    private fun formatDuration(seconds: Long): String {
-        val safe = seconds.coerceAtLeast(0L)
-        val minutes = safe / 60
-        val remainSeconds = safe % 60
-        val hours = minutes / 60
-        val remainMinutes = minutes % 60
-        return when {
-            hours > 0 -> "${hours}小时${remainMinutes}分"
-            minutes > 0 -> "${minutes}分${remainSeconds}秒"
-            else -> "${remainSeconds}秒"
-        }
-    }
-
     private fun downloadFailureAdvice(message: String?): String {
         val raw = message.orEmpty()
         return when {
@@ -20723,12 +20708,6 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun <T> java.util.Enumeration<T>.asSequence(): Sequence<T> = sequence {
         while (hasMoreElements()) yield(nextElement())
-    }
-
-    private fun formatBytes(bytes: Long): String {
-        val gb = bytes / 1024.0 / 1024.0 / 1024.0
-        val mb = bytes / 1024.0 / 1024.0
-        return if (gb >= 1.0) "%.2f GB".format(gb) else "%.1f MB".format(mb)
     }
 
     private fun ModelManifest.toLoadParams(params: GenerationParams): LoadParams =
