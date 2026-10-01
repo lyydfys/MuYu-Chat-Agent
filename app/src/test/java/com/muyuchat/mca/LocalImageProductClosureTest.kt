@@ -8,6 +8,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.muyuchat.mca.presentation.toLocalImagePreviewOptions
 
 class LocalImageProductClosureTest {
     @Test
@@ -386,12 +387,17 @@ class LocalImageProductClosureTest {
     fun `native preview progress reaches the existing generation canvas while synchronous API rejects it`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        // The call site stays in MainActivity; the mapping it calls moved to the presentation
+        // package during P2, so the second assertion reads it from there. Neither assertion
+        // changed -- only the file each one reads.
+        val imageChoicePresentation =
+            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ImageChoicePresentation.kt")
         val protocol = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageWorkerProtocol.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
         val api = functionBody(viewModel, "private suspend fun generateLocalApiImage(")
 
         assertTrue(mainActivity.contains("preview = uiOptions.toLocalImagePreviewOptions()"))
-        assertTrue(mainActivity.contains("LocalImagePreviewMode.fromWireName(uiMode.wireName)"))
+        assertTrue(imageChoicePresentation.contains("LocalImagePreviewMode.fromWireName(uiMode.wireName)"))
         assertTrue(viewModel.contains("publishLocalImagePreview(jobId, progress)"))
         assertTrue(protocol.contains(".put(\"previewPath\", progress.previewPath)"))
         assertTrue(protocol.contains("previewRevision = progress.optLong(\"previewRevision\")"))

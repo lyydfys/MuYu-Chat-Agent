@@ -7,9 +7,14 @@ import org.junit.Test
 class PersistentPrefixCacheSettingsIntegrationTest {
     @Test
     fun settingsHubReceivesPersistentPrefixCacheStateAndActions() {
+        // Two files, because the two halves of this test now live in two places. MainActivity
+        // still builds the SettingsHubScreen call; the SettingsUiState construction moved to the
+        // presentation package during P2. Every assertion below is unchanged from before the
+        // move -- only the file each one reads.
         val source = sourceFile("MainActivity.kt")
+        val mapperSource = sourceFile("presentation/SettingsUiStateMapping.kt")
         val settingsHub = callArguments(source, "SettingsHubScreen(")
-        val mapper = callArguments(source, "SettingsUiState(")
+        val mapper = callArguments(mapperSource, "SettingsUiState(")
 
         assertTrue(settingsHub.contains(
             "onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled"

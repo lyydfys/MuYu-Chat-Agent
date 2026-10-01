@@ -1,0 +1,136 @@
+package com.muyuchat.mca.presentation
+
+// MainUiState -> SettingsUiState, moved verbatim from MainActivity during P2.
+// This is the largest single mapping in the app: it is the list the settings screen renders.
+// No field, default, count or ordering was edited.
+
+
+import com.muyuchat.feature.settings.AppUpdateSettingsUiState
+import com.muyuchat.feature.settings.SettingsUiState
+import com.muyuchat.feature.settings.WebSearchBackupProviderUiState
+import com.muyuchat.feature.settings.WebSearchDiagnosticSourceUiItem
+import com.muyuchat.feature.settings.WebSearchDiagnosticUiItem
+import com.muyuchat.feature.settings.WebSearchSettingsUiState
+import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.webSearchHostLabel
+import com.muyuchat.mca.webSearchSourceTrustClass
+
+internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
+    params = params,
+    stats = stats,
+    logs = logs,
+    agentLogs = agentLogs.map { log ->
+        val recommendation = runCatching { org.json.JSONObject(log.recommendationJson) }.getOrNull()
+        val name = recommendation
+            ?.optJSONObject("recommended")
+            ?.optJSONObject("model")
+            ?.optString("displayName")
+            .orEmpty()
+        val risk = recommendation?.optString("risk").orEmpty()
+        "${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(log.time))} · ${name.ifBlank { "无推荐" }} · risk=$risk · confirmed=${log.userConfirmed}"
+    },
+    apiEnabled = apiEnabled,
+    restEnabled = restEnabled,
+    apiKey = apiKey,
+    localApiAddress = localApiAddress,
+    openApiAddress = openApiAddress,
+    loadedModelId = loadedModelId,
+    nativeStatsJson = nativeStatsJson,
+    diagnosticReport = diagnosticReport,
+    chatSessionCount = chatSessions.size,
+    imageAssetCount = images.size,
+    imageAssetBytes = images.sumOf { it.sizeBytes },
+    fileAssetCount = files.size,
+    fileAssetBytes = files.sumOf { it.sizeBytes },
+    persistentPrefixCacheEnabled = persistentPrefixCacheEnabled,
+    persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
+    persistentPrefixCacheBytes = persistentPrefixCacheBytes,
+    statusMessage = statusMessage,
+    appUpdate = AppUpdateSettingsUiState(
+        autoCheckEnabled = appUpdate.autoCheckEnabled,
+        status = appUpdate.status.name,
+        currentVersionName = appUpdate.currentVersionName,
+        latestVersionName = appUpdate.latestVersionName,
+        latestTitle = appUpdate.latestTitle,
+        releaseNotes = appUpdate.releaseNotes,
+        releaseUrl = appUpdate.releaseUrl,
+        apkSizeText = appUpdate.apkSizeBytes.takeIf { it > 0L }?.let(::formatAppUpdateBytes).orEmpty(),
+        canDownload = appUpdate.canDownload,
+        downloadedBytes = appUpdate.downloadedBytes,
+        downloadTotalBytes = appUpdate.downloadTotalBytes,
+        lastCheckedText = appUpdate.lastCheckedAtMillis.takeIf { it > 0L }?.let {
+            java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+                .format(java.util.Date(it))
+        }.orEmpty(),
+        message = appUpdate.message
+    ),
+    webSearch = WebSearchSettingsUiState(
+        enabled = webSearchConfig.enabled,
+        provider = webSearchConfig.provider.name,
+        providerLabel = webSearchConfig.providerLabel,
+        endpoint = webSearchConfig.endpoint,
+        apiKey = webSearchConfig.apiKey,
+        maxResults = webSearchConfig.maxResults,
+        fetchPageContent = webSearchConfig.fetchPageContent,
+        triggerMode = webSearchConfig.triggerMode.name,
+        triggerModeLabel = webSearchConfig.triggerMode.label,
+        researchMode = webSearchConfig.researchMode.name,
+        researchModeLabel = webSearchConfig.researchMode.label,
+        configured = webSearchConfig.configured,
+        realSearchConfigured = webSearchConfig.realSearchConfigured,
+        realSearchProviderLabel = webSearchConfig.realSearchProviderLabel,
+        backupProviders = webSearchConfig.backupProviders.take(3).map { backup ->
+            WebSearchBackupProviderUiState(
+                enabled = backup.enabled,
+                provider = backup.provider.name,
+                providerLabel = backup.providerLabel,
+                endpoint = backup.endpoint,
+                apiKey = backup.apiKey,
+                configured = backup.configured
+            )
+        },
+        statusMessage = webSearchStatusMessage ?: statusMessage,
+        diagnostics = webSearchDiagnostics.map { record ->
+            WebSearchDiagnosticUiItem(
+                createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                    .format(java.util.Date(record.createdAt)),
+                providerLabel = record.providerLabel,
+                triggerModeLabel = record.triggerModeLabel,
+                query = record.query,
+                success = record.success,
+                message = record.message,
+                sourceCount = record.sourceCount,
+                elapsedMs = record.elapsedMs,
+                searchedQueries = record.searchedQueries,
+                directUrls = record.directUrls,
+                healthScore = record.healthScore,
+                healthLabel = record.healthLabel,
+                healthReasons = record.healthReasons,
+                qualityScore = record.qualityScore,
+                qualityLabel = record.qualityLabel,
+                qualityReasons = record.qualityReasons,
+                sourceTrustSummary = record.sourceTrustSummary,
+                researchConfidenceScore = record.researchConfidenceScore,
+                researchConfidenceLabel = record.researchConfidenceLabel,
+                researchEvidenceGroups = record.researchEvidenceGroups,
+                researchConflictWarnings = record.researchConflictWarnings,
+                researchSynthesisGuidance = record.researchSynthesisGuidance,
+                triggerReasons = record.triggerReasons,
+                warnings = record.warnings,
+                cacheStatus = record.cacheStatus,
+                closedLoopChecks = record.closedLoopChecks,
+                topSources = record.topSources.map { source ->
+                    val trustClass = source.webSearchSourceTrustClass()
+                    WebSearchDiagnosticSourceUiItem(
+                        title = source.title.ifBlank { source.url },
+                        url = source.url,
+                        snippet = source.snippet,
+                        provider = source.provider,
+                        trustLabel = trustClass.label,
+                        hostLabel = source.webSearchHostLabel()
+                    )
+                }
+            )
+        }
+    )
+)

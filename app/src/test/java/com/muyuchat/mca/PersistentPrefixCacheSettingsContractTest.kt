@@ -31,9 +31,13 @@ class PersistentPrefixCacheSettingsContractTest {
 
     @Test
     fun settingsScreenReceivesUsageAndClearCallbacks() {
+        // The callback wiring is still in MainActivity. The state field this checks moved to the
+        // presentation package during P2, so it is read from there. Both assertions are unchanged
+        // from before the move -- only the file each one reads.
         val source = sourceFile("MainActivity.kt")
+        val mapperSource = sourceFile("presentation/SettingsUiStateMapping.kt")
 
-        assertTrue(source.contains("persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount"))
+        assertTrue(mapperSource.contains("persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount"))
         assertTrue(source.contains("onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled"))
         assertTrue(source.contains("onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache"))
     }
