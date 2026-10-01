@@ -18975,30 +18975,6 @@ class MainViewModel @JvmOverloads constructor(
         else -> "图片库备份失败：${message ?: "未知错误"}"
     }
 
-    private fun List<ChatMessage>.chatTitle(): String {
-        val userText = firstOrNull { it.role == Role.USER }?.content.orEmpty()
-        val fileName = Regex("""【上传文件：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
-        val imageName = Regex("""【上传图片：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
-        val raw = userText
-            .lineSequence()
-            .map { it.trim() }
-            .firstOrNull { line ->
-                line.isNotBlank() &&
-                    !isUnsafeChatTitleLine(line) &&
-                    !line.startsWith("【上传文件：") &&
-                    !line.startsWith("【上传图片：") &&
-                    !line.startsWith("（文件较大")
-            }
-            ?: fileName?.let { "文件问答：$it" }
-            ?: imageName?.let { "图片：$it" }
-            ?: "新对话"
-        val compact = raw
-            .replace(Regex("""[#>*`_\[\]()]"""), "")
-            .replace(Regex("""\s+"""), " ")
-            .trim()
-        return compact.ifBlank { "新对话" }.let { if (it.length > 28) it.take(28) + "..." else it }
-    }
-
     private fun List<ChatSessionRecord>.sortedForHistory(): List<ChatSessionRecord> =
         sortedWith(
             compareByDescending<ChatSessionRecord> { it.pinned }

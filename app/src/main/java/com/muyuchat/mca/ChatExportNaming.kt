@@ -1,14 +1,59 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
+
 /**
- * Converts a conversation title into a safe, human-readable document name.
+ * Derives and sanitises conversation titles.
  *
- * Titles are user/model controlled. They may contain Markdown fences, source
- * code, line breaks, control characters, or path separators. Keeping that
- * content in a SAF suggested name makes the picker display a confusing name
- * and, on some providers, can make the export fail. Only the short title is
- * used for naming; the complete conversation remains in the exported body.
+ * Two directions of the same concern live here. [List.chatTitle] derives a title from a
+ * conversation's first usable user turn, and [safeChatExportTitle] turns a title into a
+ * file name that a document picker and the filesystem will accept. Both need the same
+ * judgement about what counts as a usable title line, which is why
+ * [isUnsafeChatTitleLine] is shared rather than duplicated.
+ *
+ * Titles are user/model controlled. They may contain Markdown fences, source code, line
+ * breaks, control characters, or path separators. Keeping that content in a SAF suggested
+ * name makes the picker display a confusing name and, on some providers, can make the
+ * export fail. Only the short title is used for naming; the complete conversation remains
+ * in the exported body.
  */
+
+/**
+ * Title shown for a conversation whose first user turn is [this].
+ *
+ * Prefers the first line that is neither blank, nor code-shaped (see
+ * [isUnsafeChatTitleLine]), nor an attachment placeholder. When every line is unusable it
+ * falls back to naming the attached file or image, and finally to a generic title.
+ *
+ * The result has Markdown markers stripped, whitespace collapsed, and is cut to 28
+ * characters with an ellipsis. Extracted verbatim from `MainViewModel` during P2; no branch
+ * or limit was changed.
+ */
+internal fun List<ChatMessage>.chatTitle(): String {
+    val userText = firstOrNull { it.role == Role.USER }?.content.orEmpty()
+    val fileName = Regex("""【上传文件：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
+    val imageName = Regex("""【上传图片：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
+    val raw = userText
+        .lineSequence()
+        .map { it.trim() }
+        .firstOrNull { line ->
+            line.isNotBlank() &&
+                !isUnsafeChatTitleLine(line) &&
+                !line.startsWith("【上传文件：") &&
+                !line.startsWith("【上传图片：") &&
+                !line.startsWith("（文件较大")
+        }
+        ?: fileName?.let { "文件问答：$it" }
+        ?: imageName?.let { "图片：$it" }
+        ?: "新对话"
+    val compact = raw
+        .replace(Regex("""[#>*`_\[\]()]"""), "")
+        .replace(Regex("""\s+"""), " ")
+        .trim()
+    return compact.ifBlank { "新对话" }.let { if (it.length > 28) it.take(28) + "..." else it }
+}
+
 internal fun safeChatExportTitle(raw: String?): String {
     val source = raw.orEmpty()
     // A model response can begin with a code fence, JSON, HTML, or a complete source line.  A
