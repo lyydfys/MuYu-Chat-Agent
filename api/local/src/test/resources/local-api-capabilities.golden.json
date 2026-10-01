@@ -1,0 +1,96 @@
+{
+  "endpoints": [{
+      "auth_required": false,
+      "description": "Process health check.",
+      "error_codes": ["unauthorized","not_found"],
+      "fields": [],
+      "method": "GET",
+      "notes": [],
+      "path": "/health",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": false,
+      "description": "Loaded/catalog models and runtime-specific readiness.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": [],
+      "path": "/v1/models",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "OpenAI-compatible local chat subset.",
+      "error_codes": ["invalid_request","parameter_scope_conflict","invalid_model","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized"],
+      "fields": ["model","messages","prompt","input","stream","temperature","top_p","top_k","min_p","repeat_penalty","repetition_penalty","presence_penalty","frequency_penalty","max_tokens","max_completion_tokens","n_predict","stop","stop_words","seed","system_prompt","reasoning_mode","thinking_mode","enable_thinking","show_reasoning","hide_reasoning"],
+      "method": "POST",
+      "notes": ["Only the fields listed here are accepted; unsupported fields are rejected.","SSE is available when stream=true or the client requests text/event-stream.","Actual model/runtime availability is reported separately by /v1/models."],
+      "path": "/v1/chat/completions",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "OpenAI Responses-compatible text/message subset.",
+      "error_codes": ["invalid_request","unsupported_parameter","parameter_scope_conflict","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized"],
+      "fields": ["model","instructions","input","stream","max_output_tokens","temperature","top_p","stop"],
+      "method": "POST",
+      "notes": ["Input is text or an array of role/content messages with input_text parts; unsupported fields and parts are rejected before dispatch.","Streaming emits numbered typed Responses events and a response.completed or response.failed terminal event.","Reasoning controls and reasoning output items are outside this text subset and are rejected when requested.","Tool calls, hosted tools, response continuation and stored-response retrieval are not implemented."],
+      "path": "/v1/responses",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Authenticated local image-generation subset.",
+      "error_codes": ["invalid_json","unsupported_sampler","unsupported_image_count","unsupported_response_format","unsupported_preview","image_model_not_ready","image_generation_busy","image_worker_unavailable","image_native_execution_failed","unauthorized"],
+      "fields": ["model","prompt","negative_prompt","sampler","size","n","response_format","steps","cfg_scale","seed","task_mode","input_image","source_image","mask_image","mask","control_image","strength","control_strength","clip_skip","loras","vae_tiling","textual_inversion_ids","ultrafix","preview"],
+      "method": "POST",
+      "notes": ["Runtime/model capability and execution evidence are validated before native dispatch.","Unsupported task modes, samplers, image counts and response formats are rejected.","Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it."],
+      "path": "/v1/images/generations",
+      "stream": false,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Stops the current generation or one matching request_id.",
+      "error_codes": ["unauthorized","invalid_request","invalid_request_id","unsupported_parameter","generation_not_active","stop_failed"],
+      "fields": ["request_id"],
+      "method": "POST",
+      "notes": ["With request_id, only the matching active Local API request is stopped; stale IDs do not affect later requests.","Without request_id, the legacy operation stops the generation current when this call is received."],
+      "path": "/v1/generate/stop",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "This endpoint: protocol capability registry for the authenticated Local API.",
+      "error_codes": ["unauthorized","not_found"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Capability support is protocol scope, not a per-device or per-model admission list."],
+      "path": "/v1/mca/capabilities",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Current worker/coordinator lifecycle state.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": [],
+      "path": "/v1/mca/runtime",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Redacted active runtime profile and parameter evidence.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": [],
+      "path": "/v1/mca/profile",
+      "stream": false,
+      "support": "supported"}
+    ],
+  "generated_by": "McaLoopbackServer",
+  "schema": "mca.local-api.capabilities.v1",
+  "support_values": ["supported","partial","unsupported"],
+  "version": 1}

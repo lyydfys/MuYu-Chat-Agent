@@ -1,0 +1,16 @@
+/v1/chat/completions
+/v1/completions
+/v1/generate/stop
+/v1/images/generations
+/v1/images/textual-inversions
+/v1/mca/benchmark
+/v1/mca/device
+/v1/mca/profile
+/v1/mca/recommend
+/v1/mca/runtime
+/v1/mca/tuning
+/v1/models
+/v1/responses
+/v1/tuning/jobs
+/v1/tuning/jobs/
+/v1/tuning/rollback
