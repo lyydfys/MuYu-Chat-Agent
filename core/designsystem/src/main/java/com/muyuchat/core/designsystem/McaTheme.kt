@@ -1,4 +1,13 @@
-package com.muyuchat.mca.ui
+// Moved here verbatim from app's com.muyuchat.mca.ui package during P2.
+//
+// The move is the whole change: every colour value, the light and dark schemes, the system bar
+// behaviour and the visibility of each declaration are as they were. The only edits are the
+// package line below and this comment.
+//
+// It lives in a design system module rather than in app because the feature modules do not
+// depend on app, so a theme in app can only ever be used by app. Nothing here reads app state;
+// the theme is a colour scheme plus the window chrome that has to match it.
+package com.muyuchat.core.designsystem
 
 import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme

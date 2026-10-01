@@ -115,7 +115,7 @@ import com.muyuchat.feature.settings.WebSearchDiagnosticSourceUiItem
 import com.muyuchat.feature.settings.WebSearchDiagnosticUiItem
 import com.muyuchat.feature.settings.WebSearchSettingsDraft
 import com.muyuchat.feature.settings.WebSearchSettingsUiState
-import com.muyuchat.mca.ui.McaTheme
+import com.muyuchat.core.designsystem.McaTheme
 import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.AccelerationCapabilityStatus
 import com.muyuchat.core.deviceprofile.DeviceProfile
