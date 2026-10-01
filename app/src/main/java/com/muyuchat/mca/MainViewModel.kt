@@ -18959,16 +18959,6 @@ class MainViewModel @JvmOverloads constructor(
             ChatBackend.CLOUD -> selectedCloudChatModelId
         }
 
-    private fun ChatBackend.bindingValue(): String =
-        name.lowercase()
-
-    private fun String?.toChatBackendOrNull(): ChatBackend? =
-        when (this?.trim()?.lowercase()) {
-            "local" -> ChatBackend.LOCAL
-            "cloud" -> ChatBackend.CLOUD
-            else -> null
-        }
-
     private fun Throwable.imageLibraryBackupFailureMessage(): String = when (this) {
         is ImageLibraryBackupFormatException ->
             "备份文件格式无效：${message ?: "清单或文件校验失败"}"
