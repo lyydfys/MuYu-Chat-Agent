@@ -3319,7 +3319,7 @@ object ImageGenerationApiContract {
                     rejectPrivatePathValue(value.opt(index))
                 }
             }
-            is String -> if (value.looksLikePrivateExecutionPath()) {
+            is String -> if (value.looksLikePrivatePath()) {
                 reject(
                     "private_image_input_path_exposed",
                     "Image provider response exposed a worker-private path."
@@ -3900,20 +3900,6 @@ private fun normalizeProviderErrorCode(raw: String): String = raw
     .trim('_')
     .take(80)
     .ifBlank { "image_generation_failed" }
-
-private fun String.looksLikePrivateExecutionPath(): Boolean {
-    val value = trim()
-    if (value.startsWith("/") ||
-        value.startsWith("\\\\") ||
-        value.contains("file:", ignoreCase = true) ||
-        value.contains("content:", ignoreCase = true) ||
-        value.contains("android.resource:", ignoreCase = true)
-    ) return true
-    if (Regex("[A-Za-z]:[\\\\/]").containsMatchIn(value)) return true
-    val lowered = value.lowercase()
-    return listOf("/data/", "/storage/", "/sdcard/", "/mnt/", "/cache/", "/tmp/")
-        .any(lowered::contains)
-}
 
 private fun String.containsHanScript(): Boolean = codePoints().anyMatch { codePoint ->
     Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN

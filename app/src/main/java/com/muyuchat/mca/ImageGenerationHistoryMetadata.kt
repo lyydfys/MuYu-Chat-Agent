@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import org.json.JSONObject
 import org.json.JSONArray
+import com.muyuchat.api.local.looksLikePrivatePath
 
 data class ImageGenerationLoraSelection(
     val id: String,
@@ -1052,20 +1053,6 @@ private fun String.isPrivatePathEvidenceKey(): Boolean {
         "workingdirectory",
         "outputdirectory"
     )
-}
-
-private fun String.looksLikePrivatePath(): Boolean {
-    val value = trim()
-    if (value.startsWith("/") ||
-        value.startsWith("\\\\") ||
-        value.contains("file:", ignoreCase = true) ||
-        value.contains("content:", ignoreCase = true) ||
-        value.contains("android.resource:", ignoreCase = true)
-    ) return true
-    if (Regex("[A-Za-z]:[\\\\/]").containsMatchIn(value)) return true
-    val lowered = value.lowercase()
-    return listOf("/data/", "/storage/", "/sdcard/", "/mnt/", "/cache/", "/tmp/")
-        .any(lowered::contains)
 }
 
 private fun LocalImageTaskMode.displayName(): String = when (this) {
