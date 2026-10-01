@@ -2976,9 +2976,6 @@ private fun JSONArray.toStringList(): List<String> = buildList {
     }
 }
 
-private fun List<String>.toJsonArray(): JSONArray =
-    JSONArray().also { array -> forEach { value -> array.put(value) } }
-
 private fun JSONObject.toWebSearchDiagnosticHealthReport(): WebSearchHealthReport {
     val explicitLabel = optString("healthLabel")
     val explicitReasons = optJSONArray("healthReasons")?.toStringList().orEmpty()

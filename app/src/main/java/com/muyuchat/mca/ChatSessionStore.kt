@@ -2767,6 +2767,3 @@ private fun JSONArray?.toStringList(): List<String> {
         .map { it.trim() }
         .filter { it.isNotBlank() }
 }
-
-private fun List<String>.toJsonArray(): JSONArray =
-    JSONArray().also { array -> forEach { value -> array.put(value) } }
