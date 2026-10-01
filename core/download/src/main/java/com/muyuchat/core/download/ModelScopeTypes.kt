@@ -1398,12 +1398,6 @@ fun ModelScopeRecommendedModel.downloadEligibilityFor(
     )
 }
 
-private fun String.isSnapdragonChipsetCode(): Boolean {
-    if (isBlank()) return false
-    if (contains("SNAPDRAGON") || contains("骁龙")) return true
-    return matches(Regex("^(?:SM|SDM|MSM|APQ|QCS|QCM)[A-Z0-9_-]+$"))
-}
-
 data class ModelScopeHubModel(
     val id: String,
     val displayName: String,

@@ -15,6 +15,7 @@ import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.modelstore.ModelManifest
 import java.util.Locale
+import com.muyuchat.core.download.isSnapdragonChipsetCode
 
 internal data class RecommendationCatalog(
     val lightChat: List<ModelScopeRecommendedModel>,
@@ -166,7 +167,7 @@ internal fun recommendationDownloadAccess(
             RecommendationDeviceFit.UNIVERSAL
         exactChipsetMatch -> RecommendationDeviceFit.EXACT
         normalizedDevice.isBlank() -> RecommendationDeviceFit.UNKNOWN
-        deviceIsSnapdragon || normalizedDevice.isSnapdragonChipsetCodeForRecommendation() ->
+        deviceIsSnapdragon || normalizedDevice.isSnapdragonChipsetCode() ->
             RecommendationDeviceFit.VENDOR_GENERIC
         else -> RecommendationDeviceFit.CROSS_VENDOR
     }
@@ -194,12 +195,6 @@ internal fun recommendationDownloadAccess(
         experimental = experimental,
         deviceFit = deviceFit
     )
-}
-
-private fun String.isSnapdragonChipsetCodeForRecommendation(): Boolean {
-    if (isBlank()) return false
-    if (contains("SNAPDRAGON") || contains("骁龙")) return true
-    return matches(Regex("^(?:SM|SDM|MSM|APQ|QCS|QCM)[A-Z0-9_-]+$"))
 }
 
 internal fun recommendationQnnCompatibilityLine(
