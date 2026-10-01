@@ -1,0 +1,25 @@
+# SharedPreferences file names referenced from main sources, sorted.
+# Generated from the source; reviewed before committing.
+# A line disappearing means user data stored under that file would be orphaned.
+chat_device_status_overlay
+content_import_preview_v1
+image_loras_v1
+image_upscaler_product_selection_v1
+image_upscalers_v1
+mca_api
+mca_app_updates_v1
+mca_assistants
+mca_chat_appearance
+mca_chat_image_tool_authorization
+mca_cloud_api
+mca_context_compression_v1
+mca_download_receipts
+mca_download_requests
+mca_generation_params
+mca_image_generation_ui_parameters
+mca_import_receipts
+mca_local_api_idempotency_journal
+mca_local_image_models
+mca_model_generation_profiles_v1
+mca_web_search
+mca_web_search_diagnostics
