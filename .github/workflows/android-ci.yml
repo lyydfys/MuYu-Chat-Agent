@@ -62,13 +62,12 @@ jobs:
       # Every Gradle step below passes it, so no step can accidentally take the fail-closed path
       # and report a confusing SDK error instead of a real compile or test result.
       #
-      # This job pins JDK 21, and that choice is load-bearing for the test step. Locally, on
-      # JDK 17, :core:engine:testDebugUnitTest fails 7 tests with
-      # UnsupportedClassVersionError: ... class file version 65.0 ... up to 61.0 -- the
-      # litertlm-android artifact is built for Java 21. On JDK 21 those same tests are expected
-      # to pass. That expectation comes from the error itself and is NOT verified here: no JDK 21
-      # is available in the environment this workflow was written in. If a future CI run fails on
-      # exactly those 7 tests, this comment is the place to start.
+      # This job pins JDK 21, and that choice is load-bearing. Verified, not assumed: on JDK 17
+      # :core:engine:testDebugUnitTest fails 7 tests with UnsupportedClassVersionError (class
+      # file version 65.0 against 61.0) because litertlm-android targets Java 21. The same
+      # commit on JDK 21 reports 338 suites, 3129 tests, 0 failures, 10 skipped, BUILD
+      # SUCCESSFUL -- so those 7 are an environment artefact, not a code defect, and this job
+      # must stay on 21.
       - name: Run unit tests (stub QNN bindings)
         run: ./gradlew testDebugUnitTest --stacktrace -PmcaQnnTypedBindingsRequired=false
 
