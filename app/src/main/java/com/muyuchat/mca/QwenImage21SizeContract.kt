@@ -39,15 +39,9 @@ internal object QwenImage21SizeContract {
         "Tiny" to RECOMMENDED_SIZES.drop(14)
     )
 
-    @Deprecated("Use RECOMMENDED_SIZE_TIERS; the presets are not execution evidence.")
-    val VERIFIED_SIZE_TIERS: Map<String, List<Pair<Int, Int>>> = RECOMMENDED_SIZE_TIERS
-
     val RECOMMENDED_SIZE_TIERS_LABEL: String = RECOMMENDED_SIZE_TIERS.entries.joinToString("；") { (tier, sizes) ->
         "$tier：${sizes.joinToString("、") { "${it.first}×${it.second}" }}"
     }
-
-    @Deprecated("Use RECOMMENDED_SIZE_TIERS_LABEL; the presets are not execution evidence.")
-    val VERIFIED_SIZE_TIERS_LABEL: String = RECOMMENDED_SIZE_TIERS_LABEL
 
     /** Native shape admission, independent of preset or verification evidence. */
     fun isSupported(width: Int, height: Int): Boolean = isNativeShape(width, height)

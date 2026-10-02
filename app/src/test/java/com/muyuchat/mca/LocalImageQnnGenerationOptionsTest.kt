@@ -112,7 +112,7 @@ class LocalImageQnnGenerationOptionsTest {
 
     @Test
     fun `qnn prompt preparation ignores only an unexecuted model default when cfg is off`() {
-        val ignoredDefault = resolveQnnFinalNegativePromptForExecution(
+        val ignoredDefault = resolveLocalImageFinalNegativePromptForExecution(
             finalNegativePrompt = LocalImageFinalNegativePrompt(
                 value = "人物，文字",
                 source = LocalImageNegativePromptSource.MODEL_DEFAULT
@@ -122,7 +122,7 @@ class LocalImageQnnGenerationOptionsTest {
         assertEquals("", ignoredDefault.value)
         assertEquals(LocalImageNegativePromptSource.EMPTY, ignoredDefault.source)
 
-        val explicitEmpty = resolveQnnFinalNegativePromptForExecution(
+        val explicitEmpty = resolveLocalImageFinalNegativePromptForExecution(
             finalNegativePrompt = LocalImageFinalNegativePrompt(
                 value = "",
                 source = LocalImageNegativePromptSource.USER
@@ -131,7 +131,7 @@ class LocalImageQnnGenerationOptionsTest {
         )
         assertEquals(LocalImageNegativePromptSource.USER, explicitEmpty.source)
 
-        val retainedDefault = resolveQnnFinalNegativePromptForExecution(
+        val retainedDefault = resolveLocalImageFinalNegativePromptForExecution(
             finalNegativePrompt = LocalImageFinalNegativePrompt(
                 value = "people, text",
                 source = LocalImageNegativePromptSource.MODEL_DEFAULT
@@ -142,7 +142,7 @@ class LocalImageQnnGenerationOptionsTest {
         assertEquals(LocalImageNegativePromptSource.MODEL_DEFAULT, retainedDefault.source)
 
         val rejected = runCatching {
-            resolveQnnFinalNegativePromptForExecution(
+            resolveLocalImageFinalNegativePromptForExecution(
                 finalNegativePrompt = LocalImageFinalNegativePrompt(
                     value = "people, text",
                     source = LocalImageNegativePromptSource.USER

@@ -199,19 +199,6 @@ internal fun resolveLocalImageFinalNegativePromptForExecution(
     }
 }
 
-/** Kept for source compatibility while every runtime now uses the shared resolver above. */
-@Deprecated(
-    message = "Use resolveLocalImageFinalNegativePromptForExecution.",
-    replaceWith = ReplaceWith("resolveLocalImageFinalNegativePromptForExecution(finalNegativePrompt, useCfg)")
-)
-internal fun resolveQnnFinalNegativePromptForExecution(
-    finalNegativePrompt: LocalImageFinalNegativePrompt,
-    useCfg: Boolean
-): LocalImageFinalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution(
-    finalNegativePrompt = finalNegativePrompt,
-    useCfg = useCfg
-)
-
 data class ImageGenerationJobRecord(
     val id: String,
     val prompt: String,
