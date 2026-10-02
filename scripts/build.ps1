@@ -109,10 +109,19 @@ function Get-MissingRuntimeNames([string]$Root) {
 $qnnRuntimeRoot = $qnnSdkRoot
 $missingRuntimeNames = @(Get-MissingRuntimeNames $qnnRuntimeRoot)
 $sdkParent = Split-Path -Parent $qnnSdkRoot
+# Split-Path -Parent yields an empty string once it reaches a drive root, and Join-Path
+# rejects an empty -Path, so the three archive lookups are built from a bounded ancestor
+# walk that stops when there is no parent left. At the usual depths this produces exactly
+# the same three directories (parent, grandparent, great-grandparent) as before; it only
+# stops early for a runtime root sitting close to the drive root, which previously threw.
+$zipSearchRoots = New-Object System.Collections.Generic.List[string]
+$zipSearchCursor = $sdkParent
+while (-not [string]::IsNullOrWhiteSpace($zipSearchCursor) -and $zipSearchRoots.Count -lt 3) {
+    $zipSearchRoots.Add($zipSearchCursor)
+    $zipSearchCursor = Split-Path -Parent $zipSearchCursor
+}
 $zipCandidates = @(
-    (Join-Path $sdkParent "v$sdkLeaf.zip"),
-    (Join-Path (Split-Path -Parent $sdkParent) "v$sdkLeaf.zip"),
-    (Join-Path (Split-Path -Parent (Split-Path -Parent $sdkParent)) "v$sdkLeaf.zip")
+    $zipSearchRoots | ForEach-Object { Join-Path $_ "v$sdkLeaf.zip" }
 ) | Where-Object { Test-Path -LiteralPath $_ }
 $qnnSdkZip = $zipCandidates | Select-Object -First 1
 

@@ -123,7 +123,7 @@ pwsh -NoProfile -File scripts/build.ps1
 - **完整的 QAIRT 运行时根（构建生产 APK 用这个）：`E:\tools\qairt-sdk\2.45.0.260326`**
   - 它是从原仓库既有的展开产物复制出来的**仓库外副本**，七代 HTP 与 `aarch64-android` 主机库齐全
   - 副本核对：文件数 9,658 = 9,658，总字节 3,856.8 MB = 3,856.8 MB，关键库 SHA-256 逐一致
-  - **不要**把 SDK 根放在盘根下：构建配方会在盘的根上调用 `Split-Path -Parent`，浅层布局会失败
+  - 放在盘根附近也可以：构建配方已改为有界祖先遍历，遇到没有父目录即停止（此前在盘根处会因 `Split-Path -Parent` 收到空串而失败）
 - 仅有头文件的 QAIRT 安装（**不足以**构建完整 APK）：`C:\Users\sy427\qairt-sdk\2.46.0.260424`
 - MNN Android 构建根：`E:\MAC\third_party\MNN\project\android\build_64_mca_full`
 - 执行记录与证据：`E:\MAC_REFACTOR_STATUS.md`、`E:\MAC_REFACTOR_EVIDENCE\`
