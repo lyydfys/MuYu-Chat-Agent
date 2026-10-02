@@ -677,9 +677,12 @@ pwsh -NoProfile -File tools\device\tests\test-run-mnn-chat-smoke-strict-counterf
 
 .\gradlew.bat :app:assembleDebug `
   '-Pmca.abis=arm64-v8a' `
-  '-PmcaQnnSdkRoot=E:\model\qairt-sdk\qairt\2.45.0.260326' `
+  '-PmcaQnnSdkRoot=<QAIRT SDK 根目录>' `
   --no-parallel
 ```
+
+`<QAIRT SDK 根目录>` 用本机实际路径替换；本任务使用的具体路径记录在
+`docs/EVIDENCE_AND_LIMITATIONS.md` 的环境说明一节，正文不再写死机器相关路径。
 
 QAIRT SDK 路径不存在时停止并报告，不要用假库绕过。
 

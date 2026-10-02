@@ -18,21 +18,30 @@ MCA 同时提供本机 UI 和 OpenAI 兼容的 Local API，两者都可能触发
 
 ### 1. 每个共享事实只有一个写入 owner
 
+定位一律用**符号名**，不用行号：P2 的等值拆分改变了行号，而符号名在拆分、移动和后续切片中保持稳定。
+括号内的行号是**基线 `c53f4b92` 的历史注记**，只用于回看当时的源码，不代表当前 revision。
+
 | 事实 | 唯一 owner | 代码位置 |
 | --- | --- | --- |
-| 生图执行（UI 与 API 共用）| `LocalImageGenerationCoordinator` | `app/.../LocalImageGenerationCoordinator.kt` |
-| 聊天生成取消目标 | `GenerationStopToken` | `core/engine/.../McaInferenceService.kt:58` |
-| 引擎加载/卸载互斥 | `EngineLifecycleLease` | `core/engine/.../McaInferenceService.kt:249` |
+| 生图执行（UI 与 API 共用）| `LocalImageGenerationCoordinator` | `app/.../LocalImageGenerationCoordinator.kt`（类声明）|
+| 聊天生成取消目标 | `GenerationStopToken` | `core/engine/.../McaInferenceService.kt` 中的 `GenerationStopToken`（基线行 58）|
+| 引擎加载/卸载互斥 | `EngineLifecycleLease` | `core/engine/.../McaInferenceService.kt` 中的 `EngineLifecycleLease`（基线行 249）|
 | 聊天 UI 生成所有权与 epoch | `UiGenerationOwnership` | 由 `UiGenerationOwnershipTest` 覆盖 |
-| Local API 运行时 owner | `LocalApiRuntime.claimOwner` | `api/local/.../LocalApiRuntime.kt:20` |
+| Local API 运行时 owner | `LocalApiRuntime.claimOwner` | `api/local/.../LocalApiRuntime.kt` 中的 `fun claimOwner`（基线行 20）|
 | 图像资产生命周期 | `ImageAssetDeletionLease` | `app/...`（见 `ImageAssetDeletionLeaseTest`）|
 | 前台服务租约 | `GenerationForegroundLeaseRegistry` | 见 `GenerationForegroundLeaseRegistryTest` |
 
 ### 2. 生图：UI 与 API 必须共用同一个协调器
 
-`MainViewModel` 只构造 **一个** `LocalImageGenerationCoordinator`（`:2818`）。
-UI 路径（`:5382`、`:6368`、`:7873`）与 Local API 路径（`:19843`）都通过
+`MainViewModel` 只构造 **一个** `LocalImageGenerationCoordinator`，字段名为
+`localImageGenerationCoordinator`（基线行 2818）。
+UI 路径（基线行 5382、6368、7873）与 Local API 路径（基线行 19843）都通过
 `tryAcquireObservedImageGenerationLease(requestId)` 获取租约。
+
+**核验方式（不依赖行号）：** 该函数在 `MainViewModel.kt` 中应只有**一处定义**
+（`private fun tryAcquireObservedImageGenerationLease(`），且**恰好四处调用**；
+`LocalImageGenerationCoordinator` 的构造点应**恰好一处**。
+`LocalImageGenerationOwnershipContractTest` 以源码契约固定这两条。
 
 - 租约绑定 `requestId` **与自增 epoch**。
 - `release(lease)` 用**对象身份**比较（`active !== lease`），因此**陈旧的完成回调
@@ -43,7 +52,7 @@ UI 路径（`:5382`、`:6368`、`:7873`）与 Local API 路径（`:19843`）都�
 Local API 侧通过 `LocalApiRuntime` 的可注入 bridge 接入，而不是自己持有运行时：
 
 ```kotlin
-// api/local/.../LocalApiRuntime.kt:127-132
+// api/local/.../LocalApiRuntime.kt 中的 imageGenerationProvider / generateImage
 var imageGenerationProvider: (suspend (requestId: String, body: String) -> String)? = null
 suspend fun generateImage(requestId: String, body: String): String? =
     imageGenerationProvider?.invoke(requestId, body)
@@ -54,7 +63,8 @@ bridge 签名携带 `requestId`，使身份在跨层传递时保持绑定。
 ### 3. 取消是针对某个请求的命令，不是"停止一切"
 
 `GenerationStopToken` 通过 `activateGenerationStopTarget(requestId, runner)` 绑定到
-具体执行目标；`stop` 只在 token 仍匹配时生效（`McaInferenceService.kt:1629`）。
+具体执行目标；`stop` 只在 token 仍匹配时生效
+（`McaInferenceService.kt` 中的 `activateGenerationStopTarget`，基线行 1629）。
 任何资源释放前都要再次校验身份。
 
 ### 4. 跨进程不共享 Kotlin 单例
