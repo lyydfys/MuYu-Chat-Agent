@@ -16964,12 +16964,16 @@ class MainViewModel @JvmOverloads constructor(
         localImageModels.firstOrNull { it.id == selectedLocalImageModelId && it.configured }
 
     /** Captures the selected image model's default conditioning for chat-triggered images. */
-    private fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions {
+    internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions {
         val base = LocalImageGenerationOptions(batchCount = 1)
         if (state.selectedImageBackend != ImageBackend.LOCAL) return base
-        val selections = requireNotNull(state.chatImageLoraSelections) {
-            "聊天生图 LoRA 选择无效，请修正倍率、重新选择或明确清空后重试。"
-        }
+        // A null selection is a state the writers produce on purpose:
+        // `reportMissingLocalImageLoraSelection()` and `updateChatImageLoraSelection()` both store
+        // null to mean "the stored LoRA selection is no longer usable, ask the user to re-select".
+        // Treating it as impossible crashed the app during composition (McaApp -> chatImageToolPermissionUiState).
+        // Fall back to `base` (no LoRA conditioning) instead; the user-facing prompt lives in
+        // `localImageLoraMessage` and is unaffected by this path.
+        val selections = state.usableChatImageLoraSelections() ?: return base
         val resolvedLoras = resolveCurrentLocalImageLoras(selections, state.localImageLoras)
         val model = state.selectedLocalImageModel() ?: return base
         val bundleRoot = model.bundleRoot

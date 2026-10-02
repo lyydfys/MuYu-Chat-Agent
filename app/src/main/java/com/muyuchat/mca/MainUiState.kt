@@ -195,3 +195,21 @@ data class MainUiState(
     val webSearchDiagnostics: List<WebSearchDiagnosticRecord> = emptyList(),
     val appUpdate: AppUpdateState = AppUpdateState()
 )
+
+/**
+ * The chat-image LoRA selection that should actually condition a chat-triggered image, or null when
+ * no LoRA conditioning applies.
+ *
+ * Two writers store `null` on purpose to mean "the stored selection is no longer usable, ask the user
+ * to re-select": [MainViewModel.reportMissingLocalImageLoraSelection] (the selected LoRA was deleted)
+ * and [MainViewModel.updateChatImageLoraSelection] (`frozen.takeIf { valid }` yields null when the
+ * resolved selection is invalid). `null` is therefore a legitimate persisted state, not an
+ * impossible one, and callers must degrade instead of asserting.
+ *
+ * Returns null when the local backend is not selected, so that callers keep their existing early-exit
+ * behaviour for cloud-backed images.
+ */
+internal fun MainUiState.usableChatImageLoraSelections(): List<Pair<String, Double>>? {
+    if (selectedImageBackend != ImageBackend.LOCAL) return null
+    return chatImageLoraSelections
+}
