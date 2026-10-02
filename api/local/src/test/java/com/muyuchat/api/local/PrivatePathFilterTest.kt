@@ -12,6 +12,12 @@ import org.junit.Test
  * into stored history or into an API response is exactly the kind of rule that must not drift,
  * and because pinning the false positives matters as much as pinning the true positives: a
  * filter that starts rejecting ordinary values would silently strip fields a client expects.
+ *
+ * The http(s) false positive that earlier revisions of this file recorded as pinned-but-not-fixed
+ * has since been fixed, so the assertions that documented it now assert the corrected behaviour.
+ * The drive-letter pattern requires a non-alphanumeric before the letter and a single separator
+ * after the colon; the tests below pin both boundaries in each direction, so a future attempt to
+ * loosen the pattern fails here rather than in production.
  */
 class PrivatePathFilterTest {
 
@@ -52,41 +58,48 @@ class PrivatePathFilterTest {
     }
 
     @Test
-    fun `any url with a scheme counts as private, which is a false positive`() {
-        // Measured, not assumed. The drive-letter check is `[A-Za-z]:[\\/]`, and "https://..."
-        // contains "s:/", so every http(s) URL is classified as a private path. Both original
-        // copies behaved this way; the duplication did not cause it and unifying did not change
-        // it.
+    fun `a url with a scheme is not a private path`() {
+        // This was a real false positive and it is fixed here. The drive-letter check used to be
+        // the bare `[A-Za-z]:[\\/]`, which matches the "s:/" inside "https://" and the "p:/"
+        // inside "http://", so every http(s) URL was classified as a private path. It mattered
+        // beyond a dropped field: one caller rejects the whole image provider response when this
+        // returns true (private_image_input_path_exposed in ImageGenerationApiContract).
         //
-        // This matters because one caller rejects the whole image provider response on a match
-        // (private_image_input_path_exposed in ImageGenerationApiContract), so a URL in that
-        // payload would fail the response rather than merely having a field stripped.
-        //
-        // Reachability, resolved by reading the producer rather than by producing a worker
-        // response. The response's `execution` object is built in MainViewModel from
-        // sanitizedLocalImageApiExecution(...), which runs sanitizeNativeExecutionJson ->
-        // sanitizeNativeObject -> sanitizeNativeValue. That last function is
-        // `is String -> value.takeUnless(String::looksLikePrivatePath)`: it drops every string
-        // this filter matches, URLs included. The API contract then validates the response and
-        // calls the same filter on the same, already-filtered data, so the rejection cannot fire
-        // there. A sanitizer failure falls back to an empty JSONObject rather than to
-        // unsanitized data. The false positive is therefore not reachable through the execution
-        // evidence.
-        //
-        // Pinned rather than fixed: narrowing the pattern is a behaviour change and the plan
-        // requires those to be separate, analysed tasks. Recording it here means the next
-        // person sees the false positive is known, and a test failure tells them they changed
-        // behaviour that the current code depends on.
-        assertTrue("https://example.com/image.png".looksLikePrivatePath())
-        assertTrue("http://example.com/a".looksLikePrivatePath())
+        // The pattern now requires a non-alphanumeric before the letter, which is what a URI
+        // scheme cannot supply -- its colon is preceded by a letter.
+        assertFalse("https://example.com/image.png".looksLikePrivatePath())
+        assertFalse("http://example.com/a".looksLikePrivatePath())
+        assertFalse("ftp://host/x".looksLikePrivatePath())
+        assertFalse("sms://12345".looksLikePrivatePath())
+        // A single-letter scheme has no preceding letter to reject it, so the second boundary is
+        // what stops it: two separators after the colon mean a URI, one means a drive path.
+        assertFalse("a://host".looksLikePrivatePath())
+    }
+
+    @Test
+    fun `a drive path is still rejected in every position a real one appears`() {
+        // The other direction of the same fix. Loosening the pattern must not have made the
+        // filter blind to drive paths; each of these places a real path where one actually
+        // occurs in a stored value or a response payload.
+        listOf(
+            "C:\\Users\\x.png",
+            "C:/Users/x.png",
+            "C:\\",
+            "  C:\\x.png  ",
+            "path=C:\\x.png",
+            "a C:\\b",
+            "\"C:/x.png\"",
+            "[C:\\x.png]",
+            "src:C:\\x.png"
+        ).forEach { assertTrue("$it should be treated as private", it.looksLikePrivatePath()) }
     }
 
     @Test
     fun `private directory segments match anywhere, including inside a url`() {
-        // This is a real false positive in both original copies and it is preserved on purpose:
-        // tightening it here would be a behaviour change in a refactor, and being over-eager
-        // costs a dropped display field rather than a leaked path. Recorded so that anyone who
-        // later decides to narrow the rule sees it was deliberate and knows what to weigh.
+        // This one is left deliberately over-eager. Matching "/storage/" anywhere also matches
+        // inside a URL, and tightening it is a separate behaviour change from the drive-letter
+        // fix. Being over-eager costs a dropped display field rather than a leaked path, so the
+        // asymmetry argues for leaving it until there is a reason to move it.
         assertTrue("https://example.com/data/x.png".looksLikePrivatePath())
         assertTrue("prefix/storage/suffix".looksLikePrivatePath())
     }
