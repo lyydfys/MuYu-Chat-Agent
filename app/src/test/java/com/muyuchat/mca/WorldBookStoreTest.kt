@@ -541,11 +541,18 @@ class WorldBookStoreTest {
 
     @Test
     fun persistPhaseLabelDescribesRuntimeFinalizationNotDatabaseSave() {
-        val source = sequenceOf(
+        // The chat surface now spans ChatScreen.kt and ChatChromeScreens.kt: the chrome, the
+        // markdown blocks and the pagination helpers moved out of the former. Both are read, so the
+        // assertion below stays meaningful wherever the declaration now lives.
+        val chatScreen = sequenceOf(
             File("../feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"),
             File("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
-        ).firstOrNull(File::isFile)?.readText()
+        ).firstOrNull(File::isFile)
             ?: error("Unable to locate ChatScreen.kt")
+        val directory = chatScreen.parentFile
+        val source = listOf("ChatScreen.kt", "ChatChromeScreens.kt").joinToString("\n") { name ->
+            File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
+        }
         val persistLabel = Regex("""GenerationPhase\.PERSIST\s*->\s*\"([^\"]+)\"""")
             .find(source)
             ?.groupValues

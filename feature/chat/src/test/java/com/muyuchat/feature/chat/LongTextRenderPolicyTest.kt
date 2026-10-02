@@ -37,7 +37,11 @@ class LongTextRenderPolicyTest {
         require(start >= 0 && end > start) { "Missing streaming scroll policy" }
         val policy = source.substring(start, end)
 
-        assertTrue(source.contains("private const val STREAMING_SCROLL_CHAR_STEP = 512"))
+        // The declaration moved to ChatChromeScreens.kt and had to widen from private to internal
+        // there, because Kotlin has no package-private scope and ChatScreen.kt still reads it. The
+        // assertion tracks the declaration, so it tracks the new file and the new modifier; the
+        // value it pins, 512, is unchanged.
+        assertTrue(source.contains("internal const val STREAMING_SCROLL_CHAR_STEP = 512"))
         assertTrue(policy.contains("message.content.length + message.reasoningContent.length"))
         assertTrue(policy.contains("/ STREAMING_SCROLL_CHAR_STEP"))
         assertTrue(policy.contains("LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket,"))
@@ -46,7 +50,10 @@ class LongTextRenderPolicyTest {
     }
 
     private fun invokeSafePrefix(value: String, maxCharacters: Int): String {
-        val owner = Class.forName("com.muyuchat.feature.chat.ChatScreenKt")
+        // safePrefix moved to ChatChromeScreens.kt with the chat chrome, so the file facade class
+        // that holds it is ChatChromeScreensKt now rather than ChatScreenKt. The method itself is
+        // unchanged, including its private visibility, which is why this still needs isAccessible.
+        val owner = Class.forName("com.muyuchat.feature.chat.ChatChromeScreensKt")
         val method = owner.getDeclaredMethod(
             "safePrefix",
             String::class.java,
@@ -59,10 +66,19 @@ class LongTextRenderPolicyTest {
     private fun chatScreenSource(): String {
         var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(6) {
-            listOf(
+            // The chat surface now spans ChatScreen.kt and ChatChromeScreens.kt: the chrome, the
+            // markdown blocks and the pagination helpers moved out of the former. Both are read, so
+            // the assertions below stay meaningful wherever each declaration now lives.
+            val chatScreen = listOf(
                 File(root, "src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"),
                 File(root, "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
-            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            ).firstOrNull(File::isFile)
+            if (chatScreen != null) {
+                val directory = chatScreen.parentFile
+                return listOf("ChatScreen.kt", "ChatChromeScreens.kt").joinToString("\n") { name ->
+                    File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
+                }
+            }
             val parent = root.parentFile ?: return@repeat
             root = parent
         }
