@@ -159,6 +159,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
@@ -4567,6 +4568,16 @@ private fun UserMessageBubble(
     } else {
         Color(0xFFEEF4FF)
     }
+    // The colour above is an alpha-modified derived value, so Surface cannot resolve a matching
+    // content colour through contentColorFor and falls back to the ambient one, which left the text
+    // dim against the blue. On dark the pair is explicit: onPrimaryContainer is the role that
+    // belongs with primaryContainer. On light LocalContentColor.current is exactly what Surface
+    // would have fallen back to, so the light rendering is unchanged down to the colour value.
+    val bubbleContentColor = if (darkTheme) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        LocalContentColor.current
+    }
     val attachmentPlaceholderColor = if (darkTheme) {
         MaterialTheme.colorScheme.surfaceVariant
     } else {
@@ -4591,6 +4602,7 @@ private fun UserMessageBubble(
     ) {
         Surface(
             color = bubbleColor,
+            contentColor = bubbleContentColor,
             shape = RoundedCornerShape(
                 topStart = 20.dp,
                 topEnd = 20.dp,
@@ -4648,7 +4660,12 @@ private fun UserMessageBubble(
                 if (message.content.isNotBlank()) {
                     PagedPlainMessageText(
                         content = message.content,
-                        color = Color(0xFF202124),
+                        // Third hardcoded light value in this function. The bubble background became
+                        // theme-aware first, which left this near-black text on a blue surface:
+                        // readable enough to look deliberate, dim enough to be wrong. An explicit
+                        // colour here also wins over the Surface contentColor above, which is why
+                        // that pair on its own did not fix it. Light keeps 0xFF202124 exactly.
+                        color = if (darkTheme) MaterialTheme.colorScheme.onPrimaryContainer else Color(0xFF202124),
                         style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 24.sp)
                     )
                 }
