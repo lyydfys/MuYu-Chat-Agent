@@ -223,13 +223,29 @@ class McaRoomMigrationExecutionTest {
                 "hash-chunk-live",
                 singleString(database, "knowledge_chunks", "contentHash", "id = 'chunk-live'")
             )
+            // The knowledge_bases fingerprint is the third asset-integrity field, and the
+            // 19->20 rebuild does not recreate this table at all. Asserting it here fixes the
+            // fact that dropping or rewriting the row would otherwise go unnoticed.
+            assertEquals(
+                "fingerprint-base-live",
+                singleString(
+                    database,
+                    "knowledge_bases",
+                    "embeddingModelFingerprint",
+                    "id = 'base-live'"
+                )
+            )
 
             database.execSQL("DELETE FROM knowledge_bases WHERE id = 'base-live'")
             assertEquals(0, rowCount(database, "knowledge_documents"))
             assertEquals(0, rowCount(database, "knowledge_chunks"))
             assertEquals(0, rowCount(database, "chat_knowledge_base_bindings"))
 
-            database.execSQL("INSERT INTO knowledge_bases(id) VALUES ('base-document')")
+            database.execSQL(
+                "INSERT INTO knowledge_bases(id, name, description, embeddingModelFingerprint, " +
+                    "indexState, createdAt, updatedAt) " +
+                    "VALUES ('base-document', 'document', '', NULL, 'READY', 1, 1)"
+            )
             database.execSQL(
                 "INSERT INTO knowledge_documents(" +
                     "id, knowledgeBaseId, title, source, contentHash, contentLength, chunkCount, createdAt, updatedAt" +
@@ -243,7 +259,11 @@ class McaRoomMigrationExecutionTest {
             database.execSQL("DELETE FROM knowledge_documents WHERE id = 'document-cascade'")
             assertEquals(0, rowCount(database, "knowledge_chunks"))
 
-            database.execSQL("INSERT INTO knowledge_bases(id) VALUES ('base-chat')")
+            database.execSQL(
+                "INSERT INTO knowledge_bases(id, name, description, embeddingModelFingerprint, " +
+                    "indexState, createdAt, updatedAt) " +
+                    "VALUES ('base-chat', 'chat', '', NULL, 'READY', 1, 1)"
+            )
             database.execSQL(
                 "INSERT INTO chat_knowledge_base_bindings(chatSessionId, knowledgeBaseId) " +
                     "VALUES ('chat-live', 'base-chat')"
@@ -255,7 +275,23 @@ class McaRoomMigrationExecutionTest {
 
     private fun createLegacyV19Schema(database: SupportSQLiteDatabase) {
         database.execSQL("CREATE TABLE chat_sessions (id TEXT NOT NULL PRIMARY KEY)")
-        database.execSQL("CREATE TABLE knowledge_bases (id TEXT NOT NULL PRIMARY KEY)")
+        // Mirrors what the 16->17 migration leaves behind, which is the knowledge_bases shape a
+        // real v19 database has: a bare (id) table here would not be a faithful v19 fixture, and
+        // it would make it impossible to observe whether the asset-integrity fingerprint on this
+        // table survives the later rebuild. embeddingModelFingerprint is the only nullable column.
+        database.execSQL(
+            """
+            CREATE TABLE knowledge_bases (
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                embeddingModelFingerprint TEXT,
+                indexState TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                updatedAt INTEGER NOT NULL
+            )
+            """.trimIndent()
+        )
         database.execSQL(
             """
             CREATE TABLE knowledge_documents (
@@ -297,8 +333,19 @@ class McaRoomMigrationExecutionTest {
 
     private fun insertLegacyRows(database: SupportSQLiteDatabase) {
         database.execSQL("INSERT INTO chat_sessions(id) VALUES ('chat-live')")
-        database.execSQL("INSERT INTO knowledge_bases(id) VALUES ('base-live')")
-        database.execSQL("INSERT INTO knowledge_bases(id) VALUES ('base-other')")
+        // base-live carries the asset-integrity fingerprint, which the 19->20 rebuild must not
+        // drop: that migration rebuilds documents and chunks but never touches this table, so the
+        // value has to come through the rebuild untouched.
+        database.execSQL(
+            "INSERT INTO knowledge_bases(id, name, description, embeddingModelFingerprint, " +
+                "indexState, createdAt, updatedAt) " +
+                "VALUES ('base-live', 'live', 'desc-live', 'fingerprint-base-live', 'READY', 1, 1)"
+        )
+        database.execSQL(
+            "INSERT INTO knowledge_bases(id, name, description, embeddingModelFingerprint, " +
+                "indexState, createdAt, updatedAt) " +
+                "VALUES ('base-other', 'other', '', 'fingerprint-base-other', 'READY', 1, 1)"
+        )
         database.execSQL(
             "INSERT INTO knowledge_documents(" +
                 "id, knowledgeBaseId, title, source, contentHash, contentLength, chunkCount, createdAt, updatedAt" +
