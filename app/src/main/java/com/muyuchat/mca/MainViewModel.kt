@@ -209,9 +209,11 @@ import java.util.UUID
 import java.util.zip.ZipInputStream
 import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
-import com.muyuchat.mca.presentation.afterBackgroundGenerationStopped
-import com.muyuchat.mca.presentation.withBackgroundCancellationFinalized
-import com.muyuchat.mca.presentation.BackgroundCancelledAssistantOutput
+// Three P2 extractions are intentionally NOT imported here: afterBackgroundGenerationStopped,
+// withBackgroundCancellationFinalized and BackgroundCancelledAssistantOutput have no call site in
+// this ViewModel, and MainViewModelCompletionFallbackTest asserts that stays true. Importing them
+// only produced unused-import warnings, so the imports were removed rather than left dangling.
+// The declarations remain in presentation/GenerationStateTransitions.kt.
 import com.muyuchat.mca.presentation.afterGenerationStarted
 import com.muyuchat.mca.presentation.afterGenerationCompleted
 import com.muyuchat.mca.presentation.afterGenerationTerminated
