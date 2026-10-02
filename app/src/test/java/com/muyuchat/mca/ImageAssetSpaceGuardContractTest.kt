@@ -1,7 +1,9 @@
 package com.muyuchat.mca
 
 import java.io.File
+import java.nio.file.Files
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -9,16 +11,18 @@ import org.junit.Test
  * Guards the storage checks that gate writing an image asset into the library.
  *
  * `ImageAssetFiles` measures the free space of the asset root before it publishes a generated
- * image and again for every chunk it copies while importing one. Nothing covered those checks:
- * no test referenced `MIN_IMAGE_ASSET_FREE_SPACE_BYTES`, and the only test that reads this file
- * asserts the presence of `copyImageAssetStreamAtomically` instead. Removing or weakening a
- * check would therefore have failed no test, even though the consequence is writing images onto
- * a nearly full volume.
+ * image and again for every chunk it copies while importing one, both against a 64 MiB reserve.
+ * Nothing covered those checks: no test referenced `MIN_IMAGE_ASSET_FREE_SPACE_BYTES`, and the
+ * only test that read this file asserted the presence of `copyImageAssetStreamAtomically`
+ * instead. Removing or weakening a check would therefore have failed no test, even though the
+ * consequence is writing images onto a nearly full volume.
  *
- * Scope, stated plainly: this is a source contract, not a behavioural proof. The file measures
- * `File.usableSpace` directly, so there is no injectable seam to drive a low-space path from a
- * JVM test; a behavioural test needs that seam to exist first. These assertions fail if a guard
- * is deleted, reordered behind the write, or stops including the reserve.
+ * This file has two halves. The source-contract tests below fail if a guard is deleted, moved
+ * behind the write, or stops including the reserve, and they pin the cap and reserve values so
+ * the reserve cannot be raised above the per-asset cap unnoticed. The behavioural tests drive
+ * the publish guard through the free-space override that was added for exactly this reason --
+ * `File.usableSpace` cannot be forced low from a JVM test, so before that seam existed the guard
+ * could only be asserted as source text.
  */
 class ImageAssetSpaceGuardContractTest {
 
@@ -53,6 +57,10 @@ class ImageAssetSpaceGuardContractTest {
         assertTrue(
             "an insufficient-space publish must fail with an actionable message",
             body.contains("Insufficient storage to publish the generated image")
+        )
+        assertTrue(
+            "the free space must be readable through the test seam instead of only off the File",
+            body.contains("val usableSpace = usableSpaceOverride ?: root.usableSpace")
         )
     }
 
@@ -95,6 +103,85 @@ class ImageAssetSpaceGuardContractTest {
         )
     }
 
+    @Test
+    fun `publishing is refused one byte below the reserve and allowed at exactly the reserve`() {
+        val bytes = ByteArray(1_024) { 7 }
+        val required = Math.addExact(bytes.size.toLong(), RESERVE)
+
+        withTempDirectory { directory ->
+            val refusal = runCatching {
+                writeImageAssetBytesAtomically(
+                    directory = directory,
+                    fileName = "below-reserve.png",
+                    bytes = bytes,
+                    parentDirectorySyncer = NO_SYNCER,
+                    usableSpaceOverride = required - 1L
+                )
+            }
+            val error = refusal.exceptionOrNull()
+            assertTrue(
+                "one byte below the reserve must be refused, got $refusal",
+                error is IllegalArgumentException
+            )
+            assertTrue(
+                "the refusal must explain the safety reserve: ${error?.message}",
+                error?.message.orEmpty()
+                    .contains("Insufficient storage to publish the generated image")
+            )
+            assertFalse(
+                "a refused publish must not leave an asset behind",
+                File(directory, "below-reserve.png").exists()
+            )
+
+            val published = writeImageAssetBytesAtomically(
+                directory = directory,
+                fileName = "at-reserve.png",
+                bytes = bytes,
+                parentDirectorySyncer = NO_SYNCER,
+                usableSpaceOverride = required
+            )
+            assertEquals(bytes.size.toLong(), published.length())
+            assertEquals("at-reserve.png", published.name)
+            assertTrue(
+                "an accepted publish must leave no staging file behind",
+                directory.listFiles().orEmpty().none { it.name.endsWith(".part") }
+            )
+        }
+    }
+
+    @Test
+    fun `an unmeasurable free space reading is treated as unknown and does not block publishing`() {
+        val bytes = ByteArray(64) { 3 }
+        withTempDirectory { directory ->
+            // File.usableSpace reports 0 on filesystems that cannot measure it. Blocking there
+            // would refuse every publish on such a device, so the guard must let it through.
+            val published = writeImageAssetBytesAtomically(
+                directory = directory,
+                fileName = "unknown-space.png",
+                bytes = bytes,
+                parentDirectorySyncer = NO_SYNCER,
+                usableSpaceOverride = 0L
+            )
+            assertEquals(bytes.size.toLong(), published.length())
+        }
+    }
+
+    @Test
+    fun `the default provider still measures the real directory`() {
+        val bytes = ByteArray(64) { 5 }
+        withTempDirectory { directory ->
+            // No provider passed: exercises the default that replaced `root.usableSpace` and
+            // proves the injection point did not become mandatory for production callers.
+            val published = writeImageAssetBytesAtomically(
+                directory = directory,
+                fileName = "default-provider.png",
+                bytes = bytes,
+                parentDirectorySyncer = NO_SYNCER
+            )
+            assertEquals(bytes.size.toLong(), published.length())
+        }
+    }
+
     /**
      * Reads a `private const val NAME = <a * b * c>` declaration and evaluates its literal
      * product. Only the multiplication form is accepted so an accidental edit to a plain number,
@@ -109,6 +196,15 @@ class ImageAssetSpaceGuardContractTest {
         assertTrue("$name must be written as a product of literal factors", factors.size >= 2)
         return factors.fold(1L) { product, factor ->
             Math.multiplyExact(product, factor.toLongOrNull() ?: return@fold -1L)
+        }
+    }
+
+    private fun withTempDirectory(block: (File) -> Unit) {
+        val directory = Files.createTempDirectory("mca-image-asset-space").toFile()
+        try {
+            block(directory)
+        } finally {
+            directory.deleteRecursively()
         }
     }
 
@@ -151,5 +247,10 @@ class ImageAssetSpaceGuardContractTest {
 
     private companion object {
         const val IMAGE_ASSET_FILES = "app/src/main/java/com/muyuchat/mca/ImageAssetFiles.kt"
+
+        /** Mirrors `MIN_IMAGE_ASSET_FREE_SPACE_BYTES`, which is private to its own file. */
+        const val RESERVE = 64L * 1024L * 1024L
+
+        val NO_SYNCER = ParentDirectorySyncer { }
     }
 }

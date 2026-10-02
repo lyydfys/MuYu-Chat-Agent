@@ -21,11 +21,18 @@ import kotlinx.coroutines.ensureActive
 //
 // No size limit, extension, lease rule or reconciliation branch was edited.
 
+// usableSpaceOverride exists so the reserve guard below can be exercised from a JVM test:
+// File.usableSpace reports the real volume and cannot be driven low, which is why the guard had
+// no behavioural coverage. It is deliberately a nullable value rather than a lambda-typed
+// provider: a `(File) -> Long = { it.usableSpace }` default parameter in this file makes
+// kotlin-compiler 2.3.21 fail :app:compileDebugKotlin with "Internal compiler error", and a
+// measured value is all this one call site needs. Passing null keeps the previous behaviour.
 internal fun writeImageAssetBytesAtomically(
     directory: File,
     fileName: String,
     bytes: ByteArray,
-    parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer
+    parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer,
+    usableSpaceOverride: Long? = null
 ): File {
     require(bytes.isNotEmpty()) { "Generated image bytes must not be empty." }
     require(fileName.isNotBlank() && fileName == File(fileName).name) {
@@ -36,7 +43,7 @@ internal fun writeImageAssetBytesAtomically(
         "Unable to create the image asset directory."
     }
     val requiredSpace = Math.addExact(bytes.size.toLong(), MIN_IMAGE_ASSET_FREE_SPACE_BYTES)
-    val usableSpace = root.usableSpace
+    val usableSpace = usableSpaceOverride ?: root.usableSpace
     require(usableSpace <= 0L || usableSpace >= requiredSpace) {
         "Insufficient storage to publish the generated image while preserving the safety reserve."
     }
