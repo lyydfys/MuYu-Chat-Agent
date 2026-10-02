@@ -602,35 +602,6 @@ private fun MetricCard(title: String, value: String, detail: String, modifier: M
         }
     }
 }
-
-@Composable
-private fun PreferencePicker(
-    preference: UserPreference,
-    onPreferenceChange: (UserPreference) -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionTitle("运行偏好")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            listOf(PerformanceMode.PowerSave, PerformanceMode.Balanced, PerformanceMode.Speed).forEach { mode ->
-                FilterChip(
-                    selected = preference.mode == mode,
-                    onClick = { onPreferenceChange(preference.copy(mode = mode)) },
-                    label = { Text(mode.label) }
-                )
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            listOf(PerformanceMode.Quality, PerformanceMode.LongContext).forEach { mode ->
-                FilterChip(
-                    selected = preference.mode == mode,
-                    onClick = { onPreferenceChange(preference.copy(mode = mode)) },
-                    label = { Text(mode.label) }
-                )
-            }
-        }
-    }
-}
-
 @Composable
 private fun SmartDebugCard(
     state: AgentUiState,
@@ -1141,29 +1112,6 @@ private fun CandidateCard(candidate: AgentCandidate) {
         }
     }
 }
-
-@Composable
-private fun BenchmarkCard(benchmark: BenchmarkResult) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            SectionTitle("测速结果")
-            Text("首 token ${benchmark.ttftMs} ms · 速度 ${"%.2f".format(benchmark.decodeTps)} token/s · 总速 ${"%.2f".format(benchmark.e2eTps)} token/s")
-            val rssKb = benchmark.processRssKb.takeIf { it > 0L } ?: benchmark.nativePssKb
-            Text(
-                "输出 ${benchmark.genTokens} · RSS ${formatBytes(rssKb * 1024)} · PSS ${formatBytes(benchmark.nativePssKb * 1024)} · 系统可用 ${formatBytes(benchmark.availMemKb * 1024)}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            benchmark.error?.let { Text("问题：$it", color = MaterialTheme.colorScheme.error) }
-        }
-    }
-}
-
 @Composable
 private fun DebugSummaryCard(state: AgentUiState, benchmark: BenchmarkResult) {
     val bestThread = benchmark.bestThreadCount.takeIf { it > 0 }

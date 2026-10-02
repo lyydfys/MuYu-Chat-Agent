@@ -2368,65 +2368,6 @@ private fun HubModelCard(
         }
     }
 }
-
-@Composable
-private fun LegacyLocalModelCard(
-    model: ModelManifest,
-    isLoaded: Boolean,
-    enabled: Boolean,
-    onLoad: () -> Unit,
-    onVerify: () -> Unit,
-    onDelete: () -> Unit,
-    onAttachVisionProjector: () -> Unit
-) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
-    ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(shortName(model.displayName), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            if (isLoaded) {
-                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(999.dp)) {
-                    Text("已加载", modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                }
-            }
-        }
-        Text("${model.architecture ?: "未知架构"} · ${model.quant ?: "未知量化"} · ${formatBytes(model.sizeBytes)} · ${sourceLabel(model.source.name)}", style = MaterialTheme.typography.bodySmall)
-        Text("已保存到 MCA 的本机模型目录", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(
-                onClick = onLoad,
-                enabled = enabled && !isLoaded,
-                modifier = Modifier.weight(1f).height(44.dp),
-                shape = RoundedCornerShape(999.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-            ) {
-                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(if (isLoaded) "已加载" else "加载", maxLines = 1, softWrap = false)
-            }
-            OutlinedButton(
-                onClick = onVerify,
-                enabled = enabled,
-                modifier = Modifier.weight(1f).height(44.dp),
-                shape = RoundedCornerShape(999.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-            ) {
-                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(4.dp))
-                Text("校验", maxLines = 1, softWrap = false)
-            }
-            IconButton(onClick = onDelete, enabled = enabled, modifier = Modifier.size(44.dp)) {
-                Icon(Icons.Default.Delete, contentDescription = "删除")
-            }
-        }
-        }
-    }
-}
-
 @Composable
 private fun LocalModelCard(
     model: ModelManifest,

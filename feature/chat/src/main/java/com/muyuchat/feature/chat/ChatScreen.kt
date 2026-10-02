@@ -10031,67 +10031,6 @@ private fun ImageTemplateCard(
         )
     }
 }
-
-@Composable
-private fun ImageJobRow(job: ImageGenerationUiJob, onRetry: () -> Unit) {
-    val darkTheme = isSystemInDarkTheme()
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF4F6F9),
-        shape = RoundedCornerShape(18.dp)
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                job.statusLabel,
-                modifier = Modifier.width(58.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = if (job.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    job.prompt,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
-                )
-                if (job.modelName.isNotBlank()) {
-                    Text(
-                        job.modelName,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-                if (job.expectedOutputCount > 1 && job.completedProgressCount > 0) {
-                    Text(
-                        "已完成 ${job.completedProgressCount}/${job.expectedOutputCount} 张",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (job.message.isNotBlank()) {
-                    Text(
-                        job.message,
-                        maxLines = 1,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368)
-                    )
-                }
-            }
-            if (job.failed) {
-                TextButton(onClick = onRetry) { Text("重试") }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ImageAssetTile(
     image: ImageAssetUiItem,
@@ -14593,60 +14532,6 @@ private fun CapsuleMenuRow(
         }
     }
 }
-
-@Composable
-private fun ReasoningModeCapsuleDrawer(
-    visible: Boolean,
-    selected: ReasoningMode,
-    onSelect: (ReasoningMode) -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = slideInHorizontally(animationSpec = tween(220), initialOffsetX = { it / 2 }) + fadeIn(tween(140)),
-        exit = slideOutHorizontally(animationSpec = tween(180), targetOffsetX = { it / 2 }) + fadeOut(tween(120)),
-        modifier = modifier
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .clickable(onClick = onDismiss),
-            contentAlignment = Alignment.TopEnd
-        ) {
-            Surface(
-                modifier = Modifier
-                    .padding(top = 82.dp, end = 18.dp)
-                    .width(152.dp)
-                    .clickable(enabled = false) {},
-                color = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.surface else Color.White,
-                shape = RoundedCornerShape(28.dp),
-                shadowElevation = 14.dp
-            ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text(
-                        text = "思考模式",
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                        style = MaterialTheme.typography.labelMedium.copy(fontSize = 12.sp),
-                        color = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF80868B),
-                        fontWeight = FontWeight.Medium
-                    )
-                    ReasoningMode.entries.forEach { mode ->
-                        ReasoningModePill(
-                            label = mode.shortLabel(),
-                            selected = selected == mode,
-                            onClick = { onSelect(mode) }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 @Composable
 private fun ReasoningModePill(
     label: String,
