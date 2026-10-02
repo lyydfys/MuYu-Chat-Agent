@@ -176,8 +176,23 @@ if ([string]::IsNullOrWhiteSpace($env:JAVA_HOME)) {
 $gitHead = & git -C $projectRoot rev-parse HEAD 2>$null
 if ($LASTEXITCODE -eq 0) {
     $buildRecord.sourceRevision = ([string]$gitHead).Trim()
-    $gitStatusLines = & git -C $projectRoot status --short 2>&1
-    $gitStatusExitCode = $LASTEXITCODE
+    # Native commands write their diagnostics to stderr, and with
+    # $ErrorActionPreference = "Stop" Windows PowerShell 5.1 turns that output into a
+    # terminating NativeCommandError -- `java -version` below fails every time on 5.1
+    # because its version banner is a stderr write. Lower the preference around the two
+    # native captures, the same way tools/benchmarks/run-real-device-comparison.ps1 does.
+    $nativeCapturePreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $gitStatusLines = & git -C $projectRoot status --short 2>&1
+        $gitStatusExitCode = $LASTEXITCODE
+        $javaVersion = $null
+        if (Get-Command java -ErrorAction SilentlyContinue) {
+            $javaVersion = (& java -version 2>&1 | Out-String).Trim()
+        }
+    } finally {
+        $ErrorActionPreference = $nativeCapturePreference
+    }
     $buildRecord.sourceTreeStatus = if ($gitStatusExitCode -eq 0) { @($gitStatusLines) } else { "unavailable: git status failed: $($gitStatusLines -join ' ')" }
 } else {
     $buildRecord.sourceRevision = "unavailable: git rev-parse failed"
@@ -185,10 +200,6 @@ if ($LASTEXITCODE -eq 0) {
 }
 $buildRecord.sourceProvenance = Get-McaSourceProvenance $projectRoot
 
-$javaVersion = $null
-if (Get-Command java -ErrorAction SilentlyContinue) {
-    $javaVersion = (& java -version 2>&1 | Out-String).Trim()
-}
 $ndkCandidates = @($env:ANDROID_NDK_HOME, $env:ANDROID_NDK_ROOT) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 $androidSdkRoot = if ($env:ANDROID_SDK_ROOT) { $env:ANDROID_SDK_ROOT } else { $env:ANDROID_HOME }
 if ([string]::IsNullOrWhiteSpace($androidSdkRoot)) {
