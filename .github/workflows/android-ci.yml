@@ -1,5 +1,31 @@
 name: Android CI
 
+# What this workflow does and does not cover.
+#
+# It runs the JVM-side gates that can run without the QAIRT/QNN SDK: compilation and the unit
+# test suite. It deliberately does NOT produce a release artifact, and nothing it builds may be
+# treated as production evidence. Two reasons, both structural rather than temporary:
+#
+#   1. Typed QAIRT/QNN bindings are required by default (core/native/build.gradle.kts and
+#      CMakeLists.txt both fail closed without an SDK). The SDK is not uploaded to CI -- plan
+#      sections 4.2 and 13.3 treat it as local material -- so this workflow opts into the
+#      documented stub explicitly and says so.
+#   2. The MNN runtime is produced by tools/build-mnn-runtime.ps1, a Windows PowerShell script
+#      that an ubuntu runner cannot execute. Even with the QNN gate satisfied, the MNN library
+#      in any CI-built APK would be a stub.
+#
+# Production native acceptance -- real QNN graphs, a real MNN runtime, a physical device and the
+# authenticated Local API -- stays in the controlled environment described in plan section 13.4.
+# Before this change every run of this workflow failed at :core:native:verifyMcaQnnSdkHeaders,
+# so the workflow reported nothing at all. See E:\MAC_REFACTOR_EVIDENCE\P0-05-ci-workflow-broken.md.
+#
+# Lint is intentionally absent. `:app:lintDebug` reports 8 errors on this revision (5
+# NonObservableLocale in MainActivity, 3 NewApi in debug-only smoke activities); the 3 NewApi
+# ones were fixed, the 5 locale ones are untouched because changing how a composable reads the
+# locale changes recomposition behaviour and needs its own review. Adding lint here before those
+# are resolved would only move the failure. Turning off abortOnError to make it pass is not an
+# option: that suppresses findings rather than addressing them.
+
 on:
   pull_request:
   push:
@@ -7,8 +33,8 @@ on:
       - master
 
 jobs:
-  build:
-    name: Gradle build
+  verify:
+    name: Compile and unit tests (QNN stub; not a production artifact)
     runs-on: ubuntu-latest
 
     steps:
@@ -32,11 +58,25 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
-      - name: Run unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+      # -PmcaQnnTypedBindingsRequired=false is the opt-in stub path the build script documents.
+      # Every Gradle step below passes it, so no step can accidentally take the fail-closed path
+      # and report a confusing SDK error instead of a real compile or test result.
+      #
+      # This job pins JDK 21, and that choice is load-bearing for the test step. Locally, on
+      # JDK 17, :core:engine:testDebugUnitTest fails 7 tests with
+      # UnsupportedClassVersionError: ... class file version 65.0 ... up to 61.0 -- the
+      # litertlm-android artifact is built for Java 21. On JDK 21 those same tests are expected
+      # to pass. That expectation comes from the error itself and is NOT verified here: no JDK 21
+      # is available in the environment this workflow was written in. If a future CI run fails on
+      # exactly those 7 tests, this comment is the place to start.
+      - name: Run unit tests (stub QNN bindings)
+        run: ./gradlew testDebugUnitTest --stacktrace -PmcaQnnTypedBindingsRequired=false
 
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug --stacktrace
+      - name: Compile debug sources (stub QNN bindings)
+        run: ./gradlew :app:compileDebugKotlin --stacktrace -PmcaQnnTypedBindingsRequired=false
 
-      - name: Build unsigned release APK
-        run: ./gradlew :app:assembleRelease -Pmca.abis=arm64-v8a --stacktrace
+      - name: Report what this run did not verify
+        run: |
+          echo "This job compiled sources and ran JVM unit tests with stubbed QAIRT/QNN bindings."
+          echo "It did not build or validate the QNN runtime, the MNN runtime, or any release artifact."
+          echo "Real native acceptance requires the controlled environment (plan section 13.4)."

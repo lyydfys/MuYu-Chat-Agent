@@ -1945,7 +1945,16 @@ open class LocalChatSmokeActivity : Activity() {
     }
 
     private fun preferredQairtChipsets(): List<String> {
-        val socModel = Build.SOC_MODEL.orEmpty().uppercase()
+        // Build.SOC_MODEL exists only from API 31 and this module's minSdk is 26, so it is
+        // guarded here the same way the production readers guard it -- see
+        // LiteRtQualcommRuntimeStager, QairtExecutionVerification and core:telemetry's SocInfo,
+        // which all fall back to Build.BOARD below API 31. Without the guard this smoke screen
+        // throws NoSuchFieldError on API 26-30.
+        val socModel = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            Build.SOC_MODEL
+        } else {
+            Build.BOARD
+        }).orEmpty().uppercase()
         return when {
             "SM8850" in socModel -> listOf(
                 "qualcomm-snapdragon-8-elite-gen5",

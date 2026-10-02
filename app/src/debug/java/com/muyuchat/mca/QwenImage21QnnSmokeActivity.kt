@@ -107,7 +107,17 @@ class QwenImage21QnnSmokeActivity : Activity() {
                     }
                 } else null
                 if (runtime != null) {
-                    val htpVariant = LiteRtQualcommRuntimeStager.variantForSocModel(android.os.Build.SOC_MODEL)
+                    // Build.SOC_MODEL exists only from API 31; this module's minSdk is 26, so it
+                    // has to be guarded here exactly as the production readers guard it --
+                    // LiteRtQualcommRuntimeStager, QairtExecutionVerification and
+                    // core:telemetry's SocInfo all fall back to Build.BOARD below API 31.
+                    // Without the guard this smoke activity throws NoSuchFieldError on API 26-30.
+                    val socModel = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                        android.os.Build.SOC_MODEL
+                    } else {
+                        android.os.Build.BOARD
+                    }
+                    val htpVariant = LiteRtQualcommRuntimeStager.variantForSocModel(socModel)
                     val transportFiles = when (htpVariant) {
                         "v73" -> listOf("libQnnHtpV73Stub.so", "libQnnHtpV73Skel.so")
                         "v75" -> listOf("libQnnHtpV75Stub.so", "libQnnHtpV75Skel.so")
@@ -123,7 +133,7 @@ class QwenImage21QnnSmokeActivity : Activity() {
                     }
                     val presentTransportFiles = transportFiles.filter { File(runtime, it).isFile }
                     require(required.all { File(runtime, it).isFile }) {
-                        "QAIRT runtime directory is incomplete for ${android.os.Build.SOC_MODEL}: " +
+                        "QAIRT runtime directory is incomplete for $socModel: " +
                             "${runtime.listFiles()?.map { it.name }}"
                     }
                     Log.i(
