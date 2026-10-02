@@ -19,6 +19,16 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import com.muyuchat.mca.presentation.lifecycleAfterGeneration
+import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
+import com.muyuchat.mca.presentation.afterBackgroundGenerationStopped
+import com.muyuchat.mca.presentation.afterGenerationStarted
+import com.muyuchat.mca.presentation.afterGenerationCompleted
+import com.muyuchat.mca.presentation.afterGenerationTerminated
+import com.muyuchat.mca.presentation.afterNativeRuntimeReleased
+import com.muyuchat.mca.presentation.nativeRuntimeReleaseObserved
+import com.muyuchat.mca.presentation.withBackgroundCancellationFinalized
+import com.muyuchat.mca.presentation.BackgroundCancelledAssistantOutput
 
 class MainViewModelCompletionFallbackTest {
     @Test

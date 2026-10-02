@@ -4,6 +4,7 @@ import java.io.File
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import com.muyuchat.mca.presentation.restoreAfterConversationMutationFailure
 
 class ConversationMutationAtomicityContractTest {
     @Test
