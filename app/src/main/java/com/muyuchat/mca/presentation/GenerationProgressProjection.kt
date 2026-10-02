@@ -9,18 +9,23 @@ import com.muyuchat.mca.MainUiState
 // The generation-progress quartet of MainUiState, set as one unit.
 //
 // Why this exists: MainUiState.generationPhase, generationTokenProgress,
-// generationPersistProgress and generationStats describe one thing -- where the current
-// generation is and how far it has got -- but they were written by hand at seventeen copy()
-// sites in MainViewModel. Every one of those sites listed the fields individually, and twelve of
-// them deliberately omit at least one field so that Kotlin's copy() keeps the previous value.
-// That is a correctness hazard the compiler cannot see: naming three of the four fields produces
-// a state where, say, the phase has been reset but the token progress has not, and nothing warns.
+// generationPersistProgress and generationStats are written by hand at seventeen copy() sites in
+// MainViewModel, and twelve of those sites deliberately omit at least one field so that Kotlin's
+// copy() keeps the previous value. Naming three of the four is easy to do by accident and the
+// compiler cannot see it, so a caller that does want to set all four should say so once.
 //
-// This helper makes the four move together when a caller does want to set all four. It is
-// deliberately a plain four-parameter function rather than a pair of named resets: the call sites
-// it replaces pass explicit values for all four, including the streaming site that enters DECODE
-// with the new stats. Passing the values through unchanged is what makes the replacement an
-// equivalence rather than a behaviour change.
+// An earlier version of this comment claimed the four "describe one thing". That was too strong,
+// and the sites that omit a field are the counter-example: they divide into in-flight state --
+// phase, tokenProgress, persistProgress -- and the last result, stats. publishReconciledChatSessions
+// is the clearest case: when the active session is corrected underneath an in-flight generation it
+// clears the in-flight three and keeps stats, because the user should still see what the previous
+// generation produced. So the omissions are a structured split, not nine unrelated oversights, and
+// this helper must not be applied where that split is what the code means.
+//
+// This helper makes the four move together when a caller does want to set all four. It is a plain
+// four-parameter function rather than a pair of named resets: the call sites it replaces pass
+// explicit values for all four, including the streaming site that enters DECODE with the new stats.
+// Passing the values through unchanged is what makes the replacements equivalences.
 //
 // It does NOT replace the twelve sites that omit a field. Those keep copy()'s "leave it alone"
 // semantics on purpose, and forcing them through this helper would silently write null over a
@@ -30,7 +35,7 @@ import com.muyuchat.mca.MainUiState
 // construction, which is how the five replacements were checked.
 
 /**
- * Returns [this] with the whole generation-progress quartet replaced by the given values.
+ * Returns [this] with all four generation-progress fields replaced by the given values.
  *
  * Every one of the four is set, so callers must supply all four -- that is the point. If a caller
  * wants to leave one alone, it should keep using `copy(...)` directly and say so.
