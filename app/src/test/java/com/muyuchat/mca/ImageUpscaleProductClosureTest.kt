@@ -62,7 +62,7 @@ class ImageUpscaleProductClosureTest {
         // ViewModel, and no assertion changed.
         val imageAssetFiles = sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetFiles.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val upscale = functionBody(viewModel, "fun upscaleImageAsset(")
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
         val localApiGeneration = functionBody(viewModel, "private suspend fun generateLocalApiImage(")

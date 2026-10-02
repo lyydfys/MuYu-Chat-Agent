@@ -77,7 +77,7 @@ class LocalImageProductClosureTest {
     fun `worker cancellation becomes a non-failure terminal UI state`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         // ImageGenerationStatusRecord's entries moved to PersistedRecords.kt during P2, so the
         // first assertion reads from there. The other four read function bodies that stayed in
         // the ViewModel, an expression in MainActivity and one in ChatScreen. No assertion
@@ -94,7 +94,7 @@ class LocalImageProductClosureTest {
 
     @Test
     fun `image parameters reload per selected model and preserve explicit empty negative prompt`() {
-        val source = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val source = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val enqueue = functionBody(source, "fun enqueueImagePrompt(")
 
         assertTrue(source.contains("IMAGE_GENERATION_UI_PARAMETER_PREFS"))
@@ -309,7 +309,7 @@ class LocalImageProductClosureTest {
     fun `retry and history recreation retain immutable model inputs and generation parameters`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         // ImageGenerationJobRecord moved to PersistedRecords.kt during P2, so the one assertion
         // about its field reads from there. The other four read function bodies that stayed in
         // the ViewModel. No assertion changed -- only the file each one reads.
@@ -374,7 +374,7 @@ class LocalImageProductClosureTest {
     @Test
     fun `LoRA crosses UI and Local API by id while native success requires applied tensors`() {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val api = sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt")
         val bridge = sourceFile("core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp")
         val uiItemStart = chat.indexOf("data class ImageLoraUiItem(")
@@ -402,7 +402,7 @@ class LocalImageProductClosureTest {
         val imageChoicePresentation =
             sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ImageChoicePresentation.kt")
         val protocol = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageWorkerProtocol.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val api = functionBody(viewModel, "private suspend fun generateLocalApiImage(")
 
         assertTrue(mainActivity.contains("preview = uiOptions.toLocalImagePreviewOptions()"))

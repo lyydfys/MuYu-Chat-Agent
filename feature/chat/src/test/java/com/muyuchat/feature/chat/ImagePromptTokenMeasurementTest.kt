@@ -41,8 +41,14 @@ class ImagePromptTokenMeasurementTest {
 
     @Test
     fun `ui distinguishes estimates and keeps unavailable token state actionable`() {
+        // The image workspace moved out of ChatScreen.kt into ImageWorkspaceScreens.kt. The subject
+        // of this test is that workspace, so it reads both files rather than one: the assertions
+        // below are unchanged, and reading both keeps them meaningful wherever each declaration
+        // now lives.
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt",
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt",
         )
 
         assertTrue(source.contains("Token 统计暂不可用 · 生成前仍会检查模型和提示词"))
