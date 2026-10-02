@@ -12,6 +12,7 @@ import com.muyuchat.api.local.LocalApiControlPlane
 import com.muyuchat.api.local.McaLoopbackServer
 import com.muyuchat.mca.IsolatedLocalChatRunners
 import com.muyuchat.mca.LiteRtQualcommRuntimeStager
+import com.muyuchat.mca.formatBytes
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.RecommendedChatRuntime
@@ -2034,11 +2035,7 @@ open class LocalChatSmokeActivity : Activity() {
         }
     }
 
-    private fun formatBytes(bytes: Long): String {
-        val gb = bytes / 1024.0 / 1024.0 / 1024.0
-        val mb = bytes / 1024.0 / 1024.0
-        return if (gb >= 1.0) "%.2f GB".format(gb) else "%.1f MB".format(mb)
-    }
+
 
     private fun selectQairtRuntimeDir(bundleDir: File): File {
         if (looksLikeCompleteQairtBundle(bundleDir) && hasDirectQairtArtifact(bundleDir)) return bundleDir

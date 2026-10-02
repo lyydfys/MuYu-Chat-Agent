@@ -93,11 +93,7 @@ object ModelCompatibility {
         return value.startsWith("IQ1_") || value.startsWith("IQ2_") || value.startsWith("Q2_")
     }
 
-    private fun formatBytes(bytes: Long): String {
-        val gb = bytes / GB.toDouble()
-        val mb = bytes / MB.toDouble()
-        return if (gb >= 1.0) "%.2fGB".format(gb) else "%.1fMB".format(mb)
-    }
+    private fun formatBytes(bytes: Long): String = formatModelSizeBytes(bytes)
 
     private const val MB = 1024L * 1024L
     private const val GB = 1024L * MB

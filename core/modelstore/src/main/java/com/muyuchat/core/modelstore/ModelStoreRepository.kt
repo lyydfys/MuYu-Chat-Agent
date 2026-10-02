@@ -1528,11 +1528,7 @@ class ModelStoreRepository(private val context: Context) {
             candidate.path.startsWith(managedRoot.path + File.separator)
     }
 
-    private fun formatBytes(bytes: Long): String {
-        val gb = bytes / GB.toDouble()
-        val mb = bytes / MB.toDouble()
-        return if (gb >= 1.0) "%.2fGB".format(gb) else "%.1fMB".format(mb)
-    }
+    private fun formatBytes(bytes: Long): String = formatModelSizeBytes(bytes)
 
     private companion object {
         private val MODEL_IMPORT_LOCK = Any()
