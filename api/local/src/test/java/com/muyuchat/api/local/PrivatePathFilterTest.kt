@@ -60,9 +60,18 @@ class PrivatePathFilterTest {
         //
         // This matters because one caller rejects the whole image provider response on a match
         // (private_image_input_path_exposed in ImageGenerationApiContract), so a URL in that
-        // payload would fail the response rather than merely having a field stripped. Whether
-        // that is reachable in practice needs a real worker response, which this environment
-        // cannot produce.
+        // payload would fail the response rather than merely having a field stripped.
+        //
+        // Reachability, resolved by reading the producer rather than by producing a worker
+        // response. The response's `execution` object is built in MainViewModel from
+        // sanitizedLocalImageApiExecution(...), which runs sanitizeNativeExecutionJson ->
+        // sanitizeNativeObject -> sanitizeNativeValue. That last function is
+        // `is String -> value.takeUnless(String::looksLikePrivatePath)`: it drops every string
+        // this filter matches, URLs included. The API contract then validates the response and
+        // calls the same filter on the same, already-filtered data, so the rejection cannot fire
+        // there. A sanitizer failure falls back to an empty JSONObject rather than to
+        // unsanitized data. The false positive is therefore not reachable through the execution
+        // evidence.
         //
         // Pinned rather than fixed: narrowing the pattern is a behaviour change and the plan
         // requires those to be separate, analysed tasks. Recording it here means the next
