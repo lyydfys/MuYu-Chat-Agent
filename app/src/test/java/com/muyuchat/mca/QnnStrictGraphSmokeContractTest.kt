@@ -36,7 +36,9 @@ class QnnStrictGraphSmokeContractTest {
         val catalog = source(
             "core/download/src/main/java/com/muyuchat/core/download/ModelScopeClient.kt"
         )
-        val manifestWriter = source("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // The manifest writer moved out of MainViewModel during P2, so it is read from its new
+        // file. The two assertions on it below are unchanged -- only the file they read.
+        val manifestWriter = source("app/src/main/java/com/muyuchat/mca/DownloadedBundleManifest.kt")
         val parser = source("app/src/main/java/com/muyuchat/mca/LocalQnnSmokeSpec.kt")
 
         listOf(
