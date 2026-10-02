@@ -50,9 +50,17 @@
             tools:node="merge" />
 
         <!-- Initialize downloads on demand so a failed task database cannot prevent the recovery UI. -->
+        <!-- exported="false" is stated here rather than inherited. androidx.startup declares the
+             provider unexported, and the merged manifest resolved to exported="false" before this
+             line was added, so nothing changes at runtime. It is written out because the security
+             property currently depends on a library we do not control: a future androidx.startup
+             release that exported the provider, or renamed it, would silently reopen the surface
+             with no diff here to review. Stating it also clears the ExportedContentProvider lint
+             warning, which was reporting this merge node for not declaring the attribute itself. -->
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
             tools:node="merge">
             <meta-data android:name="androidx.work.WorkManagerInitializer" tools:node="remove" />
         </provider>
