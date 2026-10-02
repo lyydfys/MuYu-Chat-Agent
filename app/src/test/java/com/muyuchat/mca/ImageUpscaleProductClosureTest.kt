@@ -57,6 +57,10 @@ class ImageUpscaleProductClosureTest {
     @Test
     fun `product upscale shares coordinator protects active inputs and atomically commits result`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // copyImageAssetStreamAtomically moved to ImageAssetFiles.kt during P2. Only that one
+        // lookup reads from the new file; every other functionBody below still reads the
+        // ViewModel, and no assertion changed.
+        val imageAssetFiles = sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetFiles.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
         val upscale = functionBody(viewModel, "fun upscaleImageAsset(")
@@ -69,7 +73,7 @@ class ImageUpscaleProductClosureTest {
         val attachFile = functionBody(viewModel, "fun attachFile(")
         val importImage = functionBody(viewModel, "private suspend fun importImageAsset(")
         val atomicImport = functionBody(
-            viewModel,
+            imageAssetFiles,
             "internal suspend fun copyImageAssetStreamAtomically("
         )
         val deleteUpscaler = functionBody(viewModel, "fun deleteLocalImageUpscaler(")

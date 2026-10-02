@@ -74,7 +74,9 @@ class ChatSessionAssistantSnapshotContractTest {
 
     @Test
     fun embeddedWorldBookParserResultIsIncludedInTheVisibleImportStatus() {
-        val source = sourceFile("MainViewModel.kt")
+        // The character book parser moved to TextualInversionLibrary.kt during P2. All four
+        // assertions are unchanged -- only the file they read.
+        val source = sourceFile("TextualInversionLibrary.kt")
 
         assertTrue(source.contains("internal fun parseEmbeddedCharacterBook("))
         assertTrue(source.contains("internal fun embeddedCharacterBookStatusSuffix("))
