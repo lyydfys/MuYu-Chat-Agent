@@ -118,12 +118,20 @@ object LocalApiCapabilityRegistry {
                 "model", "prompt", "negative_prompt", "sampler", "size", "n", "response_format",
                 "steps", "cfg_scale", "seed", "task_mode", "input_image", "source_image",
                 "mask_image", "mask", "control_image", "strength", "control_strength", "clip_skip",
-                "loras", "vae_tiling", "textual_inversion_ids", "ultrafix", "preview"
+                "loras", "vae_tiling", "textual_inversion_ids", "ultrafix"
             ),
             notes = listOf(
                 "Runtime/model capability and execution evidence are validated before native dispatch.",
                 "Unsupported task modes, samplers, image counts and response formats are rejected.",
-                "Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it."
+                "Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it.",
+                // preview is absent from acceptedFields on purpose, and this note is why. The
+                // request parser rejects any preview field outright with unsupported_preview --
+                // synchronous generation has no preview path -- so listing it as accepted told
+                // clients the opposite of what happens. The field stays named in the parser's
+                // REQUEST_FIELDS so that sending it still fails as unsupported_preview rather
+                // than as an unknown field; the rejection behaviour and the error code are
+                // unchanged, only the claim in this registry is.
+                "Synchronous generation does not support preview: a preview field is rejected with unsupported_preview, and this endpoint publishes no preview frames."
             ),
             errorCodes = listOf(
                 "invalid_json", "unsupported_sampler", "unsupported_image_count",

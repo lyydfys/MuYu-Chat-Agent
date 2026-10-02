@@ -43,9 +43,9 @@
       "auth_required": true,
       "description": "Authenticated local image-generation subset.",
       "error_codes": ["invalid_json","unsupported_sampler","unsupported_image_count","unsupported_response_format","unsupported_preview","image_model_not_ready","image_generation_busy","image_worker_unavailable","image_native_execution_failed","unauthorized"],
-      "fields": ["model","prompt","negative_prompt","sampler","size","n","response_format","steps","cfg_scale","seed","task_mode","input_image","source_image","mask_image","mask","control_image","strength","control_strength","clip_skip","loras","vae_tiling","textual_inversion_ids","ultrafix","preview"],
+      "fields": ["model","prompt","negative_prompt","sampler","size","n","response_format","steps","cfg_scale","seed","task_mode","input_image","source_image","mask_image","mask","control_image","strength","control_strength","clip_skip","loras","vae_tiling","textual_inversion_ids","ultrafix"],
       "method": "POST",
-      "notes": ["Runtime/model capability and execution evidence are validated before native dispatch.","Unsupported task modes, samplers, image counts and response formats are rejected.","Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it."],
+      "notes": ["Runtime/model capability and execution evidence are validated before native dispatch.","Unsupported task modes, samplers, image counts and response formats are rejected.","Optional X-MCA-Request-Id identifies the in-flight image request for scoped stop; the response echoes it.","Synchronous generation does not support preview: a preview field is rejected with unsupported_preview, and this endpoint publishes no preview frames."],
       "path": "/v1/images/generations",
       "stream": false,
       "support": "partial"}

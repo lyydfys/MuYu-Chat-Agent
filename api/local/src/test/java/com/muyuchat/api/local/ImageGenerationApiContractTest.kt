@@ -2578,6 +2578,53 @@ class ImageGenerationApiContractTest {
                 .put("overlap", 0.25)
         )
 
+    @Test
+    fun `preview is refused for every value and the capability says so`() {
+        // The capability registry used to list "preview" among the accepted fields of
+        // /v1/images/generations while the parser refused the field outright with
+        // unsupported_preview. The registry now omits it and carries a note saying synchronous
+        // generation does not support preview. The refusal itself is unchanged, and these
+        // assertions pin both halves so that neither can drift back.
+
+        // Every shape a client could send is refused, and refused as unsupported_preview rather
+        // than as an unknown field -- which is what keeps the field named in REQUEST_FIELDS.
+        listOf<Any?>(
+            JSONObject().put("interval", 4).put("mode", "projection"),
+            JSONObject().put("interval", 1).put("mode", "vae"),
+            true,
+            false,
+            "projection",
+            4,
+            JSONObject.NULL
+        ).forEach { value ->
+            assertRejected("unsupported_preview") {
+                ImageGenerationApiContract.parseRequest(
+                    JSONObject().put("prompt", "test").put("preview", value).toString()
+                )
+            }
+        }
+
+        // Omitting the field is not an error, which is the case that must keep working.
+        val withoutPreview = ImageGenerationApiContract.parseRequest("""{"prompt":"test"}""")
+        assertNull(withoutPreview.preview)
+
+        // The capability and the parser now agree, in both directions.
+        val endpoint = LocalApiCapabilityRegistry.all()
+            .single { it.path == "/v1/images/generations" }
+        assertFalse(
+            "preview must not be advertised as an accepted field",
+            endpoint.acceptedFields.contains("preview")
+        )
+        assertTrue(
+            "the endpoint must still declare that it can refuse preview",
+            endpoint.errorCodes.contains("unsupported_preview")
+        )
+        assertTrue(
+            "the registry must state that synchronous generation does not support preview",
+            endpoint.notes.any { it.contains("does not support preview") }
+        )
+    }
+
     private fun assertRejected(code: String, block: () -> Unit) {
         try {
             block()
