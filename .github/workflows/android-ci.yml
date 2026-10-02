@@ -19,12 +19,12 @@ name: Android CI
 # Before this change every run of this workflow failed at :core:native:verifyMcaQnnSdkHeaders,
 # so the workflow reported nothing at all. See E:\MAC_REFACTOR_EVIDENCE\P0-05-ci-workflow-broken.md.
 #
-# Lint is intentionally absent. `:app:lintDebug` reports 8 errors on this revision (5
-# NonObservableLocale in MainActivity, 3 NewApi in debug-only smoke activities); the 3 NewApi
-# ones were fixed, the 5 locale ones are untouched because changing how a composable reads the
-# locale changes recomposition behaviour and needs its own review. Adding lint here before those
-# are resolved would only move the failure. Turning off abortOnError to make it pass is not an
-# option: that suppresses findings rather than addressing them.
+# Lint is a step below. It was not, until the 8 errors this file used to describe were fixed:
+# 3 NewApi reads of Build.SOC_MODEL (API 31) in debug-only smoke activities, now guarded the same
+# way the production readers guard it, and 5 NonObservableLocale reads of Locale.getDefault() in
+# McaApp, now LocalLocale.current.platformLocale. :app:lintDebug reports 0 errors and 128 warnings
+# on this revision. The warning count did not change, which is the point -- nothing was suppressed
+# to get here, and abortOnError is deliberately left at its default.
 
 on:
   pull_request:
@@ -34,7 +34,7 @@ on:
 
 jobs:
   verify:
-    name: Compile and unit tests (QNN stub; not a production artifact)
+    name: Compile, lint and unit tests (QNN stub; not a production artifact)
     runs-on: ubuntu-latest
 
     steps:
@@ -75,8 +75,21 @@ jobs:
       - name: Compile debug sources (stub QNN bindings)
         run: ./gradlew :app:compileDebugKotlin --stacktrace -PmcaQnnTypedBindingsRequired=false
 
+      # Runs over every module, not just :app -- :app:lintDebug pulls in the library modules'
+      # lint analysis. Verified to finish with 0 errors and 128 warnings on this revision;
+      # warnings do not fail the build, and no baseline or abortOnError setting was added.
+      - name: Lint (stub QNN bindings)
+        run: ./gradlew :app:lintDebug --stacktrace -PmcaQnnTypedBindingsRequired=false
+
+      - name: Upload lint report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.*
+
       - name: Report what this run did not verify
         run: |
-          echo "This job compiled sources and ran JVM unit tests with stubbed QAIRT/QNN bindings."
+          echo "This job compiled sources, ran lint, and ran JVM unit tests with stubbed QAIRT/QNN bindings."
           echo "It did not build or validate the QNN runtime, the MNN runtime, or any release artifact."
           echo "Real native acceptance requires the controlled environment (plan section 13.4)."
