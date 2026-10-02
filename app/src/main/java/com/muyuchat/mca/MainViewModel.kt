@@ -209,6 +209,7 @@ import java.util.UUID
 import java.util.zip.ZipInputStream
 import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
+import com.muyuchat.mca.presentation.withGenerationProgressCleared
 // Three P2 extractions are intentionally NOT imported here: afterBackgroundGenerationStopped,
 // withBackgroundCancellationFinalized and BackgroundCancelledAssistantOutput have no call site in
 // this ViewModel, and MainViewModelCompletionFallbackTest asserts that stays true. Importing them
@@ -13841,17 +13842,13 @@ class MainViewModel @JvmOverloads constructor(
                     sessionsToPersist = updated.chatSessions
                     updated.copy(
                         isGenerating = false,
-                        generationPhase = null,
-                        generationTokenProgress = null,
-                        generationPersistProgress = null,
-                        generationStats = null,
                         engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
                         statusMessage = if (stopRequested && joined) {
                             "已停止生成"
                         } else {
                             "已请求停止，正在恢复本地推理进程…"
                         }
-                    )
+                    ).withGenerationProgressCleared()
                 }
                 persistConversationMutation(sessionsToPersist, rollback)
             } finally {
