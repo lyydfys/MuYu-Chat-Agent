@@ -504,11 +504,16 @@ class LocalImagePromptCancellationContractTest {
 
     @Test
     fun `worker disconnect and remote failures expose an actionable next step`() {
+        // The failure message mapping moved to LocalImageFailureMessages.kt during P2; the call
+        // site that consumes it is still in the ViewModel, at the end of this test. Two sources,
+        // because the four assertions above the last one are about the mapping and the last one
+        // is about its caller. No assertion changed -- only the file each one reads.
         val source = mainViewModelSource()
-        assertTrue(source.contains("internal fun localImageGenerationFailureMessage(error: Throwable)"))
-        assertTrue(source.contains("可用内存不足"))
-        assertTrue(source.contains("校验模型包后重试"))
-        assertTrue(source.contains("请等待 1 秒后重试"))
+        val failureMessages = sourceFile("LocalImageFailureMessages.kt")
+        assertTrue(failureMessages.contains("internal fun localImageGenerationFailureMessage(error: Throwable)"))
+        assertTrue(failureMessages.contains("可用内存不足"))
+        assertTrue(failureMessages.contains("校验模型包后重试"))
+        assertTrue(failureMessages.contains("请等待 1 秒后重试"))
         assertTrue(source.contains("val nativeMessage = localImageGenerationFailureMessage(error)"))
     }
 
