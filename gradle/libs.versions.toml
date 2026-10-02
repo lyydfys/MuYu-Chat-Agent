@@ -17,7 +17,6 @@ work = "2.11.0"
 room = "2.8.4"
 junit = "4.13.2"
 json = "20240303"
-geniex = "0.3.12"
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
@@ -51,4 +50,9 @@ kotlinx-coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutine
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
 junit = { module = "junit:junit", version.ref = "junit" }
 json = { module = "org.json:json", version.ref = "json" }
-geniex-android = { module = "com.qualcomm.qti:geniex-android", version.ref = "geniex" }
+# GenieX is deliberately absent from this catalog. The project does not depend on
+# com.qualcomm.qti:geniex-android from a repository: it builds against a locally patched AAR at
+# vendor/geniex/geniex-android-0.3.12-mca1.aar, referenced as files(...) in core/engine and app,
+# with its SHA-256 checked at build time. A catalog entry naming the upstream coordinate was
+# removed because it described a dependency this project does not have, and would have led any
+# version or vulnerability scan to report on the unpatched artifact instead of the one in use.
