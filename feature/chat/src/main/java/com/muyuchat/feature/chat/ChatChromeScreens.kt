@@ -4555,6 +4555,23 @@ private fun UserMessageBubble(
     onCopy: () -> Unit
 ) {
     val context = LocalContext.current
+    // The bubble colour was hardcoded to a light value, so on a dark theme the user's own
+    // messages rendered as solid white blocks. It now follows the same
+    // "if (darkTheme) colorScheme.<role> else <light value>" shape the rest of this file uses --
+    // primaryContainer at 0.42 is the brand-tinted surface already used for blue surfaces at
+    // lines 2287, 2389 and 2490, and surfaceVariant is the neutral one used at 2391 and 4080.
+    // Only the two colour expressions change: size, radius, padding, spacing and text are untouched.
+    val darkTheme = isSystemInDarkTheme()
+    val bubbleColor = if (darkTheme) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f)
+    } else {
+        Color(0xFFEEF4FF)
+    }
+    val attachmentPlaceholderColor = if (darkTheme) {
+        MaterialTheme.colorScheme.surfaceVariant
+    } else {
+        Color.White.copy(alpha = 0.72f)
+    }
     val copyableContent = displayInputWithoutAttachment(message.content)
     val visibleImageAttachments by produceState(
         initialValue = message.imageAttachments.takeIf { it.size <= 1 }.orEmpty(),
@@ -4573,7 +4590,7 @@ private fun UserMessageBubble(
         horizontalAlignment = Alignment.End
     ) {
         Surface(
-            color = Color(0xFFEEF4FF),
+            color = bubbleColor,
             shape = RoundedCornerShape(
                 topStart = 20.dp,
                 topEnd = 20.dp,
@@ -4602,7 +4619,7 @@ private fun UserMessageBubble(
                             val displayBitmap = bitmap
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
-                                color = Color.White.copy(alpha = 0.72f),
+                                color = attachmentPlaceholderColor,
                                 modifier = Modifier.size(104.dp)
                             ) {
                                 if (displayBitmap != null) {
