@@ -209,6 +209,7 @@ import java.util.UUID
 import java.util.zip.ZipInputStream
 import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
+import com.muyuchat.mca.presentation.withGenerationProgress
 import com.muyuchat.mca.presentation.withGenerationProgressCleared
 // Three P2 extractions are intentionally NOT imported here: afterBackgroundGenerationStopped,
 // withBackgroundCancellationFinalized and BackgroundCancelledAssistantOutput have no call site in
@@ -10550,17 +10551,13 @@ class MainViewModel @JvmOverloads constructor(
                 activeChatSessionId = sessionId,
                 chatSessions = sessionsToPersist,
                 isGenerating = true,
-                generationPhase = null,
-                generationTokenProgress = null,
-                generationPersistProgress = null,
-                generationStats = null,
                 promptContextUsage = promptContextUsageFor(
                     plan = rebuiltPreflightContext,
                     admission = admission,
                     params = conversationParams
                 ),
                 statusMessage = null
-            )
+            ).withGenerationProgressCleared()
         }
         persistChatSessions(
             sessions = sessionsToPersist,
@@ -12082,12 +12079,8 @@ class MainViewModel @JvmOverloads constructor(
                     messages = messages,
                     chatSessions = sessions,
                     isGenerating = true,
-                    generationPhase = null,
-                    generationTokenProgress = null,
-                    generationPersistProgress = null,
-                    generationStats = null,
                     statusMessage = null
-                )
+                ).withGenerationProgressCleared()
             }
             persistChatSessions(sessions)
             started = startGeneration(
@@ -12162,12 +12155,8 @@ class MainViewModel @JvmOverloads constructor(
             state.copy(
                 messages = messages,
                 chatSessions = sessions,
-                isGenerating = false,
-                generationPhase = null,
-                generationTokenProgress = null,
-                generationPersistProgress = null,
-                generationStats = null
-            )
+                isGenerating = false
+            ).withGenerationProgressCleared()
         }
         updatedSessions?.let(::persistChatSessions)
     }
@@ -13493,11 +13482,12 @@ class MainViewModel @JvmOverloads constructor(
                                 it
                             } else {
                                 it.copy(
-                                    stats = event.stats,
-                                    generationPhase = GenerationPhase.DECODE,
-                                    generationTokenProgress = null,
-                                    generationPersistProgress = null,
-                                    generationStats = event.stats
+                                    stats = event.stats
+                                ).withGenerationProgress(
+                                    phase = GenerationPhase.DECODE,
+                                    tokenProgress = null,
+                                    persistProgress = null,
+                                    stats = event.stats
                                 )
                             }
                         }
