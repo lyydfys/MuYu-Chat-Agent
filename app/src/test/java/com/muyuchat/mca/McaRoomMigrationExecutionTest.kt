@@ -209,6 +209,21 @@ class McaRoomMigrationExecutionTest {
             assertEquals(1, rowCount(database, "knowledge_chunks"))
             assertEquals(1, rowCount(database, "chat_knowledge_base_bindings"))
 
+            // The content-hash columns are the only asset-integrity fields the legacy knowledge
+            // schema has. Dropping the orphaned rows above must not rewrite the surviving ones,
+            // so the hashes are asserted against the exact fixture values. Every legacy row used
+            // to carry the same literal "hash", which could not tell "preserved" apart from
+            // "re-created with an identical value"; the two surviving rows now differ from each
+            // other and from the orphans, so a rewrite, a swap, or a recomputation would fail.
+            assertEquals(
+                "hash-document-live",
+                singleString(database, "knowledge_documents", "contentHash", "id = 'document-live'")
+            )
+            assertEquals(
+                "hash-chunk-live",
+                singleString(database, "knowledge_chunks", "contentHash", "id = 'chunk-live'")
+            )
+
             database.execSQL("DELETE FROM knowledge_bases WHERE id = 'base-live'")
             assertEquals(0, rowCount(database, "knowledge_documents"))
             assertEquals(0, rowCount(database, "knowledge_chunks"))
@@ -287,7 +302,7 @@ class McaRoomMigrationExecutionTest {
         database.execSQL(
             "INSERT INTO knowledge_documents(" +
                 "id, knowledgeBaseId, title, source, contentHash, contentLength, chunkCount, createdAt, updatedAt" +
-                ") VALUES ('document-live', 'base-live', 'title', 'local', 'hash', 4, 1, 1, 1)"
+                ") VALUES ('document-live', 'base-live', 'title', 'local', 'hash-document-live', 4, 1, 1, 1)"
         )
         database.execSQL(
             "INSERT INTO knowledge_documents(" +
@@ -297,7 +312,7 @@ class McaRoomMigrationExecutionTest {
         database.execSQL(
             "INSERT INTO knowledge_chunks(" +
                 "id, knowledgeBaseId, documentId, position, content, contentHash, estimatedTokens" +
-                ") VALUES ('chunk-live', 'base-live', 'document-live', 0, 'text', 'hash', 1)"
+                ") VALUES ('chunk-live', 'base-live', 'document-live', 0, 'text', 'hash-chunk-live', 1)"
         )
         database.execSQL(
             "INSERT INTO knowledge_chunks(" +
@@ -346,6 +361,20 @@ class McaRoomMigrationExecutionTest {
             assertTrue(cursor.moveToFirst())
             cursor.getInt(0)
         }
+
+    private fun singleString(
+        database: SupportSQLiteDatabase,
+        tableName: String,
+        columnName: String,
+        selection: String
+    ): String? = database.query("SELECT `$columnName` FROM `$tableName` WHERE $selection").use { cursor ->
+        assertTrue("expected exactly one row for $tableName where $selection", cursor.moveToFirst())
+        // Read before advancing: a moveToNext() that reports "no more rows" leaves the cursor
+        // positioned past the last row, so a later getString would throw instead of comparing.
+        val value = cursor.getString(0)
+        assertTrue("expected exactly one row for $tableName where $selection", !cursor.moveToNext())
+        value
+    }
 
     private fun migration(fieldName: String): Migration =
         McaRoomDatabase::class.java.getDeclaredField(fieldName).let { field ->
