@@ -78,9 +78,14 @@ class LocalImageProductClosureTest {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        // ImageGenerationStatusRecord's entries moved to PersistedRecords.kt during P2, so the
+        // first assertion reads from there. The other four read function bodies that stayed in
+        // the ViewModel, an expression in MainActivity and one in ChatScreen. No assertion
+        // changed -- only the file the first one reads.
+        val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
         val generate = functionBody(viewModel, "private fun enqueueImageGeneration(")
 
-        assertTrue(viewModel.contains("CANCELLED(\"已取消\", terminal = true)"))
+        assertTrue(persistedRecords.contains("CANCELLED(\"已取消\", terminal = true)"))
         assertTrue(generate.contains("error is LocalImageWorkerCancelledException"))
         assertTrue(generate.contains("ImageGenerationStatusRecord.CANCELLED"))
         assertTrue(activity.contains("terminal = job.status.terminal"))
@@ -305,10 +310,14 @@ class LocalImageProductClosureTest {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+        // ImageGenerationJobRecord moved to PersistedRecords.kt during P2, so the one assertion
+        // about its field reads from there. The other four read function bodies that stayed in
+        // the ViewModel. No assertion changed -- only the file each one reads.
+        val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
         val retry = functionBody(viewModel, "fun retryImageGeneration(")
         val recreate = functionBody(viewModel, "fun recreateImageAsset(")
 
-        assertTrue(viewModel.contains("val spec: ImageGenerationJobSpec? = null"))
+        assertTrue(persistedRecords.contains("val spec: ImageGenerationJobSpec? = null"))
         assertTrue(retry.contains("jobSnapshot = snapshot"))
         assertTrue(recreate.contains("it.id == history.modelId"))
         assertTrue(recreate.contains("jobSnapshot = snapshot"))
