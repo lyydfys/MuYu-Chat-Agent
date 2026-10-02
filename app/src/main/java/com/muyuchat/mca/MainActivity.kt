@@ -357,6 +357,13 @@ private fun McaApp(
     onExportChatSession: (String) -> Unit,
     viewModel: MainViewModel
 ) {
+    // The timestamp formatters in this composable used Locale.getDefault(), which does
+    // not read observable state: changing the system language did not recompose these rows and
+    // the dates kept the previous locale's formatting. LocalLocale.current is observable, and
+    // the lint check NonObservableLocale names this exact replacement. It is read once here in
+    // the composable scope because the five uses sit inside map lambdas, where a CompositionLocal
+    // cannot be read.
+    val timestampLocale = androidx.compose.ui.platform.LocalLocale.current.platformLocale
     state.contentImportPreview?.let { preview ->
         ContentImportPreviewDialog(
             preview = preview,
@@ -513,7 +520,7 @@ private fun McaApp(
                             displayName = presentation?.name ?: session.title,
                             summary = presentation?.summary.orEmpty(),
                             assistantId = presentation?.assistantId,
-                            updatedAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                            updatedAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
                                 .format(java.util.Date(session.updatedAt)),
                             updatedAtMillis = session.updatedAt,
                             messageCount = session.messages.size,
@@ -806,7 +813,7 @@ private fun McaApp(
                             uriString = image.uriString,
                             source = image.source,
                             prompt = image.prompt,
-                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
                                 .format(java.util.Date(image.createdAt)),
                             createdAtMillis = image.createdAt,
                             sizeText = formatAssetBytes(image.sizeBytes),
@@ -939,7 +946,7 @@ private fun McaApp(
                             name = file.name,
                             mimeType = file.mimeType,
                             preview = file.preview,
-                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault())
+                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
                                 .format(java.util.Date(file.createdAt)),
                             sizeText = formatAssetBytes(file.sizeBytes),
                             truncated = file.truncated
@@ -1329,7 +1336,7 @@ private fun McaApp(
                     benchmarkHistory = state.benchmarkHistory.map { record ->
                         val params = runCatching { org.json.JSONObject(record.paramsJson) }.getOrNull()
                         BenchmarkHistoryItem(
-                            timeText = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(record.time)),
+                            timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale).format(java.util.Date(record.time)),
                             modelName = record.modelName ?: "unknown",
                             decodeTps = record.result.decodeTps,
                             ttftMs = record.result.ttftMs,
@@ -1366,7 +1373,7 @@ private fun McaApp(
                             .orEmpty()
                         val risk = recommendation?.optString("risk").orEmpty()
                         AgentDecisionItem(
-                            timeText = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(log.time)),
+                            timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale).format(java.util.Date(log.time)),
                             title = if (log.userConfirmed) "已应用参数" else "自动建议",
                             detail = "${name.ifBlank { "无推荐模型" }} · 风险 ${risk.ifBlank { "unknown" }}"
                         )
