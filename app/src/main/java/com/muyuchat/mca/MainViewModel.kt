@@ -6399,6 +6399,35 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The ViewModel side of [WebSearchConfigPort]. Six members; the coroutine scope is passed to the
+     * operations as a parameter instead, because a scope belongs to the caller.
+     */
+    private val webSearchConfigPort: WebSearchConfigPort =
+        object : WebSearchConfigPort {
+            override val context: Application
+                get() = this@MainViewModel.getApplication()
+
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override fun saveConfig(config: WebSearchConfig) {
+                this@MainViewModel.webSearchStore.save(config)
+            }
+
+            override fun appendDiagnostic(
+                record: WebSearchDiagnosticRecord
+            ): List<WebSearchDiagnosticRecord> =
+                this@MainViewModel.appendWebSearchDiagnostic(record)
+
+            override val provider: WebSearchProvider
+                get() = this@MainViewModel.webSearchProvider
+        }
+
+    /** Delegates to [persistWebSearchConfig]. */
     fun saveWebSearchConfig(
         enabled: Boolean,
         provider: String,
@@ -6410,7 +6439,8 @@ class MainViewModel @JvmOverloads constructor(
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
     ) {
-        val config = buildWebSearchConfig(
+        persistWebSearchConfig(
+            port = webSearchConfigPort,
             enabled = enabled,
             provider = provider,
             endpoint = endpoint,
@@ -6421,32 +6451,14 @@ class MainViewModel @JvmOverloads constructor(
             researchMode = researchMode,
             backupProviders = backupProviders
         )
-        webSearchStore.save(config)
-        _uiState.update {
-            val nextTurnMode = if (config.enabled) it.webSearchTurnMode else WebSearchTurnMode.FOLLOW
-            it.copy(
-                webSearchConfig = config,
-                webSearchTurnMode = nextTurnMode,
-                webSearchResearchModeOverride = it.webSearchResearchModeOverride?.takeIf { config.enabled },
-                webSearchOneShotEnabled = nextTurnMode == WebSearchTurnMode.ON && config.enabled,
-                webSearchStatusMessage = null,
-                statusMessage = if (config.realSearchConfigured) {
-                    "联网检索已保存：${config.realSearchProviderLabel.ifBlank { config.providerLabel }}"
-                } else if (config.isPublicCheckSource) {
-                    "已保存协议自检源：可在设置页测试，聊天页关键词搜索请配置真实搜索源"
-                } else if (config.enabled) {
-                    "联网检索已启用：可直读网页链接；关键词搜索还需要补齐地址或 Key"
-                } else {
-                    "联网检索已关闭"
-                }
-            )
-        }
     }
 
+    /** Delegates to [runWebSearchConfigTest]. */
     fun testWebSearchConfig(query: String) {
-        testWebSearchConfig(query, _uiState.value.webSearchConfig)
+        runWebSearchConfigTest(port = webSearchConfigPort, scope = viewModelScope, query = query)
     }
 
+    /** Delegates to [runWebSearchConfigTest]. */
     fun testWebSearchConfig(
         query: String,
         enabled: Boolean,
@@ -6459,22 +6471,23 @@ class MainViewModel @JvmOverloads constructor(
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
     ) {
-        testWebSearchConfig(
+        runWebSearchConfigTest(
+            port = webSearchConfigPort,
+            scope = viewModelScope,
             query = query,
-            config = buildWebSearchConfig(
-                enabled = enabled,
-                provider = provider,
-                endpoint = endpoint,
-                apiKey = apiKey,
-                maxResults = maxResults,
-                fetchPageContent = fetchPageContent,
-                triggerMode = triggerMode,
-                researchMode = researchMode,
-                backupProviders = backupProviders
-            )
+            enabled = enabled,
+            provider = provider,
+            endpoint = endpoint,
+            apiKey = apiKey,
+            maxResults = maxResults,
+            fetchPageContent = fetchPageContent,
+            triggerMode = triggerMode,
+            researchMode = researchMode,
+            backupProviders = backupProviders
         )
     }
 
+    /** Delegates to [runWebSearchPreflight]. */
     fun preflightWebSearchConfig(
         enabled: Boolean,
         provider: String,
@@ -6486,7 +6499,9 @@ class MainViewModel @JvmOverloads constructor(
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
     ) {
-        val config = buildWebSearchConfig(
+        runWebSearchPreflight(
+            port = webSearchConfigPort,
+            scope = viewModelScope,
             enabled = enabled,
             provider = provider,
             endpoint = endpoint,
@@ -6497,168 +6512,19 @@ class MainViewModel @JvmOverloads constructor(
             researchMode = researchMode,
             backupProviders = backupProviders
         )
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在进行联网网络预检...",
-                    statusMessage = "正在进行联网网络预检..."
-                )
-            }
-            val started = android.os.SystemClock.elapsedRealtime()
-            val result = runCatching {
-                withContext(Dispatchers.IO) {
-                    buildWebSearchPreflightReport(
-                        config = config,
-                        environmentChecks = buildAndroidWebSearchNetworkChecks()
-                    )
-                }
-            }
-            _uiState.update { state ->
-                val elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
-                result.fold(
-                    onSuccess = { report ->
-                        val warningChecks = report.checks.filter { it.startsWith("需检查") }
-                        val diagnostics = appendWebSearchDiagnostic(
-                            WebSearchDiagnosticRecord(
-                                providerLabel = config.providerLabel,
-                                triggerModeLabel = config.triggerMode.label,
-                                query = "网络预检",
-                                searchedQueries = listOf(config.endpointForRequest()).filter { it.isNotBlank() },
-                                elapsedMs = elapsedMs,
-                                success = report.ok,
-                                message = report.message,
-                                healthScore = if (report.ok) 86 else 35,
-                                healthLabel = if (report.ok) "健康" else "需检查",
-                                healthReasons = report.checks,
-                                qualityScore = if (report.ok) 80 else 20,
-                                qualityLabel = if (report.ok) "配置可用" else "配置需检查",
-                                qualityReasons = report.checks,
-                                warnings = warningChecks,
-                                closedLoopChecks = report.checks
-                            )
-                        )
-                        state.copy(
-                            busy = false,
-                            webSearchStatusMessage = report.message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = if (report.ok) "联网网络预检通过" else "联网网络预检需检查"
-                        )
-                    },
-                    onFailure = { error ->
-                        val message = "网络预检失败：${error.message ?: "未知错误"}"
-                        val diagnostics = appendWebSearchDiagnostic(
-                            WebSearchDiagnosticRecord(
-                                providerLabel = config.providerLabel,
-                                triggerModeLabel = config.triggerMode.label,
-                                query = "网络预检",
-                                searchedQueries = listOf(config.endpointForRequest()).filter { it.isNotBlank() },
-                                elapsedMs = elapsedMs,
-                                success = false,
-                                message = message,
-                                healthScore = 0,
-                                healthLabel = "失败",
-                                healthReasons = listOf(message),
-                                qualityScore = 0,
-                                qualityLabel = "预检失败",
-                                qualityReasons = listOf(message),
-                                warnings = listOf(message),
-                                closedLoopChecks = listOf(message)
-                            )
-                        )
-                        state.copy(
-                            busy = false,
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = "联网网络预检失败"
-                        )
-                    }
-                )
-            }
-        }
     }
 
-    /**
-     * Delegates to [androidWebSearchNetworkChecks]. It is a pure Android read, which is why it needed
-     * no port -- only the `Application` this class already held.
-     */
-    private fun buildAndroidWebSearchNetworkChecks(): List<String> =
-        androidWebSearchNetworkChecks(getApplication())
-
+    /** Delegates to [runWebSearchConfigTest]. */
     private fun testWebSearchConfig(query: String, config: WebSearchConfig) {
-        val cleanQuery = query.trim().ifBlank { "MCA 本地 AI" }
-        val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
-        if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
-            _uiState.update {
-                it.copy(
-                    webSearchStatusMessage = if (plan.directUrls.isNotEmpty()) {
-                        "请先启用联网检索，再测试网页链接读取"
-                    } else {
-                        "请先保存可用的联网检索配置"
-                    },
-                    statusMessage = if (plan.directUrls.isNotEmpty()) {
-                        "请先启用联网检索"
-                    } else {
-                        "请先保存可用的联网检索配置"
-                    }
-                )
-            }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在测试联网检索：$cleanQuery",
-                    statusMessage = "正在测试联网检索..."
-                )
-            }
-            val started = android.os.SystemClock.elapsedRealtime()
-            val result = runCatching { webSearchProvider.search(plan, config) }
-            _uiState.update { state ->
-                result.fold(
-                    onSuccess = { searchResult ->
-                        val success = searchResult.documents.isNotEmpty()
-                        val message = if (success) {
-                            "测试成功：${searchResult.documents.size} 个来源 · ${searchResult.elapsedMs}ms"
-                        } else {
-                            "测试完成：没有找到可靠来源"
-                        }
-                        val diagnostics = appendWebSearchDiagnostic(
-                            searchResult.toDiagnosticRecord(
-                                config = config,
-                                success = success,
-                                message = message
-                            )
-                        )
-                        state.copy(
-                            busy = false,
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = if (success) "联网检索测试成功" else "联网检索无结果"
-                        )
-                    },
-                    onFailure = { error ->
-                        val message = "测试失败：${error.message ?: "未知错误"}"
-                        val diagnostics = appendWebSearchDiagnostic(
-                            plan.toFailedDiagnosticRecord(
-                                config = config,
-                                elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L),
-                                message = message
-                            )
-                        )
-                        state.copy(
-                            busy = false,
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = "联网检索测试失败"
-                        )
-                    }
-                )
-            }
-        }
+        runWebSearchConfigTest(
+            port = webSearchConfigPort,
+            scope = viewModelScope,
+            query = query,
+            config = config
+        )
     }
 
+    /** Delegates to [runWebSearchTurnTest]. */
     fun testWebSearchTurn(
         query: String,
         enabled: Boolean,
@@ -6672,79 +6538,39 @@ class MainViewModel @JvmOverloads constructor(
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
         allowPublicCheckSourceForProtocolTest: Boolean = false
     ) {
-        testWebSearchTurn(
+        runWebSearchTurnTest(
+            port = webSearchConfigPort,
+            scope = viewModelScope,
             query = query,
-            config = buildWebSearchConfig(
-                enabled = enabled,
-                provider = provider,
-                endpoint = endpoint,
-                apiKey = apiKey,
-                maxResults = maxResults,
-                fetchPageContent = fetchPageContent,
-                triggerMode = triggerMode,
-                researchMode = researchMode,
-                backupProviders = backupProviders
-            ),
+            enabled = enabled,
+            provider = provider,
+            endpoint = endpoint,
+            apiKey = apiKey,
+            maxResults = maxResults,
+            fetchPageContent = fetchPageContent,
+            triggerMode = triggerMode,
+            researchMode = researchMode,
+            backupProviders = backupProviders,
             allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
         )
     }
 
+    /** Delegates to [runWebSearchTurnTest]. */
     private fun testWebSearchTurn(
         query: String,
         config: WebSearchConfig,
-        allowPublicCheckSourceForProtocolTest: Boolean = false
+        allowPublicCheckSourceForProtocolTest: Boolean
     ) {
-        val cleanQuery = query.trim().ifBlank { "MCA 本地 AI 最新说明" }
-        val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
-        if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
-            _uiState.update {
-                it.copy(
-                    webSearchStatusMessage = if (plan.directUrls.isNotEmpty()) {
-                        "请先启用联网检索，再进行闭环自检"
-                    } else {
-                        "请先填写可用搜索服务，再进行闭环自检"
-                    },
-                    statusMessage = "联网闭环自检未开始"
-                )
-            }
-            return
-        }
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在闭环自检：$cleanQuery",
-                    statusMessage = "正在验证联网检索闭环..."
-                )
-            }
-            val outcome = executeWebSearchForChatTurn(
-                messages = listOf(ChatMessage(role = Role.USER, content = cleanQuery)),
-                config = config,
-                oneShotEnabled = true,
-                assistantWebSearchEnabled = false,
-                allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest,
-                search = { turnPlan, turnConfig -> webSearchProvider.search(turnPlan, turnConfig) }
-            )
-            val diagnostics = outcome.diagnostic?.let(::appendWebSearchDiagnostic)
-            val passed = outcome.success &&
-                outcome.promptContext.isNotBlank() &&
-                outcome.sourceReferences.isNotEmpty()
-            val message = when {
-                passed -> "闭环自检通过：${outcome.sourceReferences.size} 个来源 · 已生成上下文和来源卡片数据"
-                !outcome.webSearchStatusMessage.isNullOrBlank() -> "闭环自检未通过：${outcome.webSearchStatusMessage}"
-                else -> "闭环自检未通过：没有生成可用联网来源"
-            }
-            _uiState.update {
-                it.copy(
-                    busy = false,
-                    webSearchStatusMessage = message,
-                    webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
-                    statusMessage = if (passed) "联网闭环自检通过" else "联网闭环自检未通过"
-                )
-            }
-        }
+        runWebSearchTurnTest(
+            port = webSearchConfigPort,
+            scope = viewModelScope,
+            query = query,
+            config = config,
+            allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
+        )
     }
 
+    /** Delegates to [webSearchConfigFrom]; six members still build a config this way. */
     private fun buildWebSearchConfig(
         enabled: Boolean,
         provider: String,
@@ -6755,18 +6581,30 @@ class MainViewModel @JvmOverloads constructor(
         triggerMode: String,
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ): WebSearchConfig =
-        WebSearchConfig(
-            enabled = enabled,
-            provider = WebSearchProviderType.from(provider),
-            endpoint = endpoint.trim(),
-            apiKey = apiKey.trim(),
-            maxResults = maxResults.coerceIn(1, 8),
-            fetchPageContent = fetchPageContent,
-            triggerMode = WebSearchTriggerMode.from(triggerMode),
-            researchMode = WebSearchResearchMode.from(researchMode),
-            backupProviders = backupProviders.take(3)
-        )
+    ): WebSearchConfig = webSearchConfigFrom(
+        enabled = enabled,
+        provider = provider,
+        endpoint = endpoint,
+        apiKey = apiKey,
+        maxResults = maxResults,
+        fetchPageContent = fetchPageContent,
+        triggerMode = triggerMode,
+        researchMode = researchMode,
+        backupProviders = backupProviders
+    )
+
+
+
+
+    /**
+     * Delegates to [androidWebSearchNetworkChecks]. It is a pure Android read, which is why it needed
+     * no port -- only the `Application` this class already held.
+     */
+    private fun buildAndroidWebSearchNetworkChecks(): List<String> =
+        androidWebSearchNetworkChecks(getApplication())
+
+
+
 
     fun toggleWebSearchForNextTurn() {
         val state = _uiState.value
