@@ -28,3 +28,24 @@ internal fun MainUiState.isLocalChatModelLoaded(modelId: String): Boolean =
             AgentEngineLifecycle.ROLLING_BACK,
             AgentEngineLifecycle.STOPPING
         )
+
+/**
+ * Whether the local chat engine currently holds a usable loaded model.
+ *
+ * [MainUiState.loadedModelId] is deliberately **retained** as a recovery target: when the isolated
+ * local text worker dies (crash, reclaim, force-stop) the id stays set so the user can reload it,
+ * while [com.muyuchat.core.engine.RuntimeStats.loaded] goes false. UI surfaces that only compare ids
+ * therefore keep claiming "已加载" after the worker is gone, and — because the reload affordance is
+ * gated on the same flag — leave the user with no way to recover inside the app.
+ *
+ * Pass this into feature state alongside the id so those surfaces agree with
+ * [localChatReadinessLabel].
+ */
+internal fun MainUiState.isLocalChatEngineReady(): Boolean =
+    stats.loaded &&
+        engineLifecycle !in setOf(
+            AgentEngineLifecycle.LOADING,
+            AgentEngineLifecycle.RELOADING,
+            AgentEngineLifecycle.ROLLING_BACK,
+            AgentEngineLifecycle.STOPPING
+        )

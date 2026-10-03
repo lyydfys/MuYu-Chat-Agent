@@ -168,8 +168,29 @@ data class ModelHubUiState(
     val cloudApi: CloudApiUiState = CloudApiUiState(),
     val isBusy: Boolean = false,
     val loadedModelId: String? = null,
+    /**
+     * Whether the local chat engine currently holds a **usable** loaded model.
+     *
+     * [loadedModelId] is deliberately retained as a recovery target while the isolated local text
+     * worker is gone, so a card must not claim "已加载" from the id alone — the reload affordance is
+     * gated on the same flag and would otherwise be unreachable.
+     *
+     * Defaults to true so previews and tests that do not wire the live engine keep their previous
+     * behaviour; the app passes the real readiness.
+     */
+    val localChatEngineReady: Boolean = true,
     val statusMessage: String? = null
 )
+
+/**
+ * Whether the "本地" list card may claim the model is loaded.
+ *
+ * Requires **both** the retained id and a live engine: after the isolated local text worker dies the
+ * id stays set as a recovery target, and gating the reload affordance on the same flag is what makes
+ * recovery reachable again. Pure so it can be unit-tested without Compose.
+ */
+internal fun localChatModelCardIsLoaded(state: ModelHubUiState, modelId: String): Boolean =
+    modelId == state.loadedModelId && state.localChatEngineReady
 
 data class ModelImportTaskUi(
     val id: String,
@@ -694,7 +715,7 @@ private fun LocalModelsSection(
             items(state.localModels, key = { "chat-${it.id}-${it.path}" }) { model ->
                         LocalModelCard(
                             model = model,
-                            isLoaded = model.id == state.loadedModelId,
+                            isLoaded = localChatModelCardIsLoaded(state, model.id),
                             mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                             enabled = !state.isBusy && pendingAction == null,
                             pendingAction = pendingAction

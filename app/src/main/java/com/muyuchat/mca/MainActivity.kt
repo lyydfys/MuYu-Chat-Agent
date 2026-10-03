@@ -1520,6 +1520,7 @@ private fun McaApp(
                     ),
                     isBusy = state.busy,
                     loadedModelId = state.loadedModelId,
+                    localChatEngineReady = state.isLocalChatEngineReady(),
                     statusMessage = if (state.busy && state.engineLifecycle == com.muyuchat.feature.agent.AgentEngineLifecycle.LOADING) {
                         state.modelLoadStage ?: state.statusMessage
                     } else state.statusMessage
