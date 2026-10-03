@@ -186,6 +186,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -6600,48 +6601,70 @@ private fun CodeBlock(language: String?, code: String, fileName: String? = null,
 @Composable
 private fun TableBlock(rows: List<List<String>>) {
     if (rows.isEmpty()) return
-    Surface(
-        color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(10.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.74f)),
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-    ) {
-        Column {
-            rows.forEachIndexed { rowIndex, row ->
-                Row(
-                    modifier = Modifier.background(
-                        if (rowIndex == 0) {
-                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.74f)
-                        } else {
-                            Color.Transparent
-                        }
-                    )
-                ) {
-                    row.forEach { cell ->
-                        Text(
-                            text = inlineMarkdownText(cell),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            style = MaterialTheme.typography.bodySmall.copy(
-                                fontSize = 13.sp,
-                                lineHeight = 18.sp
-                            ),
-                            fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
-                            modifier = Modifier
-                                .widthIn(min = 92.dp, max = 190.dp)
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
-                            softWrap = true
+    val scrollState = rememberScrollState()
+    // 窄屏（手机 411dp）下三列表格会超出屏宽，末列被裁切且**没有任何滚动提示**，用户会以为
+    // 被截断的列名就是完整内容。此处在可继续横滚时给出**功能性**右缘渐隐（不是装饰性渐变）。
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.74f)),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(scrollState)
+        ) {
+            Column {
+                rows.forEachIndexed { rowIndex, row ->
+                    Row(
+                        modifier = Modifier.background(
+                            if (rowIndex == 0) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.74f)
+                            } else {
+                                Color.Transparent
+                            }
                         )
+                    ) {
+                        row.forEach { cell ->
+                            Text(
+                                text = inlineMarkdownText(cell),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp
+                                ),
+                                fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .widthIn(min = 92.dp, max = 190.dp)
+                                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                                softWrap = true
+                            )
+                        }
                     }
-                }
-                if (rowIndex != rows.lastIndex) {
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f))
+                    if (rowIndex != rows.lastIndex) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.52f))
+                    }
                 }
             }
         }
+        if (scrollState.canScrollForward) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .fillMaxHeight()
+                    .width(TABLE_SCROLL_HINT_WIDTH)
+                    .background(
+                        Brush.horizontalGradient(
+                            0f to Color.Transparent,
+                            1f to MaterialTheme.colorScheme.surface
+                        )
+                    )
+            )
+        }
     }
 }
+
+/** 表格横向滚动提示的宽度；仅在 `canScrollForward` 时绘制。 */
+private val TABLE_SCROLL_HINT_WIDTH = 22.dp
 
 @Composable
 private fun inlineMarkdownText(value: String): AnnotatedString {
