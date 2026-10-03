@@ -16325,67 +16325,90 @@ class MainViewModel @JvmOverloads constructor(
         return requireNotNull(workerResult).toCandidateCanaryResult(candidate)
     }
 
+    /**
+     * The ViewModel side of [TuningCanaryPort]. The canary result port object stays here: it is the
+     * adapter that binds that interface to this ViewModel.
+     */
+    private val tuningCanaryPort: TuningCanaryPort =
+        object : TuningCanaryPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override fun currentDeviceProfile(): DeviceProfile =
+                this@MainViewModel.currentDeviceProfile()
+
+            override val candidateCanaryResultPort: CandidateCanaryResultPort
+                get() = this@MainViewModel.candidateCanaryResultPort
+
+            override val engine: McaInferenceService
+                get() = this@MainViewModel.engine
+        }
+
+
+/** Delegates to [failedIsolatedCanaryResult]. Signature kept verbatim. */
     private fun failedIsolatedTuningCandidateResult(
         candidate: TuningExecutionProfile,
         start: MeasurementPoint,
         error: Throwable
     ): CandidateCanaryResult {
-        val message = error.message?.take(1_024) ?: error::class.java.simpleName
-        val normalized = message.lowercase()
-        val remoteCode = (error as? TuningProbeWorkerRemoteException)?.code.orEmpty().lowercase()
-        val timedOut = error is TimeoutCancellationException ||
-            "timeout" in remoteCode || "timed out" in normalized || "watchdog" in normalized ||
-            "hang" in normalized
-        val nativeFatal = "native_fatal" in remoteCode || "fatal signal" in normalized ||
-            "sigsegv" in normalized || "sigabrt" in normalized
-        val workerDied = error is TuningProbeWorkerException &&
-            error !is TuningProbeWorkerRemoteException &&
-            ("crash" in normalized || "exited" in normalized || "disconnected" in normalized ||
-                "binding died" in normalized || "watchdog" in normalized)
-        val measuredEnd = measurementPoint()
-        val measurement = MeasurementEnvelope(
-            start = start,
-            end = measuredEnd,
-            samples = listOf(
-                PerformanceSample(
-                    ttftMs = 0L,
-                    decodeTps = 0.0,
-                    pssBytes = measuredEnd.pssBytes,
-                    rssBytes = measuredEnd.rssBytes,
-                    availableMemoryBytes = measuredEnd.availableMemoryBytes
-                )
-            )
-        )
-        return CandidateCanaryResult(
-            passed = false,
-            output = "",
-            stats = RuntimeStats(
-                loaded = false,
-                backend = candidate.runtimeIdentity.runtime.backendId,
-                isLowMemory = start.lowMemoryTriggered || measuredEnd.lowMemoryTriggered,
-                lastError = message
-            ),
-            detail = "isolated candidate rejected: $message",
-            measurement = measurement,
-            safetyPassed = SafetyEnvelope.forDevice(currentDeviceProfile()).assess(measurement).passed,
-            signatureVerification = null,
-            crashCount = if (workerDied) 1 else 0,
-            anrCount = if (timedOut) 1 else 0,
-            nativeFatalSignalCount = if (nativeFatal) 1 else 0,
-            testedProfileId = candidate.profileId,
-            testedResolvedLoadSignature = candidate.engineProfile.resolvedLoadSignature.digest,
-            testedCommittedExecutionSignature = candidate.engineProfile.committedExecutionSignature.digest,
-            evidenceJson = JSONObject()
-                .put("environment", "isolated_process")
-                .put("outcome", "worker_failure")
-                .put("errorClass", error::class.java.name)
-                .put("remoteCode", remoteCode.takeIf(String::isNotBlank))
-                .put("message", message)
-                .put("crashCount", if (workerDied) 1 else 0)
-                .put("anrCount", if (timedOut) 1 else 0)
-                .put("nativeFatalSignalCount", if (nativeFatal) 1 else 0)
-                .toString()
-        )
+        return failedIsolatedCanaryResult(port = tuningCanaryPort, candidate = candidate, start = start, error = error)
+    }
+
+/** Delegates to [canaryResultFrom]. Signature kept verbatim. */
+    private fun TuningProbeWorkerProtocol.Result.toCandidateCanaryResult(
+        candidate: TuningExecutionProfile
+    ): CandidateCanaryResult = canaryResultFrom(port = tuningCanaryPort, candidate = candidate)
+
+/** Delegates to [jsonOptionalFiniteDouble]. Signature kept verbatim. */
+    private fun JSONObject.optionalFiniteDouble(field: String): Double {
+        return jsonOptionalFiniteDouble(port = tuningCanaryPort, field = field)
+    }
+
+/** Delegates to [runCanary]. Signature kept verbatim. */
+    private suspend fun runCandidateCanary(
+        candidate: TuningExecutionProfile,
+        canaryParams: com.muyuchat.core.tuning.CanaryEvaluationParams,
+        authorization: com.muyuchat.core.engine.LoadAuthorization,
+        disposition: com.muyuchat.core.engine.PendingProfileDisposition =
+            com.muyuchat.core.engine.PendingProfileDisposition.ROLLBACK_AFTER_REQUEST,
+        lifecycleLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
+    ): CandidateCanaryResult {
+        return runCanary(port = tuningCanaryPort, candidate = candidate, canaryParams = canaryParams, authorization = authorization, disposition = disposition, lifecycleLease = lifecycleLease)
+    }
+
+/** Delegates to [canaryHardGate]. Signature kept verbatim. */
+    private fun tuningCandidateHardGate(result: CandidateCanaryResult): CandidateHardGate {
+        return canaryHardGate(port = tuningCanaryPort, result = result)
+    }
+
+/** Delegates to [canaryScore]. Signature kept verbatim. */
+    private fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore = canaryScore(port = tuningCanaryPort, result = result)
+
+/** Delegates to [canaryMeasurement]. Signature kept verbatim. */
+    private fun candidateMeasurement(
+        profileId: String,
+        jobId: String?,
+        phase: String,
+        result: CandidateCanaryResult
+    ): CandidateMeasurementEntity {
+        return canaryMeasurement(port = tuningCanaryPort, profileId = profileId, jobId = jobId, phase = phase, result = result)
+    }
+
+/** Delegates to [asTuningProfile]. Signature kept verbatim. */
+    private fun ModelExecutionProfile.asTuningExecutionProfile(
+        kind: ExecutionProfileKind,
+        verificationLevel: ProfileVerificationLevel,
+        reason: String
+    ): TuningExecutionProfile {
+        return asTuningProfile(port = tuningCanaryPort, kind = kind, verificationLevel = verificationLevel, reason = reason)
+    }
+
+/** Delegates to [currentMeasurementPoint]. Signature kept verbatim. */
+    private fun measurementPoint(device: DeviceProfile = currentDeviceProfile()): MeasurementPoint {
+        return currentMeasurementPoint(port = tuningCanaryPort, device = device)
     }
 
     /**
@@ -16405,250 +16428,12 @@ class MainViewModel @JvmOverloads constructor(
                 root.optionalFiniteDouble(field)
         }
 
-    private fun TuningProbeWorkerProtocol.Result.toCandidateCanaryResult(
-        candidate: TuningExecutionProfile
-    ): CandidateCanaryResult =
-        toCandidateCanaryResult(port = candidateCanaryResultPort, candidate = candidate)
 
-    /**
-     * Reads a tolerant double out of a JSON object: `0.0` when the field is absent, null, non-numeric
-     * or non-finite. Private to the ViewModel, which is why the conversion reaches it through
-     * [CandidateCanaryResultPort] rather than calling it directly.
-     */
-    private fun JSONObject.optionalFiniteDouble(field: String): Double {
-        if (!has(field) || isNull(field)) return 0.0
-        return optDouble(field, 0.0).takeIf(Double::isFinite) ?: 0.0
-    }
 
-    private suspend fun runCandidateCanary(
-        candidate: TuningExecutionProfile,
-        canaryParams: com.muyuchat.core.tuning.CanaryEvaluationParams,
-        authorization: com.muyuchat.core.engine.LoadAuthorization,
-        disposition: com.muyuchat.core.engine.PendingProfileDisposition =
-            com.muyuchat.core.engine.PendingProfileDisposition.ROLLBACK_AFTER_REQUEST,
-        lifecycleLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
-    ): CandidateCanaryResult {
-        val startPoint = measurementPoint()
-        val output = StringBuilder()
-        var stats = RuntimeStats()
-        var errorMessage: String? = null
-        val request = ChatRequest(
-            messages = listOf(
-                ChatMessage(
-                    Role.USER,
-                    MinimumTextCanaryPolicy.prompt
-                )
-            ),
-            params = canaryParams.toGenerationParams(candidate)
-        )
-        withTimeout(120_000L) {
-            engine.streamChat(
-                request,
-                com.muyuchat.core.engine.LocalChatExecutionContext(
-                    requestId = "tuning-${UUID.randomUUID()}",
-                    loadAuthorization = authorization,
-                    pendingProfileDisposition = disposition,
-                    lifecycleLease = lifecycleLease
-                )
-            ).collect { event ->
-                when (event) {
-                    is GenerateEvent.Phase -> stats = event.stats
-                    is GenerateEvent.Persist -> Unit
-                    is GenerateEvent.Chunk -> {
-                        output.append(event.text)
-                        stats = event.stats
-                    }
-                    is GenerateEvent.Done -> stats = event.stats
-                    is GenerateEvent.Error -> {
-                        errorMessage = event.message
-                        stats = event.stats
-                    }
-                }
-            }
-        }
-        val text = output.toString()
-        val passed = errorMessage == null && MinimumTextCanaryPolicy.matches(text)
-        val signatureVerification = engine.authorizedPendingSignatureVerification(authorization)
-        val measuredEnd = measurementPoint()
-        val endPoint = measuredEnd.copy(
-            availableMemoryBytes = stats.availMemKb
-                .takeIf { it > 0L }
-                ?.times(1024L)
-                ?: measuredEnd.availableMemoryBytes,
-            pssBytes = stats.nativePssKb.coerceAtLeast(0L) * 1024L,
-            rssBytes = stats.processRssKb.coerceAtLeast(0L) * 1024L,
-            lowMemoryTriggered = measuredEnd.lowMemoryTriggered || stats.isLowMemory
-        )
-        val decodeTps = stats.decodeTps
-            .takeIf { it.isFinite() && it >= 0.0 }
-            ?: stats.e2eTps.coerceAtLeast(0.0)
-        val measurement = MeasurementEnvelope(
-            start = startPoint,
-            end = endPoint,
-            samples = listOf(
-                PerformanceSample(
-                    ttftMs = stats.ttftMs.coerceAtLeast(0L),
-                    decodeTps = decodeTps,
-                    pssBytes = endPoint.pssBytes,
-                    rssBytes = endPoint.rssBytes,
-                    availableMemoryBytes = endPoint.availableMemoryBytes
-                )
-            )
-        )
-        val safetyPassed = SafetyEnvelope.forDevice(currentDeviceProfile()).assess(measurement).passed
-        return CandidateCanaryResult(
-            passed = passed,
-            output = text,
-            stats = stats,
-            detail = errorMessage ?: if (passed) "candidate correctness passed" else "candidate output failed correctness",
-            measurement = measurement,
-            safetyPassed = safetyPassed,
-            signatureVerification = signatureVerification,
-            testedProfileId = candidate.profileId,
-            testedResolvedLoadSignature = candidate.engineProfile.resolvedLoadSignature.digest,
-            testedCommittedExecutionSignature = candidate.engineProfile.committedExecutionSignature.digest,
-            evidenceJson = JSONObject()
-                .put("environment", "caller_process")
-                .put("profileId", candidate.profileId)
-                .put("resolvedLoadSignature", candidate.engineProfile.resolvedLoadSignature.digest)
-                .put("committedExecutionSignature", candidate.engineProfile.committedExecutionSignature.digest)
-                .toString()
-        )
-    }
 
-    private fun tuningCandidateHardGate(result: CandidateCanaryResult): CandidateHardGate {
-        return CandidateHardGate(
-            correctnessPassed = result.passed && result.stats.lastError == null,
-            crashCount = result.crashCount,
-            anrCount = result.anrCount,
-            nativeFatalSignalCount = result.nativeFatalSignalCount,
-            lowMemoryTriggered = result.stats.isLowMemory ||
-                result.measurement.start.lowMemoryTriggered ||
-                result.measurement.end.lowMemoryTriggered,
-            outputVisible = result.output.isNotBlank(),
-            templateValid = result.passed,
-            safetyPassed = result.safetyPassed,
-            signaturesMatch = result.signatureVerification?.strictlyMatches == true
-        )
-    }
 
-    private fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
-        CandidateScorer.score(tuningCandidateHardGate(result), result.measurement)
 
-    private fun candidateMeasurement(
-        profileId: String,
-        jobId: String?,
-        phase: String,
-        result: CandidateCanaryResult
-    ): CandidateMeasurementEntity {
-        val gate = tuningCandidateHardGate(result)
-        val score = CandidateScorer.score(gate, result.measurement)
-        val failureCode = tuningCandidateFailureCode(gate, score, result.stats.lastError)
-        val metrics = JSONObject()
-            .put("phase", phase)
-            .put("eligible", score.eligible)
-            .put("score", score.value)
-            .put("correctnessPassed", gate.correctnessPassed)
-            .put("templateValid", gate.templateValid)
-            .put("outputVisible", gate.outputVisible)
-            .put("safetyPassed", gate.safetyPassed)
-            .put("signatureStrictlyMatched", gate.signaturesMatch)
-            .put("lowMemoryTriggered", gate.lowMemoryTriggered)
-            .put("crashCount", gate.crashCount)
-            .put("anrCount", gate.anrCount)
-            .put("nativeFatalSignalCount", gate.nativeFatalSignalCount)
-            .put("ttftMs", result.stats.ttftMs.coerceAtLeast(0L))
-            .put("decodeMs", result.stats.decodeMs.coerceAtLeast(0L))
-            .put("decodeTps", result.stats.decodeTps.takeIf { it.isFinite() })
-            .put("completionTokens", result.stats.completionTokens.coerceAtLeast(0))
-            .put("nativePssKb", result.stats.nativePssKb.coerceAtLeast(0L))
-            .put("processRssKb", result.stats.processRssKb.coerceAtLeast(0L))
-            .put("minimumAvailableMemoryBytes", result.measurement.minimumAvailableMemoryBytes.coerceAtLeast(0L))
-            .put("testedProfileId", result.testedProfileId)
-            .put("testedResolvedLoadSignature", result.testedResolvedLoadSignature)
-            .put("testedCommittedExecutionSignature", result.testedCommittedExecutionSignature)
-            .put(
-                "isolatedEvidence",
-                runCatching { JSONObject(result.evidenceJson) }.getOrElse { JSONObject() }
-            )
-            .put("signatures", JSONObject().apply {
-                result.signatureVerification?.signatures?.let { signatures ->
-                    put("desired", signatures.desired.digest)
-                    put("resolvedLoad", signatures.resolved.digest)
-                    put("activeLoaded", signatures.active?.digest)
-                    put("committedExecution", signatures.committed.digest)
-                    put("runtimeOverride", signatures.override.digest)
-                    put("effectiveExecution", signatures.effective?.digest)
-                }
-            })
-        return CandidateMeasurementEntity(
-            measurementId = "measurement-${UUID.randomUUID()}",
-            profileId = profileId,
-            jobId = jobId,
-            correctnessPassed = gate.correctnessPassed,
-            safetyPassed = gate.safetyPassed,
-            effectiveSignatureMatched = gate.signaturesMatch,
-            accepted = score.eligible,
-            metricsJson = metrics.toString(),
-            failureCode = failureCode,
-            createdAt = System.currentTimeMillis()
-        )
-    }
 
-    private fun ModelExecutionProfile.asTuningExecutionProfile(
-        kind: ExecutionProfileKind,
-        verificationLevel: ProfileVerificationLevel,
-        reason: String
-    ): TuningExecutionProfile {
-        fun intValue(field: String): Int? =
-            (resolvedLoadBoundValues.value(field) as? Number)?.toInt()
-                ?: (hotExecutionValues.value(field) as? Number)?.toInt()
-        fun stringValue(field: String): String? =
-            resolvedLoadBoundValues.value(field)?.toString()
-        fun boolValue(field: String): Boolean? =
-            resolvedLoadBoundValues.value(field) as? Boolean
-        return TuningExecutionProfile(
-            engineProfile = this,
-            kind = kind,
-            loadBound = LoadBoundExecutionParams(
-                nCtx = intValue("n_ctx") ?: _uiState.value.params.nCtx,
-                nBatch = intValue("n_batch"),
-                nUbatch = intValue("n_ubatch"),
-                cacheTypeK = stringValue("cache_type_k"),
-                cacheTypeV = stringValue("cache_type_v"),
-                flashAttention = stringValue("flash_attn"),
-                gpuLayers = intValue("n_gpu_layers"),
-                mainGpu = intValue("main_gpu"),
-                cpuMoeLayers = intValue("n_cpu_moe"),
-                speculativeType = stringValue("spec_type"),
-                speculativeDraftMax = intValue("spec_draft_n_max"),
-                nParallel = intValue("n_parallel") ?: 1,
-                mmap = boolValue("mmap") ?: true,
-                mlock = boolValue("mlock") ?: false,
-                backend = stringValue("backend") ?: runtimeIdentity.runtime.backendId
-            ),
-            hotExecution = HotExecutionParams(
-                nThreads = intValue("n_threads") ?: _uiState.value.params.nThreads,
-                nThreadsBatch = intValue("n_threads_batch")
-            ),
-            verificationLevel = verificationLevel,
-            reason = reason
-        )
-    }
-
-    private fun measurementPoint(device: DeviceProfile = currentDeviceProfile()): MeasurementPoint {
-        val stats = _uiState.value.stats
-        return MeasurementPoint(
-            thermalStatus = device.thermalStatus,
-            batteryPercent = device.batteryPercent,
-            isCharging = device.isCharging,
-            availableMemoryBytes = device.availableRamBytes,
-            pssBytes = stats.nativePssKb.coerceAtLeast(0L) * 1024L,
-            rssBytes = stats.processRssKb.coerceAtLeast(0L) * 1024L,
-            lowMemoryTriggered = device.isLowMemory || stats.isLowMemory,
-            appInForeground = _uiState.value.engineLifecycle != AgentEngineLifecycle.STOPPING
-        )
-    }
 
     private fun runtimeProfileJson(): String {
         val state = _uiState.value
