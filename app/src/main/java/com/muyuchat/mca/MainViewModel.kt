@@ -17492,92 +17492,31 @@ class MainViewModel @JvmOverloads constructor(
         while (hasMoreElements()) yield(nextElement())
     }
 
+    /**
+     * Four forwarders to [ExecutionProfileMerging]. These functions are pure -- they read no ViewModel
+     * state, no field and no coroutine -- so the extraction needed no port at all; only the
+     * declarations moved. The names differ from the top-level ones on purpose: a same-named member
+     * would shadow the top-level function inside this class and the forwarder would call itself.
+     */
     private fun ModelManifest.toLoadParams(params: GenerationParams): LoadParams =
-        LoadParams(
-            nCtx = params.nCtx,
-            nThreads = params.nThreads,
-            advancedJson = params.advancedJson,
-            visionProjectorPath = if (runtime == ChatModelRuntime.LLAMA_CPP) {
-                resolveVisionProjectorPath(path, visionProjectorPath)
-            } else {
-                null
-            }
-        )
+        buildLoadParamsFor(params)
 
     private fun mergeExecutionProfile(
         generation: GenerationParams,
         profile: ModelExecutionProfile
-    ): GenerationParams = GenerationParams.fromJson(
-        profile.resolvedLoadBoundValues
-            .plus(profile.hotExecutionValues)
-            .plus(profile.modelBehaviorValues)
-            .toJsonObject(),
-        generation
-    )
+    ): GenerationParams = mergedExecutionProfile(generation, profile)
 
     private fun mergeUserRequestedExecutionProfile(
         base: ModelExecutionProfile,
         requested: ModelExecutionProfile,
         authoritativeFields: Set<String>
-    ): ModelExecutionProfile {
-        require(base.runtimeIdentity.identityHash == requested.runtimeIdentity.identityHash) {
-            "用户参数候选与当前运行身份不一致"
-        }
-        val selected = requested.userOverrides.intersect(authoritativeFields)
-        if (selected.isEmpty()) return base
-        val merged = requested.copy(
-            desiredLoadBoundValues = base.desiredLoadBoundValues.plus(
-                requested.desiredLoadBoundValues.only(selected)
-            ),
-            resolvedLoadBoundValues = base.resolvedLoadBoundValues.plus(
-                requested.resolvedLoadBoundValues.only(selected)
-            ),
-            hotExecutionValues = base.hotExecutionValues.plus(
-                requested.hotExecutionValues.only(selected)
-            ),
-            desiredHotExecutionValues = base.desiredHotExecutionValues.plus(
-                requested.desiredHotExecutionValues.only(selected)
-            ),
-            modelBehaviorValues = base.modelBehaviorValues.plus(
-                requested.modelBehaviorValues.only(selected)
-            ),
-            desiredModelBehaviorValues = base.desiredModelBehaviorValues.plus(
-                requested.desiredModelBehaviorValues.only(selected)
-            ),
-            userOverrides = base.userOverrides + selected,
-            quarantinedOverrides = (base.quarantinedOverrides + requested.quarantinedOverrides)
-                .distinctBy { it.field }
-        )
-        return if (merged.resolvedLoadSignature.digest == base.resolvedLoadSignature.digest &&
-            merged.committedExecutionSignature.digest == base.committedExecutionSignature.digest
-        ) {
-            base
-        } else {
-            merged
-        }
-    }
+    ): ModelExecutionProfile =
+        mergeUserRequestedIntoProfile(base, requested, authoritativeFields)
 
     private fun executionProfileDiffers(
         requested: GenerationParams,
         active: ModelExecutionProfile?
-    ): Boolean {
-        active ?: return false
-        val requestedLoad = LoadParams(
-            nCtx = requested.nCtx,
-            nThreads = requested.nThreads,
-            advancedJson = requested.advancedJson
-        ).toJson().let(::JSONObject)
-        val effective = active.resolvedLoadBoundValues
-            .plus(active.hotExecutionValues)
-            .plus(active.modelBehaviorValues)
-            .toJsonObject()
-        val governedFields = active.resolvedLoadBoundValues.fields +
-            active.hotExecutionValues.fields + active.modelBehaviorValues.fields
-        return governedFields.any { field ->
-            requestedLoad.has(field) &&
-                canonicalJsonValue(requestedLoad.opt(field)) != canonicalJsonValue(effective.opt(field))
-        }
-    }
+    ): Boolean = profileDiffersFrom(requested, active)
 
     private suspend fun timedLoadModel(
         model: ModelManifest,
