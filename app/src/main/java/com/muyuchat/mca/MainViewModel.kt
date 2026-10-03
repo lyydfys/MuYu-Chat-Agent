@@ -243,6 +243,10 @@ import com.muyuchat.mca.SelectChatSessionPort
 import com.muyuchat.mca.selectChatSession
 import com.muyuchat.mca.CandidateCanaryResultPort
 import com.muyuchat.mca.toCandidateCanaryResult
+import com.muyuchat.core.tuning.CanaryEvaluationParams
+import com.muyuchat.core.engine.EngineLifecycleLease
+import com.muyuchat.core.engine.LoadAuthorization
+import com.muyuchat.core.engine.PendingProfileDisposition
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -15003,245 +15007,94 @@ class MainViewModel @JvmOverloads constructor(
         return ((previous ?: 30_000L) * multiplier / 1000.0).toLong().coerceAtLeast(15L)
     }
 
-    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) {
-        val model = activeModelForRuntimeProfile
-            ?: error("当前没有可用于 pending profile 的已加载模型")
-        var lease: com.muyuchat.core.engine.EngineLifecycleLease? = null
-        val transactionId = pending.journal.transactionId
-        try {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    engineLifecycle = AgentEngineLifecycle.RELOADING,
-                    tuningJobState = AgentTuningJobState.VALIDATING,
-                    tuningPhase = "应用 pending profile",
-                    statusMessage = "正在重新加载并验证 pending profile…"
-                )
+    /**
+     * The ViewModel side of [RuntimeProfileTransactionPort]: one route per member, no logic of its
+     * own. Both decisions moved to [RuntimeProfileTransactionOperations], which is now the only place
+     * a runtime profile is applied or rolled back.
+     *
+     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
+     * their name with the ViewModel member they forward to, and an unqualified call would recurse.
+     */
+    private val runtimeProfileTransactionPort: RuntimeProfileTransactionPort =
+        object : RuntimeProfileTransactionPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
             }
-            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.VALIDATING, "USER_APPLY")
-            pending.journal.jobId?.let { jobId ->
-                val persistedJob = runtimeProfileStore.tuningJob(jobId)
-                    ?: error("pending profile 对应的调优任务不存在")
-                if (persistedJob.state == PersistedTuningJobState.PAUSED.name) {
-                    runtimeProfileStore.resumeTuningJob(jobId, "USER_APPLY_RESUMED")
+
+            override val runtimeProfileStore: ModelRuntimeProfileStore
+                get() = this@MainViewModel.runtimeProfileStore
+
+            override val engine: McaInferenceService
+                get() = this@MainViewModel.engine
+
+            override val activeModelForRuntimeProfile: ModelManifest?
+                get() = this@MainViewModel.activeModelForRuntimeProfile
+
+            override var pendingProfileTransactionId: String?
+                get() = this@MainViewModel.pendingProfileTransactionId
+                set(value) {
+                    this@MainViewModel.pendingProfileTransactionId = value
                 }
-                runtimeProfileStore.transitionTuningJob(
-                    jobId,
-                    PersistedTuningJobState.VALIDATING,
-                    "USER_APPLY"
-                )
+
+            override fun candidateMeasurement(
+                profileId: String,
+                jobId: String?,
+                phase: String,
+                result: CandidateCanaryResult
+            ): CandidateMeasurementEntity =
+                this@MainViewModel.candidateMeasurement(profileId, jobId, phase, result)
+
+            override fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
+                this@MainViewModel.tuningCandidateScore(result)
+
+            override fun mergeExecutionProfile(
+                generation: GenerationParams,
+                profile: ModelExecutionProfile
+            ): GenerationParams = this@MainViewModel.mergeExecutionProfile(generation, profile)
+
+            override suspend fun restoreExactRuntimeProfile(
+                model: ModelManifest,
+                profile: ModelExecutionProfile
+            ): Boolean = this@MainViewModel.restoreExactRuntimeProfile(model, profile)
+
+            override fun showStatus(message: String) {
+                this@MainViewModel.showStatus(message)
             }
-            val candidate = pending.pendingExecutionProfile.asTuningExecutionProfile(
-                kind = ExecutionProfileKind.BALANCED,
-                verificationLevel = ProfileVerificationLevel.UNVERIFIED,
-                reason = "用户应用已验证的 pending profile"
-            )
-            lease = engine.acquireExclusiveLifecycleLease()
-            val authorization = engine.stagePendingExecutionProfile(
-                transactionId = transactionId,
-                profile = pending.pendingExecutionProfile,
-                rollbackTargetProfileId = pending.journal.rollbackTargetProfileId
-            )
-            val result = runCandidateCanary(
+
+            override fun asTuningExecutionProfile(
+                profile: ModelExecutionProfile,
+                kind: ExecutionProfileKind,
+                verificationLevel: ProfileVerificationLevel,
+                reason: String
+            ): TuningExecutionProfile =
+                profile.asTuningExecutionProfile(kind = kind, verificationLevel = verificationLevel, reason = reason)
+
+            override suspend fun runCandidateCanary(
+                candidate: TuningExecutionProfile,
+                canaryParams: CanaryEvaluationParams,
+                authorization: LoadAuthorization,
+                disposition: PendingProfileDisposition,
+                lifecycleLease: EngineLifecycleLease?
+            ): CandidateCanaryResult = this@MainViewModel.runCandidateCanary(
                 candidate = candidate,
-                canaryParams = com.muyuchat.core.tuning.CanaryEvaluationParams(),
+                canaryParams = canaryParams,
                 authorization = authorization,
-                disposition = com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
-                lifecycleLease = lease
+                disposition = disposition,
+                lifecycleLease = lifecycleLease
             )
-            runtimeProfileStore.recordMeasurement(
-                candidateMeasurement(
-                    profileId = pending.pendingExecutionProfile.profileId,
-                    jobId = pending.journal.jobId,
-                    phase = "USER_APPLY_CANARY",
-                    result = result
-                )
-            )
-            val applyScore = tuningCandidateScore(result)
-            if (!applyScore.eligible) error(applyScore.reason ?: result.detail)
-            engine.commitDeferredPendingExecutionProfile(authorization, lease ?: error("pending apply lease 已释放"))
-            val signatures = engine.parameterSignatureSnapshot() ?: error("pending profile 缺少签名快照")
-            runtimeProfileStore.commitCandidate(
-                transactionId = transactionId,
-                verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
-                activeLoadedSignature = signatures.active?.digest ?: signatures.resolved.digest,
-                effectiveExecutionSignature = signatures.effective?.digest ?: signatures.committed.digest
-            )
-            pendingProfileTransactionId = null
-            _uiState.update { state ->
-                state.copy(
-                    params = mergeExecutionProfile(state.params, pending.pendingExecutionProfile),
-                    profileId = pending.pendingExecutionProfile.profileId,
-                    revision = pending.pendingExecutionProfile.revision,
-                    profileRecordState = AgentProfileRecordState.COMMITTED,
-                    verification = AgentProfileVerification.COMPATIBLE,
-                    pendingProfile = null,
-                    reloadRequired = false,
-                    engineLifecycle = AgentEngineLifecycle.READY,
-                    tuningJobState = AgentTuningJobState.SUCCEEDED,
-                    tuningPhase = "pending 已提交",
-                    busy = false,
-                    statusMessage = "pending profile 已通过正确性与签名核对并提交。"
-                )
-            }
-        } catch (error: Throwable) {
-            lease?.release()
-            lease = null
-            val recovery = runCatching {
-                runtimeProfileStore.rejectCandidate(
-                    transactionId = transactionId,
-                    failureStage = "USER_APPLY",
-                    failureCode = "PENDING_APPLY_FAILED",
-                    failureSummary = error.message ?: "pending apply failed"
-                )
-            }.getOrNull()
-            val restoredId = recovery?.rollbackProfileId?.let { rollbackId ->
-                val rollback = runtimeProfileStore.reconstructedProfile(rollbackId)
-                if (rollback != null && restoreExactRuntimeProfile(model, rollback)) rollbackId else null
-            }
-            if (recovery != null) runCatching { runtimeProfileStore.completeRecovery(transactionId, restoredId) }
-            if (pendingProfileTransactionId == transactionId) pendingProfileTransactionId = null
-            _uiState.update {
-                it.copy(
-                    busy = false,
-                    engineLifecycle = if (restoredId != null) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR,
-                    tuningJobState = AgentTuningJobState.FAILED,
-                    tuningPhase = "pending 应用失败",
-                    pendingProfile = null,
-                    statusMessage = "pending profile 应用失败：${error.message ?: "未知错误"}"
-                )
-            }
-        } finally {
-            runCatching { lease?.release() }
         }
+
+    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) {
+        applyPendingRuntimeTransaction(port = runtimeProfileTransactionPort, pending = pending)
     }
 
     private suspend fun rollbackCommittedRuntimeProfile(
         identity: ModelRuntimeIdentity,
         model: ModelManifest
     ) {
-        val current = runtimeProfileStore.currentRuntimeState(identity.identityHash)
-            ?: error("当前运行配置未持久化")
-        val activeEntity = current.activeProfile ?: error("当前没有 active profile")
-        val parentId = activeEntity.parentCommittedProfileId
-            ?: current.pointers?.lastKnownGoodProfileId?.takeIf { it != activeEntity.profileId }
-        if (parentId == null) {
-            showStatus("当前 profile 没有更早的稳定版本可回退。")
-            return
-        }
-        val parentEntity = runtimeProfileStore.profile(parentId) ?: error("回退目标不存在")
-        val target = runtimeProfileStore.reconstructedProfile(parentId) ?: error("回退目标无法重建")
-        val rollbackCandidate = target.copy(
-            profileId = "rollback-${UUID.randomUUID().toString().replace("-", "").take(20)}",
-            revision = nextExecutionProfileRevision(
-                committedRevision = activeEntity.revision,
-                persistedRevisions = runtimeProfileStore.profiles(identity.identityHash).map { it.revision }
-            ),
-            resolvedAt = System.currentTimeMillis()
-        )
-        val transactionId = "rollback-${UUID.randomUUID()}"
-        var lease: com.muyuchat.core.engine.EngineLifecycleLease? = null
-        try {
-            _uiState.update {
-                it.copy(
-                    busy = true,
-                    engineLifecycle = AgentEngineLifecycle.ROLLING_BACK,
-                    tuningJobState = AgentTuningJobState.RECOVERING,
-                    tuningPhase = "回退到上一稳定 profile",
-                    statusMessage = "正在回退并重新验证…"
-                )
-            }
-            runtimeProfileStore.stageCandidate(
-                snapshot = rollbackCandidate.toPersistedExecutionProfileSnapshot(
-                    parentCommittedProfileId = parentEntity.parentCommittedProfileId,
-                    verificationLevel = PersistedProfileVerificationLevel.COMPATIBLE,
-                    sourceSummaryJson = JSONObject().put("source", "user_rollback").put("target", parentId).toString()
-                ),
-                transactionId = transactionId,
-                rollbackTargetProfileId = activeEntity.profileId
-            )
-            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.APPLYING, "ROLLBACK_APPLYING")
-            lease = engine.acquireExclusiveLifecycleLease()
-            val authorization = engine.stagePendingExecutionProfile(
-                transactionId = transactionId,
-                profile = rollbackCandidate,
-                rollbackTargetProfileId = activeEntity.profileId
-            )
-            runtimeProfileStore.updateJournalStage(transactionId, TuningJournalState.VALIDATING, "ROLLBACK_VALIDATING")
-            val wrapper = rollbackCandidate.asTuningExecutionProfile(
-                ExecutionProfileKind.BALANCED,
-                ProfileVerificationLevel.UNVERIFIED,
-                "用户回退"
-            )
-            val result = runCandidateCanary(
-                wrapper,
-                com.muyuchat.core.tuning.CanaryEvaluationParams(),
-                authorization,
-                com.muyuchat.core.engine.PendingProfileDisposition.DEFER_TO_LEASE_HOLDER,
-                lease
-            )
-            runtimeProfileStore.recordMeasurement(
-                candidateMeasurement(
-                    profileId = rollbackCandidate.profileId,
-                    jobId = null,
-                    phase = "ROLLBACK_CANARY",
-                    result = result
-                )
-            )
-            val rollbackScore = tuningCandidateScore(result)
-            if (!rollbackScore.eligible) error(rollbackScore.reason ?: result.detail)
-            engine.commitDeferredPendingExecutionProfile(authorization, lease ?: error("rollback lease 已释放"))
-            val signatures = engine.parameterSignatureSnapshot() ?: error("回退缺少签名快照")
-            runtimeProfileStore.commitCandidate(
-                transactionId,
-                PersistedProfileVerificationLevel.COMPATIBLE,
-                signatures.active?.digest ?: signatures.resolved.digest,
-                signatures.effective?.digest ?: signatures.committed.digest
-            )
-            _uiState.update { state ->
-                state.copy(
-                    params = mergeExecutionProfile(state.params, rollbackCandidate),
-                    profileId = rollbackCandidate.profileId,
-                    revision = rollbackCandidate.revision,
-                    profileRecordState = AgentProfileRecordState.COMMITTED,
-                    verification = AgentProfileVerification.COMPATIBLE,
-                    engineLifecycle = AgentEngineLifecycle.READY,
-                    tuningJobState = AgentTuningJobState.SUCCEEDED,
-                    tuningPhase = "回退完成",
-                    busy = false,
-                    rollbackProfile = parentEntity.parentCommittedProfileId?.let {
-                        AgentRollbackProfile(it, null, "可继续回退", true)
-                    },
-                    statusMessage = "已回退到上一稳定配置并完成正确性验证。"
-                )
-            }
-        } catch (error: Throwable) {
-            lease?.release()
-            lease = null
-            val recovery = runCatching {
-                runtimeProfileStore.rejectCandidate(
-                    transactionId,
-                    "ROLLBACK",
-                    "ROLLBACK_FAILED",
-                    error.message ?: "rollback failed"
-                )
-            }.getOrNull()
-            val restoredId = recovery?.rollbackProfileId?.let { rollbackId ->
-                val previous = runtimeProfileStore.reconstructedProfile(rollbackId)
-                if (previous != null && restoreExactRuntimeProfile(model, previous)) rollbackId else null
-            }
-            if (recovery != null) runCatching { runtimeProfileStore.completeRecovery(transactionId, restoredId) }
-            _uiState.update {
-                it.copy(
-                    busy = false,
-                    engineLifecycle = if (restoredId != null) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR,
-                    tuningJobState = AgentTuningJobState.FAILED,
-                    statusMessage = "回退失败：${error.message ?: "未知错误"}"
-                )
-            }
-        } finally {
-            runCatching { lease?.release() }
-        }
+        rollbackCommittedRuntimeProfile(port = runtimeProfileTransactionPort, identity = identity, model = model)
     }
 
     private suspend fun restoreExactRuntimeProfile(
