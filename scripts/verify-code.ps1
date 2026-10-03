@@ -61,20 +61,41 @@ $compileTasks = @(
 
 $failed = @()
 
+# Gradle writes into a single shared `app/build`. Two concurrent invocations (two agents, or an agent
+# and a human) corrupt each other's incremental caches: "Detected multiple Kotlin daemon sessions",
+# "Could not delete .../kotlin-classes", "Could not close incremental caches". `--no-daemon` does not
+# prevent that, because the Kotlin compiler runs its own daemon and both share the build directory.
+# A named system mutex serialises every Gradle call from any process on this machine, so parallel
+# work queues instead of failing. Wait up to 30 minutes, then fail loudly rather than corrupt.
+$script:buildMutex = New-Object System.Threading.Mutex($false, 'Global\McaGradleBuildQueue')
+
 function Invoke-Gradle {
     param([string[]] $Arguments, [string] $LogPath)
-    $all = @('-p', $repo) + $Arguments + @('--no-daemon', '--console=plain')
+    $held = $false
+    try {
+        $held = $script:buildMutex.WaitOne([TimeSpan]::FromMinutes(30))
+        if (-not $held) {
+            Write-Host '   could not acquire the build queue within 30 minutes' -ForegroundColor Red
+            return 1
+        }
+        $all = @('-p', $repo) + $Arguments + @('--no-daemon', '--console=plain')
     # No --rerun-tasks and no clean on purpose: Kotlin/Gradle incrementality and the build cache are
     # what make this the fast loop. The strict path lives in build.ps1.
-    & $gradlew @all > $LogPath 2>&1
-    return $LASTEXITCODE
+        & $gradlew @all > $LogPath 2>&1
+        return $LASTEXITCODE
+    } finally {
+        if ($held) { $script:buildMutex.ReleaseMutex() }
+    }
 }
 
 Write-Host '== compile (incremental) ==' -ForegroundColor Cyan
 Write-Host ('   ' + ($compileTasks -join ', '))
-$compileLog = Join-Path $env:TEMP 'mca-verify-compile.log'
+# Unique per run: several agents may run this script at once, and a shared path makes them
+# clobber each other's log (observed).
+$runTag = "$PID-" + (Get-Date -Format 'HHmmssfff')
+$compileLog = Join-Path $env:TEMP "mca-verify-compile-$runTag.log"
 $code = Invoke-Gradle -Arguments $compileTasks -LogPath $compileLog
-$text = Get-Content $compileLog -Raw
+$text = Get-Content $compileLog -Raw -ErrorAction SilentlyContinue
 
 $crashed = $text -match 'Exception while generating code for'
 $succeeded = $text -match 'BUILD SUCCESSFUL'
@@ -111,9 +132,9 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $testArgs += @(':core:engine:testDebugUnitTest', ':api:local:testDebugUnitTest')
         Write-Host '   plus :core:engine:test and :api:local:test'
     }
-    $testLog = Join-Path $env:TEMP 'mca-verify-test.log'
+    $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
     $testCode = Invoke-Gradle -Arguments $testArgs -LogPath $testLog
-    $testText = Get-Content $testLog -Raw
+    $testText = Get-Content $testLog -Raw -ErrorAction SilentlyContinue
     if ($testText -match 'BUILD SUCCESSFUL' -and $testCode -eq 0) {
         Write-Host '   ok' -ForegroundColor Green
     } else {
@@ -132,7 +153,11 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         [int] $totalFailures = 0
         [int] $totalErrors = 0
         [int] $totalSkipped = 0
-        foreach ($file in Get-ChildItem $dir -Filter '*.xml') {
+        # Only count reports written by THIS run. Parallel agents share the report directory, so
+        # counting every XML on disk reports another agent's (possibly stale) results as ours -
+        # observed: a filtered run reported tests=14 from a different test class entirely.
+        [datetime] $runStart = (Get-Date).AddMinutes(-20)
+        foreach ($file in Get-ChildItem $dir -Filter '*.xml' | Where-Object { $_.LastWriteTime -gt $runStart }) {
             [string] $xml = [System.IO.File]::ReadAllText($file.FullName)
             [System.Text.RegularExpressions.Match] $suite = [regex]::Match($xml, '<testsuite\s[^>]*>')
             if (-not $suite.Success) { continue }
@@ -142,7 +167,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             $totalErrors = $totalErrors + [int] ([regex]::Match($head, 'errors="(\d+)"').Groups[1].Value)
             $totalSkipped = $totalSkipped + [int] ([regex]::Match($head, 'skipped="(\d+)"').Groups[1].Value)
         }
-        Write-Host ("   reports: tests=$totalTests failures=$totalFailures errors=$totalErrors skipped=$totalSkipped")
+        Write-Host ("   reports (this run only): tests=$totalTests failures=$totalFailures errors=$totalErrors skipped=$totalSkipped")
         if ($totalFailures -gt 0 -or $totalErrors -gt 0) {
             foreach ($file in Get-ChildItem $dir -Filter '*.xml') {
                 [string] $xml = [System.IO.File]::ReadAllText($file.FullName)
@@ -163,6 +188,16 @@ if (-not $status) {
     Write-Host ''
     Write-Host '   dependency direction: nothing under core/engine or api/local may import app internals.'
     Write-Host '   A new import across that line means the slice is not finished.'
+}
+
+# Keep the logs when something failed - they are the only record of why, and deleting them made a
+# failing run undiagnosable.
+if ($failed.Count -gt 0) {
+    Write-Host "   compile log: $compileLog" -ForegroundColor Yellow
+    if ($testLog -and (Test-Path $testLog)) { Write-Host "   test log:    $testLog" -ForegroundColor Yellow }
+} else {
+    Remove-Item $compileLog -ErrorAction SilentlyContinue
+    if ($testLog) { Remove-Item $testLog -ErrorAction SilentlyContinue }
 }
 
 Write-Host ''
