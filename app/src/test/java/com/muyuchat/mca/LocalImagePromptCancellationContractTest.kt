@@ -67,13 +67,20 @@ class LocalImagePromptCancellationContractTest {
     fun `standalone local generation uses verified Hy-MT2 before English prompt admission`() {
         val source = mainViewModelSource()
         val prepare = functionBody(
-            source,
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
 
         assertFalse(source.contains("private suspend fun translateLocalImagePrompt("))
         assertFalse(prepare.contains("LocalImagePromptAlignmentV4"))
-        assertTrue(prepare.contains("offlinePromptTranslationService.translate("))
+        // The call moved behind the port, so assert BOTH halves of the original intent: the
+        // preparation reaches translation only through the port, and the port is still the single
+        // shared service. Checking just one half would let a second translation path slip in.
+        assertTrue(prepare.contains("port.translate("))
+        assertTrue(
+            "the port must still be the one shared translation service",
+            mainViewModelSource().contains("offlinePromptTranslationService.translate(bundle, request)")
+        )
         assertTrue(prepare.contains("catch (error: OfflinePromptTranslationCleanupException)"))
         assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
         assertTrue(prepare.contains("OfflinePromptTranslationResolution.Fallback"))
@@ -88,8 +95,8 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `prompt preparation never acquires the chat runtime lifecycle lease`() {
         val prepare = functionBody(
-            mainViewModelSource(),
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
 
         assertFalse(prepare.contains("acquireExclusiveLifecycleLease("))
@@ -101,8 +108,8 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `prompt preparation bounds request and final native text before execution`() {
         val prepare = functionBody(
-            mainViewModelSource(),
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
         val originalLimit = prepare.indexOf("if (prompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS")
         val finalNegative = prepare.indexOf("val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution(")
@@ -199,8 +206,8 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `captured prompt evidence cannot override the required method`() {
         val prepare = functionBody(
-            mainViewModelSource(),
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
         val derive = prepare.indexOf("val requiredMethod = requiredLocalImagePromptTransformationMethod(")
         val captured = prepare.indexOf("captured?.let { execution ->")
@@ -227,8 +234,8 @@ class LocalImagePromptCancellationContractTest {
     fun `prompt evidence full fingerprint is resolved from final effective negative`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val prepare = functionBody(
-            source,
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
         val finalNegative = prepare.indexOf(
             "val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution("
@@ -316,15 +323,16 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `English-dominant Chinese pair is translated before final language admission`() {
         val prepare = functionBody(
-            mainViewModelSource(),
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
         val finalNegative = prepare.indexOf(
             "val finalNegativePrompt = resolveLocalImageFinalNegativePromptForExecution("
         )
         val admission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", finalNegative)
         val method = prepare.indexOf("val requiredMethod = requiredLocalImagePromptTransformationMethod(", admission)
-        val translation = prepare.indexOf("offlinePromptTranslationService.translate(", method)
+        // The call is reached through the port now; the ordering assertion is unchanged.
+        val translation = prepare.indexOf("port.translate(", method)
         val translatedAdmission = prepare.indexOf("requireLocalImagePromptLanguageAdmission(", translation)
         assertTrue(translatedAdmission > translation)
         val argumentsEnd = prepare.indexOf(')', translatedAdmission)
@@ -372,8 +380,8 @@ class LocalImagePromptCancellationContractTest {
     fun `Hy-MT2 success binds English prompt and fallback exits before either image worker`() {
         val source = mainViewModelSource()
         val prepare = functionBody(
-            source,
-            "private suspend fun prepareLocalImagePromptExecution("
+            prepareSource(),
+            "internal suspend fun prepareLocalImagePromptExecution("
         )
         val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
         val api = functionBody(source, "private suspend fun generateLocalApiImage(")
@@ -540,6 +548,12 @@ class LocalImagePromptCancellationContractTest {
     }
 
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+
+    /**
+     * The prompt-preparation body now lives in its own file. The assertions below are unchanged --
+     * only the file they read moved -- so this is the same contract, checked at its new home.
+     */
+    private fun prepareSource(): String = sourceFile("LocalImagePromptPreparation.kt")
 
     private fun localImageWorkerClientSource(): String = sourceFile("LocalImageWorkerClient.kt")
 
