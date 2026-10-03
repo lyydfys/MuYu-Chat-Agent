@@ -2217,143 +2217,70 @@ class MainViewModel @JvmOverloads constructor(
      *
      * Must be called from an IO coroutine.
      */
-    private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot {
-        managedRuntimeReadinessRefreshGate.invalidate()
-        val models = modelStore.listModels()
-        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(getApplication(), models)
-        _uiState.update { state ->
-            state.copy(
-                models = models,
-                qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds,
-                qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                    models = models,
-                    verifiedLocalModelIds = qairtVerifiedLocalModelIds,
-                    recommendations = state.recommendedRemoteModels
-                )
-            )
+    /**
+     * The ViewModel side of [ManagedRuntimeReadinessPort]. Every concurrency primitive stays here and
+     * is reduced to a yes/no answer, so nothing that a caller could misuse crosses the boundary.
+     */
+    private val managedRuntimeReadinessPort: ManagedRuntimeReadinessPort =
+        object : ManagedRuntimeReadinessPort {
+            override val context: Application
+                get() = this@MainViewModel.getApplication()
+
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override fun listLocalModels(): List<ModelManifest> =
+                this@MainViewModel.modelStore.listModels()
+
+            override fun loadLocalImageModels(): List<LocalImageModelRecord> =
+                this@MainViewModel.localImageModelStore.loadModels()
+
+            override fun loadPersistedSelectedImageModelId(): String? =
+                this@MainViewModel.localImageModelStore.loadSelectedModelId()
+
+            override fun saveSelectedImageModelId(id: String?) {
+                this@MainViewModel.localImageModelStore.saveSelectedModelId(id)
+            }
+
+            override fun beginReadinessRefresh(): Long =
+                this@MainViewModel.managedRuntimeReadinessRefreshGate.begin()
+
+            override fun invalidateReadinessRefresh() {
+                this@MainViewModel.managedRuntimeReadinessRefreshGate.invalidate()
+            }
+
+            override fun isReadinessRefreshCurrent(token: Long): Boolean =
+                this@MainViewModel.managedRuntimeReadinessRefreshGate.isCurrent(token)
+
+            override fun imageLibraryBackupJobActive(): Boolean =
+                this@MainViewModel.imageLibraryBackupJob?.isCompleted == false
+
+            override fun hasActiveImageGeneration(): Boolean =
+                this@MainViewModel.activeImageGenerationJobId != null
+
+            override fun hasActiveImageUpscale(): Boolean =
+                this@MainViewModel.activeImageUpscaleJobId != null
+
+            override fun hasActiveLocalApiImageGeneration(): Boolean =
+                this@MainViewModel.activeLocalApiImageModelId != null
+
+            override fun hasActiveImageGenerationRequest(): Boolean =
+                this@MainViewModel.localImageGenerationCoordinator.activeRequestId() != null
         }
-        return ManagedChatCatalogSnapshot(
-            models = models,
-            qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds
-        )
-    }
+
+    /** Delegates to [publishChatCatalogSnapshot]. */
+    private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot =
+        publishChatCatalogSnapshot(managedRuntimeReadinessPort)
 
     /** Refreshes product-facing readiness; persisted verification remains advisory. */
     private fun refreshManagedRuntimeReadiness() {
-        val refreshToken = managedRuntimeReadinessRefreshGate.begin()
-        try {
-            // Publish the inexpensive catalog projection before hashing QNN/QAIRT packages. This
-            // keeps cold start responsive while the readiness evidence is still being collected.
-            val localModels = modelStore.listModels()
-            _uiState.update { state ->
-                if (managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) {
-                    val previouslyVerifiedShaByModelId = state.models
-                        .asSequence()
-                        .filter { it.id in state.qairtVerifiedLocalModelIds }
-                        .associate { it.id to it.sha256 }
-                    val stillVerifiedIds = verifiedModelIdsWithUnchangedSha(
-                        verifiedShaByModelId = previouslyVerifiedShaByModelId,
-                        currentShaByModelId = localModels.associate { it.id to it.sha256 }
-                    )
-                    state.copy(
-                        models = localModels,
-                        qairtVerifiedLocalModelIds = stillVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = localModels,
-                            verifiedLocalModelIds = stillVerifiedIds,
-                            recommendations = state.recommendedRemoteModels
-                        )
-                    )
-                } else {
-                    state
-                }
-            }
-            if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
-
-            val localImageModels = localImageModelStore.loadModels()
-            val persistedImageModelId = localImageModelStore.loadSelectedModelId()
-            // QNN verification is advisory telemetry.  A staging/runtime probe failure must
-            // never discard the structurally discovered image catalog from the product UI.
-            // Keep the models visible and let the real load/graph path report the concrete
-            // runtime failure when the user selects one.
-            val qnnVerificationCurrentByModelId = runCatching {
-                currentQnnImageVerificationByModelId(getApplication(), localImageModels)
-            }.getOrElse { emptyMap() }
-            val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(getApplication(), localModels)
-            if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
-
-            _uiState.update { latest ->
-                if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) {
-                    latest
-                } else {
-                    // Selection is user-owned state. Merge against the latest StateFlow value at
-                    // publication time and never write a captured background value back to prefs.
-                    val preferredImageModelId = latest.selectedLocalImageModelId
-                        ?.takeIf { selectedId -> localImageModels.any { it.id == selectedId } }
-                        ?: persistedImageModelId
-                    val selectedImageModelId = selectedReadyLocalImageModelId(
-                        models = localImageModels,
-                        qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                        preferredId = preferredImageModelId
-                    )
-                    if (selectedImageModelId != persistedImageModelId) {
-                        localImageModelStore.saveSelectedModelId(selectedImageModelId)
-                    }
-                    val selectedImageBackend = if (
-                        selectedImageModelId == null && latest.selectedImageBackend == ImageBackend.LOCAL
-                    ) {
-                        ImageBackend.CLOUD
-                    } else {
-                        latest.selectedImageBackend
-                    }
-                    val verifiedQairtShaByModelId = localModels
-                        .asSequence()
-                        .filter { it.id in qairtVerifiedLocalModelIds }
-                        .associate { it.id to it.sha256 }
-                    val currentQairtVerifiedIds = verifiedModelIdsWithUnchangedSha(
-                        verifiedShaByModelId = verifiedQairtShaByModelId,
-                        currentShaByModelId = latest.models.associate { it.id to it.sha256 }
-                    )
-                    latest.copy(
-                        localImageModels = localImageModels,
-                        qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                        qairtVerifiedLocalModelIds = currentQairtVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = latest.models,
-                            verifiedLocalModelIds = currentQairtVerifiedIds,
-                            recommendations = latest.recommendedRemoteModels
-                        ),
-                        selectedLocalImageModelId = selectedImageModelId,
-                        selectedImageBackend = selectedImageBackend
-                    )
-                }
-            }
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            _uiState.update { state ->
-                if (shouldSurfaceManagedRuntimeRefreshFailure(
-                        refreshCurrent = managedRuntimeReadinessRefreshGate.isCurrent(refreshToken),
-                        busy = state.busy,
-                        isGenerating = state.isGenerating,
-                        imageLibraryBackupRunning = state.imageLibraryBackup.running,
-                        imageLibraryBackupJobActive = imageLibraryBackupJob?.isCompleted == false,
-                        generationImageGrantReleaseDeferred = state.deferGenerationImageGrantRelease,
-                        activeImageGeneration = activeImageGenerationJobId != null,
-                        activeImageUpscale = activeImageUpscaleJobId != null,
-                        activeLocalApiImageGeneration = activeLocalApiImageModelId != null,
-                        coordinatorActive = localImageGenerationCoordinator.activeRequestId() != null
-                    )) {
-                    state.copy(
-                        statusMessage = "模型目录后台刷新失败，已保留当前列表：" +
-                            (error.message ?: "请稍后重试")
-                    )
-                } else {
-                    state
-                }
-            }
-        }
+        refreshRuntimeReadiness(managedRuntimeReadinessPort)
     }
+
+    /** Refreshes product-facing readiness; persisted verification remains advisory. */
 
     fun onInputChange(value: String) {
         if (value != _uiState.value.input &&

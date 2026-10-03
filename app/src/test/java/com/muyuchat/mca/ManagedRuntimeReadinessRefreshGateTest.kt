@@ -107,14 +107,19 @@ class ManagedRuntimeReadinessRefreshGateTest {
         assertTrue(load.contains("var model = persistedModels.firstOrNull { it.id == requestedModel.id }"))
         assertTrue(smoke.contains("validatedCatalog.models.firstOrNull { it.id == requestedModel.id }"))
 
+        // The publisher body moved to ManagedRuntimeReadinessRefresh.kt during the readiness
+        // extraction (the ViewModel keeps a forwarding call with the original name). The ordering
+        // contract -- invalidate the gate *before* reading the catalog -- is asserted where the code
+        // now lives, and the two symbols it names are the ones the extraction renamed. The contract
+        // itself is unchanged: nothing was relaxed.
         val publisher = section(
-            source,
-            "private fun publishManagedChatCatalogAfterValidation(",
-            "/** Refreshes product-facing readiness"
+            sourceFile("app/src/main/java/com/muyuchat/mca/ManagedRuntimeReadinessRefresh.kt"),
+            "internal fun publishChatCatalogSnapshot(",
+            "internal fun refreshRuntimeReadiness("
         )
         assertTrue(
-            publisher.indexOf("managedRuntimeReadinessRefreshGate.invalidate()") <
-                publisher.indexOf("modelStore.listModels()")
+            publisher.indexOf("port.invalidateReadinessRefresh()") <
+                publisher.indexOf("port.listLocalModels()")
         )
         assertTrue(publisher.contains("qairtVerifiedLocalModelIds = qairtVerifiedLocalModelIds"))
         assertTrue(publisher.contains("qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds("))
