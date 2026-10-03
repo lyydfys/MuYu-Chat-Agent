@@ -69,7 +69,15 @@ class StatusMessageWriterContractTest {
 
     @Test
     fun `the funnel is actually used`() {
-        val calls = Regex("""(?<![\w.])showStatus\(""").findAll(viewModelSource).count()
+        // The funnel is still *defined* once, on the ViewModel (see the test below). What moved is the
+        // call sites: when a family is extracted, its `showStatus(...)` becomes `port.showStatus(...)`
+        // in the extracted file. Counting both spellings across the package's own sources keeps the
+        // same contract -- "the migrated sites really do go through the funnel" -- instead of pinning
+        // a count that every extraction would otherwise have to lower.
+        val sources = packageSources()
+        val direct = Regex("""(?<![\w.])showStatus\(""").findAll(sources).count()
+        val throughPort = Regex("""\.showStatus\(""").findAll(sources).count()
+        val calls = direct + throughPort
         assertTrue("showStatus(...) should be called by the migrated sites, found $calls", calls >= 100)
     }
 
@@ -125,6 +133,30 @@ class StatusMessageWriterContractTest {
             }
         """.trimIndent()
         assertEquals("a multi-line atomic copy must not be flagged", 0, countSingleFieldStatusUpdates(atomic))
+    }
+
+    /**
+     * Every `.kt` file in the app package, concatenated.
+     *
+     * Resolved the same way [sourceFile] resolves a single path, then listing that directory, so the
+     * helper keeps working from whatever working directory the test runner picks.
+     */
+    private fun packageSources(): String {
+        val relative = "app/src/main/java/com/muyuchat/mca/MainViewModel.kt"
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidate = File(root, relative)
+            if (candidate.isFile) {
+                val packageDir = candidate.parentFile
+                return packageDir.listFiles { file -> file.extension == "kt" }
+                    ?.sortedBy { it.name }
+                    ?.joinToString("\n") { it.readText(Charsets.UTF_8) }
+                    ?: error("Unable to list $packageDir")
+            }
+            directory = root.parentFile
+        }
+        error("Unable to locate $relative")
     }
 
     private fun sourceFile(relativePath: String): String {

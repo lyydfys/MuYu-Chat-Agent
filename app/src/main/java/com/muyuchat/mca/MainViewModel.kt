@@ -609,13 +609,6 @@ class MainViewModel @JvmOverloads constructor(
     private val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
     private var offlineTranslationInstallJob: Job? = null
     private var offlineTranslationDownloadJob: Job? = null
-    private data class PendingImageTranslation(
-        val id: String,
-        val visibleUserText: String,
-        val handoff: ChatImagePromptBridge.ChatImagePromptBridgeHandoff,
-        val contextTraceJson: String?,
-        val stillOwned: () -> Boolean
-    )
     private var pendingImageTranslation: PendingImageTranslation? = null
     private data class PendingChatImageAction(
         val id: String,
@@ -957,71 +950,77 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private suspend fun recoverPendingChatImageCommits(
+    /** The ViewModel side of [ChatImageRetryPort]. */
+    private val chatImageRetryPort: ChatImageRetryPort =
+        object : ChatImageRetryPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val cloudApiStore: CloudApiStore
+                get() = this@MainViewModel.cloudApiStore
+
+            override val localImageModelStore: LocalImageModelStore
+                get() = this@MainViewModel.localImageModelStore
+
+            override val chatImageCommitJournal: ChatImageCommitJournal
+                get() = this@MainViewModel.chatImageCommitJournal
+
+            override val chatSessionStore: ChatSessionStore
+                get() = this@MainViewModel.chatSessionStore
+
+            override fun showStatus(message: String?) =
+                this@MainViewModel.showStatus(message = message)
+
+            override fun invalidatePendingChatImagePreparation() =
+                this@MainViewModel.invalidatePendingChatImagePreparation()
+
+            override fun sendChatImageRequest(
+visibleUserText: String,
+prompt: String,
+optionsOverride: LocalImageGenerationOptions?,
+promptEnvelope: PromptEnvelope?,
+contextTraceJson: String?
+) =
+                this@MainViewModel.sendChatImageRequest(visibleUserText = visibleUserText, prompt = prompt, optionsOverride = optionsOverride, promptEnvelope = promptEnvelope, contextTraceJson = contextTraceJson)
+
+            override fun pendingImageTranslation(): PendingImageTranslation? =
+                this@MainViewModel.pendingImageTranslation
+
+
+            override fun setPendingImageTranslation(value: PendingImageTranslation?) {
+                this@MainViewModel.pendingImageTranslation = value
+            }
+
+        }
+
+
+/** Delegates to [recoverPendingImageCommits]. Signature kept verbatim. */
+    suspend fun recoverPendingChatImageCommits(
         sessions: List<ChatSessionRecord>,
         images: List<ImageAssetRecord>
     ): Pair<List<ChatSessionRecord>, List<ImageAssetRecord>> {
-        val journal = runCatching { chatImageCommitJournal }.getOrNull() ?: return sessions to images
-        val entries = runCatching { journal.enumerate().validEntries }.getOrNull().orEmpty()
-        if (entries.isEmpty()) return sessions to images
-        var recoveredSessions = sessions
-        val recoveredImages = images.toMutableList()
-        for (entry in entries) {
-            val asset = runCatching { entry.imageAssetRecord() }.getOrNull() ?: continue
-            val session = recoveredSessions.firstOrNull { it.id == entry.chatSessionId }
-            val request = session?.messages
-                ?.firstOrNull { it.generatedImageRequest?.id == entry.requestId }
-                ?.generatedImageRequest
-            val jobMatches = request != null && (
-                request.currentJobId == entry.jobId ||
-                    request.currentJobId?.let { entry.jobId.startsWith("$it.") } == true
-                )
-            val databaseAlreadyContains = recoveredImages.any { it.id == asset.id }
-            val safelyAssociate = session != null && request != null && jobMatches
-            if (safelyAssociate && session != null && request != null) {
-                val imageIds = (request.imageAssetIds + asset.id).distinct()
-                val completedRequest = request.copy(
-                    status = ChatGeneratedImageStatus.DONE,
-                    message = if (imageIds.size == 1) "已生成 1 张图片。" else "已生成 ${imageIds.size} 张图片。",
-                    imageAssetIds = imageIds
-                )
-                val updatedMessages = session.messages.map { message ->
-                    if (message.generatedImageRequest?.id == entry.requestId) {
-                        message.copy(
-                            content = completedRequest.assistantTranscriptText(),
-                            generatedImageRequest = completedRequest
-                        )
-                    } else message
-                }
-                val updatedSessions = recoveredSessions.map { current ->
-                    if (current.id == session.id) {
-                        current.copy(messages = updatedMessages, updatedAt = System.currentTimeMillis())
-                    } else current
-                }.sortedForHistory()
-                val committed = runCatching {
-                    chatSessionStore.saveGeneratedImageResult(updatedSessions, listOf(asset))
-                }.getOrDefault(false)
-                if (committed) {
-                    recoveredSessions = updatedSessions
-                    if (!databaseAlreadyContains) recoveredImages += asset
-                    journal.removeAfterDurableCommit(entry.jobId, entry.requestId, true)
-                    continue
-                }
-            }
+        return recoverPendingImageCommits(port = chatImageRetryPort, sessions = sessions, images = images)
+    }
 
-            // A stale or deleted chat must not strand a valid image file. Preserve it in the
-            // gallery; only associate it with a conversation when the request/job identity matches.
-            val galleryAsset = if (safelyAssociate) asset else asset.copy(chatSessionId = null)
-            val durable = if (databaseAlreadyContains) true else runCatching {
-                chatSessionStore.upsertImages(listOf(galleryAsset))
-                true
-            }.getOrDefault(false)
-            if (durable) {
-                if (!databaseAlreadyContains) recoveredImages += galleryAsset
-                journal.removeAfterDurableCommit(entry.jobId, entry.requestId, true)
-            }
-        }
-        return recoveredSessions to recoveredImages.sortedImagesForLibrary()
+/** Delegates to [deleteCloudModelRecord]. Signature kept verbatim. */
+    fun deleteCloudModel(modelId: String) {
+        deleteCloudModelRecord(port = chatImageRetryPort, modelId = modelId)
+    }
+
+/** Delegates to [applyChatImageTranslationDraft]. Signature kept verbatim. */
+    fun confirmChatImageTranslationDraft(id: String, positive: String, negative: String?) {
+        applyChatImageTranslationDraft(port = chatImageRetryPort, id = id, positive = positive, negative = negative)
+    }
+
+/** Delegates to [chatImageRetrySnapshot]. Signature kept verbatim. */
+    fun buildChatImageRetrySnapshot(
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ): ImageGenerationJobSpec? {
+        return chatImageRetrySnapshot(port = chatImageRetryPort, request = request, chatSessionId = chatSessionId)
     }
 
     private fun startImageLibraryBackupJob(
@@ -6905,57 +6904,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun deleteCloudModel(modelId: String) {
-        val current = _uiState.value
-        val removed = current.cloudModels.firstOrNull { it.id == modelId }
-        if (removed == null) {
-            showStatus("未找到要删除的云端模型")
-            return
-        }
-        val remaining = current.cloudModels.filterNot { it.id == modelId }
-        val deletedSelectedChat = removed.kind == CloudModelKind.CHAT && current.selectedCloudChatModelId == modelId
-        val deletedSelectedImage = removed.kind == CloudModelKind.IMAGE && current.selectedCloudImageModelId == modelId
-        val nextChat = if (deletedSelectedChat) {
-            remaining.firstOrNull { it.kind == CloudModelKind.CHAT }
-        } else {
-            remaining.firstOrNull { it.id == current.selectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
-        }
-        val nextImage = if (deletedSelectedImage) {
-            remaining.firstOrNull { it.kind == CloudModelKind.IMAGE }
-        } else {
-            remaining.firstOrNull { it.id == current.selectedCloudImageModelId && it.kind == CloudModelKind.IMAGE }
-        }
-        val nextChatBackend = if (deletedSelectedChat && nextChat == null) ChatBackend.LOCAL else current.selectedChatBackend
-        val nextImageBackend = if (deletedSelectedImage && nextImage == null) ImageBackend.LOCAL else current.selectedImageBackend
-        val nextConfig = when {
-            deletedSelectedChat && nextChat != null -> nextChat.toChatConfig().normalized()
-            deletedSelectedImage && nextImage != null -> nextImage.toImageConfig().normalized()
-            current.editingCloudModelId == modelId -> CloudApiConfig()
-            else -> current.cloudApiConfig
-        }
-
-        cloudApiStore.saveModels(remaining)
-        cloudApiStore.saveSelectedCloudChatModelId(nextChat?.id)
-        cloudApiStore.saveSelectedCloudImageModelId(nextImage?.id)
-        if (deletedSelectedChat) cloudApiStore.saveSelectedBackend(nextChatBackend)
-        if (deletedSelectedImage) localImageModelStore.saveSelectedBackend(nextImageBackend)
-        if (deletedSelectedChat || deletedSelectedImage || current.editingCloudModelId == modelId) {
-            cloudApiStore.save(nextConfig)
-        }
-
-        _uiState.update { state ->
-            state.copy(
-                cloudModels = remaining,
-                selectedCloudChatModelId = nextChat?.id,
-                selectedCloudImageModelId = nextImage?.id,
-                selectedChatBackend = nextChatBackend,
-                selectedImageBackend = nextImageBackend,
-                cloudApiConfig = nextConfig,
-                editingCloudModelId = state.editingCloudModelId.takeUnless { it == modelId },
-                statusMessage = "已删除云端模型：${removed.displayName}"
-            )
-        }
-    }
 
     fun updateAgentPreference(preference: UserPreference) {
         val state = _uiState.value
@@ -8985,56 +8933,6 @@ class MainViewModel @JvmOverloads constructor(
         showStatus("译文草稿已取消，原文已保留。")
     }
 
-    fun confirmChatImageTranslationDraft(id: String, positive: String, negative: String?) {
-        val pending = pendingImageTranslation?.takeIf { it.id == id } ?: return
-        if (!pending.stillOwned()) {
-            invalidatePendingChatImagePreparation()
-            showStatus("会话或模型已变化，请重新整理图片描述。")
-            return
-        }
-        val currentOwner = _uiState.value
-        if (currentOwner.input != pending.visibleUserText) {
-            invalidatePendingChatImagePreparation()
-            showStatus("原始描述已修改，请重新整理图片提示词。")
-            return
-        }
-        if (currentOwner.isGenerating) return
-        val prepared = ChatImagePromptBridge.Result.Prepared(
-            originalPrompt = pending.handoff.envelope.original,
-            effectivePrompt = positive,
-            effectiveNegativePrompt = negative,
-            translated = true
-        )
-        val handoff = runCatching {
-            require(positive.isNotBlank() && positive.length <= ChatImagePromptBridge.MAX_OUTPUT_CHARS)
-            require(negative.orEmpty().length <= ChatImagePromptBridge.MAX_OUTPUT_CHARS)
-            require(!positive.containsHanScript() && !negative.orEmpty().containsHanScript()) {
-                "当前图片编码器需要英文描述，请编辑译文后重试。"
-            }
-            require(ChatImagePromptBridge.protectedPromptSpansPreserved(
-                pending.handoff.envelope.protectedSpans,
-                positive,
-                negative
-            )) { "译文草稿移动、重复或丢失了受保护的权重或 LoRA 标签。" }
-            pending.handoff.copy(
-                prompt = prepared.effectivePrompt,
-                options = pending.handoff.options.copy(negativePrompt = negative?.takeIf(String::isNotBlank)),
-                envelope = pending.handoff.envelope.copy(positive = positive, negative = negative)
-            )
-        }.getOrElse { error ->
-            showStatus(error.message ?: "译文草稿无效。")
-            return
-        }
-        pendingImageTranslation = null
-        _uiState.update { it.copy(pendingChatImageTranslationDraft = null) }
-        sendChatImageRequest(
-            visibleUserText = pending.visibleUserText,
-            prompt = handoff.prompt,
-            optionsOverride = handoff.options,
-            promptEnvelope = handoff.envelope,
-            contextTraceJson = pending.contextTraceJson
-        )
-    }
 
     /** Sends the composer contents straight to the selected image backend. */
     fun sendChatImagePrompt() {
@@ -10557,70 +10455,6 @@ class MainViewModel @JvmOverloads constructor(
             ChatGeneratedImageStatus.GENERATING
         ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING
 
-    private fun buildChatImageRetrySnapshot(
-        request: ChatGeneratedImageRequest,
-        chatSessionId: String
-    ): ImageGenerationJobSpec? {
-        val state = _uiState.value
-        val options = request.generationOptionsJson?.let { encoded ->
-            runCatching { LocalImageGenerationOptions.fromHistoryJson(JSONObject(encoded)) }.getOrNull()
-        } ?: return null
-        val backend = request.backendId?.let { encoded ->
-            runCatching { ImageBackend.valueOf(encoded) }.getOrNull()
-        } ?: return null
-        val modelId = request.modelId ?: return null
-        return when (backend) {
-            ImageBackend.LOCAL -> {
-                val model = state.localImageModels.firstOrNull {
-                    it.id == modelId && it.configured
-                } ?: return null
-                if (request.modelFingerprint != null &&
-                    model.chatImageRetryFingerprint() != request.modelFingerprint
-                ) return null
-                ImageGenerationJobSpec(
-                    prompt = request.prompt,
-                    backend = backend,
-                    localModelSnapshot = model,
-                    modelId = model.id,
-                    modelName = request.modelName?.takeIf(String::isNotBlank) ?: model.displayName,
-                    inputDraft = LocalImageInputDraft(),
-                    options = options.copy(
-                        inputImage = null,
-                        maskImage = null,
-                        controlImage = null,
-                        taskMode = LocalImageTaskMode.TEXT_TO_IMAGE
-                    ),
-                    chatSessionId = chatSessionId,
-                    chatMessageId = request.id
-                )
-            }
-            ImageBackend.CLOUD -> {
-                val config = state.cloudModels.firstOrNull {
-                    it.id == modelId && it.kind == CloudModelKind.IMAGE && it.configured
-                }?.toImageConfig()?.normalized() ?: return null
-                if (request.modelFingerprint != null &&
-                    config.chatImageRetryFingerprint() != request.modelFingerprint
-                ) return null
-                ImageGenerationJobSpec(
-                    prompt = request.prompt,
-                    backend = backend,
-                    cloudConfigSnapshot = config,
-                    modelId = modelId,
-                    modelName = request.modelName?.takeIf(String::isNotBlank)
-                        ?: config.displayName.ifBlank { config.imageModel },
-                    inputDraft = LocalImageInputDraft(),
-                    options = options.copy(
-                        inputImage = null,
-                        maskImage = null,
-                        controlImage = null,
-                        taskMode = LocalImageTaskMode.TEXT_TO_IMAGE
-                    ),
-                    chatSessionId = chatSessionId,
-                    chatMessageId = request.id
-                )
-            }
-        }
-    }
 
     /**
      * The ViewModel side of [ChatImageRequestPort].
