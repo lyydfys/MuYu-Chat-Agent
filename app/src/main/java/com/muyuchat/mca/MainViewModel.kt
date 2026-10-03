@@ -239,6 +239,8 @@ import com.muyuchat.mca.presentation.LocalApiImageLoraGateway
 import com.muyuchat.mca.presentation.LocalApiImageWorkerGateway
 import com.muyuchat.mca.presentation.generateLocalApiImageOperations
 import kotlinx.coroutines.flow.StateFlow
+import com.muyuchat.mca.SelectChatSessionPort
+import com.muyuchat.mca.selectChatSession
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -13449,114 +13451,103 @@ class MainViewModel @JvmOverloads constructor(
         return true
     }
 
+    /**
+     * The ViewModel side of [SelectChatSessionPort]: one route per member, no logic of its own. The
+     * decision moved to [selectChatSession], which is now the only place a conversation switch is
+     * decided.
+     *
+     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
+     * their name and signature with the ViewModel member they forward to, and an unqualified call
+     * would recurse into the override instead of reaching the original implementation.
+     */
     fun selectChatSession(sessionId: String) {
-        val state = _uiState.value
-        if (rejectWhileConversationMutationInProgress()) return
-        if (hasActiveAssistantImageExecution(state.activeChatSessionId) ||
-            hasActiveAssistantImageExecution(sessionId)
-        ) {
-            showStatus("角色图片请求尚未完成，请先确认、取消或等待任务结束。")
-            return
-        }
-        if (state.isGenerating) {
-            showStatus("请先停止当前生成，再切换对话")
-            return
-        }
-        val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
-        invalidatePendingChatImagePreparation()
-        activeWebSearchDeferred?.cancel()
-        contentImportSelectionRevision.incrementAndGet()
-        val selectedKnowledgeBaseIds = knowledgeBaseStore.selectedKnowledgeBaseIds(session.id)
-        val assistant = (session.assistantSnapshot?.assistantId ?: session.assistantId)
-            ?.let { id -> state.assistants.firstOrNull { it.id == id } }
-            ?: state.assistants.firstOrNull { it.id == state.selectedAssistantId }
-        val assistantParams = assistant?.toGenerationParams(state.params) ?: state.params
-        val sessionBackend = session.modelMode.toChatBackendOrNull()
-        val sessionCloudModel = if (sessionBackend == ChatBackend.CLOUD) {
-            state.cloudModels.firstOrNull { it.id == session.modelId && it.kind == CloudModelKind.CHAT && it.configured }
-        } else {
-            null
-        }
-        val restoreCloud = sessionCloudModel != null
-        val restoreLoadedLocal = sessionBackend == ChatBackend.LOCAL &&
-            (session.modelId.isNullOrBlank() || session.modelId == state.loadedModelId)
-        val restoredBackend = when {
-            restoreCloud -> ChatBackend.CLOUD
-            restoreLoadedLocal -> ChatBackend.LOCAL
-            else -> state.selectedChatBackend
-        }
-        val restoredModelId = when {
-            restoreCloud -> sessionCloudModel?.id
-            restoredBackend == ChatBackend.LOCAL -> session.modelId ?: state.loadedModelId
-            else -> state.selectedCloudChatModelId
-        }
-        val updatedParams = loadModelGenerationParams(
-            backend = restoredBackend,
-            modelId = restoredModelId,
-            defaults = assistantParams
-        )
-        if (assistant != null && assistant.id != state.selectedAssistantId) {
-            assistantStore.saveSelectedAssistantId(assistant.id)
-            persistGenerationParams(updatedParams)
-        }
-        if (sessionCloudModel != null) {
-            cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
-            cloudApiStore.saveSelectedCloudChatModelId(sessionCloudModel.id)
-            cloudApiStore.save(sessionCloudModel.toChatConfig().normalized())
-        } else if (restoreLoadedLocal) {
-            cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
-        }
-        val status = when {
-            session.mixedAssistantHistory ->
-                "混合会话已保留原始消息，仅供查看；请从历史菜单手动创建角色分支。"
-            session.assistantId == null || session.assistantSnapshot?.assistantId != session.assistantId ||
-                state.assistants.none { it.id == session.assistantId } ->
-                "原角色已不存在或会话归属不明确，此会话仅供查看。"
-            sessionBackend == ChatBackend.LOCAL &&
-                !session.modelId.isNullOrBlank() &&
-                session.modelId != state.loadedModelId ->
-                "已打开对话；该会话原本使用的本地模型尚未加载，可在顶部模型胶囊中重新加载。"
-            sessionBackend == ChatBackend.CLOUD && session.modelId != null && !restoreCloud ->
-                "已打开对话；该会话原本使用的云端模型已不可用，请重新选择云端推理引擎。"
-            else -> null
-        }
-        val compressionPending = manualContextCompressionRequests.isPending(session.id)
-        _uiState.update {
-            it.copy(
-                messages = session.messages,
-                input = "",
-                activeChatSessionId = session.id,
-                browserTask = it.browserTask?.let { task ->
-                    if (task.sessionId == session.id) task else
-                        com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Conversation owner changed")
-                },
-                selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
-                selectedAssistantId = assistant?.id ?: it.selectedAssistantId,
-                params = updatedParams,
-                selectedChatBackend = restoredBackend,
-                selectedCloudChatModelId = sessionCloudModel?.id ?: it.selectedCloudChatModelId,
-                cloudApiConfig = sessionCloudModel?.toChatConfig()?.normalized() ?: it.cloudApiConfig,
-                promptContextUsage = null,
-                contextCompressionPending = compressionPending,
-                statusMessage = status
-            )
-        }
-        markLocalConversationContextInvalid()
-        if (session.mixedAssistantHistory || session.assistantSnapshot?.assistantId != session.assistantId ||
-            state.assistants.none { it.id == session.assistantId }) return
-        session.messages.firstNotNullOfOrNull { message ->
-            message.generatedImageRequest?.takeIf { request ->
-                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
-                    request.toolContinuationStatus == ChatImageToolContinuationStatus.NOT_STARTED &&
-                    request.status in setOf(
-                        ChatGeneratedImageStatus.DONE,
-                        ChatGeneratedImageStatus.FAILED,
-                        ChatGeneratedImageStatus.CANCELLED,
-                        ChatGeneratedImageStatus.INTERRUPTED
-                    )
-            }
-        }?.let { continueAssistantImageTurn(it.id) }
+        selectChatSession(port = selectChatSessionPort, sessionId = sessionId)
     }
+
+    private val selectChatSessionPort: SelectChatSessionPort =
+        object : SelectChatSessionPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override fun rejectWhileConversationMutationInProgress(): Boolean =
+                this@MainViewModel.rejectWhileConversationMutationInProgress()
+
+            override fun hasActiveAssistantImageExecution(sessionId: String?): Boolean =
+                this@MainViewModel.hasActiveAssistantImageExecution(sessionId)
+
+            override fun showStatus(message: String) {
+                this@MainViewModel.showStatus(message)
+            }
+
+            override fun invalidatePendingChatImagePreparation() {
+                this@MainViewModel.invalidatePendingChatImagePreparation()
+            }
+
+            override fun cancelActiveWebSearch() {
+                this@MainViewModel.activeWebSearchDeferred?.cancel()
+            }
+
+            override fun bumpContentImportSelectionRevision() {
+                this@MainViewModel.contentImportSelectionRevision.incrementAndGet()
+            }
+
+            override fun selectedKnowledgeBaseIdsFor(sessionId: String): Set<String> =
+                this@MainViewModel.knowledgeBaseStore.selectedKnowledgeBaseIds(sessionId)
+
+            override fun saveSelectedAssistantId(assistantId: String) {
+                this@MainViewModel.assistantStore.saveSelectedAssistantId(assistantId)
+            }
+
+            override fun loadModelGenerationParams(
+                backend: ChatBackend,
+                modelId: String?,
+                defaults: GenerationParams
+            ): GenerationParams = this@MainViewModel.loadModelGenerationParams(
+                backend = backend,
+                modelId = modelId,
+                defaults = defaults
+            )
+
+            override fun persistGenerationParams(params: GenerationParams) {
+                this@MainViewModel.persistGenerationParams(params)
+            }
+
+            override fun saveSelectedBackend(backend: ChatBackend) {
+                this@MainViewModel.cloudApiStore.saveSelectedBackend(backend)
+            }
+
+            override fun saveSelectedCloudChatModelId(modelId: String) {
+                this@MainViewModel.cloudApiStore.saveSelectedCloudChatModelId(modelId)
+            }
+
+            override fun normalizedCloudChatConfig(config: CloudApiConfig): CloudApiConfig =
+                config.normalized()
+
+            override fun saveCloudChatConfig(config: CloudApiConfig) {
+                // `normalized()` is a private extension of this class, so the normalisation stays
+                // here rather than moving into the operations file.
+                this@MainViewModel.cloudApiStore.save(config.normalized())
+            }
+
+            override fun toGenerationParams(
+                assistant: AssistantRecord,
+                defaults: GenerationParams
+            ): GenerationParams = assistant.toGenerationParams(defaults)
+
+            override fun isContextCompressionPending(sessionId: String): Boolean =
+                this@MainViewModel.manualContextCompressionRequests.isPending(sessionId)
+
+            override fun markLocalConversationContextInvalid() {
+                this@MainViewModel.markLocalConversationContextInvalid()
+            }
+
+            override fun continueAssistantImageTurn(requestId: String) {
+                this@MainViewModel.continueAssistantImageTurn(requestId)
+            }
+        }
 
     fun branchMixedChatSession(sessionId: String, assistantId: String) {
         val state = _uiState.value

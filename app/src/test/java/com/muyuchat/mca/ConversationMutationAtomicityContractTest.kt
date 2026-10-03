@@ -66,9 +66,24 @@ class ConversationMutationAtomicityContractTest {
             "deleteChatSession",
             "clearChatHistory"
         ).forEach { functionName ->
+            // `selectChatSession` now delegates: the wrapper it leaves behind only forwards, while
+            // the guard lives in the moved body. Both sources are searched so the contract is still
+            // checked, without weakening the assertion.
+            val body = functionBody(source, functionName) +
+                if (functionName == "selectChatSession") {
+                    // The unit-test working directory is the app module, so the moved file is
+                    // addressed module-relatively. Both forms are tried so a repo-root working
+                    // directory keeps working too.
+                    sequenceOf(
+                        File("src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"),
+                        File("app/src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt")
+                    ).firstOrNull(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
+                } else {
+                    ""
+                }
             assertTrue(
                 "$functionName must reject interleaving with an active Room mutation",
-                functionBody(source, functionName).contains("rejectWhileConversationMutationInProgress()")
+                body.contains("rejectWhileConversationMutationInProgress()")
             )
         }
     }

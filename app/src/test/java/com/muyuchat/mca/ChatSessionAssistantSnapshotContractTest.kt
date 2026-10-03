@@ -88,7 +88,9 @@ class ChatSessionAssistantSnapshotContractTest {
     fun openingAConversationPrefersItsCapturedAssistantIdentity() {
         val source = sourceFile("MainViewModel.kt")
 
-        assertTrue(functionBody(source, "selectChatSession")
+        // The decision moved to SelectChatSessionOperations.kt; the assertion is unchanged, only the
+        // file it reads. The wrapper that stays behind contains no logic to assert on.
+        assertTrue(functionBody(sourceFile(NEW_FILE), "selectChatSession")
             .contains("session.assistantSnapshot?.assistantId ?: session.assistantId"))
     }
 
@@ -111,7 +113,13 @@ class ChatSessionAssistantSnapshotContractTest {
 
     private fun sourceFile(name: String): String = sequenceOf(
         File("src/main/java/com/muyuchat/mca/$name"),
-        File("app/src/main/java/com/muyuchat/mca/$name")
+        File("app/src/main/java/com/muyuchat/mca/$name"),
+        // Repository-relative form, for files outside the flat app package.
+        File(name)
     ).firstOrNull(File::isFile)?.readText(Charsets.UTF_8)
         ?: error("Unable to locate $name")
+
+    private companion object {
+        const val NEW_FILE = "src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"
+    }
 }
