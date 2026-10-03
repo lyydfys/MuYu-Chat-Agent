@@ -16,7 +16,8 @@ class AppForegroundRecoveryContractTest {
     @Test
     fun applicationOwnsProcessLifecycleSoConfigurationChangesAreNotTransitions() {
         val application = sourceFile("app/src/main/java/com/muyuchat/mca/McaApplication.kt")
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
 
         assertTrue(application.contains("ProcessLifecycleOwner.get().lifecycle.addObserver(this)"))
@@ -232,7 +233,8 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun cloudChoicesPreferTheUserFacingNameOverTheProviderModelId() {
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
 
         assertTrue(
             activity.split("displayName = model.displayName.ifBlank { model.modelName }").size - 1 >= 2
@@ -242,7 +244,8 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun rootBackMovesTheTaskToBackgroundWithoutDestroyingRuntimeOwnership() {
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
 
         assertTrue(activity.contains("onBackPressedDispatcher.addCallback("))
         assertTrue(activity.contains("moveTaskToBack(true)"))

@@ -76,7 +76,8 @@ class LocalImageProductClosureTest {
     @Test
     fun `worker cancellation becomes a non-failure terminal UI state`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         // ImageGenerationStatusRecord's entries moved to PersistedRecords.kt during P2, so the
         // first assertion reads from there. The other four read function bodies that stayed in
@@ -308,7 +309,8 @@ class LocalImageProductClosureTest {
     @Test
     fun `retry and history recreation retain immutable model inputs and generation parameters`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         // ImageGenerationJobRecord moved to PersistedRecords.kt during P2, so the one assertion
         // about its field reads from there. The other four read function bodies that stayed in
@@ -373,7 +375,8 @@ class LocalImageProductClosureTest {
 
     @Test
     fun `LoRA crosses UI and Local API by id while native success requires applied tensors`() {
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val api = sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt")
         val bridge = sourceFile("core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp")
@@ -395,7 +398,8 @@ class LocalImageProductClosureTest {
     @Test
     fun `native preview progress reaches the existing generation canvas while synchronous API rejects it`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         // The call site stays in MainActivity; the mapping it calls moved to the presentation
         // package during P2, so the second assertion reads it from there. Neither assertion
         // changed -- only the file each one reads.

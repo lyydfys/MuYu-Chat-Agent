@@ -61,7 +61,8 @@ class ImageUpscaleProductClosureTest {
         // lookup reads from the new file; every other functionBody below still reads the
         // ViewModel, and no assertion changed.
         val imageAssetFiles = sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetFiles.kt")
-        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt")
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val upscale = functionBody(viewModel, "fun upscaleImageAsset(")
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
