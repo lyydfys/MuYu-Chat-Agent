@@ -231,6 +231,8 @@ import com.muyuchat.mca.presentation.KnowledgeLibraryChange
 import com.muyuchat.mca.presentation.WorldBookImportOutcome
 import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
+import com.muyuchat.mca.presentation.ChatContextOperations
+import com.muyuchat.mca.presentation.chatContextSnapshot
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -13068,39 +13070,15 @@ class MainViewModel @JvmOverloads constructor(
                         ?: true
                 )
             }
-            val contextStatus = buildList {
-                if (initialState.selectedKnowledgeBaseIds.isNotEmpty()) {
-                    add(
-                        if ((assistantSnapshot?.fileContextEnabled
-                                ?: initialState.selectedAssistant()?.fileContextEnabled
-                                ?: true).not()
-                        ) {
-                            "知识库检索已关闭（当前助手的文件上下文开关已关闭）"
-                        } else if (runtimeContextPlan.knowledge.chunks.isEmpty()) {
-                            "本轮知识库未命中（已按当前问题检索）"
-                        } else {
-                            "本轮知识库命中 ${runtimeContextPlan.knowledge.chunks.size} 段"
-                        }
-                    )
-                }
-                val applicableWorldBooks = initialState.worldBooks.count { book ->
-                    book.enabled && when (book.scope) {
-                        WorldBookScope.GLOBAL -> true
-                        WorldBookScope.ASSISTANT -> book.assistantId == (assistantSnapshot?.assistantId
-                            ?: initialState.selectedAssistantId)
-                        WorldBookScope.CHAT -> book.chatSessionId == initialState.activeChatSessionId
-                    }
-                }
-                if (applicableWorldBooks > 0) {
-                    add(
-                        if (runtimeContextPlan.worldBook.selectedEntryIds.isEmpty()) {
-                            "本轮世界书未命中关键词"
-                        } else {
-                            "本轮世界书命中 ${runtimeContextPlan.worldBook.selectedEntryIds.size} 条"
-                        }
-                    )
-                }
-            }.joinToString("；").takeIf { it.isNotBlank() }
+            // The wording decision now lives in ChatContextOperations.turnContextStatus, pinned by tests.
+            val contextSnapshot = initialState.chatContextSnapshot(
+                assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId,
+                // Same fallback chain the composer call above uses, resolved at the same moment.
+                fileContextEnabled = assistantSnapshot?.fileContextEnabled
+                    ?: initialState.selectedAssistant()?.fileContextEnabled
+                    ?: true
+            )
+            val contextStatus = ChatContextOperations.turnContextStatus(contextSnapshot, runtimeContextPlan)
             if (contextStatus != null) {
                 updateGenerationUi { it.copy(statusMessage = contextStatus) }
             }
