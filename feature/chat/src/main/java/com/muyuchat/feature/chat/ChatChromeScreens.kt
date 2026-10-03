@@ -615,11 +615,14 @@ private fun formatGenerationRate(rate: Double): String =
 @Composable
 private fun GenerationPerformanceLine(stats: RuntimeStats?) {
     val summary = generationPerformanceSummary(stats) ?: return
+    // 真机实测（手机 560dpi）：这一行是回复区里最小的一档（h=44 对正文 h=61~64），
+    // 且额外乘了 0.78 的透明度 —— `onSurfaceVariant` 本身已表达"次级"，
+    // 再折减 alpha 就是"低对比"的实际来源。此处提到 labelMedium 并去掉多余折减。
     Text(
         text = summary,
         modifier = Modifier.padding(top = 1.dp),
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant
     )
 }
 
@@ -4955,9 +4958,11 @@ private fun AssistantMessageBlock(
                 GenerationPerformanceLine(generationStats)
             } else {
                 message.generationMetricsSummary()?.let { summary ->
+                    // 与生成中态保持一致：labelSmall(11sp) 在手机上偏小，提到 labelMedium(12sp)。
+                    // 颜色沿用 onSurfaceVariant（Material3 对次级文本的正确 token），不做额外 alpha 折减。
                     Text(
                         text = summary,
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
