@@ -416,7 +416,6 @@ private fun McaApp(
     fun finishAppMenuReturn() {
         onTab(AppTab.CHAT)
     }
-    val chatVisionCapability = state.chatVisionCapability()
     val preparedImageUi by produceState<Map<String, PreparedLocalImageUi>>(
         initialValue = emptyMap(), state.localImageModels, state.qnnImageVerificationCurrentByModelId
     ) {
@@ -429,12 +428,8 @@ private fun McaApp(
     val imageGenerationHistoryById = remember(state.images) { state.images.associate { image ->
         image.id to ImageGenerationHistoryMetadata.fromJsonOrNull(image.generationMetadataJson)
     } }
-    val generationHistoryInputUris = retainedGenerationImageContentReferences(
-        historyReferences = imageGenerationHistoryById.values
-        .filterNotNull()
-            .flatMapTo(mutableSetOf()) { history -> history.requiredContentInputReferences() },
-        jobInputDrafts = state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }
-    )
+    // 注：chatVisionCapability 与 generationHistoryInputUris 的派生已在 P3-a 随映射移入
+    // ChatUiStateMapping.buildChatUiState（它们只被该映射使用），此处不再重复计算。
     val activeChatSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
     val selectedAssistant = state.assistants.firstOrNull { it.id == state.selectedAssistantId }
     val assistantAppearance = selectedAssistant?.appearance?.takeUnless { it.isDefault }
