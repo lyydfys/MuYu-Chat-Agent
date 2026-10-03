@@ -8,10 +8,15 @@ class PersistentPrefixCacheSettingsContractTest {
     @Test
     fun settingsPersistToggleClearDiskStateAndInvalidateLiveConversation() {
         val source = sourceFile("MainViewModel.kt")
+        // The preference key and its read/write moved to GenerationPreferenceStore.kt; the ViewModel
+        // keeps forwarding members with the same names. Both files are read so the contract below
+        // still covers the same facts, and the assertions are unchanged.
+        val preferences = sourceFile("GenerationPreferenceStore.kt")
+        val both = source + preferences
         val toggle = functionBody(source, "setPersistentPrefixCacheEnabled")
         val clear = functionBody(source, "schedulePersistentPrefixCacheClear")
 
-        assertTrue(source.contains("PERSISTENT_PREFIX_CACHE_ENABLED_KEY"))
+        assertTrue(both.contains("PERSISTENT_PREFIX_CACHE_ENABLED_KEY"))
         assertTrue(source.contains("loadPersistentPrefixCacheEnabled"))
         assertTrue(source.contains("persistPersistentPrefixCacheEnabled"))
         assertTrue(toggle.contains("engine.setPersistentPrefixCacheEnabled(enabled)"))

@@ -334,10 +334,6 @@ private data class LocalApiStreamSmokeResult(
     val stopCalls: Int
 )
 
-private data class LocalApiPreferences(
-    val apiEnabled: Boolean,
-    val restEnabled: Boolean
-)
 
 private data class LocalApiApplyResult(
     val running: Boolean,
@@ -438,12 +434,10 @@ class MainViewModel @JvmOverloads constructor(
         private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
         private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
-        private const val GENERATION_PARAMETERS_PREFERENCES = "mca_generation_params"
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
         private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
         private const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
-        private const val PERSISTENT_PREFIX_CACHE_ENABLED_KEY = "persistent_prefix_cache_enabled"
         private const val IMAGE_UPSCALE_TILE_SIZE = 128
         private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_STREAM_PUBLISH_CHARS = 2 * 1024
@@ -16924,97 +16918,46 @@ class MainViewModel @JvmOverloads constructor(
         _uiState.update { state -> state.copy(localImageModels = models) }
     }
 
-    private data class CloudProviderPreset(
-        val key: String,
-        val providerName: String,
-        val displayName: String,
-        val format: CloudApiFormat,
-        val baseUrl: String,
-        val chatModel: String,
-        val imageModel: String = "",
-        val imageSize: String = "1024x1024"
-    )
-
-    private fun cloudProviderPreset(key: String): CloudProviderPreset? =
-        cloudProviderPresets.firstOrNull { it.key == key }
-
-    private val cloudProviderPresets = listOf(
-        CloudProviderPreset("openai", "OpenAI-compatible", "自定义推理引擎", CloudApiFormat.OPENAI_COMPATIBLE, "", ""),
-        CloudProviderPreset("responses", "OpenAI Responses", "自定义推理引擎", CloudApiFormat.OPENAI_RESPONSES, "", ""),
-        CloudProviderPreset("anthropic", "Anthropic Messages", "自定义推理引擎", CloudApiFormat.ANTHROPIC, "", "")
-    )
-
     /**
-     * User-facing message for a credential write that did not reach a durable state, or
-     * null when the credential was stored (or intentionally cleared).
-     *
-     * A failed credential write must never be presented as a successful save, and the
-     * message must not suggest that a plaintext copy was created (plan section 11.3).
+     * Thin forwarders to [GenerationPreferences] and the two pure helpers beside it. The store is a
+     * stateless object, so nothing here holds state or a scope: each call passes what the operation
+     * needs.
      */
-    private fun credentialFailureMessage(result: CredentialSaveResult): String? = when (result) {
-        CredentialSaveResult.Stored, CredentialSaveResult.Cleared -> null
+    private fun cloudProviderPreset(key: String): CloudProviderPreset? = findCloudProviderPreset(key)
 
-        CredentialSaveResult.EncryptionUnavailable ->
-            "连接成功，但 API Key 未能安全保存：系统密钥库当前不可用，本次未写入明文。" +
-                "恢复系统密钥库后请重新保存。"
+    private fun credentialFailureMessage(result: CredentialSaveResult): String? =
+        credentialWriteFailureMessage(result)
 
-        CredentialSaveResult.VerificationFailed ->
-            "连接成功，但 API Key 写入后校验失败，已保留原有配置且未写入明文。请重试保存。"
-    }
+    private fun loadOrCreateApiKey(application: Application): String =
+        GenerationPreferences.loadOrCreateApiKey(application)
 
-    private fun loadOrCreateApiKey(application: Application): String {
-        val prefs = application.getSharedPreferences("mca_api", Context.MODE_PRIVATE)
-        val existing = prefs.getString("api_key", null)
-        if (!existing.isNullOrBlank()) return existing
-        val created = "mca-" + UUID.randomUUID().toString().replace("-", "").take(24)
-        prefs.edit().putString("api_key", created).apply()
-        return created
-    }
+    private fun loadApiPreferences(application: Application): LocalApiPreferences =
+        GenerationPreferences.loadApiPreferences(application)
 
-    private fun loadApiPreferences(application: Application): LocalApiPreferences {
-        val prefs = application.getSharedPreferences("mca_api", Context.MODE_PRIVATE)
-        val apiEnabled = prefs.getBoolean("api_enabled", false)
-        return LocalApiPreferences(
+    private fun persistApiPreferences(apiEnabled: Boolean, restEnabled: Boolean) {
+        GenerationPreferences.persistApiPreferences(
+            context = getApplication(),
             apiEnabled = apiEnabled,
-            restEnabled = apiEnabled && prefs.getBoolean("rest_enabled", false)
+            restEnabled = restEnabled
         )
     }
 
-    private fun persistApiPreferences(apiEnabled: Boolean, restEnabled: Boolean) {
-        getApplication<Application>()
-            .getSharedPreferences("mca_api", Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean("api_enabled", apiEnabled)
-            .putBoolean("rest_enabled", apiEnabled && restEnabled)
-            .apply()
-    }
-
-    private fun modelGenerationProfileKey(
-        backend: ChatBackend,
-        modelId: String?
-    ): String? {
-        val id = modelId?.trim().takeIf { !it.isNullOrBlank() } ?: return null
-        return when (backend) {
-            ChatBackend.LOCAL -> ModelGenerationProfileKey.local(id)
-            ChatBackend.CLOUD -> ModelGenerationProfileKey.cloud(id)
-        }
-    }
+    private fun modelGenerationProfileKey(backend: ChatBackend, modelId: String?): String? =
+        GenerationPreferences.modelGenerationProfileKey(backend, modelId)
 
     private fun MainUiState.modelGenerationProfileKey(): String? =
         modelGenerationProfileKey(selectedChatBackend, currentChatModelId())
 
-    /**
-     * Applies a model's semantic profile without replacing the selected
-     * assistant/system prompt or native load-bound settings.
-     */
     private fun loadModelGenerationParams(
         backend: ChatBackend,
         modelId: String?,
         defaults: GenerationParams
-    ): GenerationParams {
-        val key = modelGenerationProfileKey(backend, modelId) ?: return defaults
-        return modelGenerationProfileStore.loadOrCreate(key, defaults)
-    }
+    ): GenerationParams = GenerationPreferences.loadModelGenerationParams(
+        profileStore = modelGenerationProfileStore,
+        backend = backend,
+        modelId = modelId,
+        defaults = defaults
+    )
 
     private fun persistModelGenerationParams(state: MainUiState, params: GenerationParams) {
         persistModelGenerationParams(
@@ -17029,60 +16972,33 @@ class MainViewModel @JvmOverloads constructor(
         modelId: String?,
         params: GenerationParams
     ) {
-        modelGenerationProfileKey(backend, modelId)?.let { key ->
-            modelGenerationProfileStore.save(key, params)
-        }
-    }
-
-    private fun loadGenerationParams(application: Application): GenerationParams {
-        val prefs = application.getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-        return restoreGenerationParams(
-            semanticJson = prefs.getString("params_json", null),
-            runtimeJson = prefs.getString("runtime_params_json", null)
+        GenerationPreferences.persistModelGenerationParams(
+            profileStore = modelGenerationProfileStore,
+            backend = backend,
+            modelId = modelId,
+            params = params
         )
     }
 
+    private fun loadGenerationParams(application: Application): GenerationParams =
+        GenerationPreferences.loadGenerationParams(application)
+
     private fun persistGenerationParams(params: GenerationParams) {
-        getApplication<Application>()
-            .getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .putString("params_json", params.toAssistantGenerationJson())
-            .putString("runtime_params_json", runtimeParameterDocument(params).toString())
-            .apply()
+        GenerationPreferences.persistGenerationParams(getApplication(), params)
     }
 
     private fun loadPersistentPrefixCacheEnabled(application: Application): Boolean =
-        application.getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-            .getBoolean(PERSISTENT_PREFIX_CACHE_ENABLED_KEY, true)
+        GenerationPreferences.loadPersistentPrefixCacheEnabled(application)
 
     private fun persistPersistentPrefixCacheEnabled(enabled: Boolean) {
-        getApplication<Application>()
-            .getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(PERSISTENT_PREFIX_CACHE_ENABLED_KEY, enabled)
-            .apply()
+        GenerationPreferences.persistPersistentPrefixCacheEnabled(getApplication(), enabled)
     }
 
-    private fun loadRuntimeUserOverrideFields(application: Application): Set<String> {
-        val raw = application.getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-            .getString("runtime_user_fields", null)
-            ?: return emptySet()
-        return runCatching {
-            val values = JSONArray(raw)
-            buildSet {
-                for (index in 0 until values.length()) {
-                    values.optString(index).takeIf(String::isNotBlank)?.let(::add)
-                }
-            }
-        }.getOrDefault(emptySet())
-    }
+    private fun loadRuntimeUserOverrideFields(application: Application): Set<String> =
+        GenerationPreferences.loadRuntimeUserOverrideFields(application)
 
     private fun persistRuntimeUserOverrideFields(fields: Set<String>) {
-        getApplication<Application>()
-            .getSharedPreferences(GENERATION_PARAMETERS_PREFERENCES, Context.MODE_PRIVATE)
-            .edit()
-            .putString("runtime_user_fields", JSONArray(fields.sorted()).toString())
-            .apply()
+        GenerationPreferences.persistRuntimeUserOverrideFields(getApplication(), fields)
     }
 
     private fun updatedAssistantsWithParams(params: GenerationParams): List<AssistantRecord> {

@@ -187,6 +187,11 @@ class CredentialStoragePolicyTest {
     @Test
     fun `cloud quick test does not claim success when the key could not be stored`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // The two honest failure messages and the typed-result mapping moved to
+        // GenerationPreferenceStore.kt during the settings extraction. Reading both files keeps the
+        // same contract under test -- and the assertions below are unchanged.
+        val preferences = sourceFile("app/src/main/java/com/muyuchat/mca/GenerationPreferenceStore.kt")
+        val both = source + preferences
 
         assertTrue(
             "the quick test must consume the typed credential result",
@@ -198,7 +203,7 @@ class CredentialStoragePolicyTest {
         )
         assertTrue(
             "both failure modes need distinct honest messages",
-            source.contains("系统密钥库当前不可用") && source.contains("写入后校验失败")
+            both.contains("系统密钥库当前不可用") && both.contains("写入后校验失败")
         )
         assertFalse(
             "the old boolean flag must not come back",
