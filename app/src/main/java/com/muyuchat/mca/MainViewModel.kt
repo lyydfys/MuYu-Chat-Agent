@@ -11033,6 +11033,15 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The ViewModel side of [SendChatImageRequestPort]: one route per member, no logic of its own.
+     * The decision body moved to [SendChatImageRequestOperations.sendChatImageRequest], which is now
+     * the only place the send path is decided.
+     *
+     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
+     * their name and signature with the ViewModel member they forward to, and an unqualified call
+     * would recurse into the override instead of reaching the original implementation.
+     */
     private fun sendChatImageRequest(
         visibleUserText: String,
         prompt: String,
@@ -11040,138 +11049,117 @@ class MainViewModel @JvmOverloads constructor(
         promptEnvelope: PromptEnvelope? = null,
         contextTraceJson: String? = null
     ) {
-        val initialState = _uiState.value
-        if (!initialState.canWriteToActiveAssistantSession()) {
-            showStatus("此会话仅供查看，请先创建角色分支。")
-            return
-        }
-        if (initialState.isGenerating) {
-            showStatus("当前聊天仍在生成，请等本轮结束后再发送图片请求。")
-            return
-        }
-        if (rejectWhileConversationMutationInProgress()) return
-        chatImageSubmissionBlockMessage(initialState)?.let { message ->
-            showStatus(message)
-            return
-        }
+        val port = object : SendChatImageRequestPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
-        val assistantSnapshot = initialState.activeAssistantSnapshot()
-            ?: initialState.selectedAssistant()?.toConversationSnapshot()
-        val assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId
-        val requestId = UUID.randomUUID().toString()
-        val jobId = "ui-img-${UUID.randomUUID()}"
-        val initialImageModelId = if (initialState.selectedImageBackend == ImageBackend.LOCAL) {
-            initialState.selectedLocalImageModelId
-        } else {
-            initialState.selectedCloudImageModelId
-        }
-        val initialImageModelName = if (initialState.selectedImageBackend == ImageBackend.LOCAL) {
-            initialState.selectedLocalImageModel()?.displayName
-        } else {
-            initialState.selectedImageCloudConfig()?.let { config ->
-                config.displayName.takeIf(String::isNotBlank) ?: config.imageModel
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
             }
-        }
-        val imageFingerprint = when (initialState.selectedImageBackend) {
-            ImageBackend.LOCAL -> initialState.selectedLocalImageModel()?.chatImageRetryFingerprint()
-            ImageBackend.CLOUD -> initialState.selectedImageCloudConfig()?.chatImageRetryFingerprint()
-        }
-        val imageOptions = optionsOverride ?: runCatching {
-            chatImageOptionsForCurrentSelection(initialState)
-        }.getOrElse { error ->
-            _uiState.update { it.copy(input = visibleUserText, statusMessage = error.message.orEmpty()) }
-            return
-        }
-        promptEnvelope?.let { envelope ->
-            if (envelope.positive != prompt || envelope.negative != imageOptions.negativePrompt) {
-                _uiState.update {
-                    it.copy(
-                        input = visibleUserText,
-                        statusMessage = "图片描述整理结果已过期，未启动生图。请重试。"
-                    )
-                }
-                return
+
+            override fun showStatus(message: String) {
+                this@MainViewModel.showStatus(message)
             }
-        }
-        val request = ChatGeneratedImageRequest(
-            id = requestId,
-            prompt = prompt,
-            status = ChatGeneratedImageStatus.QUEUED,
-            message = "正在准备图片生成。",
-            currentJobId = jobId,
-            backendId = initialState.selectedImageBackend.name,
-            modelId = initialImageModelId,
-            modelName = initialImageModelName,
-            modelFingerprint = imageFingerprint,
-            generationOptionsJson = imageOptions.toJson().toString(),
-            promptEnvelopeJson = promptEnvelope?.let { envelope ->
-                ChatImagePromptBridge.run { envelope.toAuditJsonString() }
-            }
-        )
-        val user = ChatMessage(Role.USER, visibleUserText)
-        val assistant = ChatMessage(
-            role = Role.ASSISTANT,
-            content = "正在准备图片生成。",
-            generatedImageRequest = request,
-            contextAssemblyTraceJson = contextTraceJson
-        )
-        var ownerSessionId: String? = null
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        var knowledgeBaseIdsForBinding: Set<String> = emptySet()
-        _uiState.update { state ->
-            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-            ownerSessionId = sessionId
-            knowledgeBaseIdsForBinding = state.selectedKnowledgeBaseIds
-            val messages = state.messages + user + assistant
-            sessionsToPersist = state.chatSessions.upsertSession(
-                sessionId = sessionId,
-                messages = messages,
-                assistantId = assistantId,
-                assistantSnapshot = assistantSnapshot,
-                modelMode = state.selectedChatBackend.bindingValue(),
-                modelId = state.currentChatModelId()
-            )
-            state.copy(
-                input = "",
-                messages = messages,
-                activeChatSessionId = sessionId,
-                chatSessions = sessionsToPersist,
-                statusMessage = null
-            )
-        }
-        val chatSessionId = ownerSessionId ?: return
-        persistChatSessions(
-            sessions = sessionsToPersist,
-            knowledgeBinding = chatSessionId to knowledgeBaseIdsForBinding
-        )
-        val admitted = enqueueImageGeneration(
-            prompt = prompt,
-            inputDraft = LocalImageInputDraft(),
-            options = imageOptions,
-            jobSnapshot = null,
-            requestedJobId = jobId,
-            requestedChatSessionId = chatSessionId,
-            requestedChatMessageId = requestId
-        )
-        if (!admitted) {
-            updateChatGeneratedImageRequest(
-                chatSessionId = chatSessionId,
-                requestId = requestId,
-                request = request.copy(
-                    status = ChatGeneratedImageStatus.FAILED,
-                    message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
+
+            override fun rejectWhileConversationMutationInProgress(): Boolean =
+                this@MainViewModel.rejectWhileConversationMutationInProgress()
+
+            override fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
+                this@MainViewModel.chatImageSubmissionBlockMessage(state)
+
+            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
+                with(this@MainViewModel) { state.canWriteToActiveAssistantSession() }
+
+            override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot? =
+                with(this@MainViewModel) { state.activeAssistantSnapshot() }
+
+            override fun selectedAssistant(state: MainUiState): AssistantRecord? =
+                with(this@MainViewModel) { state.selectedAssistant() }
+
+            override fun selectedLocalImageModel(state: MainUiState): LocalImageModelRecord? =
+                with(this@MainViewModel) { state.selectedLocalImageModel() }
+
+            override fun selectedImageCloudConfig(state: MainUiState): CloudApiConfig? =
+                with(this@MainViewModel) { state.selectedImageCloudConfig() }
+
+            override fun currentChatModelId(state: MainUiState): String? =
+                with(this@MainViewModel) { state.currentChatModelId() }
+
+            override fun chatImageOptionsForCurrentSelection(
+                state: MainUiState
+            ): LocalImageGenerationOptions =
+                this@MainViewModel.chatImageOptionsForCurrentSelection(state)
+
+            override fun upsertSession(
+                sessions: List<ChatSessionRecord>,
+                sessionId: String,
+                messages: List<ChatMessage>,
+                assistantId: String?,
+                assistantSnapshot: AssistantConversationSnapshot?,
+                modelMode: String?,
+                modelId: String?
+            ): List<ChatSessionRecord> = with(this@MainViewModel) {
+                sessions.upsertSession(
+                    sessionId = sessionId,
+                    messages = messages,
+                    assistantId = assistantId,
+                    assistantSnapshot = assistantSnapshot,
+                    modelMode = modelMode,
+                    modelId = modelId
                 )
-            )
-            _uiState.update { state ->
-                if (state.activeChatSessionId == chatSessionId && state.input.isBlank()) {
-                    state.copy(input = visibleUserText)
-                } else {
-                    state
-                }
             }
-        } else {
-            updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+
+            override fun persistChatSessions(
+                sessions: List<ChatSessionRecord>?,
+                knowledgeBinding: Pair<String, Set<String>>?
+            ) {
+                this@MainViewModel.persistChatSessions(
+                    sessions = sessions,
+                    knowledgeBinding = knowledgeBinding
+                )
+            }
+
+            override fun enqueueImageGeneration(
+                prompt: String,
+                inputDraft: LocalImageInputDraft,
+                options: LocalImageGenerationOptions,
+                jobSnapshot: ImageGenerationJobSpec?,
+                requestedJobId: String?,
+                requestedChatSessionId: String?,
+                requestedChatMessageId: String?
+            ): Boolean = this@MainViewModel.enqueueImageGeneration(
+                prompt = prompt,
+                inputDraft = inputDraft,
+                options = options,
+                jobSnapshot = jobSnapshot,
+                requestedJobId = requestedJobId,
+                requestedChatSessionId = requestedChatSessionId,
+                requestedChatMessageId = requestedChatMessageId
+            )
+
+            override fun updateChatGeneratedImageRequest(
+                chatSessionId: String,
+                requestId: String,
+                request: ChatGeneratedImageRequest
+            ) {
+                this@MainViewModel.updateChatGeneratedImageRequest(chatSessionId, requestId, request)
+            }
+
+            override fun updateChatImageRequestFromJob(
+                chatSessionId: String,
+                requestId: String,
+                jobId: String
+            ) {
+                this@MainViewModel.updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+            }
         }
+        SendChatImageRequestOperations.sendChatImageRequest(
+            port = port,
+            visibleUserText = visibleUserText,
+            prompt = prompt,
+            optionsOverride = optionsOverride,
+            promptEnvelope = promptEnvelope,
+            contextTraceJson = contextTraceJson
+        )
     }
 
     private fun chatImageSubmissionBlockMessage(state: MainUiState): String? {
@@ -11208,175 +11196,123 @@ class MainViewModel @JvmOverloads constructor(
         imageModelBinding: AssistantImageModelBinding?,
         chatConfig: CloudApiConfig?
     ): Boolean {
-        if (calls.isEmpty()) return false
-        if (calls.size != 1) {
-            setPendingAssistantToolFailure("一次助手回复最多只能请求生成一张图片。")
-            return true
-        }
-        val call = calls.single()
-        val args = validateChatImageToolCall(call)
-        if (args !is ChatImageToolArguments.Valid) {
-            setPendingAssistantToolFailure(
-                (args as ChatImageToolArguments.Invalid).reason
+        // The decision moved to AssistantImageToolTurnOperations.kt. Every override below keeps the
+        // `this@MainViewModel.` prefix on purpose: each port method shares its name and signature
+        // with the ViewModel member it forwards to, and an unqualified call would recurse into the
+        // override instead of reaching the original implementation.
+        val port = object : AssistantImageToolTurnPort {
+            override fun activeChatSessionId(): String? = _uiState.value.activeChatSessionId
+
+            override fun chatImageNegativePromptSupported(): Boolean =
+                this@MainViewModel.chatImageNegativePromptSupported(_uiState.value)
+
+            override suspend fun prepareAssistantImagePrompt(
+                prompt: String,
+                chatConfig: CloudApiConfig?,
+                params: GenerationParams,
+                conversationContext: List<ChatMessage>
+            ): ChatImagePromptBridge.Result = this@MainViewModel.prepareAssistantImagePrompt(
+                prompt = prompt,
+                chatConfig = chatConfig,
+                params = params,
+                conversationContext = conversationContext
             )
-            return true
-        }
-        val sessionId = chatSessionId ?: _uiState.value.activeChatSessionId
-        if (sessionId.isNullOrBlank() || cloudModelId.isNullOrBlank()) {
-            setPendingAssistantToolFailure("无法确定本次生图请求所属的对话或云端模型。")
-            return true
-        }
-        if (imageModelBinding == null) {
-            setPendingAssistantToolFailure("请先在模型管理中选择一个可用的生图模型，再发送本轮消息。")
-            return true
-        }
-        val effectivePromptResult = when (val promptResult = prepareAssistantImagePrompt(
-            prompt = args.prompt,
-            chatConfig = chatConfig,
-            params = paramsBeforeAssistant,
-            conversationContext = originalRequestMessages
-        )) {
-            is ChatImagePromptBridge.Result.Prepared -> promptResult
-            is ChatImagePromptBridge.Result.Failed -> {
-                setPendingAssistantToolFailure(
-                    "聊天模型未能把角色的图片描述整理成可执行提示词，未启动生图。请重试角色回复。原因：${promptResult.message}"
+
+            override suspend fun prepareAssistantImageNegativePrompt(
+                prompt: String,
+                chatConfig: CloudApiConfig?,
+                params: GenerationParams,
+                conversationContext: List<ChatMessage>,
+                preserveAuthoredNegative: Boolean
+            ): ChatImagePromptBridge.Result = this@MainViewModel.prepareAssistantImageNegativePrompt(
+                prompt = prompt,
+                chatConfig = chatConfig,
+                params = params,
+                conversationContext = conversationContext,
+                preserveAuthoredNegative = preserveAuthoredNegative
+            )
+
+            override fun setPendingAssistantToolFailure(message: String) {
+                this@MainViewModel.setPendingAssistantToolFailure(message)
+            }
+
+            override fun buildChatImageRetrySnapshot(
+                request: ChatGeneratedImageRequest,
+                chatSessionId: String
+            ): ImageGenerationJobSpec? =
+                this@MainViewModel.buildChatImageRetrySnapshot(request, chatSessionId)
+
+            override fun registerPendingAssistantImageToolTurn(turn: AssistantImageToolPendingTurn) {
+                pendingAssistantImageToolTurns[turn.requestId] = PendingAssistantImageToolTurn(
+                    requestId = turn.requestId,
+                    chatSessionId = turn.chatSessionId,
+                    originalRequestMessages = turn.originalRequestMessages,
+                    params = turn.params,
+                    cloudModelId = turn.cloudModelId,
+                    toolCalls = turn.toolCalls,
+                    primaryToolCallId = turn.primaryToolCallId,
+                    initialToolOutputs = turn.initialToolOutputs
                 )
-                return true
             }
-        }
-        val inlineNegativePrompt = effectivePromptResult.effectiveNegativePrompt
-        // Responses tool calls may carry a separate negative prompt. Translate it through the
-        // same chat connector and keep the effective value in the immutable image job options;
-        // previously only the positive prompt was bridged, so an English-only encoder rejected
-        // Chinese exclusions after the tool call had already been approved.
-        val translatedArgumentNegativePrompt = args.negativePrompt?.let { negativePrompt ->
-            when (val negativeResult = prepareAssistantImageNegativePrompt(
-                prompt = negativePrompt,
-                chatConfig = chatConfig,
-                params = paramsBeforeAssistant,
-                conversationContext = originalRequestMessages,
-                preserveAuthoredNegative = true
-            )) {
-                is ChatImagePromptBridge.Result.Prepared ->
-                    negativeResult.effectiveNegativePrompt?.trim()?.takeIf(String::isNotBlank)
-                        ?: run {
-                            setPendingAssistantToolFailure(
-                                "聊天模型未返回可用的英文负面提示词，未启动生图。请重试角色回复。"
-                            )
-                            return true
-                        }
-                is ChatImagePromptBridge.Result.Failed -> {
-                    setPendingAssistantToolFailure(
-                        "聊天模型未能把角色请求中的负面提示词整理成英文，未启动生图。请重试角色回复。原因：${negativeResult.message}"
-                    )
-                    return true
-                }
+
+            override fun attachAssistantImageRequestToTimeline(
+                chatSessionId: String,
+                request: ChatGeneratedImageRequest
+            ) {
+                this@MainViewModel.attachAssistantImageRequestToTimeline(chatSessionId, request)
             }
-        }
-        val modelNegativePrompt = imageModelBinding.options.negativePrompt
-        val effectiveModelNegativePrompt = if (translatedArgumentNegativePrompt != null ||
-            inlineNegativePrompt != null
-        ) {
-            // An assistant tool call can carry exclusions in either the structured
-            // negative_prompt argument or the structured bridge response. Keep both branches
-            // separate from the positive prompt and preserve their order without duplicates.
-            mergeChatImageNegativePrompts(
-                translatedArgumentNegativePrompt,
-                inlineNegativePrompt
+
+            /** One `_uiState.value` read, like the original `val currentState = _uiState.value`. */
+            override fun currentTurnSelectionSnapshot(): AssistantImageToolTurnSelection {
+                val state = _uiState.value
+                return AssistantImageToolTurnSelection(
+                    activeChatSessionId = state.activeChatSessionId,
+                    selectedCloudChatModelId = state.selectedCloudChatModelId,
+                    chatModelIdentity = chatImageToolChatModelIdentity(
+                        state.selectedCloudChatModelId,
+                        state.selectedChatCloudConfig()?.normalized()
+                    ),
+                    imageAuthorizationIdentity = state.chatImageModelBinding()?.authorizationIdentity()
+                )
+            }
+
+            override fun chatImageToolAuthorizationMode(
+                chatSessionId: String?,
+                chatModelIdentity: String?,
+                imageModelIdentity: String?
+            ): ChatImageToolAuthorizationMode = chatImageToolAuthorizationStore.getMode(
+                chatSessionId,
+                chatModelIdentity,
+                imageModelIdentity
             )
-        } else if (chatImageNegativePromptNeedsBridge(modelNegativePrompt)) {
-            when (val modelNegativeResult = prepareAssistantImageNegativePrompt(
-                prompt = modelNegativePrompt.orEmpty(),
-                chatConfig = chatConfig,
-                params = paramsBeforeAssistant,
-                conversationContext = originalRequestMessages,
-                preserveAuthoredNegative = false
-            )) {
-                is ChatImagePromptBridge.Result.Prepared ->
-                    modelNegativeResult.effectiveNegativePrompt?.trim()?.takeIf(String::isNotBlank)
-                        // A model default is optional conditioning. If the chat bridge cannot
-                        // translate it, the helper returns an empty branch so generation can use
-                        // the image backend's built-in default (or no negative conditioning).
-                is ChatImagePromptBridge.Result.Failed -> {
-                    setPendingAssistantToolFailure(
-                        "聊天模型未能整理生图模型的默认负面提示词，未启动生图。请重试角色回复。原因：${modelNegativeResult.message}"
-                    )
-                    return true
-                }
+
+            override fun approveChatImageRequest(requestId: String) {
+                this@MainViewModel.approveChatImageRequest(requestId)
             }
-        } else {
-            modelNegativePrompt
         }
-        // The bridge may emit a generic quality branch when the model/profile has no authored
-        // default. Keep that branch only for a local topology that actually encodes CFG negatives;
-        // otherwise the tool path would bypass the normal chat-image handoff gate and send an
-        // unusable negative prompt into a CFG-off worker.
-        val toolNegativeSupported = imageModelBinding.backend != ImageBackend.LOCAL ||
-            chatImageNegativePromptSupported(_uiState.value)
-        val effectiveImageOptions = imageModelBinding.options.copy(
-            negativePrompt = effectiveModelNegativePrompt.takeIf { toolNegativeSupported }
-        )
-        val requestId = UUID.randomUUID().toString()
-        val request = ChatGeneratedImageRequest(
-            id = requestId,
-            prompt = effectivePromptResult.effectivePrompt,
-            status = ChatGeneratedImageStatus.AWAITING_APPROVAL,
-            message = "角色请求生成一张图片。",
-            origin = ChatGeneratedImageOrigin.ASSISTANT_TOOL,
-            backendId = imageModelBinding.backend.name,
-            modelId = imageModelBinding.modelId,
-            modelName = imageModelBinding.modelName,
-            modelFingerprint = imageModelBinding.fingerprint,
-            generationOptionsJson = effectiveImageOptions.toJson().toString(),
-            toolCallId = call.id,
-            toolArgumentsJson = call.argumentsJson,
-            toolChatModelId = cloudModelId,
-            toolParamsJson = paramsBeforeAssistant.toJson(),
-            toolRequestMessageCount = originalRequestMessages.size,
-            toolRequestMessagesFingerprint = chatImageToolContextFingerprint(originalRequestMessages)
-        )
-        val imageSnapshot = buildChatImageRetrySnapshot(request, sessionId)
-        if (imageSnapshot == null) {
-            setPendingAssistantToolFailure("所选生图模型已不可用，请先恢复模型后重新发送本轮消息。")
-            return true
-        }
-        val snapshottedRequest = request.copy(
-            generationOptionsJson = imageSnapshot.options.toJson().toString()
-        )
-        pendingAssistantImageToolTurns[requestId] = PendingAssistantImageToolTurn(
-            requestId = requestId,
-            chatSessionId = sessionId,
+        return handleAssistantImageToolTurn(
+            port = port,
+            calls = calls,
             originalRequestMessages = originalRequestMessages,
-            params = paramsBeforeAssistant,
+            paramsBeforeAssistant = paramsBeforeAssistant,
+            chatSessionId = chatSessionId,
             cloudModelId = cloudModelId,
-            toolCalls = listOf(call),
-            primaryToolCallId = call.id,
-            initialToolOutputs = emptyMap()
+            chatModelIdentity = chatModelIdentity,
+            // The private binding stays private: only the fields the turn reads cross the port.
+            // `authorizationIdentity` stays a provider so its read still happens at the
+            // auto-approval gate, after the request and the pending turn were created.
+            imageModelBinding = imageModelBinding?.let { binding ->
+                AssistantImageToolModelBinding(
+                    backend = binding.backend,
+                    modelId = binding.modelId,
+                    modelName = binding.modelName,
+                    options = binding.options,
+                    fingerprint = binding.fingerprint,
+                    authorizationIdentity = { binding.authorizationIdentity() }
+                )
+            },
+            chatConfig = chatConfig
         )
-        attachAssistantImageRequestToTimeline(sessionId, snapshottedRequest)
-        val currentState = _uiState.value
-        val expectedImageIdentity = imageModelBinding.authorizationIdentity()
-        val currentChatIdentity = chatImageToolChatModelIdentity(
-            currentState.selectedCloudChatModelId,
-            currentState.selectedChatCloudConfig()?.normalized()
-        )
-        val currentImageIdentity = currentState.chatImageModelBinding()?.authorizationIdentity()
-        val selectionStillMatchesRequest = currentState.activeChatSessionId == sessionId &&
-            currentState.selectedCloudChatModelId == cloudModelId &&
-            currentChatIdentity == chatModelIdentity &&
-            currentImageIdentity == expectedImageIdentity
-        if (chatImageToolAuthorizationStore.getMode(
-                sessionId,
-                chatModelIdentity.takeIf { selectionStillMatchesRequest },
-                expectedImageIdentity.takeIf { selectionStillMatchesRequest }
-            ) ==
-            ChatImageToolAuthorizationMode.AUTO_APPROVE
-        ) {
-            // Automatic approval is valid only while the exact session, chat configuration,
-            // and image backend/model configuration remain the ones the user approved.
-            approveChatImageRequest(requestId)
-        }
-        return true
     }
 
     /**

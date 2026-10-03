@@ -187,7 +187,7 @@ class KnowledgeBaseRoomContractTest {
         )
 
         val source = sourceFile("MainViewModel.kt")
-        val persistBody = functionBody(source, "persistChatSessions")
+        val persistBody = declaredFunctionBody(source, "persistChatSessions")
         assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
         assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
         assertFalse(persistBody.contains("knowledgeBaseStore.setSelectedKnowledgeBaseIds"))
@@ -198,7 +198,7 @@ class KnowledgeBaseRoomContractTest {
 
     @Test
     fun coalescedSnapshotsKeepPendingBindingsAndDiscardDeletedSessionBindings() {
-        val body = functionBody(sourceFile("MainViewModel.kt"), "persistChatSessions")
+        val body = declaredFunctionBody(sourceFile("MainViewModel.kt"), "persistChatSessions")
 
         assertCallsInOrder(
             body,
@@ -223,7 +223,7 @@ class KnowledgeBaseRoomContractTest {
     @Test
     fun worldBookCleanupRunsOnlyAfterCanonicalOwnerPersistence() {
         val source = sourceFile("MainViewModel.kt")
-        val persistBody = functionBody(source, "persistChatSessions")
+        val persistBody = declaredFunctionBody(source, "persistChatSessions")
         assertCallsInOrder(
             persistBody,
             "chatSessionStore.save(snapshot, knowledgeBindingsForSave)",
@@ -361,6 +361,24 @@ class KnowledgeBaseRoomContractTest {
         val declaration = source.indexOf("fun $functionName(")
         assertTrue("Missing function $functionName", declaration >= 0)
         return blockAt(source, source.indexOf('{', declaration))
+    }
+
+    /**
+     * Body of the *declaration* of [functionName], skipping port-implementation forwarders.
+     *
+     * `functionBody` above finds the first `fun <name>(`, which is now ambiguous for every member a
+     * `MainViewModel` delegate block forwards: the block contains `override fun <name>(` ahead of the
+     * real declaration, so the first hit is a one-line forwarder and every assertion on the real body
+     * fails for the wrong reason. This locates the member declaration itself.
+     */
+    private fun declaredFunctionBody(source: String, functionName: String): String {
+        val declaration = Regex(
+            "^    (?:private |internal |public |protected |inline |suspend )*fun " +
+                Regex.escape(functionName) + "\\(",
+            RegexOption.MULTILINE
+        ).find(source)
+        assertTrue("Missing declaration of $functionName", declaration != null)
+        return blockAt(source, source.indexOf('{', declaration!!.range.first))
     }
 
     private fun queryForFunction(source: String, functionName: String): String {
