@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -2123,6 +2124,70 @@ private fun DownloadCheckLine(title: String, status: String, message: String?) {
     )
 }
 
+/** 推荐卡的主操作。**刻意不含 Verify** —— 验证状态不得替换加载/打开。 */
+internal enum class RecommendedCardPrimaryAction { DOWNLOAD, OPEN_LOCAL_IMAGE, LOAD_LOCAL_CHAT }
+
+/**
+ * 推荐卡主操作的决策。
+ *
+ * 通用设备准入要求：验证状态（含 `qairtVerifiedLocalModelIds` 这类设备侧名单）**不得**把主操作
+ * 变成"校验"，否则未知设备或"暂无验证记录"就阻断了加载/打开路径。
+ *
+ * ⇒ 因此本函数**不接受任何验证参数**：主操作与验证状态**在结构上无法耦合**，而不只是靠约定。
+ */
+internal fun recommendedCardPrimaryAction(
+    hasLocalImageModel: Boolean,
+    hasLocalChatModel: Boolean
+): RecommendedCardPrimaryAction = when {
+    hasLocalImageModel -> RecommendedCardPrimaryAction.OPEN_LOCAL_IMAGE
+    hasLocalChatModel -> RecommendedCardPrimaryAction.LOAD_LOCAL_CHAT
+    else -> RecommendedCardPrimaryAction.DOWNLOAD
+}
+
+/** 是否显示**次级**诊断按钮。它只提示验证状态，永不取代主操作。 */
+internal fun recommendedCardShowsVerifyDiagnostic(
+    hasLocalImageModel: Boolean,
+    hasLocalChatModel: Boolean,
+    imageVerificationPassed: Boolean,
+    chatVerificationPassed: Boolean
+): Boolean = when {
+    hasLocalImageModel -> !imageVerificationPassed
+    hasLocalChatModel -> !chatVerificationPassed
+    else -> false
+}
+
+/**
+ * 已安装模型的**次级**诊断按钮。
+ *
+ * 只在模型尚未通过本机验证时出现，且**永不取代**主操作：加载/打开始终可用，诊断失败后
+ * 仍可走通用兼容路径，由真实 native 加载与执行决定结果（通用设备准入要求）。
+ */
+@Composable
+private fun RowScope.VerifyLocalModelButton(
+    failed: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier.weight(1f),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Icon(
+            Icons.Default.CheckCircle,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (failed) "重新诊断" else "本机诊断",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
 @Composable
 private fun RecommendedModelCard(
     model: ModelScopeRecommendedModel,
@@ -2283,53 +2348,75 @@ private fun RecommendedModelCard(
         if (detailsExpanded) {
             Text(model.description, style = MaterialTheme.typography.bodySmall)
         }
+        // 主操作只由"是否已安装"决定（决策函数刻意不含验证参数）；验证状态只决定次级诊断按钮。
+        val primaryAction = recommendedCardPrimaryAction(
+            hasLocalImageModel = localImageModel != null,
+            hasLocalChatModel = localChatModel != null
+        )
+        val showVerifyDiagnostic = recommendedCardShowsVerifyDiagnostic(
+            hasLocalImageModel = localImageModel != null,
+            hasLocalChatModel = localChatModel != null,
+            imageVerificationPassed = localImageVerificationPassed,
+            chatVerificationPassed = localChatVerificationPassed
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (localImageModel != null) {
+            if (localImageModel != null &&
+                primaryAction == RecommendedCardPrimaryAction.OPEN_LOCAL_IMAGE
+            ) {
+                // 主操作**始终**是打开/加载：验证记录只作提示与诊断，不得把主按钮替换成"校验"，
+                // 否则未知设备/未验证状态就阻断了加载路径（违反通用设备准入）。
                 OutlinedButton(
-                    onClick = {
-                        if (localImageVerificationPassed) onOpenLocalModel(localImageModel.id)
-                        else onVerifyLocalModel(localImageModel.id)
-                    },
+                    onClick = { onOpenLocalModel(localImageModel.id) },
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Icon(
-                        if (localImageVerificationPassed) Icons.Default.Image else Icons.Default.CheckCircle,
+                        Icons.Default.Image,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        when {
-                            localImageVerificationPassed -> "打开本地模型"
-                            localImageModel.verificationStatus == "FAILED" -> "校验失败 · 重试"
-                            else -> "已安装 · 重新校验"
-                        },
+                        "打开本地模型",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-            } else if (localChatModel != null) {
+                if (showVerifyDiagnostic) {
+                    VerifyLocalModelButton(
+                        failed = localImageModel.verificationStatus == "FAILED",
+                        enabled = enabled,
+                        onClick = { onVerifyLocalModel(localImageModel.id) }
+                    )
+                }
+            } else if (localChatModel != null &&
+                primaryAction == RecommendedCardPrimaryAction.LOAD_LOCAL_CHAT
+            ) {
+                // 同上：加载不被验证状态阻断；诊断失败后仍可走通用兼容路径，由真实 native 加载决定结果。
                 OutlinedButton(
-                    onClick = {
-                        if (localChatVerificationPassed) onLoadLocalChatModel(localChatModel)
-                        else onVerifyLocalChatModel(localChatModel)
-                    },
+                    onClick = { onLoadLocalChatModel(localChatModel) },
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Icon(
-                        if (localChatVerificationPassed) Icons.Default.PlayArrow else Icons.Default.CheckCircle,
+                        Icons.Default.PlayArrow,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
-                        if (localChatVerificationPassed) "打开本地模型" else "已安装 · 重新校验",
+                        "打开本地模型",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (showVerifyDiagnostic) {
+                    VerifyLocalModelButton(
+                        failed = false,
+                        enabled = enabled,
+                        onClick = { onVerifyLocalChatModel(localChatModel) }
                     )
                 }
             } else {
