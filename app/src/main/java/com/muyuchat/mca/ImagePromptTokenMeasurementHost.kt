@@ -14,7 +14,7 @@ import org.json.JSONObject
 /**
  * What the prompt-token measurement needs from its owner.
  *
- * Six members: the model catalogue it resolves against, and the process-local caches that keep a
+ * Five members: the model catalogue it resolves against, and the process-local caches that keep a
  * measurement from re-reading a tokenizer on every keystroke. Everything else the measurement does is
  * a top-level function or a native bridge, which is why 166 lines could move without state ownership.
  */
