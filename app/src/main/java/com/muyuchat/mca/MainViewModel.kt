@@ -223,6 +223,10 @@ import com.muyuchat.mca.presentation.afterGenerationTerminated
 import com.muyuchat.mca.presentation.afterNativeRuntimeReleased
 import com.muyuchat.mca.presentation.nativeRuntimeReleaseObserved
 import com.muyuchat.mca.presentation.restoreAfterConversationMutationFailure
+import com.muyuchat.mca.presentation.KnowledgeLibraryOperations
+import com.muyuchat.mca.presentation.StoreKnowledgeLibraryPort
+import com.muyuchat.mca.presentation.knowledgeLibrarySnapshot
+import com.muyuchat.mca.presentation.withKnowledgeLibraryChange
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -489,6 +493,7 @@ class MainViewModel @JvmOverloads constructor(
     private val chatImageToolAuthorizationStore = ChatImageToolAuthorizationStore(application)
     private val worldBookStore = WorldBookStore(application)
     private val knowledgeBaseStore = KnowledgeBaseStore(application)
+    private val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
     private val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
@@ -8091,39 +8096,25 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun deleteWorldBook(worldBookId: String) {
-        val removed = _uiState.value.worldBooks.firstOrNull { it.id == worldBookId } ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { worldBookStore.remove(worldBookId) }
-                .onSuccess { remaining ->
-                    _uiState.update {
-                        it.copy(
-                            worldBooks = remaining,
-                            statusMessage = "已删除世界书：${removed.name}"
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(statusMessage = "世界书删除失败：${error.message ?: "请重试"}")
-                    }
-                }
+            val change = KnowledgeLibraryOperations.deleteWorldBook(
+                knowledgeLibraryPort,
+                _uiState.value.knowledgeLibrarySnapshot(),
+                worldBookId
+            ) ?: return@launch
+            _uiState.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
     fun createKnowledgeBase(name: String, description: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
-            val created = runCatching { knowledgeBaseStore.create(name, description) }.getOrElse { error ->
-                showStatus("知识库创建失败：${error.message ?: "名称无效"}")
-                return@launch
-            }
-            _uiState.update { state ->
-                state.copy(
-                    knowledgeBases = (state.knowledgeBases.filterNot { it.id == created.id } + created)
-                        .sortedBy { it.name.lowercase() },
-                    knowledgeDocumentCounts = state.knowledgeDocumentCounts + (created.id to 0),
-                    statusMessage = "已创建知识库：${created.name}"
-                )
-            }
+            val change = KnowledgeLibraryOperations.createKnowledgeBase(
+                knowledgeLibraryPort,
+                _uiState.value.knowledgeLibrarySnapshot(),
+                name,
+                description
+            )
+            _uiState.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
@@ -8244,23 +8235,13 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun deleteKnowledgeBase(knowledgeBaseId: String) {
-        val removed = _uiState.value.knowledgeBases.firstOrNull { it.id == knowledgeBaseId } ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { knowledgeBaseStore.remove(knowledgeBaseId) }
-                .onSuccess {
-                    _uiState.update { state ->
-                        state.copy(
-                            knowledgeBases = state.knowledgeBases.filterNot { it.id == knowledgeBaseId },
-                            knowledgeDocumentCounts = state.knowledgeDocumentCounts - knowledgeBaseId,
-                            knowledgeBaseImportingIds = state.knowledgeBaseImportingIds - knowledgeBaseId,
-                            selectedKnowledgeBaseIds = state.selectedKnowledgeBaseIds - knowledgeBaseId,
-                            statusMessage = "已删除知识库：${removed.name}"
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    showStatus("知识库删除失败：${error.message ?: "请重试"}")
-                }
+            val change = KnowledgeLibraryOperations.deleteKnowledgeBase(
+                knowledgeLibraryPort,
+                _uiState.value.knowledgeLibrarySnapshot(),
+                knowledgeBaseId
+            ) ?: return@launch
+            _uiState.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
