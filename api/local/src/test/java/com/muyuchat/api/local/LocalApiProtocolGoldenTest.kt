@@ -113,10 +113,26 @@ class LocalApiProtocolGoldenTest {
         // Which routes are reachable without an API key is a security-relevant part of the
         // contract, so pin the exact set rather than letting a route drift open.
         // `modelsRouteDoesNotRequireApiKey` in McaLoopbackServerTest covers the behaviour.
+        //
+        // This set is now stated per method, not per path, because the router answers HEAD
+        // /health without a key while GET /models is the key-free alias of /v1/models; a
+        // path-only set could not tell those apart from an authenticated route that merely
+        // shares a path. The members are exactly what McaLoopbackServer serves before its
+        // API-key check plus everything `isPublicRoute` accepts, and
+        // `authRequired matches the routes the router serves before the API key check` in
+        // LocalApiCapabilityRegistryCoverageTest re-derives them from the router source so
+        // this list cannot drift away from the server.
         assertEquals(
             "only these documented routes may be reachable without an API key",
-            setOf("/health", "/v1/models"),
-            registry.filter { !it.authRequired }.map { it.path }.toSet()
+            setOf(
+                "HEAD /health",
+                "GET /health",
+                "GET /",
+                "GET /index.html",
+                "GET /v1/models",
+                "GET /models"
+            ),
+            registry.filter { !it.authRequired }.map { "${it.method} ${it.path}" }.toSet()
         )
     }
 

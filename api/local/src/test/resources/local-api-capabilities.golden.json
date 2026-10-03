@@ -89,6 +89,206 @@
       "path": "/v1/mca/profile",
       "stream": false,
       "support": "supported"}
+    ,{
+      "auth_required": false,
+      "description": "Header-only health probe.",
+      "error_codes": ["not_found"],
+      "fields": [],
+      "method": "HEAD",
+      "notes": ["Key-free like GET /health: the router's public-route predicate matches HEAD /health.","Answers 204 No Content, so there is no payload to parse."],
+      "path": "/health",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": false,
+      "description": "Built-in local chat page (HTML).",
+      "error_codes": ["not_found"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Served by the router before the API-key check, so it is reachable without a key.","This is a human-facing page, not a JSON API; the model chat contract is /v1/chat/completions."],
+      "path": "/",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": false,
+      "description": "Alias of the built-in local chat page.",
+      "error_codes": ["not_found"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Same handler and response as GET /."],
+      "path": "/index.html",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": false,
+      "description": "Alias of /v1/models.",
+      "error_codes": ["runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Key-free like /v1/models: the router's public-route predicate matches GET /models.","Same handler and payload as /v1/models."],
+      "path": "/models",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Redacted native metrics, request correlation and coordinator signatures.",
+      "error_codes": ["unauthorized","request_failed"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Absolute paths, prompts, sessions and credentials are removed at this boundary.","Returns text/plain, not JSON, and requires the API key."],
+      "path": "/metrics",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Device profile reported by the runtime.",
+      "error_codes": ["unauthorized","request_failed"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["The payload is produced by the runtime-registered device-profile provider; this module forwards it and cannot guarantee the response shape.","Device evidence is descriptive only and is never an admission gate for any route."],
+      "path": "/v1/mca/device",
+      "stream": false,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Public tuning state with private fields removed.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": [],
+      "path": "/v1/mca/tuning",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Image-extension inventory available for the image endpoints.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Only the fields needed to select an artifact are published; app-private paths and compatibility fingerprints are discarded."],
+      "path": "/v1/images/textual-inversions",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Alias of /v1/images/textual-inversions.",
+      "error_codes": ["unauthorized","runtime_unavailable"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["Same handler and payload as /v1/images/textual-inversions."],
+      "path": "/images/textual-inversions",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Creates a tuning job and returns its initial state.",
+      "error_codes": ["unauthorized","idempotency_key_required","invalid_idempotency_key","idempotency_key_conflict","invalid_json","unsupported_tuning_fields","invalid_tuning_mode","invalid_auto_apply","invalid_performance_preference","lifecycle_conflict","control_plane_invalid_response","request_failed"],
+      "fields": ["modelId","mode","autoApply","performancePreference"],
+      "method": "POST",
+      "notes": ["Only the fields listed here are accepted; unsupported fields are rejected.","mode accepts quick, standard, deep or power_save.","Idempotency-Key is required and an exact retry replays the original response while reuse for a different request is rejected.","A transient lifecycle conflict is reported before dispatch and does not consume the key."],
+      "path": "/v1/tuning/jobs",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Rolls the active tuning state back.",
+      "error_codes": ["unauthorized","idempotency_key_required","invalid_idempotency_key","idempotency_key_conflict","invalid_json","unsupported_tuning_fields","lifecycle_conflict","control_plane_invalid_response","request_failed"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["The request body must be empty or an empty JSON object.","Idempotency-Key is required and an exact retry replays the original response while reuse for a different request is rejected."],
+      "path": "/v1/tuning/rollback",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Read-only state of one tuning job.",
+      "error_codes": ["unauthorized","invalid_tuning_job_route","control_plane_invalid_response","request_failed"],
+      "fields": [],
+      "method": "GET",
+      "notes": ["{jobId} is a literal placeholder: substitute a real job id, which may contain letters, digits, dot, underscore, colon or hyphen.","Reads through the runtime coordinator and does not use the generation busy gate, so it stays available while a candidate is loading or being recovered.","The single segment `current` selects the current job."],
+      "path": "/v1/tuning/jobs/{jobId}",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Applies a pause, resume, cancel or apply transition to one tuning job.",
+      "error_codes": ["unauthorized","invalid_tuning_job_route","invalid_tuning_job_id","idempotency_key_required","invalid_idempotency_key","idempotency_key_conflict","invalid_json","unsupported_tuning_fields","tuning_action_not_found","lifecycle_conflict","control_plane_invalid_response","request_failed"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["{jobId} is a literal placeholder: substitute a real job id, which may contain letters, digits, dot, underscore, colon or hyphen.","The router also accepts a two-segment form /v1/tuning/jobs/{jobId}/{action} where action is pause, resume, cancel or apply; no other action is accepted.","The body must be empty or an empty JSON object.","`current` is rejected here: a transition needs a concrete job id.","Idempotency-Key is required and an exact retry replays the original response while reuse for a different request is rejected."],
+      "path": "/v1/tuning/jobs/{jobId}",
+      "stream": false,
+      "support": "supported"}
+    ,{
+      "auth_required": true,
+      "description": "Runtime agent recommendation for the posted request body.",
+      "error_codes": ["unauthorized","request_failed"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["The response payload is produced by the runtime-registered advisor provider; this module forwards the body and returns that JSON, so it cannot guarantee the response shape.","A recommendation is advisory and never an admission gate for any route."],
+      "path": "/v1/mca/recommend",
+      "stream": false,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Runtime benchmark result for the posted request body.",
+      "error_codes": ["unauthorized","request_failed"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["The response payload is produced by the runtime-registered benchmark provider; this module forwards the body and returns that JSON, so it cannot guarantee the response shape.","Benchmark results are advisory and never an admission gate for any route."],
+      "path": "/v1/mca/benchmark",
+      "stream": false,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Alias of /v1/chat/completions.",
+      "error_codes": ["invalid_request","parameter_scope_conflict","invalid_model","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["Same handler, field set and SSE behaviour as /v1/chat/completions; see that entry for the accepted fields.","Requires a JSON object body, a model id and a non-empty messages array."],
+      "path": "/chat/completions",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Completion-compatible alias of /v1/chat/completions.",
+      "error_codes": ["invalid_request","parameter_scope_conflict","invalid_model","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["Same handler, field set and SSE behaviour as /v1/chat/completions; see that entry for the accepted fields.","Requires a JSON object body and a model id, but does not require a non-empty messages array."],
+      "path": "/v1/completions",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Legacy text-completion compatibility route.",
+      "error_codes": ["invalid_request","parameter_scope_conflict","invalid_model","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized","preflight_failed"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["Handled by the /v1/chat/completions pipeline, but this route is the permissive one: it accepts a non-JSON body and does not require a model id.","Kept for existing local clients; new clients should use /v1/chat/completions.","SSE is available when stream=true or the client requests text/event-stream."],
+      "path": "/completion",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Alias of /v1/responses.",
+      "error_codes": ["invalid_request","unsupported_parameter","parameter_scope_conflict","model_not_found","runtime_busy","context_length_exceeded","generation_failed","generation_cancelled","unauthorized"],
+      "fields": ["model","instructions","input","stream","max_output_tokens","temperature","top_p","stop"],
+      "method": "POST",
+      "notes": ["Same handler, field set and streaming events as /v1/responses.","Input is text or an array of role/content messages with input_text parts; unsupported fields and parts are rejected before dispatch."],
+      "path": "/responses",
+      "stream": true,
+      "support": "partial"}
+    ,{
+      "auth_required": true,
+      "description": "Alias of /v1/images/generations.",
+      "error_codes": ["invalid_json","unsupported_sampler","unsupported_image_count","unsupported_response_format","unsupported_preview","image_model_not_ready","image_generation_busy","image_worker_unavailable","image_native_execution_failed","unauthorized"],
+      "fields": [],
+      "method": "POST",
+      "notes": ["Same handler, accepted fields and error semantics as /v1/images/generations; see that entry for the field list.","Synchronous generation does not support preview: a preview field is rejected with unsupported_preview."],
+      "path": "/images/generations",
+      "stream": false,
+      "support": "partial"}
     ],
   "generated_by": "McaLoopbackServer",
   "schema": "mca.local-api.capabilities.v1",
