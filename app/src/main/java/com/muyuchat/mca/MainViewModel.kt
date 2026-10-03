@@ -488,7 +488,8 @@ class MainViewModel @JvmOverloads constructor(
     private val chatImageToolAuthorizationStore = ChatImageToolAuthorizationStore(application)
     private val worldBookStore = WorldBookStore(application)
     private val knowledgeBaseStore = KnowledgeBaseStore(application)
-    private val chatContextComposer = ChatContextComposer(worldBookStore, knowledgeBaseStore)
+    private val chatContextComposer =
+        ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
     private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
     private val chatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

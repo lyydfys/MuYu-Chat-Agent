@@ -100,10 +100,13 @@ data class ChatRuntimeContextPlan(
  * Keeps optional retrieval and lore under a bounded part of the actual loaded
  * context window. The plan stays request-scoped so it never inflates an
  * assistant's permanent system prompt or chat history.
+ *
+ * The sources arrive through [ChatContextSources], so this use case decides *how much* context may
+ * be used and *in what order* it is combined, while storage decides *where* it comes from. It used
+ * to take the two concrete stores, which is why it could not be tested without a real store.
  */
 class ChatContextComposer(
-    private val worldBookStore: WorldBookStore,
-    private val knowledgeBaseStore: KnowledgeBaseStore
+    private val sources: ChatContextSources
 ) {
     fun compose(
         messages: List<ChatMessage>,
@@ -123,7 +126,7 @@ class ChatContextComposer(
         val loreBudget = dynamicBudget * 3 / 5
         val retrievalBudget = dynamicBudget - loreBudget
         val lore = WorldBookResolver.select(
-            books = worldBookStore.load(),
+            books = sources.loadWorldBooks(),
             messages = messages,
             assistantId = assistantId,
             chatSessionId = chatSessionId,
@@ -135,7 +138,7 @@ class ChatContextComposer(
                 ?.content
                 ?.let(::boundedQuery)
                 .orEmpty()
-            knowledgeBaseStore.retrieve(
+            sources.retrieveKnowledge(
                 knowledgeBaseIds = knowledgeBaseIds,
                 query = query,
                 maxChunks = MAX_KNOWLEDGE_CHUNKS,
