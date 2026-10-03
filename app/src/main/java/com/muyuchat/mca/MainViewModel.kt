@@ -2345,7 +2345,7 @@ class MainViewModel @JvmOverloads constructor(
                     )
                     return@runCatching AttachmentImportResult(name, image.toInputAttachment(), false, image)
                 }
-                if (!isSupportedTextAttachment(uri, name)) {
+                if (!isSupportedTextAttachment(getApplication<Application>().contentResolver, uri, name)) {
                     error("当前上传入口暂支持文本、Markdown、JSON、XML 等文本类文件")
                 }
                 val (text, truncated) = readAttachmentText(uri)
@@ -6476,7 +6476,7 @@ class MainViewModel @JvmOverloads constructor(
                 val preview = runCatching {
                     val uri = Uri.parse(uriString)
                     val name = displayNameForUri(uri)
-                    require(isSupportedTextAttachment(uri, name)) { "知识库目前支持文本、Markdown、JSON、XML、CSV 与代码文件。" }
+                    require(isSupportedTextAttachment(getApplication<Application>().contentResolver, uri, name)) { "知识库目前支持文本、Markdown、JSON、XML、CSV 与代码文件。" }
                     val text = getApplication<Application>().contentResolver.openInputStream(uri)
                         ?.use { KnowledgeDocumentImportCodec.readTextCancellable(it) }
                         ?: error("无法读取所选文档")
@@ -14752,69 +14752,6 @@ class MainViewModel @JvmOverloads constructor(
         return queriedName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "上传文件"
     }
 
-    private fun isSupportedTextAttachment(uri: Uri, name: String): Boolean {
-        val resolver = getApplication<Application>().contentResolver
-        val mime = resolver.getType(uri).orEmpty().lowercase()
-        val lowerName = name.lowercase()
-        return mime.startsWith("text/") ||
-            mime in setOf(
-                "application/json", "application/xml", "application/x-ndjson",
-                "application/yaml", "application/x-yaml", "text/yaml",
-                "text/csv", "application/rtf"
-            ) ||
-            lowerName.endsWith(".txt") ||
-            lowerName.endsWith(".md") ||
-            lowerName.endsWith(".markdown") ||
-            lowerName.endsWith(".json") ||
-            lowerName.endsWith(".json5") ||
-            lowerName.endsWith(".jsonl") ||
-            lowerName.endsWith(".xml") ||
-            lowerName.endsWith(".yaml") ||
-            lowerName.endsWith(".yml") ||
-            lowerName.endsWith(".csv") ||
-            lowerName.endsWith(".log") ||
-            lowerName.endsWith(".html") ||
-            lowerName.endsWith(".htm") ||
-            lowerName.endsWith(".rst") ||
-            lowerName.endsWith(".tex") ||
-            lowerName.endsWith(".srt") ||
-            lowerName.endsWith(".vtt") ||
-            lowerName.endsWith(".toml") ||
-            lowerName.endsWith(".ini") ||
-            lowerName.endsWith(".conf") ||
-            lowerName.endsWith(".cfg") ||
-            lowerName.endsWith(".sql") ||
-            lowerName.endsWith(".sh") ||
-            lowerName.endsWith(".bash") ||
-            lowerName.endsWith(".zsh") ||
-            lowerName.endsWith(".bat") ||
-            lowerName.endsWith(".cmd") ||
-            lowerName.endsWith(".ps1") ||
-            lowerName.endsWith(".c") ||
-            lowerName.endsWith(".h") ||
-            lowerName.endsWith(".cc") ||
-            lowerName.endsWith(".cpp") ||
-            lowerName.endsWith(".cxx") ||
-            lowerName.endsWith(".hpp") ||
-            lowerName.endsWith(".cs") ||
-            lowerName.endsWith(".go") ||
-            lowerName.endsWith(".rs") ||
-            lowerName.endsWith(".swift") ||
-            lowerName.endsWith(".rb") ||
-            lowerName.endsWith(".php") ||
-            lowerName.endsWith(".dart") ||
-            lowerName.endsWith(".vue") ||
-            lowerName.endsWith(".jsx") ||
-            lowerName.endsWith(".tsx") ||
-            lowerName.endsWith(".gradle") ||
-            lowerName.endsWith(".properties") ||
-            lowerName.endsWith(".proto") ||
-            lowerName.endsWith(".kt") ||
-            lowerName.endsWith(".java") ||
-            lowerName.endsWith(".py") ||
-            lowerName.endsWith(".js") ||
-            lowerName.endsWith(".ts")
-    }
 
     private fun isImageAttachment(uri: Uri, name: String): Boolean {
         val resolver = getApplication<Application>().contentResolver
