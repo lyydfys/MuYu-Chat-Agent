@@ -1,4 +1,4 @@
-﻿package com.muyuchat.api.local
+package com.muyuchat.api.local
 
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.GenerationParams
@@ -55,6 +55,9 @@ object LocalApiRuntime {
         benchmarkJsonProvider = { "{}" }
         imageGenerationProvider = null
         controlPlane = null
+        // Drop the published set in the same critical section as the field clears, so a call that
+        // arrives after release cannot keep using the retired owner's callbacks.
+        publishedBindings = null
         clearRequestTrace()
         ownerToken = null
         ownerReplacementCleanup = null
@@ -128,8 +131,10 @@ object LocalApiRuntime {
     @Volatile
     var imageGenerationProvider: (suspend (requestId: String, body: String) -> String)? = null
 
-    suspend fun generateImage(requestId: String, body: String): String? =
-        imageGenerationProvider?.invoke(requestId, body)
+    suspend fun generateImage(requestId: String, body: String): String? {
+        val bindings = currentBindings()
+        return bindings.imageGenerationProvider?.invoke(requestId, body)
+    }
 
     /**
      * Optional app-owned coordinator bridge. Existing provider fields remain valid when this is
@@ -137,6 +142,83 @@ object LocalApiRuntime {
      */
     @Volatile
     var controlPlane: LocalApiControlPlane? = null
+
+    /**
+     * Immutable snapshot of every callback one runtime call needs.
+     *
+     * Before this existed a call read the individual `var` fields one after another. While an owner
+     * was being replaced those reads could straddle the swap and observe a half-updated mix (for
+     * example the new owner's chat stream together with the old owner's stop handle). The owner now
+     * publishes one complete set, and a call captures it once and uses only that value.
+     */
+    class LocalApiBindings internal constructor(
+        val engine: McaInferenceService?,
+        val nativeStatsJsonProvider: (() -> String)?,
+        val streamChatProvider: ((ChatRequest) -> Flow<GenerateEvent>)?,
+        val streamChatWithContextProvider:
+            ((ChatRequest, LocalChatExecutionContext) -> Flow<GenerateEvent>)?,
+        val stopGenerationProvider: (suspend () -> Unit)?,
+        val stopGenerationIfRequestActiveProvider: (suspend (String) -> Boolean)?,
+        val loadedModelJsonProvider: () -> String,
+        val paramsJsonProvider: () -> String,
+        val generationParamsProvider: () -> GenerationParams,
+        val modelsJsonProvider: () -> String,
+        val imageTextualInversionsJsonProvider: () -> String,
+        val modelRuntimeStatesJsonProvider: () -> String,
+        val deviceProfileJsonProvider: () -> String,
+        val agentRecommendationJsonProvider: (String) -> String,
+        val benchmarkJsonProvider: suspend (String) -> String,
+        val imageGenerationProvider: (suspend (requestId: String, body: String) -> String)?,
+        val controlPlane: LocalApiControlPlane?
+    )
+
+    @Volatile
+    private var publishedBindings: LocalApiBindings? = null
+
+    /** Reads the current field values as one set. Not atomic by itself; see [publishBindings]. */
+    private fun snapshotBindings(): LocalApiBindings = LocalApiBindings(
+        engine = engine,
+        nativeStatsJsonProvider = nativeStatsJsonProvider,
+        streamChatProvider = streamChatProvider,
+        streamChatWithContextProvider = streamChatWithContextProvider,
+        stopGenerationProvider = stopGenerationProvider,
+        stopGenerationIfRequestActiveProvider = stopGenerationIfRequestActiveProvider,
+        loadedModelJsonProvider = loadedModelJsonProvider,
+        paramsJsonProvider = paramsJsonProvider,
+        generationParamsProvider = generationParamsProvider,
+        modelsJsonProvider = modelsJsonProvider,
+        imageTextualInversionsJsonProvider = imageTextualInversionsJsonProvider,
+        modelRuntimeStatesJsonProvider = modelRuntimeStatesJsonProvider,
+        deviceProfileJsonProvider = deviceProfileJsonProvider,
+        agentRecommendationJsonProvider = agentRecommendationJsonProvider,
+        benchmarkJsonProvider = benchmarkJsonProvider,
+        imageGenerationProvider = imageGenerationProvider,
+        controlPlane = controlPlane
+    )
+
+    /**
+     * Publishes the currently installed callbacks as one immutable set.
+     *
+     * The owner calls this exactly once, after it has finished installing every provider, so that no
+     * runtime call can observe a half-installed owner. Publishing is a single volatile write, so the
+     * swap is atomic with respect to [currentBindings].
+     */
+    fun publishBindings(): LocalApiBindings {
+        val bindings = snapshotBindings()
+        publishedBindings = bindings
+        return bindings
+    }
+
+    /** True once an owner has published a complete set. */
+    val hasPublishedBindings: Boolean get() = publishedBindings != null
+
+    /**
+     * The set a runtime call must use for its whole lifetime.
+     *
+     * Falls back to a live read when nothing has been published yet, which keeps integrations that
+     * only assign individual providers (older embeddings, focused tests) working unchanged.
+     */
+    fun currentBindings(): LocalApiBindings = publishedBindings ?: snapshotBindings()
 
     fun streamChat(request: ChatRequest): Flow<GenerateEvent>? =
         streamChat(request, LocalChatExecutionContext())
@@ -163,25 +245,28 @@ object LocalApiRuntime {
         } else {
             executionContext
         }
-        return streamChatWithContextProvider?.invoke(request, tracedContext)
-            ?: streamChatProvider?.invoke(request)
-            ?: engine?.streamChat(request, tracedContext)
+        val bindings = currentBindings()
+        return bindings.streamChatWithContextProvider?.invoke(request, tracedContext)
+            ?: bindings.streamChatProvider?.invoke(request)
+            ?: bindings.engine?.streamChat(request, tracedContext)
     }
 
     suspend fun stopGeneration() {
-        val stop = stopGenerationProvider
+        val bindings = currentBindings()
+        val stop = bindings.stopGenerationProvider
         if (stop != null) {
             stop()
         } else {
-            engine?.stopGeneration()
+            bindings.engine?.stopGeneration()
         }
     }
 
     suspend fun stopGenerationIfRequestActive(requestId: String): Boolean {
         if (requestId.isBlank()) return false
-        val conditional = stopGenerationIfRequestActiveProvider
+        val bindings = currentBindings()
+        val conditional = bindings.stopGenerationIfRequestActiveProvider
         if (conditional != null) return conditional(requestId)
-        val attached = engine ?: return false
+        val attached = bindings.engine ?: return false
         val token = attached.activeGenerationStopToken()
             ?.takeIf { it.requestId == requestId }
             ?: return false
@@ -189,7 +274,7 @@ object LocalApiRuntime {
     }
 
     fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
-        val plane = controlPlane ?: return LocalApiPreflightResult.Ready
+        val plane = currentBindings().controlPlane ?: return LocalApiPreflightResult.Ready
         val busy = plane.busyState()
         if (busy.busy) {
             return LocalApiPreflightResult.Rejected(
@@ -203,11 +288,15 @@ object LocalApiRuntime {
         return plane.preflight(request)
     }
 
-    fun busyState(): LocalApiBusyState = controlPlane?.busyState() ?: LocalApiBusyState.IDLE
+    fun busyState(): LocalApiBusyState =
+        currentBindings().controlPlane?.busyState() ?: LocalApiBusyState.IDLE
 
-    fun profileJson(): String = controlPlane?.profileJson() ?: paramsJsonProvider()
+    fun profileJson(): String {
+        val bindings = currentBindings()
+        return bindings.controlPlane?.profileJson() ?: bindings.paramsJsonProvider()
+    }
 
-    fun tuningJson(): String = controlPlane?.tuningJson() ?: "{}"
+    fun tuningJson(): String = currentBindings().controlPlane?.tuningJson() ?: "{}"
 
     fun publicProfileJson(): String = publicJson(profileJson())
 
@@ -684,7 +773,10 @@ object LocalApiRuntime {
     }
 
     private fun nativeStatsObject(): JSONObject? = runCatching {
-        nativeStatsJsonProvider?.invoke() ?: engine?.nativeStatsJson()
+        // Read the stats source from one captured set, like every other runtime call, so a stats
+        // request cannot pair the new owner's provider with the previous owner's engine.
+        val bindings = currentBindings()
+        bindings.nativeStatsJsonProvider?.invoke() ?: bindings.engine?.nativeStatsJson()
     }.getOrNull()?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
 
     private fun nativeMetricsObject(): JSONObject {

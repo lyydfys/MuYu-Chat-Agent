@@ -2053,6 +2053,11 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
 
+        // Every provider above is now installed. Publish them as one immutable set so a runtime call
+        // that starts from here on can never observe a half-installed owner (for example the new
+        // chat stream paired with the previous owner's stop handle).
+        LocalApiRuntime.publishBindings()
+
         launchModelOperation("恢复运行记录失败") {
             recoverInterruptedRuntimeProfiles()
         }
