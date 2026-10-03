@@ -1,10 +1,19 @@
 package com.muyuchat.mca.presentation
 
+import com.muyuchat.mca.ContentImportOwner
+import com.muyuchat.mca.ContentImportPreview
 import com.muyuchat.mca.KnowledgeBaseRecord
 import com.muyuchat.mca.KnowledgeBaseStore
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.WorldBookCodec
+import com.muyuchat.mca.WorldBookImportResult
 import com.muyuchat.mca.WorldBookRecord
+import com.muyuchat.mca.WorldBookScope
 import com.muyuchat.mca.WorldBookStore
+import com.muyuchat.mca.worldBookPreview
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * The knowledge-library operations: create and delete knowledge bases, delete world books.
@@ -37,6 +46,9 @@ internal interface KnowledgeLibraryPort {
 
     /** Removes a knowledge base together with its documents and chunks. */
     fun removeKnowledgeBase(id: String)
+
+    /** Inserts or replaces a world book and returns the resulting list. */
+    fun upsertWorldBook(book: WorldBookRecord): List<WorldBookRecord>
 }
 
 /**
@@ -145,6 +157,96 @@ internal object KnowledgeLibraryOperations {
     }
 }
 
+/** The inputs a world-book import needs, including the two facts only the caller can observe. */
+internal data class WorldBookImportRequest(
+    val rawJson: String,
+    val scope: WorldBookScope,
+    val owner: ContentImportOwner,
+    val commitId: String?,
+    /** `owner.sessionId != null`: a CHAT-scoped import needs an active conversation. */
+    val hasActiveSession: Boolean,
+    /** Whether the assistant or session the book belongs to still exists. */
+    val ownerStillExists: Boolean,
+    /**
+     * `ContentImportOwner.isCurrent(state)`, evaluated by the caller against the live revision.
+     *
+     * This is a provider, not a value, because the original read it **after** the store write. A slow
+     * write can race a selection change, and in that case the message must say "已保存，当前对话未切换
+     * 绑定" rather than claiming the binding moved. Passing a pre-computed boolean would silently
+     * change that.
+     */
+    val ownerIsCurrent: suspend () -> Boolean
+)
+
+/**
+ * What the caller still has to do.
+ *
+ * The two side effects a world-book import has beyond state — staging a preview and invalidating the
+ * local conversation context — stay in the caller, because they own the preview store and the engine.
+ * Everything else (parsing, the existence check, the store write, the message) is decided here.
+ */
+internal sealed interface WorldBookImportOutcome {
+    /** No commit yet: the caller must stage this preview and report success. */
+    data class NeedsPreview(val preview: ContentImportPreview) : WorldBookImportOutcome
+
+    /** Committed: publish the change, then invalidate the context when asked. */
+    data class Committed(
+        val change: KnowledgeLibraryChange,
+        val invalidateContext: Boolean
+    ) : WorldBookImportOutcome
+
+    /** Nothing to publish beyond a status line; the caller reports failure. */
+    data class Rejected(val statusMessage: String) : WorldBookImportOutcome
+}
+
+/**
+ * Parses, validates and stores an imported world book.
+ *
+ * Dispatchers match the original: parsing on [Dispatchers.Default], the store write on
+ * [Dispatchers.IO]. A cancellation is rethrown rather than reported as a failure, exactly as before
+ * — turning a cancelled import into "保存失败" would be a user-visible lie.
+ */
+internal suspend fun KnowledgeLibraryPort.importWorldBook(request: WorldBookImportRequest): WorldBookImportOutcome {
+    if (request.scope == WorldBookScope.CHAT && !request.hasActiveSession) {
+        return WorldBookImportOutcome.Rejected("当前没有活动对话，无法导入当前对话作用域的世界书")
+    }
+    val result = withContext(Dispatchers.Default) {
+        WorldBookCodec.parse(
+            rawJson = request.rawJson,
+            scope = request.scope,
+            assistantId = request.owner.assistantId.takeIf { request.scope == WorldBookScope.ASSISTANT },
+            chatSessionId = request.owner.sessionId.takeIf { request.scope == WorldBookScope.CHAT }
+        )
+    }
+    val imported = result.book
+        ?: return WorldBookImportOutcome.Rejected("世界书导入失败：${result.error ?: "格式不正确"}")
+    if (request.commitId == null) {
+        return WorldBookImportOutcome.NeedsPreview(
+            worldBookPreview(request.rawJson, result, request.owner, request.scope)
+        )
+    }
+    val frozenBook = imported.copy(id = request.commitId, enabled = request.ownerStillExists)
+    val updated = runCatching { withContext(Dispatchers.IO) { upsertWorldBook(frozenBook) } }.getOrElse { error ->
+        if (error is CancellationException) throw error
+        return WorldBookImportOutcome.Rejected(
+            "世界书保存失败：${error.message ?: "请检查本机存储空间后重试"}"
+        )
+    }
+    val ownerIsCurrent = request.ownerIsCurrent()
+    val statusMessage = buildString {
+        append("已导入世界书：${imported.name}（${imported.entries.size} 条）")
+        if (!ownerIsCurrent) append("；已保存，当前对话未切换绑定")
+        if (!request.ownerStillExists) append("；原所属对象已删除，资料已保留但未启用")
+        result.warnings.takeIf { it.isNotEmpty() }?.let { warnings ->
+            append("；").append(warnings.joinToString(" "))
+        }
+    }
+    return WorldBookImportOutcome.Committed(
+        change = KnowledgeLibraryChange(worldBooks = updated, statusMessage = statusMessage),
+        invalidateContext = ownerIsCurrent || request.scope == WorldBookScope.GLOBAL
+    )
+}
+
 /**
  * Reads the fields the knowledge-library operations decide on.
  *
@@ -192,4 +294,6 @@ internal class StoreKnowledgeLibraryPort(
         knowledgeBaseStore.create(name, description)
 
     override fun removeKnowledgeBase(id: String) = knowledgeBaseStore.remove(id)
+
+    override fun upsertWorldBook(book: WorldBookRecord): List<WorldBookRecord> = worldBookStore.upsert(book)
 }

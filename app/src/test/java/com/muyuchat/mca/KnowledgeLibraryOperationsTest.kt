@@ -29,11 +29,14 @@ class KnowledgeLibraryOperationsTest {
         var created: KnowledgeBaseRecord? = null,
         var throwOnWorldBookRemove: Throwable? = null,
         var throwOnCreate: Throwable? = null,
-        var throwOnKnowledgeRemove: Throwable? = null
+        var throwOnKnowledgeRemove: Throwable? = null,
+        var throwOnUpsert: Throwable? = null
     ) : KnowledgeLibraryPort {
         var removeWorldBookCalls = 0
         var createCalls = 0
         var removeKnowledgeCalls = 0
+        var upsertCalls = 0
+        var upserted: WorldBookRecord? = null
 
         override fun removeWorldBook(id: String): List<WorldBookRecord> {
             removeWorldBookCalls++
@@ -50,6 +53,13 @@ class KnowledgeLibraryOperationsTest {
         override fun removeKnowledgeBase(id: String) {
             removeKnowledgeCalls++
             throwOnKnowledgeRemove?.let { throw it }
+        }
+
+        override fun upsertWorldBook(book: WorldBookRecord): List<WorldBookRecord> {
+            upsertCalls++
+            throwOnUpsert?.let { throw it }
+            upserted = book
+            return worldBooks
         }
     }
 

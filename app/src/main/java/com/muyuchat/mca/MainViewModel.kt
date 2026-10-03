@@ -227,6 +227,10 @@ import com.muyuchat.mca.presentation.KnowledgeLibraryOperations
 import com.muyuchat.mca.presentation.StoreKnowledgeLibraryPort
 import com.muyuchat.mca.presentation.knowledgeLibrarySnapshot
 import com.muyuchat.mca.presentation.withKnowledgeLibraryChange
+import com.muyuchat.mca.presentation.KnowledgeLibraryChange
+import com.muyuchat.mca.presentation.WorldBookImportOutcome
+import com.muyuchat.mca.presentation.WorldBookImportRequest
+import com.muyuchat.mca.presentation.importWorldBook
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -8015,61 +8019,54 @@ class MainViewModel @JvmOverloads constructor(
         _uiState.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
+    /**
+     * Imports a world book, delegating the decision to [KnowledgeLibraryOperations.importWorldBook].
+     *
+     * What stays here is what only this class can do: read the live selection revision, stage a
+     * preview through [stageContentImportPreview], publish the resulting change atomically, and
+     * invalidate the local conversation context through [markLocalConversationContextInvalid].
+     * Parsing, the owner-existence check, the store write and the message are decided in the use case.
+     */
     private suspend fun importWorldBookOwned(
         rawJson: String,
         scope: WorldBookScope,
         owner: ContentImportOwner,
         commitId: String? = null
     ): Boolean {
-        if (scope == WorldBookScope.CHAT && owner.sessionId == null) {
-            _uiState.update {
-                it.copy(statusMessage = "当前没有活动对话，无法导入当前对话作用域的世界书")
-            }
-            return false
-        }
-        val result = withContext(Dispatchers.Default) { WorldBookCodec.parse(
+        val state = _uiState.value
+        val request = WorldBookImportRequest(
             rawJson = rawJson,
             scope = scope,
-            assistantId = owner.assistantId.takeIf { scope == WorldBookScope.ASSISTANT },
-            chatSessionId = owner.sessionId.takeIf { scope == WorldBookScope.CHAT }
-        ) }
-        val imported = result.book ?: run {
-            showStatus("世界书导入失败：${result.error ?: "格式不正确"}")
-            return false
-        }
-        if (commitId == null) {
-            stageContentImportPreview(worldBookPreview(rawJson, result, owner, scope))
-            return true
-        }
-        val ownerExists = when (scope) {
-            WorldBookScope.GLOBAL -> true
-            WorldBookScope.ASSISTANT -> _uiState.value.assistants.any { it.id == owner.assistantId }
-            WorldBookScope.CHAT -> _uiState.value.chatSessions.any { it.id == owner.sessionId }
-        }
-        val frozenBook = imported.copy(id = commitId, enabled = ownerExists)
-        val updated = runCatching { withContext(Dispatchers.IO) { worldBookStore.upsert(frozenBook) } }.getOrElse { error ->
-            if (error is CancellationException) throw error
-            _uiState.update {
-                it.copy(statusMessage = "世界书保存失败：${error.message ?: "请检查本机存储空间后重试"}")
+            owner = owner,
+            commitId = commitId,
+            hasActiveSession = owner.sessionId != null,
+            ownerStillExists = when (scope) {
+                WorldBookScope.GLOBAL -> true
+                WorldBookScope.ASSISTANT -> state.assistants.any { it.id == owner.assistantId }
+                WorldBookScope.CHAT -> state.chatSessions.any { it.id == owner.sessionId }
+            },
+            // Read after the store write, exactly as the original did.
+            ownerIsCurrent = { owner.isCurrent(_uiState.value) }
+        )
+        return when (val outcome = knowledgeLibraryPort.importWorldBook(request)) {
+            is WorldBookImportOutcome.NeedsPreview -> {
+                stageContentImportPreview(outcome.preview)
+                true
             }
-            return false
-        }
-        val ownerIsCurrent = owner.isCurrent(_uiState.value)
-        _uiState.update {
-            it.copy(
-                worldBooks = updated,
-                statusMessage = buildString {
-                    append("已导入世界书：${imported.name}（${imported.entries.size} 条）")
-                    if (!ownerIsCurrent) append("；已保存，当前对话未切换绑定")
-                    if (!ownerExists) append("；原所属对象已删除，资料已保留但未启用")
-                    result.warnings.takeIf { it.isNotEmpty() }?.let { warnings ->
-                        append("；").append(warnings.joinToString(" "))
-                    }
+
+            is WorldBookImportOutcome.Committed -> {
+                _uiState.update { it.withKnowledgeLibraryChange(outcome.change) }
+                if (outcome.invalidateContext) markLocalConversationContextInvalid()
+                true
+            }
+
+            is WorldBookImportOutcome.Rejected -> {
+                _uiState.update {
+                    it.withKnowledgeLibraryChange(KnowledgeLibraryChange(statusMessage = outcome.statusMessage))
                 }
-            )
+                false
+            }
         }
-        if (ownerIsCurrent || scope == WorldBookScope.GLOBAL) markLocalConversationContextInvalid()
-        return true
     }
 
     fun importWorldBookFile(
