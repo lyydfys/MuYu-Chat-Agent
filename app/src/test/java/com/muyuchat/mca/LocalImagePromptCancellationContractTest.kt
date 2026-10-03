@@ -84,7 +84,13 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(prepare.contains("catch (error: OfflinePromptTranslationCleanupException)"))
         assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
         assertTrue(prepare.contains("OfflinePromptTranslationResolution.Fallback"))
-        val preview = functionBody(source, "suspend fun translateImagePromptPreview(")
+        // The preview moved to its own file, and the two assertions below were always about the
+        // worker that publishes the cleanup/cancelled statuses rather than about the one-line
+        // entry point. They now read the worker directly; the asserted text is unchanged.
+        val preview = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImagePromptTranslationPreviewOperations.kt"),
+            "internal suspend fun translateImagePromptTextPreview("
+        )
         assertTrue(preview.contains("catch (error: OfflinePromptTranslationCleanupException)"))
         assertTrue(preview.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))
         assertTrue(prepare.contains("requireLocalImagePromptLanguageAdmission("))

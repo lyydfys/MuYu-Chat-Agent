@@ -10294,73 +10294,41 @@ class MainViewModel @JvmOverloads constructor(
         offlineTranslationInstallJob?.cancel()
     }
 
+    /**
+     * The ViewModel side of [ImagePromptTranslationPreviewPort]: one route per member, no logic of
+     * its own. The previews moved to [translateImagePromptPreview], which is now the only place an
+     * offline prompt translation is decided.
+     */
+    private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
+        object : ImagePromptTranslationPreviewPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val offlinePromptTranslationService: OfflinePromptTranslationService
+                get() = this@MainViewModel.offlinePromptTranslationService
+
+            override suspend fun verifiedOfflineTranslationBundle():
+                VerifiedOfflinePromptTranslationBundle? =
+                this@MainViewModel.verifiedOfflineTranslationBundle()
+        }
+
     suspend fun translateImagePromptPreview(prompt: String): String =
-        translateImagePromptTextPreview(prompt, "正向提示词")
+        translateImagePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
 
     suspend fun translateImageNegativePromptPreview(prompt: String): String =
-        translateImagePromptTextPreview(prompt, "负面提示词")
+        translateImageNegativePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
 
-    private suspend fun translateImagePromptTextPreview(prompt: String, fieldLabel: String): String = withContext(Dispatchers.IO) {
-        val source = prompt.trim()
-        require(source.isNotBlank()) { "请先输入图片提示词。" }
-        require(source.containsHanScript()) { "当前提示词没有中文内容。" }
-        require(source.length <= OfflinePromptTranslationContract.MAX_SOURCE_TEXT_CHARS) {
-            "提示词超过离线翻译长度限制，请精简后重试。"
-        }
-        val request = try {
-            offlineImagePromptTranslationRequest(prompt = source, finalNegativePrompt = "")
-        } catch (error: IllegalArgumentException) {
-            throw IllegalArgumentException("提示词格式不受支持，请检查内容后重试。", error)
-        }
-        _uiState.update {
-            it.copy(offlineTranslationStatus = "Hy-MT2 正在翻译$fieldLabel")
-        }
-        val translationResolution = try {
-            offlinePromptTranslationService.translate(
-                verifiedOfflineTranslationBundle(),
-                request
-            )
-        } catch (error: OfflinePromptTranslationCleanupException) {
-            _uiState.update {
-                it.copy(
-                    offlineTranslationStatus = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS,
-                    statusMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE
-                )
-            }
-            throw IllegalStateException(LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_MESSAGE, error)
-        } catch (error: CancellationException) {
-            _uiState.update {
-                it.copy(
-                    offlineTranslationStatus = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS,
-                    statusMessage = LOCAL_IMAGE_PROMPT_TRANSLATION_CANCELLED_STATUS
-                )
-            }
-            throw error
-        }
-        when (val resolution = translationResolution) {
-            is OfflinePromptTranslationResolution.Translated -> {
-                val translated = resolution.translatedPrompt
-                val preview = translated.replace('\n', ' ').replace('\r', ' ').trim().take(96)
-                _uiState.update {
-                    it.copy(
-                        offlineTranslationStatus = "$fieldLabel 英文译文：$preview${if (translated.length > 96) "..." else ""}",
-                        statusMessage = "Hy-MT2 已完成$fieldLabel 离线翻译；英文草稿已生成，可编辑并确认使用。"
-                    )
-                }
-                translated
-            }
-            is OfflinePromptTranslationResolution.Fallback -> {
-                val failureMessage = "Hy-MT2 翻译失败：${resolution.message}；原始提示词已保留。"
-                _uiState.update {
-                    it.copy(
-                        offlineTranslationStatus = failureMessage,
-                        statusMessage = failureMessage
-                    )
-                }
-                throw IllegalStateException(failureMessage)
-            }
-        }
-    }
+    private suspend fun translateImagePromptTextPreview(
+        prompt: String,
+        fieldLabel: String
+    ): String = translateImagePromptTextPreview(
+        port = imagePromptTranslationPreviewPort,
+        prompt = prompt,
+        fieldLabel = fieldLabel
+    )
 
     fun downloadOfflinePromptTranslationBundle() {
         if (offlineTranslationDownloadJob?.isActive == true || offlineTranslationInstallJob?.isActive == true) return
