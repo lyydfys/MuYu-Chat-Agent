@@ -141,15 +141,20 @@ def main():
         private_names.setdefault(match.group(1), match.start())
     hits = []
     for name, offset in private_names.items():
-        # A property is often read or written WITHOUT a trailing `(` or `.` -- e.g.
-        # `val model = activeModelForRuntimeProfile` or `pendingProfileTransactionId = null`.
-        # Requiring a call/qualifier after the name missed exactly those two, so match a bare
-        # identifier too and then drop names that only appear inside strings or comments.
-        if not re.search(r"(?<![\w.])" + re.escape(name) + r"(?![\w])", text):
+        # Three call shapes have to be covered, and the first version missed two of them:
+        #   * `name(...)`      -- a plain member call or property read/write;
+        #   * `x.name(...)`    -- a PRIVATE EXTENSION, which is how `normalized` and
+        #                         `toGenerationParams` were missed; the `(?<![\w.])` guard hid it;
+        #   * bare `name`      -- a property read/write with no call at all, e.g.
+        #                         `val model = activeModelForRuntimeProfile`.
+        plain = re.search(r"(?<![\w.])" + re.escape(name) + r"(?![\w])", text) is not None
+        qualified = re.search(r"\.\s*" + re.escape(name) + r"\s*[\(<]?[^\w]", text) is not None
+        if not (plain or qualified):
             continue
         bare = [
             line for line in text.split("\n")
             if re.search(r"(?<![\w.])" + re.escape(name) + r"(?![\w])", line.split("//")[0])
+            or re.search(r"\.\s*" + re.escape(name) + r"\s*\(", line.split("//")[0])
         ]
         if not bare:
             continue
@@ -157,7 +162,13 @@ def main():
             re.search(r"(?<![\w.])" + re.escape(name) + r"\s*(=[^=]|\+=|-=)", line)
             for line in bare
         )
-        hits.append((name, vm[:offset].count("\n") + 1, "written" if assigned else "read"))
+        # A private extension is unusable from another file no matter how it is called, so say so.
+        is_extension = bool(
+            re.search(r"(?m)^    (?:@\w+\s+)*private (?:suspend )?fun [\w.<>]+\.\s*"
+                      + re.escape(name) + r"\s*\(", vm)
+        )
+        shape = "extension" if is_extension else ("written" if assigned else "read")
+        hits.append((name, vm[:offset].count("\n") + 1, shape))
     if hits:
         for name, lineno, usage in sorted(hits, key=lambda item: item[1]):
             print("   PRIVATE  %-44s declared at line %-6d %s" % (name, lineno, usage))
