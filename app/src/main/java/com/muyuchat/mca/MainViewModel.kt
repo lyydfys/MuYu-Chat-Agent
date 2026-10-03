@@ -2843,47 +2843,66 @@ class MainViewModel @JvmOverloads constructor(
         persistFiles(emptyList())
     }
 
-    fun importLocalImageLora(uriString: String) {
-        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
-        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
-            _uiState.update {
-                it.copy(localImageLoraMessage = "请选择可读取的 LoRA 文档。")
+    /**
+     * The ViewModel side of [LocalImageAdapterPort]. Both lifecycle locks stay here and are only ever
+     * entered through the two locked-section methods.
+     */
+    private val localImageAdapterPort: LocalImageAdapterPort =
+        object : LocalImageAdapterPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
             }
-            return
+
+            override val loraStore: LocalImageLoraStore
+                get() = this@MainViewModel.localImageLoraStore
+
+            override val textualInversionStore: TextualInversionStore
+                get() = this@MainViewModel.localImageTextualInversionStore
+
+            override fun <T> withLoraLifecycleLock(block: () -> T): T =
+                synchronized(this@MainViewModel.localImageLoraLifecycleLock) { block() }
+
+            override fun <T> withTextualInversionLifecycleLock(block: () -> T): T =
+                synchronized(this@MainViewModel.localImageTextualInversionLifecycleLock) { block() }
         }
-        if (_uiState.value.localImageLoraImporting) return
-        val existingIds = _uiState.value.localImageLoras.mapTo(mutableSetOf(), LocalImageLoraRecord::id)
-        _uiState.update {
-            it.copy(
-                localImageLoraImporting = true,
-                localImageLoraMessage = "正在导入 LoRA…"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { localImageLoraStore.import(uri) }
-                .onSuccess { record ->
-                    val records = localImageLoraStore.load()
-                    _uiState.update {
-                        it.copy(
-                            localImageLoras = records,
-                            localImageLoraImporting = false,
-                            localImageLoraMessage = if (record.id in existingIds) {
-                                "相同 LoRA 已存在：${record.name}"
-                            } else {
-                                "已导入 LoRA：${record.name}"
-                            }
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            localImageLoraImporting = false,
-                            localImageLoraMessage = "LoRA 导入失败：${error.message ?: "文件无效"}"
-                        )
-                    }
-                }
-        }
+
+    /** Delegates to [importLocalImageLoraAdapter]. */
+    fun importLocalImageLora(uriString: String) {
+        importLocalImageLoraAdapter(
+            port = localImageAdapterPort,
+            scope = viewModelScope,
+            uriString = uriString
+        )
+    }
+
+    /** Delegates to [deleteLocalImageLoraAdapter]. */
+    fun deleteLocalImageLora(id: String) {
+        deleteLocalImageLoraAdapter(
+            port = localImageAdapterPort,
+            scope = viewModelScope,
+            id = id
+        )
+    }
+
+    /** Delegates to [importLocalImageTextualInversionArtifact]. Signature copied verbatim. */
+    fun importLocalImageTextualInversion(uriString: String, trigger: String) {
+        importLocalImageTextualInversionArtifact(
+            port = localImageAdapterPort,
+            scope = viewModelScope,
+            uriString = uriString,
+            trigger = trigger
+        )
+    }
+
+    /** Delegates to [deleteLocalImageTextualInversionArtifact]. */
+    fun deleteLocalImageTextualInversion(id: String) {
+        deleteLocalImageTextualInversionArtifact(
+            port = localImageAdapterPort,
+            scope = viewModelScope,
+            id = id
+        )
     }
 
     /** Downloads the publisher-pinned Viggle v0.2.1 adapter into the same
@@ -2933,31 +2952,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun deleteLocalImageLora(id: String) {
-        val adapterId = id.trim()
-        if (adapterId.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            val deletion = synchronized(localImageLoraLifecycleLock) {
-                if (adapterId in _uiState.value.activeLocalImageLoraIds) {
-                    false to "该 LoRA 正被当前图片任务使用，任务结束后才能删除。"
-                } else {
-                    val record = _uiState.value.localImageLoras.firstOrNull { it.id == adapterId }
-                    when {
-                        record == null -> false to "LoRA 已不存在。"
-                        localImageLoraStore.delete(adapterId) -> true to "已删除 LoRA：${record.name}"
-                        else -> false to "LoRA 文件删除失败，索引和文件均已保留。"
-                    }
-                }
-            }
-            val records = localImageLoraStore.load()
-            _uiState.update {
-                it.copy(
-                    localImageLoras = records,
-                    localImageLoraMessage = deletion.second
-                )
-            }
-        }
-    }
 
     fun reportMissingLocalImageLoraSelection() {
         _uiState.update { it.copy(chatImageLoraSelections = null) }
@@ -2969,135 +2963,7 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun importLocalImageTextualInversion(uriString: String, trigger: String) {
-        if (_uiState.value.localImageTextualInversionLoading) {
-            _uiState.update {
-                it.copy(localImageTextualInversionMessage = "Textual Inversion 库仍在加载，请稍后重试。")
-            }
-            return
-        }
-        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
-        val normalizedTrigger = trigger.trim()
-        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
-            _uiState.update {
-                it.copy(localImageTextualInversionMessage = "请选择可读取的 Textual Inversion 文档。")
-            }
-            return
-        }
-        if (!TextualInversionContract.TRIGGER_PATTERN.matches(normalizedTrigger)) {
-            _uiState.update {
-                it.copy(localImageTextualInversionMessage = "Textual Inversion 触发词格式无效。")
-            }
-            return
-        }
-        if (_uiState.value.localImageTextualInversionImporting) return
-        _uiState.update {
-            it.copy(
-                localImageTextualInversionImporting = true,
-                localImageTextualInversionMessage = "正在导入 Textual Inversion…"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val imported = localImageTextualInversionStore.importFromContentUri(
-                    uri = uri,
-                    trigger = normalizedTrigger
-                )
-                val records = localImageTextualInversionStore.load()
-                _uiState.update {
-                    it.copy(
-                        localImageTextualInversions = records,
-                        localImageTextualInversionImporting = false,
-                        localImageTextualInversionMessage = if (imported.duplicate) {
-                            "相同 Textual Inversion 已存在：${imported.artifact.name}"
-                        } else {
-                            "已导入 Textual Inversion：${imported.artifact.name}"
-                        }
-                    )
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                _uiState.update {
-                    it.copy(
-                        localImageTextualInversionImporting = false,
-                        localImageTextualInversionMessage =
-                            "Textual Inversion 导入失败：${error.message ?: "文件无效"}"
-                    )
-                }
-            }
-        }
-    }
 
-    fun deleteLocalImageTextualInversion(id: String) {
-        if (_uiState.value.localImageTextualInversionLoading) {
-            _uiState.update {
-                it.copy(localImageTextualInversionMessage = "Textual Inversion 库仍在加载，请稍后重试。")
-            }
-            return
-        }
-        val artifactId = runCatching { UUID.fromString(id.trim()).toString() }.getOrNull() ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            val reserved = synchronized(localImageTextualInversionLifecycleLock) {
-                val state = _uiState.value
-                when {
-                    artifactId in state.activeLocalImageTextualInversionIds -> false
-                    artifactId in state.deletingLocalImageTextualInversionIds -> false
-                    else -> {
-                        _uiState.update {
-                            it.copy(
-                                deletingLocalImageTextualInversionIds =
-                                    it.deletingLocalImageTextualInversionIds + artifactId
-                            )
-                        }
-                        true
-                    }
-                }
-            }
-            if (!reserved) {
-                _uiState.update {
-                    it.copy(
-                        localImageTextualInversionMessage =
-                            "该 Textual Inversion 正被任务使用或删除中。"
-                    )
-                }
-                return@launch
-            }
-            try {
-                val record = _uiState.value.localImageTextualInversions
-                    .firstOrNull { it.id == artifactId }
-                val deleted = localImageTextualInversionStore.clear(artifactId)
-                val records = localImageTextualInversionStore.load()
-                _uiState.update {
-                    it.copy(
-                        localImageTextualInversions = records,
-                        localImageTextualInversionMessage = when {
-                            record == null || !deleted -> "Textual Inversion 已不存在。"
-                            else -> "已删除 Textual Inversion：${record.name}"
-                        }
-                    )
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                _uiState.update {
-                    it.copy(
-                        localImageTextualInversionMessage =
-                            "Textual Inversion 删除失败：${error.message ?: "文件已保留"}"
-                    )
-                }
-            } finally {
-                synchronized(localImageTextualInversionLifecycleLock) {
-                    _uiState.update {
-                        it.copy(
-                            deletingLocalImageTextualInversionIds =
-                                it.deletingLocalImageTextualInversionIds - artifactId
-                        )
-                    }
-                }
-            }
-        }
-    }
 
     fun reportMissingLocalImageTextualInversionSelection() {
         _uiState.update {
