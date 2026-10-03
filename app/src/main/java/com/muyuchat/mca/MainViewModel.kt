@@ -343,7 +343,9 @@ private data class LocalApiApplyResult(
 private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
 private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
-private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
+// `internal`, not `private`: the vision preparation that enforces this cap moved to
+// VisionAttachmentSupport.kt, and one shared cap is safer than two copies drifting apart.
+internal const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
 // `internal`, not `private`: the send-boundary deduplication that reads this budget moved to
 // VisionAttachmentSupport.kt, and one shared bound is safer than two copies drifting apart.
 internal const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
@@ -17106,171 +17108,60 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun mimeTypeForUri(uriString: String): String {
-        val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return "image/jpeg"
-        return runCatching { getApplication<Application>().contentResolver.getType(uri) }
-            .getOrNull()
-            ?.takeIf { it.startsWith("image/", ignoreCase = true) }
-            ?: when (uriString.substringAfterLast('.', "").lowercase()) {
-                "png" -> "image/png"
-                "webp" -> "image/webp"
-                "gif" -> "image/gif"
-                else -> "image/jpeg"
-            }
-    }
+    /**
+     * The ViewModel side of [VisionAttachmentPort]. This interface is the Android adapter seam for
+     * vision preparation: the `ContentResolver`, the cache directory and the engine's native stats are
+     * the four things the moved functions genuinely need from their owner.
+     */
+    private val visionAttachmentPort: VisionAttachmentPort =
+        object : VisionAttachmentPort {
+            override val context: Context
+                get() = this@MainViewModel.getApplication()
 
-    private suspend fun List<ChatMessage>.withInlineImageDataForCloud(): List<ChatMessage> =
-        withContext(Dispatchers.IO) {
-            map { message ->
-                if (message.imageAttachments.isEmpty()) {
-                    message
-                } else {
-                    message.copy(
-                        imageAttachments = message.imageAttachments
-                            .deduplicateVisionAttachments()
-                            .take(MAX_CHAT_IMAGES_PER_MESSAGE)
-                            .map { attachment ->
-                                if (attachment.hasInlineData) attachment else attachment.withCompressedInlineData()
-                            }
-                            .deduplicateVisionAttachments()
-                    )
-                }
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
             }
+
+            override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
+
+            override val activeRuntimeIdentity: ModelRuntimeIdentity?
+                get() = this@MainViewModel.activeRuntimeIdentity
+
+            override val activeVisionProjectorStamp: LoadedVisionProjectorStamp?
+                get() = this@MainViewModel.activeVisionProjectorStamp
         }
 
+    /** Delegates to [visionMimeTypeForUri]; the Context read stays on the owner side. */
+    private fun mimeTypeForUri(uriString: String): String =
+        visionMimeTypeForUri(visionAttachmentPort, uriString)
+
+    /** Delegates to [preparedForCloudVision]. */
+    private suspend fun List<ChatMessage>.withInlineImageDataForCloud(): List<ChatMessage> =
+        preparedForCloudVision(visionAttachmentPort)
+    /** Delegates to [preparedForLocalVision]. */
     private suspend fun List<ChatMessage>.withLocalImageFilesForVision(
         createdFiles: MutableList<File>
-    ): List<ChatMessage> = withContext(Dispatchers.IO) {
-        try {
-            map { message ->
-                if (message.imageAttachments.isEmpty()) {
-                    message
-                } else {
-                    message.copy(
-                        imageAttachments = message.imageAttachments
-                            .deduplicateVisionAttachments()
-                            .take(MAX_CHAT_IMAGES_PER_MESSAGE)
-                            .map { it.withCompressedFileForLocalVision(createdFiles) }
-                            .deduplicateVisionAttachments()
-                    )
-                }
-            }
-        } catch (error: Throwable) {
-            createdFiles.forEach { file -> runCatching { file.delete() } }
-            createdFiles.clear()
-            throw error
-        }
-    }
+    ): List<ChatMessage> = preparedForLocalVision(visionAttachmentPort, createdFiles)
 
+    /** Delegates to [compressedForLocalVision]. */
     private fun ChatImageAttachment.withCompressedFileForLocalVision(
         createdFiles: MutableList<File>
-    ): ChatImageAttachment {
-        val bitmap = decodeBitmapForLocalVision()
-        val prepared = bitmap.scaledToMaxEdge(VisionDecodeBudget.MAX_EDGE)
-        val width = prepared.width
-        val height = prepared.height
-        val visionDir = File(getApplication<Application>().cacheDir, "vision_inputs").apply { mkdirs() }
-        val outputFile = File(visionDir, "vision-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}.jpg")
-        try {
-            outputFile.outputStream().use { output ->
-                check(prepared.compress(Bitmap.CompressFormat.JPEG, 88, output)) {
-                    "无法压缩图片：${name.ifBlank { "image" }}"
-                }
-            }
-        } catch (error: Throwable) {
-            outputFile.delete()
-            throw error
-        } finally {
-            if (prepared !== bitmap && !prepared.isRecycled) prepared.recycle()
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        createdFiles += outputFile
-        return copy(
-            uriString = Uri.fromFile(outputFile).toString(),
-            mimeType = "image/jpeg",
-            dataBase64 = "",
-            width = width,
-            height = height,
-            sizeBytes = outputFile.length()
-        )
-    }
+    ): ChatImageAttachment = compressedForLocalVision(visionAttachmentPort, createdFiles)
 
-    private fun ChatImageAttachment.decodeBitmapForLocalVision(): Bitmap {
-        if (hasInlineData) {
-            val encoded = plainBase64()
-            require(inlineVisionImageWithinLimit(encoded)) {
-                "图片超过本地识图的 20 MB 单张上限，请先压缩图片后重试。"
-            }
-            val bytes = runCatching {
-                Base64.decode(encoded, Base64.DEFAULT)
-            }.getOrElse {
-                error("无法解析内联图片：${name.ifBlank { "api-image" }}")
-            }
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                "内联图片没有可识别的尺寸：${name.ifBlank { "api-image" }}"
-            }
-            val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
-            return BitmapFactory.decodeByteArray(
-                bytes,
-                0,
-                bytes.size,
-                visionBitmapOptions(sampleSize)
-            ) ?: error("无法读取内联图片：${name.ifBlank { "api-image" }}")
-        }
-        val uri = Uri.parse(uriString)
-        val resolver = getApplication<Application>().contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-            "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
-        }
-        val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
-        return resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
-        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
-    }
+    /** Delegates to [decodeVisionBitmap]. */
+    private fun ChatImageAttachment.decodeBitmapForLocalVision(): Bitmap =
+        decodeVisionBitmap(visionAttachmentPort)
 
     /** Delegates to [deduplicatedVisionAttachmentsForSend]; see there for the contract. */
     private fun List<ChatImageAttachment>.deduplicateVisionAttachmentsForSend(
         context: Context
     ): List<ChatImageAttachment> = deduplicatedVisionAttachmentsForSend(context)
 
-    private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment {
-        val uri = Uri.parse(uriString)
-        val resolver = getApplication<Application>().contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-            "图片没有可识别的尺寸：${name.ifBlank { uriString }}"
-        }
-        val sampleSize = VisionDecodeBudget.sampleSize(bounds.outWidth, bounds.outHeight, VisionDecodeBudget.MAX_EDGE)
-        val bitmap = resolver.openInputStream(uri)?.use { input ->
-            BitmapFactory.decodeStream(input, null, visionBitmapOptions(sampleSize))
-        } ?: error("无法读取图片：${name.ifBlank { uriString }}")
-        val prepared = bitmap.scaledToMaxEdge(VisionDecodeBudget.MAX_EDGE)
-        val width = prepared.width
-        val height = prepared.height
-        val bytes = try {
-            ByteArrayOutputStream().use { output ->
-                check(prepared.compress(Bitmap.CompressFormat.JPEG, 86, output)) {
-                    "无法压缩图片：${name.ifBlank { "image" }}"
-                }
-                output.toByteArray()
-            }
-        } finally {
-            if (prepared !== bitmap && !prepared.isRecycled) prepared.recycle()
-            if (!bitmap.isRecycled) bitmap.recycle()
-        }
-        return copy(
-            mimeType = "image/jpeg",
-            dataBase64 = Base64.encodeToString(bytes, Base64.NO_WRAP),
-            width = width,
-            height = height,
-            sizeBytes = bytes.size.toLong()
-        )
-    }
+    /** Delegates to [compressedInlineForCloud]. */
+    private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment =
+        compressedInlineForCloud(visionAttachmentPort)
 
     /** Delegates to [scaledDownToMaxEdge]. */
     private fun Bitmap.scaledToMaxEdge(maxEdge: Int): Bitmap = scaledDownToMaxEdge(maxEdge)
@@ -17278,34 +17169,9 @@ class MainViewModel @JvmOverloads constructor(
     /** Delegates to [visionDecodeOptions]. */
     private fun visionBitmapOptions(sampleSize: Int): BitmapFactory.Options =
         visionDecodeOptions(sampleSize)
-    private suspend fun localVisionRunnerAvailable(): Boolean {
-        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrNull()
-            ?: return false
-        if (!nativeStats.optBoolean("loaded", false)) return false
-        val nativeVisionReady = nativeStats.optBoolean("visionReady", false)
-        val model = _uiState.value.models.firstOrNull { it.id == _uiState.value.loadedModelId }
-        if (model == null) return false
-        val imageInputReady = when (model.runtime) {
-            ChatModelRuntime.LITERT_LM -> liteRtVisionInputAvailable(nativeStats.toString())
-            else -> model.acceptsImageInput(nativeVisionReady)
-        }
-        if (!imageInputReady) return false
-        if (model.runtime == ChatModelRuntime.LLAMA_CPP) {
-            val expected = model.visionProjectorPath?.let(::File)?.let {
-                runCatching { it.canonicalPath }.getOrDefault(it.absolutePath)
-            }
-            val actual = nativeStats.optString("mmprojPath").trim()
-                .takeIf { it.isNotBlank() }
-                ?.let(::File)
-                ?.let { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
-            if (expected != null && actual != expected) return false
-            val loadedFingerprint = activeRuntimeIdentity?.projectorFingerprint
-                ?.takeIf(String::isNotBlank) ?: return false
-            val stamp = activeVisionProjectorStamp ?: return false
-            if (expected == null || !stamp.matches(File(expected), loadedFingerprint)) return false
-        }
-        return true
-    }
+    /** Delegates to [isLocalVisionRunnerAvailable]. */
+    private suspend fun localVisionRunnerAvailable(): Boolean =
+        isLocalVisionRunnerAvailable(visionAttachmentPort)
 
     /**
      * Delegates to [localVisionUnavailableReason]. The engine read stays here: the function itself
