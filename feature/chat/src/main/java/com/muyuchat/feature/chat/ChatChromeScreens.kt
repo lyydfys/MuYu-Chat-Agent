@@ -7022,6 +7022,18 @@ private fun buildInlineMarkdown(
                     index++
                 }
             }
+            // LaTeX 数学：`$...$` 与 `$$...$$`。必须在反引号分支之后，代码 span 才能优先。
+            // 识别与转换都在 MarkdownMathText.kt 的可测纯函数里；这里只做分派。
+            value.startsWith("$", index) -> {
+                val span = findMathSpan(value, index)
+                if (span != null) {
+                    appendPlain(renderLatexMath(span.tex))
+                    index = span.endExclusive
+                } else {
+                    appendPlain(value[index].toString())
+                    index++
+                }
+            }
             value.startsWith("**", index) -> {
                 val end = value.indexOf("**", startIndex = index + 2)
                 if (end > index + 2) {
@@ -7048,6 +7060,7 @@ private fun buildInlineMarkdown(
             }
             else -> {
                 val next = listOf(
+                    value.indexOf('$', startIndex = index).takeIf { it >= 0 } ?: value.length,
                     value.indexOf('`', startIndex = index).takeIf { it >= 0 } ?: value.length,
                     value.indexOf("**", startIndex = index).takeIf { it >= 0 } ?: value.length,
                     value.indexOf("__", startIndex = index).takeIf { it >= 0 } ?: value.length,
