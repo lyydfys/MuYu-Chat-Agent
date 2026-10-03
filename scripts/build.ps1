@@ -308,11 +308,29 @@ try {
         $quotedArgs = ($gradleArgs | ForEach-Object {
             if ($_ -match '\s') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
         }) -join " "
-        cmd.exe /d /s /c "call `"$vcvars`" >nul && `"$gradleExecutable`" $quotedArgs"
+        # Gradle writes progress/warnings to stderr (and `call vcvars64.bat >nul` can too).
+        # With $ErrorActionPreference = "Stop", Windows PowerShell 5.1 turns any stderr write
+        # from cmd.exe into a terminating NativeCommandError, so a fully successful Gradle run
+        # was being reported as a build failure with an empty *failure* field and no
+        # "What went wrong" block. Only the process exit code may decide success here.
+        $gradleNativePreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            cmd.exe /d /s /c "call `"$vcvars`" >nul && `"$gradleExecutable`" $quotedArgs"
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $gradleNativePreference
+        }
     } else {
-        & $gradleExecutable @gradleArgs
+        $gradleNativePreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $gradleExecutable @gradleArgs
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $gradleNativePreference
+        }
     }
-    $exitCode = $LASTEXITCODE
 } finally {
     Pop-Location
 }
