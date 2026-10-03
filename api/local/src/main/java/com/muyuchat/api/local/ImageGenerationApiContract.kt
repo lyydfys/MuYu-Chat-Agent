@@ -8,6 +8,8 @@ import java.security.MessageDigest
 import java.util.Base64
 import com.muyuchat.core.engine.compareUtf8Unsigned
 import com.muyuchat.core.engine.isNativeChineseHanCodePoint
+import com.muyuchat.core.engine.SAFE_ASCII_PROMPT_PUNCTUATION
+import com.muyuchat.core.engine.isSafeAsciiDiffusionPromptCodePoint
 
 fun imagePromptExecutionSha256(prompt: String, negativePrompt: String?): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -3895,12 +3897,10 @@ private fun String.containsHanScript(): Boolean = codePoints().anyMatch { codePo
     Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN
 }
 
-private const val SAFE_ASCII_DIFFUSION_PROMPT_PUNCTUATION = "_,.;:!?\"'+-*/\\()[]{}<>|=@#%&"
-
 private fun String.isSafeAsciiDiffusionPrompt(): Boolean = all { char ->
     char == ' ' || char == '\n' || char == '\r' ||
         char in 'A'..'Z' || char in 'a'..'z' || char in '0'..'9' ||
-        char in SAFE_ASCII_DIFFUSION_PROMPT_PUNCTUATION
+        char in SAFE_ASCII_PROMPT_PUNCTUATION
 }
 
 /** Mirrors the Kotlin/native direct-Chinese grammar before loopback evidence is accepted. */
@@ -3910,14 +3910,6 @@ private fun String.isSupportedNativeChineseHanDiffusionPrompt(): Boolean = codeP
         isSafeAsciiDiffusionPromptCodePoint(codePoint) ||
         isNativeChineseHanCodePoint(codePoint)
 }
-
-private fun isSafeAsciiDiffusionPromptCodePoint(codePoint: Int): Boolean =
-    codePoint == ' '.code || codePoint == '\n'.code || codePoint == '\r'.code ||
-        codePoint in 'A'.code..'Z'.code ||
-        codePoint in 'a'.code..'z'.code ||
-        codePoint in '0'.code..'9'.code ||
-        (codePoint <= Char.MAX_VALUE.code &&
-            codePoint.toChar() in SAFE_ASCII_DIFFUSION_PROMPT_PUNCTUATION)
 
 private val SUPPORTED_NATIVE_CHINESE_HAN_PROMPT_PUNCTUATION = setOf(
     0xFF0C, 0xFF1B, 0x3002, 0xFF01, 0xFF1F, 0xFF08, 0xFF09,

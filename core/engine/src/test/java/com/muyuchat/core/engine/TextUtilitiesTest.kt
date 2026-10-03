@@ -142,4 +142,54 @@ class TextUtilitiesTest {
         assertTrue(isNativeChineseHanCodePoint(0x2EE5D))
         assertFalse(isNativeChineseHanCodePoint(0x2EE5E))
     }
+
+    // ── isSafeAsciiDiffusionPromptCodePoint / SAFE_ASCII_PROMPT_PUNCTUATION ─────────────
+    //
+    // These were two differently named constants holding the same 28 characters, feeding two
+    // byte-identical predicate bodies. They agreed when consolidated — which is the point: the
+    // sibling Han predicate in the same two files did not, so this pair is pinned before it drifts.
+
+    @Test
+    fun `whitespace, ascii letters and digits are safe prompt code points`() {
+        listOf(' ', '\n', '\r').forEach { assertTrue("U+%04X".format(it.code), isSafeAsciiDiffusionPromptCodePoint(it.code)) }
+        ('A'..'Z').forEach { assertTrue("$it", isSafeAsciiDiffusionPromptCodePoint(it.code)) }
+        ('a'..'z').forEach { assertTrue("$it", isSafeAsciiDiffusionPromptCodePoint(it.code)) }
+        ('0'..'9').forEach { assertTrue("$it", isSafeAsciiDiffusionPromptCodePoint(it.code)) }
+    }
+
+    @Test
+    fun `every declared punctuation character is safe`() {
+        assertEquals("the shared set is the 28 characters the two old constants held", 28, SAFE_ASCII_PROMPT_PUNCTUATION.toSet().size)
+        SAFE_ASCII_PROMPT_PUNCTUATION.forEach {
+            assertTrue("'$it'", isSafeAsciiDiffusionPromptCodePoint(it.code))
+        }
+    }
+
+    @Test
+    fun `the punctuation set carries no whitespace, letters or digits`() {
+        // If it did, the predicate would accept input the ASCII branches above are meant to bound,
+        // and the set would silently widen the accepted alphabet.
+        SAFE_ASCII_PROMPT_PUNCTUATION.forEach {
+            assertFalse("'$it' must not be whitespace", it.isWhitespace())
+            assertFalse("'$it' must not be a letter or digit", it.isLetterOrDigit())
+        }
+    }
+
+    @Test
+    fun `non ascii and control code points are not safe prompt text`() {
+        listOf(0x00, 0x01, 0x07, 0x1B, 0x7F to "DEL", 0xE9 to "é", 0x4E2D to "中", 0x1F600 to "an emoji").forEach { entry ->
+            val codePoint = if (entry is Pair<*, *>) entry.first as Int else entry as Int
+            assertFalse("U+%04X".format(codePoint), isSafeAsciiDiffusionPromptCodePoint(codePoint))
+        }
+    }
+
+    @Test
+    fun `a code point above the char range is rejected instead of being truncated`() {
+        // The predicate guards with `codePoint <= Char.MAX_VALUE.code` before calling toChar().
+        // Without that guard a value such as 0x1F600 or 0x10041 would be truncated to a BMP char
+        // that may well be punctuation, letting an out-of-range code point through.
+        assertFalse(isSafeAsciiDiffusionPromptCodePoint(Char.MAX_VALUE.code + 1))
+        assertFalse(isSafeAsciiDiffusionPromptCodePoint(0x1F600))
+        assertFalse(isSafeAsciiDiffusionPromptCodePoint(0x10041))
+    }
 }

@@ -74,6 +74,35 @@ public fun isNativeChineseHanCodePoint(codePoint: Int): Boolean =
         codePoint in 0x30000..0x3134A ||
         codePoint in 0x31350..0x323AF
 
+/**
+ * Punctuation an image prompt may carry outside the Han ranges.
+ *
+ * The same 28 characters existed as two differently named constants,
+ * `SAFE_ASCII_DIFFUSION_PROMPT_PUNCTUATION` in api:local and `SAFE_ASCII_PROMPT_PUNCTUATION` in
+ * app. Their values compared equal at the time of consolidation, which is exactly why they are
+ * merged rather than left alone: a pair that agrees today can drift tomorrow, and the sibling
+ * `isNativeChineseHanCodePoint` in the same two files is the worked example — its copies had
+ * already drifted by one Unicode block before anyone noticed.
+ */
+public const val SAFE_ASCII_PROMPT_PUNCTUATION: String = "_,.;:!?\"'+-*/\\()[]{}<>|=@#%&"
+
+/**
+ * True when [codePoint] is safe ASCII prompt text: space, a line break, an ASCII letter or digit,
+ * or one of [SAFE_ASCII_PROMPT_PUNCTUATION].
+ *
+ * This is the code-point form of the predicate api:local also applies character by character in
+ * `String.isSafeAsciiDiffusionPrompt()`. Both sides and both forms have to agree: a character the
+ * editor accepts must not be rejected when the prompt reaches the API contract, and a character the
+ * contract rejects must not be accepted on the way in.
+ */
+public fun isSafeAsciiDiffusionPromptCodePoint(codePoint: Int): Boolean =
+    codePoint == ' '.code || codePoint == '\n'.code || codePoint == '\r'.code ||
+        codePoint in 'A'.code..'Z'.code ||
+        codePoint in 'a'.code..'z'.code ||
+        codePoint in '0'.code..'9'.code ||
+        (codePoint <= Char.MAX_VALUE.code &&
+            codePoint.toChar() in SAFE_ASCII_PROMPT_PUNCTUATION)
+
 /** Byte-wise unsigned comparison of two strings' UTF-8 encodings; see the file comment. */
 public fun compareUtf8Unsigned(left: String, right: String): Int {
     val leftBytes = left.toByteArray(Charsets.UTF_8)

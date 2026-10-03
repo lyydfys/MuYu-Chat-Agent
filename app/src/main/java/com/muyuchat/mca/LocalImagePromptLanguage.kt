@@ -6,6 +6,7 @@ import java.security.MessageDigest
 import java.util.Locale
 import org.json.JSONObject
 import com.muyuchat.core.engine.isNativeChineseHanCodePoint
+import com.muyuchat.core.engine.isSafeAsciiDiffusionPromptCodePoint
 
 internal const val CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 4
 internal const val CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 5
@@ -3196,7 +3197,6 @@ private val BARE_PROMPT_DIRECTIVE = Regex(
     "(?<![A-Za-z0-9_<>])(?:embedding|lora):[A-Za-z0-9_+./-]{1,120}" +
         "(?::[+-]?\\d+(?:\\.\\d+)?)?(?![A-Za-z0-9_])"
 )
-private const val SAFE_ASCII_PROMPT_PUNCTUATION = "_,.;:!?\"'+-*/\\()[]{}<>|=@#%&"
 private val CONTROLLED_POSITION_PUNCTUATION =
     setOf('|', '=', '@', '#', '%', '&', '*', '/', '\\', '"', '+', '_', '-')
 private val SUPPORTED_CHINESE_DIFFUSION_PROMPT_PUNCTUATION = setOf(
@@ -3218,14 +3218,6 @@ private val SUPPORTED_CHINESE_DIFFUSION_PROMPT_PUNCTUATION = setOf(
 
 internal fun String.isSafeAsciiDiffusionPrompt(): Boolean =
     codePoints().allMatch { codePoint -> isSafeAsciiDiffusionPromptCodePoint(codePoint) }
-
-private fun isSafeAsciiDiffusionPromptCodePoint(codePoint: Int): Boolean =
-    codePoint == ' '.code || codePoint == '\n'.code || codePoint == '\r'.code ||
-        codePoint in 'A'.code..'Z'.code ||
-        codePoint in 'a'.code..'z'.code ||
-        codePoint in '0'.code..'9'.code ||
-        (codePoint <= Char.MAX_VALUE.code &&
-            codePoint.toChar() in SAFE_ASCII_PROMPT_PUNCTUATION)
 
 private val CONTROLLED_ENGLISH_GRAMMAR_TOKENS = setOf(
     "a", "an", "the"
