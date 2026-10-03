@@ -6767,230 +6767,123 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Read a target model's persisted generation profile for the model selector UI. */
-    fun generationParamsForChatModel(modelId: String): GenerationParams =
-        loadModelGenerationParams(
-            backend = ChatBackend.LOCAL,
-            modelId = modelId,
-            defaults = _uiState.value.params
-        )
+    /**
+     * The ViewModel side of [CloudModelConfigPort].
+     */
+    private val cloudModelConfigPort: CloudModelConfigPort =
+        object : CloudModelConfigPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
-    fun updateCloudSupportsTools(value: Boolean) {
-        _uiState.update { state ->
-            state.copy(
-                cloudApiConfig = state.cloudApiConfig.copy(
-                    supportsTools = value && state.cloudApiConfig.apiFormat == CloudApiFormat.OPENAI_RESPONSES
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val cloudApiStore: CloudApiStore
+                get() = this@MainViewModel.cloudApiStore
+
+            override val cloudChatProvider: OpenAiCompatibleChatProvider
+                get() = this@MainViewModel.cloudChatProvider
+
+            override val localImageModelStore: LocalImageModelStore
+                get() = this@MainViewModel.localImageModelStore
+
+            override fun loadModelGenerationParams(
+                backend: ChatBackend,
+                modelId: String?,
+                defaults: GenerationParams
+            ): GenerationParams =
+                this@MainViewModel.loadModelGenerationParams(backend, modelId, defaults)
+
+            override fun persistChatSessions(
+                sessions: List<ChatSessionRecord>?,
+                knowledgeBinding: Pair<String, Set<String>>?
+            ) {
+                this@MainViewModel.persistChatSessions(
+                    sessions = sessions,
+                    knowledgeBinding = knowledgeBinding
                 )
-            )
+            }
+
+            override fun persistGenerationParams(params: GenerationParams) {
+                this@MainViewModel.persistGenerationParams(params)
+            }
+
+            override fun showStatus(message: String?) {
+                this@MainViewModel.showStatus(message)
+            }
+
+            override fun busy(message: String) {
+                this@MainViewModel.busy(message)
+            }
+
+            override fun fail(message: String) {
+                this@MainViewModel.fail(message)
+            }
         }
+
+
+/** Delegates to [cloudChatModelGenerationParams]. Signature kept verbatim. */
+    fun generationParamsForChatModel(modelId: String): GenerationParams = cloudChatModelGenerationParams(port = cloudModelConfigPort, modelId = modelId)
+
+/** Delegates to [applyCloudSupportsTools]. Signature kept verbatim. */
+    fun updateCloudSupportsTools(value: Boolean) {
+        applyCloudSupportsTools(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [applyCloudImageModel]. Signature kept verbatim. */
     fun updateCloudImageModel(value: String) {
-        _uiState.update { state ->
-            state.copy(cloudApiConfig = state.cloudApiConfig.copy(imageModel = value))
-        }
+        applyCloudImageModel(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [applyCloudResponsesReasoning]. Signature kept verbatim. */
     fun updateCloudResponsesReasoning(value: Boolean) {
-        _uiState.update { it.copy(cloudApiConfig = it.cloudApiConfig.copy(responsesReasoningEnabled = value)) }
+        applyCloudResponsesReasoning(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [applyCloudImageSize]. Signature kept verbatim. */
     fun updateCloudImageSize(value: String) {
-        _uiState.update { state ->
-            state.copy(cloudApiConfig = state.cloudApiConfig.copy(imageSize = value))
-        }
+        applyCloudImageSize(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [applyCloudImageEndpointPath]. Signature kept verbatim. */
     fun updateCloudImageEndpointPath(value: String) {
-        _uiState.update { state ->
-            state.copy(cloudApiConfig = state.cloudApiConfig.copy(imageEndpointPath = value))
-        }
+        applyCloudImageEndpointPath(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [applyCloudDisplayName]. Signature kept verbatim. */
     fun updateCloudDisplayName(value: String) {
-        _uiState.update { state ->
-            state.copy(cloudApiConfig = state.cloudApiConfig.copy(displayName = value))
-        }
+        applyCloudDisplayName(port = cloudModelConfigPort, value = value)
     }
 
+/** Delegates to [persistCloudApiConfig]. Signature kept verbatim. */
     fun saveCloudApiConfig() {
-        saveCloudChatModel()
+        persistCloudApiConfig(port = cloudModelConfigPort)
     }
 
+/** Delegates to [saveCloudChatModelConfig]. Signature kept verbatim. */
     fun saveCloudChatModel() {
-        val config = _uiState.value.cloudApiConfig.normalized()
-        if (!config.configured) {
-            showStatus("请先填写对话推理模型的 Base URL、模型名和必要的 API Key。")
-            return
-        }
-        val editing = _uiState.value.cloudModels.firstOrNull {
-            it.id == _uiState.value.editingCloudModelId && it.kind == CloudModelKind.CHAT
-        }
-        val record = editing?.copy(
-            apiFormat = config.apiFormat,
-            providerName = config.providerName,
-            displayName = config.safeDisplayName(),
-            baseUrl = config.baseUrl,
-            apiKey = config.apiKey,
-            modelName = config.chatModel,
-            supportsVision = config.supportsVision,
-            supportsTools = config.supportsTools,
-            responsesReasoningEnabled = config.responsesReasoningEnabled,
-            imageSize = config.imageSize,
-            updatedAt = System.currentTimeMillis()
-        ) ?: _uiState.value.cloudModels.matchingCloudModel(
-            kind = CloudModelKind.CHAT,
-            format = config.apiFormat,
-            baseUrl = config.baseUrl,
-            modelName = config.chatModel
-        )?.copy(
-            providerName = config.providerName,
-            displayName = config.safeDisplayName(),
-            apiKey = config.apiKey,
-            supportsVision = config.supportsVision,
-            supportsTools = config.supportsTools,
-            responsesReasoningEnabled = config.responsesReasoningEnabled,
-            updatedAt = System.currentTimeMillis()
-        ) ?: CloudModelRecord(
-            kind = CloudModelKind.CHAT,
-            apiFormat = config.apiFormat,
-            providerName = config.providerName,
-            displayName = config.safeDisplayName(),
-            baseUrl = config.baseUrl,
-            apiKey = config.apiKey,
-            modelName = config.chatModel,
-            supportsVision = config.supportsVision,
-            supportsTools = config.supportsTools,
-            responsesReasoningEnabled = config.responsesReasoningEnabled,
-            imageSize = config.imageSize
-        )
-        val models = _uiState.value.cloudModels.upsertCloudModel(record)
-        val selectedChatId = record.id
-        cloudApiStore.save(config)
-        cloudApiStore.saveModels(models)
-        cloudApiStore.saveSelectedCloudChatModelId(selectedChatId)
-        cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
-        val modelParams = loadModelGenerationParams(
-            backend = ChatBackend.CLOUD,
-            modelId = selectedChatId,
-            defaults = _uiState.value.params
-        )
-        persistGenerationParams(modelParams)
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        _uiState.update { state ->
-            sessionsToPersist = state.chatSessions.bindSession(
-                sessionId = state.activeChatSessionId,
-                assistantId = state.selectedAssistantId,
-                modelMode = ChatBackend.CLOUD.bindingValue(),
-                modelId = selectedChatId
-            )
-            state.copy(
-                cloudApiConfig = config,
-                cloudModels = models,
-                selectedCloudChatModelId = selectedChatId,
-                selectedChatBackend = ChatBackend.CLOUD,
-                params = modelParams,
-                editingCloudModelId = null,
-                chatSessions = sessionsToPersist,
-                statusMessage = "已保存并加载云端推理模型：${record.displayName}"
-            )
-        }
-        persistChatSessions(sessionsToPersist)
+        saveCloudChatModelConfig(port = cloudModelConfigPort)
     }
 
+/** Delegates to [saveCloudImageModelConfig]. Signature kept verbatim. */
     fun saveCloudImageModel() {
-        val config = _uiState.value.cloudApiConfig.normalized()
-        if (!config.imageConfigured) {
-            showStatus("请先选择支持生图的协议，并填写生图模型、Base URL 和必要的 API Key。")
-            return
-        }
-        val displayName = config.displayName.trim().ifBlank { "${config.providerName} · ${config.imageModel}" }
-        val editing = _uiState.value.cloudModels.firstOrNull {
-            it.id == _uiState.value.editingCloudModelId && it.kind == CloudModelKind.IMAGE
-        }
-        val record = editing?.copy(
-            apiFormat = config.apiFormat,
-            imageApiFormat = config.imageApiFormat,
-            imageEndpointPath = config.imageEndpointPathForRequest(),
-            providerName = config.providerName,
-            displayName = displayName,
-            baseUrl = config.baseUrl,
-            apiKey = config.apiKey,
-            modelName = config.imageModel,
-            imageSize = config.imageSize,
-            updatedAt = System.currentTimeMillis()
-        ) ?: _uiState.value.cloudModels.matchingCloudModel(
-            kind = CloudModelKind.IMAGE,
-            format = config.apiFormat,
-            baseUrl = config.baseUrl,
-            modelName = config.imageModel,
-            imageFormat = config.imageApiFormat,
-            imageEndpointPath = config.imageEndpointPathForRequest()
-        )?.copy(
-            imageApiFormat = config.imageApiFormat,
-            imageEndpointPath = config.imageEndpointPathForRequest(),
-            providerName = config.providerName,
-            displayName = displayName,
-            apiKey = config.apiKey,
-            imageSize = config.imageSize,
-            updatedAt = System.currentTimeMillis()
-        ) ?: CloudModelRecord(
-            kind = CloudModelKind.IMAGE,
-            apiFormat = config.apiFormat,
-            imageApiFormat = config.imageApiFormat,
-            imageEndpointPath = config.imageEndpointPathForRequest(),
-            providerName = config.providerName,
-            displayName = displayName,
-            baseUrl = config.baseUrl,
-            apiKey = config.apiKey,
-            modelName = config.imageModel,
-            imageSize = config.imageSize
-        )
-        val models = _uiState.value.cloudModels.upsertCloudModel(record)
-        cloudApiStore.save(config)
-        cloudApiStore.saveModels(models)
-        val selectedImageId = record.id
-        cloudApiStore.saveSelectedCloudImageModelId(selectedImageId)
-        localImageModelStore.saveSelectedBackend(ImageBackend.CLOUD)
-        _uiState.update { state ->
-            state.copy(
-                cloudApiConfig = config,
-                cloudModels = models,
-                selectedCloudImageModelId = selectedImageId,
-                selectedImageBackend = ImageBackend.CLOUD,
-                editingCloudModelId = null,
-                statusMessage = "已保存并设为当前图像生成模型：${record.modelName}"
-            )
-        }
+        saveCloudImageModelConfig(port = cloudModelConfigPort)
     }
 
+/** Delegates to [runCloudApiConfigTest]. Signature kept verbatim. */
     fun testCloudApiConfig() {
-        val config = _uiState.value.cloudApiConfig.normalized()
-        if (!config.configured) {
-            showStatus("请先启用云端 API，并填写 Base URL、API Key 和对话推理模型。")
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在快速测试云端 API...")
-            cloudChatProvider.quickTest(config)
-                .onSuccess {
-                    val credential = cloudApiStore.save(config)
-                    _uiState.update {
-                        it.copy(
-                            busy = false,
-                            cloudApiConfig = config,
-                            // The request succeeded either way, but the API key is only
-                            // usable later if it is durably stored. Never claim a completed
-                            // save when encryption was unavailable or unverifiable.
-                            statusMessage = credentialFailureMessage(credential)
-                                ?: "云端 API 快速测试成功：${config.safeDisplayName()}"
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    fail("云端 API 快速测试失败：${error.message ?: "请求失败"}")
-                }
-        }
+        runCloudApiConfigTest(port = cloudModelConfigPort, scope = viewModelScope)
     }
+
+
+
+
+
+
+
+
+
+
 
     fun selectCloudImageModel(modelId: String) {
         if (rejectImageModelSwitchWhileGenerationIsActive()) return
@@ -14675,41 +14568,6 @@ class MainViewModel @JvmOverloads constructor(
         return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
     }
 
-    private fun List<ChatSessionRecord>.bindSession(
-        sessionId: String?,
-        assistantId: String? = null,
-        assistantSnapshot: AssistantConversationSnapshot? = null,
-        replaceAssistantSnapshot: Boolean = false,
-        modelMode: String? = null,
-        modelId: String? = null
-    ): List<ChatSessionRecord> {
-        if (sessionId == null) return this
-        var changed = false
-        val updated = map { session ->
-            if (session.id != sessionId) {
-                session
-            } else {
-                val owner = session.assistantSnapshot?.assistantId ?: session.assistantId
-                if (session.mixedAssistantHistory ||
-                    (assistantId != null && owner != assistantId) ||
-                    (assistantSnapshot != null && assistantSnapshot.assistantId != owner)
-                ) return@map session
-                val next = session.copy(
-                    assistantId = session.assistantId ?: assistantId,
-                    assistantSnapshot = if (replaceAssistantSnapshot) {
-                        assistantSnapshot
-                    } else {
-                        assistantSnapshot ?: session.assistantSnapshot
-                    },
-                    modelMode = modelMode ?: session.modelMode,
-                    modelId = if (modelMode != null) modelId else session.modelId
-                )
-                if (next != session) changed = true
-                next
-            }
-        }
-        return if (changed) updated else this
-    }
 
     private fun MainUiState.currentChatModelId(): String? =
         when (selectedChatBackend) {
@@ -14723,34 +14581,7 @@ class MainViewModel @JvmOverloads constructor(
         else -> "图片库备份失败：${message ?: "未知错误"}"
     }
 
-    private fun List<CloudModelRecord>.matchingCloudModel(
-        kind: CloudModelKind,
-        format: CloudApiFormat,
-        baseUrl: String,
-        modelName: String,
-        imageFormat: CloudImageApiFormat? = null,
-        imageEndpointPath: String = ""
-    ): CloudModelRecord? =
-        firstOrNull {
-            it.kind == kind &&
-                it.apiFormat == format &&
-                (
-                    kind != CloudModelKind.IMAGE ||
-                        (
-                            it.imageApiFormat == (imageFormat ?: it.imageApiFormat) &&
-                                it.imageEndpointPath.trim().trim('/') == imageEndpointPath.trim().trim('/')
-                            )
-                    ) &&
-                it.baseUrl.trim().trimEnd('/') == baseUrl.trim().trimEnd('/') &&
-                it.modelName == modelName
-        }
 
-    private fun List<CloudModelRecord>.upsertCloudModel(model: CloudModelRecord): List<CloudModelRecord> =
-        (listOf(model) + filterNot { it.id == model.id })
-            .sortedWith(
-                compareBy<CloudModelRecord> { it.kind.name }
-                    .thenByDescending { it.updatedAt }
-            )
 
     private fun List<ImageGenerationJobRecord>.updateImageJob(
         jobId: String,
@@ -14905,16 +14736,6 @@ class MainViewModel @JvmOverloads constructor(
         return base.copy(negativePrompt = defaultNegative, loras = resolvedLoras)
     }
 
-    private fun CloudApiConfig.normalized(): CloudApiConfig =
-        copy(
-            providerName = providerName.trim().ifBlank { apiFormat.label },
-            displayName = displayName.trim().ifBlank { chatModel.trim().ifBlank { "自定义推理引擎" } },
-            baseUrl = baseUrl.trim().trimEnd('/'),
-            chatModel = chatModel.trim(),
-            imageModel = imageModel.trim(),
-            imageSize = imageSize.trim().ifBlank { "1024x1024" },
-            imageEndpointPath = imageEndpointPath.trim().trim('/')
-        ).normalizedForImageRequest(preserveProviderName = true)
 
     private fun displayNameForUri(uri: Uri): String {
         val resolver = getApplication<Application>().contentResolver

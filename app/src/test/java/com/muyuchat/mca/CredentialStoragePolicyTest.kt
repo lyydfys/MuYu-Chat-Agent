@@ -191,15 +191,22 @@ class CredentialStoragePolicyTest {
         // GenerationPreferenceStore.kt during the settings extraction. Reading both files keeps the
         // same contract under test -- and the assertions below are unchanged.
         val preferences = sourceFile("app/src/main/java/com/muyuchat/mca/GenerationPreferenceStore.kt")
+        // The quick test itself moved to CloudModelConfigurationOperations.kt with the cloud
+        // configuration family. The ViewModel keeps the public entry point. Reading all three files
+        // keeps the same contract under test; the two substrings follow the extraction (the store is
+        // reached through the port, and the helper is the top-level `credentialWriteFailureMessage`).
+        val cloudConfig =
+            sourceFile("app/src/main/java/com/muyuchat/mca/CloudModelConfigurationOperations.kt")
         val both = source + preferences
+        val sources = both + cloudConfig
 
         assertTrue(
             "the quick test must consume the typed credential result",
-            source.contains("val credential = cloudApiStore.save(config)")
+            cloudConfig.contains("val credential = port.cloudApiStore.save(config)")
         )
         assertTrue(
             "the success message must be suppressed when the credential write failed",
-            source.contains("credentialFailureMessage(credential)")
+            cloudConfig.contains("credentialWriteFailureMessage(credential)")
         )
         assertTrue(
             "both failure modes need distinct honest messages",
@@ -207,7 +214,7 @@ class CredentialStoragePolicyTest {
         )
         assertFalse(
             "the old boolean flag must not come back",
-            source.contains("val credentialStored = cloudApiStore.save(config)")
+            sources.contains("val credentialStored = cloudApiStore.save(config)")
         )
     }
 
