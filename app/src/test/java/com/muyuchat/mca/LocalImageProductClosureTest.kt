@@ -16,7 +16,7 @@ class LocalImageProductClosureTest {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val ui = functionBody(source, "private fun enqueueImageGeneration(")
         val localAsset = functionBody(source, "private suspend fun createLocalGeneratedImageAsset(")
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(ui.contains("val jobId = requestedJobId ?: \"ui-img-\${UUID.randomUUID()}\""))
         assertTrue(ui.contains("tryAcquireObservedImageGenerationLease(jobId)"))
@@ -32,7 +32,7 @@ class LocalImageProductClosureTest {
     fun `requested image model is snapshotted and API model never falls through to selection`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val ui = functionBody(source, "private fun enqueueImageGeneration(")
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val explicitModelBranch = api.substring(
             api.indexOf("if (requestedModel.isNotBlank())"),
             api.indexOf("} else {", api.indexOf("if (requestedModel.isNotBlank())"))
@@ -407,7 +407,7 @@ class LocalImageProductClosureTest {
             sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ImageChoicePresentation.kt")
         val protocol = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageWorkerProtocol.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
-        val api = functionBody(viewModel, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(mainActivity.contains("preview = uiOptions.toLocalImagePreviewOptions()"))
         assertTrue(imageChoicePresentation.contains("LocalImagePreviewMode.fromWireName(uiMode.wireName)"))

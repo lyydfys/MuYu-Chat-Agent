@@ -282,7 +282,7 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `authenticated api materializes random seed before prompt preparation`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
         val plan = api.indexOf("val batchPlan = planLocalImageBatch(")
         val prepare = api.indexOf("prepareLocalImagePromptExecution(")
         val worker = api.indexOf("localImageWorkerClient.generate(")
@@ -384,7 +384,7 @@ class LocalImagePromptCancellationContractTest {
             "internal suspend fun prepareLocalImagePromptExecution("
         )
         val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(prepare.contains("effectivePrompt = translation.translatedPrompt"))
         assertTrue(prepare.contains("translation.effectiveNegativePrompt"))
@@ -503,7 +503,7 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(generationLease > preflight)
         assertTrue(workerBegin > preflight)
 
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
         val apiReadiness = api.indexOf("localImageStructuralReadinessMessage()")
         val apiWorker = api.indexOf("localImageWorkerClient.generate(")
         assertTrue(apiReadiness >= 0)
@@ -554,6 +554,15 @@ class LocalImagePromptCancellationContractTest {
      * only the file they read moved -- so this is the same contract, checked at its new home.
      */
     private fun prepareSource(): String = sourceFile("LocalImagePromptPreparation.kt")
+
+    /**
+     * The Local API image adapter moved into the `presentation` sub-package, which the filename-based
+     * `sourceFile(fileName)` above cannot reach: two of its three candidates hard-code
+     * `com/muyuchat/mca/`. Use the repository-relative form instead.
+     */
+    private fun localApiSource(): String = sourceFile(
+        "app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"
+    )
 
     private fun localImageWorkerClientSource(): String = sourceFile("LocalImageWorkerClient.kt")
 

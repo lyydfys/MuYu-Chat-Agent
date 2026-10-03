@@ -10,7 +10,7 @@ class LocalApiImageCancellationContractTest {
     @Test
     fun `authenticated image cancellation owns the request job worker and lease`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val api = functionBody(source, "private suspend fun generateLocalApiImage(")
+        val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val stopProvider = source.substring(
             source.indexOf("LocalApiRuntime.stopGenerationProvider ="),
             source.indexOf("LocalApiRuntime.loadedModelJsonProvider =")

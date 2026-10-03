@@ -109,7 +109,12 @@ class LocalImageGenerationOwnershipContractTest {
 
     @Test
     fun `the UI and the Local API acquire the same lease`() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // The Local API image adapter moved to its own file, so the ownership contract is now spread
+        // over two sources: the lease helper is still acquired from MainViewModel, while the busy
+        // wording and the typed 409 error live with the adapter. Both are read here, which keeps the
+        // assertions checking the same contract rather than the same file.
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt")
         val acquisitions = Regex("tryAcquireObservedImageGenerationLease\\(").findAll(viewModel).count()
 
         assertTrue(

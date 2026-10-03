@@ -66,7 +66,7 @@ class ImageUpscaleProductClosureTest {
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
         val upscale = functionBody(viewModel, "fun upscaleImageAsset(")
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
-        val localApiGeneration = functionBody(viewModel, "private suspend fun generateLocalApiImage(")
+        val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
         val deleteImages = functionBody(viewModel, "fun deleteImageAssets(")
         val clearImages = functionBody(viewModel, "fun clearImageLibrary(")

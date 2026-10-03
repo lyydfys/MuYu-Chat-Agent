@@ -233,6 +233,12 @@ import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
 import com.muyuchat.mca.presentation.ChatContextOperations
 import com.muyuchat.mca.presentation.chatContextSnapshot
+import com.muyuchat.mca.presentation.LocalApiImageBounds
+import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
+import com.muyuchat.mca.presentation.LocalApiImageLoraGateway
+import com.muyuchat.mca.presentation.LocalApiImageWorkerGateway
+import com.muyuchat.mca.presentation.generateLocalApiImageOperations
+import kotlinx.coroutines.flow.StateFlow
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -16979,416 +16985,162 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private suspend fun generateLocalApiImage(requestId: String, body: String): String {
-        val request = ImageGenerationApiContract.parseRequest(body)
-        require(requestId.isNotBlank()) { "requestId must not be blank." }
-        if (request.preview != null) {
-            throw ImageGenerationProviderException(
-                code = "unsupported_preview_transport",
-                httpStatus = 422,
-                message = "This synchronous Images API response cannot publish live preview frames."
-            )
-        }
-        val requestedModel = request.model.orEmpty()
-        val model = if (requestedModel.isNotBlank()) {
-            val currentState = _uiState.value
-            val candidate = resolveLocalImageApiModel(
-                requestedModelId = requestedModel,
-                chatModelIds = currentState.models.map(ModelManifest::id),
-                imageModels = currentState.localImageModels
-            )
-                ?: throw ImageGenerationProviderException(
-                    code = "image_model_not_found",
-                    httpStatus = 404,
-                    message = "The requested local image model was not found."
-                )
-            candidate
-        } else {
-            _uiState.value.selectedLocalImageModel()
-                ?: throw ImageGenerationProviderException(
-                    code = "image_runtime_unavailable",
-                    httpStatus = 503,
-                    message = "No configured local image model is selected."
-                )
-        }
-        model.localImageStructuralReadinessMessage()?.let { readiness ->
-            throw ImageGenerationProviderException(
-                code = "image_model_not_ready",
-                httpStatus = 409,
-                message = "The selected local image model is not ready: $readiness " +
-                    "Re-download or re-import the complete model bundle, then retry."
-            )
-        }
-        if (!supportsAuthenticatedLocalImageCount(model.runtime, request.imageCount)) {
-            throw ImageGenerationProviderException(
-                code = "unsupported_image_count",
-                httpStatus = 422,
-                message = "The selected local image runtime does not support n=${request.imageCount}."
-            )
-        }
-        val dispatch = request.toLocalImageApiDispatch()
-        if (request.textualInversionIds.isNotEmpty() &&
-            _uiState.value.localImageTextualInversionLoading
-        ) {
-            throw ImageGenerationProviderException(
-                code = "image_textual_inversion_library_loading",
-                httpStatus = 409,
-                message = "The textual inversion library is still loading. Retry this request shortly."
-            )
-        }
-        val resolvedLoras = try {
-            resolveCurrentLocalImageLoras(
-                request.loras.map { selection -> selection.id to selection.multiplier }
-            )
-        } catch (error: Exception) {
-            throw localImageExtensionResolutionFailure(
-                error = error,
-                fallbackCode = "image_lora_not_found",
-                fallbackMessage = "A requested LoRA adapter is unavailable."
-            )
-        }
-        val resolvedTextualInversionIds = try {
-            resolveCurrentLocalImageTextualInversionIds(request.textualInversionIds).also { ids ->
-                requireTextualInversionPromptTriggers(
-                    prompt = request.prompt,
-                    negativePrompt = dispatch.options.negativePrompt,
-                    ids = ids,
-                    records = _uiState.value.localImageTextualInversions
-                )
+    /**
+     * The ViewModel side of [LocalApiImageGenerationPort]: one delegate per member, no logic of its
+     * own. The protocol adaptation moved to [generateLocalApiImageOperations], which is now the only
+     * place a Local API image request is decided.
+     *
+     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
+     * their name and signature with the ViewModel member they forward to, and an unqualified call
+     * would recurse into the override instead of reaching the original implementation.
+     */
+    private val localApiImageGenerationPort: LocalApiImageGenerationPort =
+        object : LocalApiImageGenerationPort {
+            override val uiState: StateFlow<MainUiState> get() = this@MainViewModel.uiState
+
+            // Delegates to the real MutableStateFlow.update, so the CAS-based atomicity is kept.
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
             }
-        } catch (error: Exception) {
-            throw localImageExtensionResolutionFailure(
-                error = error,
-                fallbackCode = "image_textual_inversion_not_found",
-                fallbackMessage = "A requested textual inversion is unavailable."
-            )
-        }
-        var options = dispatch.options.copy(
-            loras = resolvedLoras,
-            textualInversionIds = resolvedTextualInversionIds
-        )
-        val inputDraft = dispatch.inputDraft
-        try {
-            val resolvedSampler = model.validateProductTaskSampler(
-                taskMode = inputDraft.taskMode,
-                sampleMethod = options.sampleMethod
-            )
-            // Persist the task-aware effective sampler before planning/dispatch. This keeps an
-            // omitted sampler usable for generic shared-QNN img2img (whose legacy profile default
-            // may be PNDM) while still returning a stable 422 for an explicit PNDM request.
-            options = options.copy(sampleMethod = imageSchedulerProductName(resolvedSampler))
-        } catch (error: Exception) {
-            throw requireNotNull(error.toLocalImageApiProviderExceptionOrNull()) {
-                ImageGenerationProviderException(
-                    code = "unsupported_sampler",
-                    httpStatus = 422,
-                    message = error.message ?: "The selected sampler is not supported for this image task."
-                )
-            }
-        }
-        val batchPlan = planLocalImageBatch(
-            parentRequestId = requestId,
-            runtime = model.runtime,
-            requestedOptions = options
-        )
-        options = batchPlan.parentOptions
-        val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
-            "Local API image generation requires a request coroutine."
-        }
-        val generationLease = tryAcquireObservedImageGenerationLease(requestId)
-            ?: throw ImageGenerationProviderException(
-                code = "image_generation_busy",
-                httpStatus = 409,
-                message = "Another UI or Local API image request is already running."
-            )
-        val ownership = LocalApiImageGenerationOwnership(
-            requestId = requestId,
-            requestJob = requestJob
-        )
-        var ownershipRegistered = false
-        var chatRuntimeLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
-        try {
-            registerLocalApiImageGenerationOwnership(ownership)
-            ownershipRegistered = true
-            currentCoroutineContext().ensureActive()
-            activeLocalApiImageModelId = model.id
-            val textualInversionReservationError =
-                synchronized(localImageTextualInversionLifecycleLock) {
-                    val state = _uiState.value
-                    val ids = options.textualInversionIds.toSet()
-                    when {
-                        ids.any(state.deletingLocalImageTextualInversionIds::contains) ->
-                            "A requested textual inversion is being deleted."
-                        ids.any { requestedId ->
-                            state.localImageTextualInversions.none { it.id == requestedId }
-                        } -> "A requested textual inversion is no longer installed."
-                        else -> {
-                            _uiState.update {
-                                it.copy(activeLocalImageTextualInversionIds = ids)
-                            }
-                            null
-                        }
-                    }
+
+            override fun selectedLocalImageModel(): LocalImageModelRecord? =
+                this@MainViewModel._uiState.value.selectedLocalImageModel()
+
+            override val localImageLoraLifecycleLock: Any
+                get() = this@MainViewModel.localImageLoraLifecycleLock
+
+            override val localImageTextualInversionLifecycleLock: Any
+                get() = this@MainViewModel.localImageTextualInversionLifecycleLock
+
+            override var activeLocalApiImageModelId: String?
+                get() = this@MainViewModel.activeLocalApiImageModelId
+                set(value) {
+                    this@MainViewModel.activeLocalApiImageModelId = value
                 }
-            if (textualInversionReservationError != null) {
-                throw ImageGenerationProviderException(
-                    code = "image_textual_inversion_not_found",
-                    httpStatus = 404,
-                    message = textualInversionReservationError
-                )
-            }
-            val leasedLoraRefreshError = synchronized(localImageLoraLifecycleLock) {
-                runCatching {
-                    val currentLoras = localImageLoraStore.load()
-                    options = options.copy(
-                        loras = resolveCurrentLocalImageLoras(
-                            request.loras.map { selection -> selection.id to selection.multiplier },
-                            currentLoras
-                        )
-                    )
-                    _uiState.update {
-                        it.copy(
-                            localImageLoras = currentLoras,
-                            activeLocalImageLoraIds = options.loras
-                                .mapTo(mutableSetOf()) { adapter -> adapter.id }
-                        )
-                    }
-                }.exceptionOrNull()
-            }
-            if (leasedLoraRefreshError != null) {
-                throw ImageGenerationProviderException(
-                    code = "image_lora_not_found",
-                    httpStatus = 404,
-                    message = leasedLoraRefreshError.message
-                        ?: "A requested LoRA adapter is unavailable."
-                )
-            }
-            val promptExecution = try {
-                prepareLocalImagePromptExecution(
-                    model = model,
-                    prompt = request.prompt,
-                    options = options,
-                    captured = null
-                ).also { execution ->
-                    requireTextualInversionPromptTriggers(
-                        prompt = execution.effectivePrompt,
-                        negativePrompt = execution.effectiveNegativePrompt,
-                        ids = options.textualInversionIds,
-                        records = _uiState.value.localImageTextualInversions
-                    )
-                }
-            } catch (error: Throwable) {
-                if (error is LocalImageProductContractException &&
-                    error.code == "image_textual_inversion_trigger_missing"
-                ) {
-                    throw ImageGenerationProviderException(
-                        code = error.code,
-                        httpStatus = 422,
-                        message = error.message
-                    )
-                }
-                error.toLocalImageApiProviderExceptionOrNull()?.let { throw it }
-                throw error
-            }
-            val effectiveOptions = options.copy(
-                negativePrompt = promptExecution.effectiveNegativePrompt
-            )
-            chatRuntimeLease = prepareLocalImageRuntimeMemory()
-            currentCoroutineContext().ensureActive()
-            val childResults = try {
-                executeLocalImageBatchPlan(
-                    plan = batchPlan,
-                    cancellationRequested = { requestJob.isCancelled },
-                    execute = { child ->
-                        val result = localImageWorkerClient.generate(
-                            model = model,
-                            prompt = promptExecution.effectivePrompt,
-                            options = effectiveOptions.copy(
-                                batchCount = child.options.batchCount,
-                                seed = child.options.seed
-                            ),
-                            inputDraft = inputDraft,
-                            requestId = child.requestId,
-                            batchLineage = child.batchLineage
-                        )
-                        require(result.outputs.size == child.outputCount) {
-                            "Image batch child returned ${result.outputs.size} outputs; expected ${child.outputCount}."
-                        }
-                        listOf(result)
-                    },
-                    cleanup = { _ -> Unit }
-                )
-            } catch (error: Throwable) {
-                error.toLocalImageApiProviderExceptionOrNull()?.let { throw it }
-                if (error is IllegalArgumentException) {
-                    throw ImageGenerationProviderException(
-                        code = "invalid_image_input",
-                        httpStatus = 422,
-                        message = error.message ?: "The image input could not be prepared."
-                    )
-                }
-                throw error
-            }
-            currentCoroutineContext().ensureActive()
-            return try {
-                val orderedOutputs = childResults.flatMapIndexed { childIndex, result ->
-                    val child = batchPlan.requests[childIndex]
-                    result.outputs.map { output ->
-                        output.copy(index = child.outputOffset + output.index)
-                    }
-                }
-                require(orderedOutputs.size == request.imageCount) {
-                    "The local image worker returned ${orderedOutputs.size} images; ${request.imageCount} were requested."
-                }
-                val result = childResults.last()
-                val execution = runCatching {
-                    val lastChild = batchPlan.requests.last()
-                    sanitizedLocalImageApiExecution(executionWithQnnVerificationEvidence(
+
+            override val localImageWorkerClient: LocalApiImageWorkerGateway =
+                object : LocalApiImageWorkerGateway {
+                    override suspend fun generate(
+                        model: LocalImageModelRecord,
+                        prompt: String,
+                        options: LocalImageGenerationOptions,
+                        inputDraft: LocalImageInputDraft,
+                        requestId: String,
+                        batchLineage: ImageGenerationBatchLineage?
+                    ): LocalImageResult = this@MainViewModel.localImageWorkerClient.generate(
                         model = model,
-                        result = result,
-                        options = effectiveOptions.copy(
-                            batchCount = lastChild.options.batchCount,
-                            seed = lastChild.options.seed
-                        ),
+                        prompt = prompt,
+                        options = options,
+                        inputDraft = inputDraft,
                         requestId = requestId,
-                        attemptId = lastChild.requestId,
-                        entryPoint = QnnImageEvidenceEntryPoint.AUTHENTICATED_LOCAL_API
-                    ))
-                }.getOrElse { JSONObject() }
-                // Expose the resolved, non-sensitive execution contract on the authenticated
-                // API response. Paths and device-private runtime directories remain excluded;
-                // clients can now audit exactly which profile/scheduler bounds were applied.
-                runCatching {
-                    val profileRoot = model.bundleRoot
-                        ?.takeIf(String::isNotBlank)
-                        ?.let(::File)
-                        ?.takeIf(File::isDirectory)
-                        ?: File(model.path).parentFile?.takeIf(File::isDirectory)
-                    val profile = resolveLocalImageExecutionProfile(
-                        model = model,
-                        options = effectiveOptions.normalizedForPromptExecutionProfile(model.runtime),
-                        bundleRoot = profileRoot
-                    ).profile
-                    execution.put(
-                        "resolvedProfile",
-                        JSONObject()
-                            .put("profileId", profile.profileId)
-                            .put("profileRevision", profile.profileRevision)
-                            .put("runtime", profile.runtime.name)
-                            .put("family", profile.family.name)
-                            .put("scheduler", JSONObject()
-                                .put("algorithm", profile.scheduler.algorithm.name)
-                                .put("predictionType", profile.scheduler.predictionType.name)
-                                .put("defaultSteps", profile.scheduler.defaultSteps)
-                                .put("minSteps", profile.scheduler.minSteps)
-                                .put("maxSteps", profile.scheduler.maxSteps))
-                            .put("defaults", JSONObject()
-                                .put("steps", profile.defaults.steps)
-                                .put("width", profile.defaults.width)
-                                .put("height", profile.defaults.height)
-                                .put("cfgScale", profile.defaults.cfgScale))
-                            .put("supportedSchedulers", JSONArray(
-                                profile.capabilities.supportedSchedulers.map { it.name }))
+                        batchLineage = batchLineage
                     )
-                }
-                execution.put(
-                    "responseOutputEvidence",
-                    localImageApiResponseOutputEvidence(orderedOutputs)
-                )
-                val nativeEffective = execution.optJSONObject("nativeEffective")
-                    ?: error("The local image result is missing nativeEffective execution evidence.")
-                require(
-                    execution.optBoolean("nativeExecution", false) &&
-                        !execution.optBoolean("fallback", true)
-                ) {
-                    "The local image result did not prove direct native execution without fallback."
-                }
-                require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
-                    "The local image result is missing a positive native generation sequence."
-                }
-                require(nativeEffective.getString("runtime") == model.runtime.name) {
-                    "The local image result runtime does not match the selected model runtime."
-                }
-                if (model.runtime == LocalImageRuntime.QNN_HTP) {
-                    require(
-                        execution.optBoolean("npuActive", false) &&
-                            execution.optBoolean("qnnGraphExecution", false)
-                    ) {
-                        "The local image result did not prove native QNN graph execution."
+
+                    override suspend fun awaitOwnedWorkerRelease() {
+                        this@MainViewModel.localImageWorkerClient.awaitOwnedWorkerRelease()
                     }
                 }
-                JSONObject()
-                    .put("created", System.currentTimeMillis() / 1000L)
-                    .put("request_id", requestId)
-                    // Echo an explicit catalog alias exactly so the API contract can bind the
-                    // provider response to the caller's requested model. Legacy raw ids remain
-                    // accepted and are echoed unchanged.
-                    .put("model", requestedModel.ifBlank { model.id })
-                    .put("prompt_processing", promptExecution.toJson())
-                    .put("execution", execution)
-                    .put(
-                        "data",
-                        JSONArray().apply {
-                            orderedOutputs.forEach { output ->
-                                currentCoroutineContext().ensureActive()
-                                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                BitmapFactory.decodeByteArray(output.bytes, 0, output.bytes.size, bounds)
-                                require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                                    "The local image worker returned an invalid image at index ${output.index}."
-                                }
-                                put(
-                                    JSONObject()
-                                        .put("index", output.index)
-                                        .put("b64_json", Base64.encodeToString(output.bytes, Base64.NO_WRAP))
-                                        .put("mime_type", output.mimeType)
-                                        .put("width", bounds.outWidth)
-                                        .put("height", bounds.outHeight)
-                                        .apply { output.seed?.let { put("seed", it) } }
-                                )
-                            }
-                        }
-                    )
-                    .toString()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: ImageGenerationProviderException) {
-                throw error
-            } catch (error: Throwable) {
-                throw ImageGenerationProviderException(
-                    code = "invalid_image_worker_response",
-                    httpStatus = 502,
-                    message = error.message ?: "The local image worker returned invalid execution evidence."
-                )
-            }
-        } catch (cancelled: CancellationException) {
-            if (ownershipRegistered) cancelOwnedLocalApiImageWorker(ownership)
-            throw cancelled
-        } finally {
-            withContext(NonCancellable) {
-                // Keep the authenticated API path under the same native memory release barrier
-                // as the UI path before chat weights can be loaded again.
-                runCatching { localImageWorkerClient.awaitOwnedWorkerRelease() }
-                chatRuntimeLease?.release()
-            }
-            if (ownershipRegistered) {
-                check(unregisterLocalApiImageGenerationOwnership(ownership)) {
-                    "Local API image cancellation ownership changed before request completion."
+
+            override val localImageLoraStore: LocalApiImageLoraGateway =
+                object : LocalApiImageLoraGateway {
+                    override fun load(): List<LocalImageLoraRecord> =
+                        this@MainViewModel.localImageLoraStore.load()
                 }
-                if (activeLocalApiImageModelId == model.id) activeLocalApiImageModelId = null
-                synchronized(localImageLoraLifecycleLock) {
-                    _uiState.update {
-                        it.copy(
-                            activeLocalImageLoraIds = emptySet(),
-                            activeLocalImageTextualInversionIds = emptySet()
-                        )
-                    }
-                }
+
+            override fun tryAcquireObservedImageGenerationLease(
+                requestId: String
+            ): LocalImageGenerationCoordinator.Lease? =
+                this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
+
+            override fun releaseObservedImageGenerationLease(
+                lease: LocalImageGenerationCoordinator.Lease
+            ): Boolean = this@MainViewModel.releaseObservedImageGenerationLease(lease)
+
+            override fun registerLocalApiImageGenerationOwnership(
+                ownership: LocalApiImageGenerationOwnership
+            ) {
+                this@MainViewModel.registerLocalApiImageGenerationOwnership(ownership)
             }
-            check(releaseObservedImageGenerationLease(generationLease)) {
-                "Local API image generation lease was replaced before request completion."
+
+            override fun unregisterLocalApiImageGenerationOwnership(
+                ownership: LocalApiImageGenerationOwnership
+            ): Boolean = this@MainViewModel.unregisterLocalApiImageGenerationOwnership(ownership)
+
+            override fun cancelOwnedLocalApiImageWorker(
+                ownership: LocalApiImageGenerationOwnership
+            ): Boolean = this@MainViewModel.cancelOwnedLocalApiImageWorker(ownership)
+
+            override fun resolveCurrentLocalImageLoras(
+                selections: List<Pair<String, Double>>
+            ): List<LocalImagePreparedLora> =
+                this@MainViewModel.resolveCurrentLocalImageLoras(selections)
+
+            override fun resolveCurrentLocalImageLoras(
+                selections: List<Pair<String, Double>>,
+                records: List<LocalImageLoraRecord>
+            ): List<LocalImagePreparedLora> =
+                this@MainViewModel.resolveCurrentLocalImageLoras(selections, records)
+
+            override fun resolveCurrentLocalImageTextualInversionIds(
+                ids: List<String>
+            ): List<String> =
+                this@MainViewModel.resolveCurrentLocalImageTextualInversionIds(ids)
+
+            override suspend fun prepareLocalImagePromptExecution(
+                model: LocalImageModelRecord,
+                prompt: String,
+                options: LocalImageGenerationOptions,
+                captured: LocalImagePromptExecution?
+            ): LocalImagePromptExecution = this@MainViewModel.prepareLocalImagePromptExecution(
+                model = model,
+                prompt = prompt,
+                options = options,
+                captured = captured
+            )
+
+            override suspend fun prepareLocalImageRuntimeMemory():
+                com.muyuchat.core.engine.EngineLifecycleLease? =
+                this@MainViewModel.prepareLocalImageRuntimeMemory()
+
+            override fun executionWithQnnVerificationEvidence(
+                model: LocalImageModelRecord,
+                result: LocalImageResult,
+                options: LocalImageGenerationOptions,
+                requestId: String,
+                attemptId: String,
+                entryPoint: QnnImageEvidenceEntryPoint
+            ): String = this@MainViewModel.executionWithQnnVerificationEvidence(
+                model = model,
+                result = result,
+                options = options,
+                requestId = requestId,
+                attemptId = attemptId,
+                entryPoint = entryPoint
+            )
+
+            /**
+             * Platform encoding seam. The production implementation is the two lines that were here
+             * before the move, so the bytes this device produces for a response are unchanged; a plain
+             * JVM unit test cannot reach them because the android.jar stubs throw, which is why they
+             * are behind the port rather than inline.
+             */
+            override fun decodeImageBounds(bytes: ByteArray): LocalApiImageBounds {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                return LocalApiImageBounds(bounds.outWidth, bounds.outHeight)
             }
+
+            /** Equivalent to `Base64.encodeToString(bytes, Base64.NO_WRAP)`. */
+            override fun encodeBase64NoWrap(bytes: ByteArray): String =
+                Base64.encodeToString(bytes, Base64.NO_WRAP)
         }
-    }
+
+    private suspend fun generateLocalApiImage(requestId: String, body: String): String =
+        generateLocalApiImageOperations(
+            requestId = requestId,
+            body = body,
+            port = localApiImageGenerationPort
+        )
 
     /** Records actual worker execution only; this evidence is never an admission certificate. */
     private fun recordLocalImageExecutionOutcome(
