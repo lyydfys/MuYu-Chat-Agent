@@ -18401,24 +18401,52 @@ class MainViewModel @JvmOverloads constructor(
         return canceled
     }
 
-    private fun tuningStateJson(): String {
-        val state = _uiState.value
-        return JSONObject()
-            .put("jobId", activeTuningJobId)
-            .put("state", state.tuningJobState.name.lowercase())
-            .put("phase", state.tuningPhase)
-            .put("etaSeconds", state.tuningEtaSeconds)
-            .put("autoTuningInProgress", state.autoTuningInProgress)
-            .put("cancelRequested", adaptiveTuningCancelRequested.get())
-            .put("pauseRequested", adaptiveTuningPauseRequested.get())
-            .put("progress", JSONObject()
-                .put("completed", state.tuningCandidateProgress.completed)
-                .put("total", state.tuningCandidateProgress.total)
-                .put("currentCandidate", state.tuningCandidateProgress.currentCandidate)
-                .put("passed", state.tuningCandidateProgress.passed)
-                .put("rejected", state.tuningCandidateProgress.rejected))
-            .put("profile", JSONObject(runtimeProfileJson()))
-            .toString()
+    /**
+     * The ViewModel side of [LocalApiPayloadPort]. Eight members: the state the projections render,
+     * the tuning flags they report, the two engine reads, the profile document, and the persisted
+     * runtime summaries. No mutex, job, scope or atomics cross this boundary -- the request flags are
+     * read through functions at render time.
+     */
+    private val localApiPayloadPort: LocalApiPayloadPort =
+        object : LocalApiPayloadPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override val activeTuningJobId: String?
+                get() = this@MainViewModel.activeTuningJobId
+
+            override fun tuningCancelRequested(): Boolean =
+                this@MainViewModel.adaptiveTuningCancelRequested.get()
+
+            override fun tuningPauseRequested(): Boolean =
+                this@MainViewModel.adaptiveTuningPauseRequested.get()
+
+            override fun runtimeProfileJson(): String = this@MainViewModel.runtimeProfileJson()
+
+            override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
+
+            override fun runtimeLoaded(): Boolean = this@MainViewModel.engine.stats.value.loaded
+
+            override suspend fun modelRuntimeSummaries(
+                modelIds: Collection<String>
+            ): List<PersistedModelRuntimeSummary> =
+                this@MainViewModel.runtimeProfileStore.modelRuntimeSummaries(modelIds)
+        }
+
+    /** Delegates to [localApiTuningStateJson]. */
+    private fun tuningStateJson(): String = localApiTuningStateJson(localApiPayloadPort)
+
+    /** Delegates to [localApiLoadedModelJson]. */
+    private fun loadedModelJson(): String = localApiLoadedModelJson(localApiPayloadPort)
+
+    /** Delegates to [localApiModelsJson]. */
+    private fun modelsJson(): String = localApiModelsJson(localApiPayloadPort)
+
+    /**
+     * Delegates to [localApiModelRuntimeStatesJson]. The blocking hop stays here: the projection is a
+     * suspend function, and how the store is entered is the caller's decision.
+     */
+    private fun modelRuntimeStatesJson(): String = runBlocking(Dispatchers.IO) {
+        localApiModelRuntimeStatesJson(localApiPayloadPort)
     }
 
     private fun runTuningControl(
@@ -18443,89 +18471,8 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun loadedModelJson(): String {
-        val state = _uiState.value
-        val loadedModel = state.models.firstOrNull { it.id == state.loadedModelId }
-        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
-        val runtimeLoaded = state.loadedModelId != null && engine.stats.value.loaded
-        val visionReady = runtimeLoaded && nativeStats.optBoolean("visionReady", false)
-        // A loaded image input is not evidence that an image inference passed.
-        val visionValidated = runtimeLoaded && nativeStats.optBoolean("visionVerified", false)
-        return JSONObject()
-            .put("id", state.loadedModelId)
-            .put("name", state.loadedModelName)
-            .put("displayName", state.loadedModelName)
-            .put("runtime", loadedModel?.runtime?.storageValue)
-            .put("vision_ready", visionReady)
-            .put("vision_validated", visionValidated)
-            .put("visionValidated", visionValidated)
-            .put("vision_projector", loadedModel?.visionProjectorFileName)
-            .put("stats", nativeStats)
-            .toString()
-    }
 
-    private fun modelsJson(): String {
-        val array = JSONArray()
-        val state = _uiState.value
-        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
-        state.models.forEach { model ->
-            val selected = engine.stats.value.loaded && model.id == state.loadedModelId
-            val visionReady = selected && nativeStats.optBoolean("visionReady", false)
-            val visionValidated = selected && nativeStats.optBoolean("visionVerified", false)
-            array.put(
-                JSONObject()
-                    .put("id", model.id)
-                    .put("object", "model")
-                    .put("owned_by", "local")
-                    // OpenAI-compatible clients do not agree on the display-name key. Keep
-                    // the stable manifest id while publishing aliases from the real manifest
-                    // display name; never derive a user-facing name from the id.
-                    .put("name", model.displayName)
-                    .put("display_name", model.displayName)
-                    .put("displayName", model.displayName)
-                    .put("runtime", model.runtime.storageValue)
-                    .put("vision_projector", model.visionProjectorFileName)
-                    .put("vision_ready", visionReady)
-                    .put("vision_validated", visionValidated)
-            )
-        }
-        localImageApiCatalogEntries(
-            chatModelIds = state.models.map(ModelManifest::id),
-            imageModels = state.localImageModels
-        ).forEach { entry -> array.put(entry.payload) }
-        return JSONObject().put("object", "list").put("data", array).toString()
-    }
 
-    private fun modelRuntimeStatesJson(): String {
-        val models = _uiState.value.models
-        val states = runBlocking(Dispatchers.IO) {
-            runtimeProfileStore.modelRuntimeSummaries(models.map { it.id })
-        }
-        val root = JSONObject()
-        states.forEach { runtimeState ->
-            val modelId = runtimeState.modelId
-            val profile = runtimeState.activeProfile
-            val activeJob = runtimeState.activeJob
-            val isLoaded = modelId == _uiState.value.loadedModelId
-            root.put(
-                modelId,
-                JSONObject()
-                    .put("profileId", profile?.profileId)
-                    .put("profileRecordState", profile?.recordState?.lowercase(Locale.ROOT) ?: "none")
-                    .put(
-                        "profileVerificationLevel",
-                        profile?.verificationLevel?.lowercase(Locale.ROOT) ?: "unknown"
-                    )
-                    .put("reloadRequired", runtimeState.pendingProfile != null)
-                    .put(
-                        "engineLifecycle",
-                        if (isLoaded) _uiState.value.engineLifecycle.name.lowercase(Locale.ROOT) else "unloaded"
-                    )
-                    .put("tuningJobState", activeJob?.state?.lowercase(Locale.ROOT) ?: "idle")
-            )
-        }
-        return root.toString()
-    }
 
     private fun currentDeviceProfile(): DeviceProfile =
         deviceProfileReader.read()
