@@ -348,7 +348,9 @@ private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
 private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 private const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
-private const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
+// `internal`, not `private`: the send-boundary deduplication that reads this budget moved to
+// VisionAttachmentSupport.kt, and one shared bound is safer than two copies drifting apart.
+internal const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
 
 data class ImageLibraryBackupState(
     val running: Boolean = false,
@@ -17314,44 +17316,10 @@ class MainViewModel @JvmOverloads constructor(
         } ?: error("无法读取图片：${name.ifBlank { uriString }}")
     }
 
-    /**
-     * Final send-boundary image deduplication.  The shared engine helper cannot open Android
-     * content:// providers, so this pass hashes provider bytes before a user turn is persisted.
-     * It runs on Dispatchers.IO and is deliberately the last step before sendPreparedMessage;
-     * picker/preflight races therefore cannot publish the same imported photo twice.
-     */
+    /** Delegates to [deduplicatedVisionAttachmentsForSend]; see there for the contract. */
     private fun List<ChatImageAttachment>.deduplicateVisionAttachmentsForSend(
         context: Context
-    ): List<ChatImageAttachment> {
-        if (size < 2) return this
-        val seen = LinkedHashSet<String>(size)
-        return filter { attachment ->
-            val source = attachment.uriString.trim()
-            val identity = if (source.startsWith("content:", ignoreCase = true)) {
-                runCatching {
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    val input = requireNotNull(context.contentResolver.openInputStream(Uri.parse(source)))
-                    var total = 0L
-                    input.use { stream ->
-                        val buffer = ByteArray(32 * 1024)
-                        while (true) {
-                            val read = stream.read(buffer)
-                            if (read < 0) break
-                            total += read
-                            require(total <= CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES)
-                            digest.update(buffer, 0, read)
-                        }
-                    }
-                    "bytes:" + digest.digest().joinToString("") { byte ->
-                        "%02x".format(java.util.Locale.ROOT, byte.toInt() and 0xff)
-                    }
-                }.getOrElse { attachment.visionDeduplicationKey() }
-            } else {
-                attachment.visionDeduplicationKey()
-            }
-            seen.add(identity)
-        }
-    }
+    ): List<ChatImageAttachment> = deduplicatedVisionAttachmentsForSend(context)
 
     private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment {
         val uri = Uri.parse(uriString)
@@ -17388,29 +17356,12 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun Bitmap.scaledToMaxEdge(maxEdge: Int): Bitmap {
-        val currentMax = maxOf(width, height)
-        if (currentMax <= maxEdge) return this
-        val scale = maxEdge.toFloat() / currentMax.toFloat()
-        return Bitmap.createScaledBitmap(
-            this,
-            (width * scale).toInt().coerceAtLeast(1),
-            (height * scale).toInt().coerceAtLeast(1),
-            true
-        )
-    }
+    /** Delegates to [scaledDownToMaxEdge]. */
+    private fun Bitmap.scaledToMaxEdge(maxEdge: Int): Bitmap = scaledDownToMaxEdge(maxEdge)
 
+    /** Delegates to [visionDecodeOptions]. */
     private fun visionBitmapOptions(sampleSize: Int): BitmapFactory.Options =
-        BitmapFactory.Options().apply {
-            inSampleSize = sampleSize.coerceAtLeast(1)
-            // Vision inputs are converted to JPEG immediately. RGB_565 keeps
-            // malformed or very large user images from exhausting the app
-            // process before the isolated native runner can reject them.
-            inPreferredConfig = Bitmap.Config.RGB_565
-            inScaled = false
-            inDither = false
-        }
-
+        visionDecodeOptions(sampleSize)
     private suspend fun localVisionRunnerAvailable(): Boolean {
         val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrNull()
             ?: return false
@@ -17440,36 +17391,12 @@ class MainViewModel @JvmOverloads constructor(
         return true
     }
 
-    private fun MainUiState.localVisionUnavailableMessage(): String {
-        val model = models.firstOrNull { it.id == loadedModelId }
-        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrNull()
-        val nativeReason = nativeStats?.optString("visionFailureReason")
-            ?.takeIf { it.isNotBlank() && it != "null" }
-        return when {
-            model == null ->
-                "当前未加载本地模型。请在模型管理加载支持视觉的多模态 GGUF，或切换到支持图片输入的云端模型。"
-            model.runtime == ChatModelRuntime.LITERT_LM &&
-                nativeStats?.optBoolean("visionModelKnownTextOnly", false) == true ->
-                LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
-            model.runtime == ChatModelRuntime.LITERT_LM &&
-                nativeStats?.has("visionModelVisualComponentsPresent") == true &&
-                !nativeStats.optBoolean("visionModelVisualComponentsPresent", false) ->
-                LITERT_LM_VISION_COMPONENTS_UNAVAILABLE_MESSAGE
-            model.runtime == ChatModelRuntime.LITERT_LM ->
-                LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
-            model.runtime == ChatModelRuntime.MNN ->
-                "当前 MNN 模型没有就绪的视觉组件。请加载包含可读 visual.mnn 的完整多模态包后重试。"
-            model.visionProjectorPath.isNullOrBlank() ->
-                "当前本地模型未启用识图。纯文本 GGUF 不能直接看图，请在模型管理为多模态模型绑定匹配的 mmproj / projector 文件后重新加载。"
-            nativeReason == "mmproj_not_bound" || nativeReason == "mmproj_file_missing" ||
-                nativeReason == "mmproj_file_empty" || nativeReason == "mmproj_file_unreadable" ->
-                "视觉投影器已记录但没有传入当前 runner（${nativeReason}）。请重新加载该模型；如果仍失败，请重新绑定与主模型匹配的 mmproj / projector。"
-            nativeReason == "native_capability_reports_no_vision" ->
-                "当前 mmproj 与主模型或运行时不匹配，native runner 明确拒绝视觉能力。请更换同仓库、同架构的 mmproj / projector。"
-            else ->
-                "已绑定视觉投影器，但本地视觉 runner 还未就绪。请重新加载当前模型；如果仍失败，请更换与主模型匹配的 mmproj / projector。"
-        }
-    }
+    /**
+     * Delegates to [localVisionUnavailableReason]. The engine read stays here: the function itself
+     * is pure over `(state, nativeStatsJson)`, which is what let it move out.
+     */
+    private fun MainUiState.localVisionUnavailableMessage(): String =
+        localVisionUnavailableReason(this, runCatching { engine.nativeStatsJson() }.getOrNull())
 
     private fun currentOpenApiAddress(): String =
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")
