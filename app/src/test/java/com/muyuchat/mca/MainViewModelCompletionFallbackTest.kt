@@ -415,7 +415,7 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun qairtLoadUsesGenericEnginePathWithoutMandatoryDiagnosticCanary() {
-        val body = functionBody(mainViewModelSource(), "fun loadModel(")
+        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
         val nativeLoad = body.indexOf("val nativeLoad = engine.loadModel(")
 
         assertTrue(nativeLoad >= 0)
@@ -426,7 +426,7 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun failedLoadReleasesCancelledGenerationBeforeReadingDiagnostics() {
-        val body = functionBody(mainViewModelSource(), "fun loadModel(")
+        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
         val failStart = body.indexOf("fun failBeforeNativeReplacement")
         val cancel = body.indexOf("cancelGenerationJob()", failStart)
         val fail = body.substring(failStart, cancel)
@@ -480,7 +480,7 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun modelLoadUsesOneCatchBoundaryForNativeCanaryAndPersistenceFailures() {
-        val body = functionBody(mainViewModelSource(), "fun loadModel(")
+        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
         val nativeLoad = body.indexOf("val nativeLoad = engine.loadModel(")
         val getOrThrow = body.indexOf("nativeLoad.getOrThrow()", nativeLoad)
         val persist = body.indexOf("persistBootstrapProfile(", getOrThrow)

@@ -47,7 +47,7 @@ class BootstrapLoadIsolationContractTest {
     fun mainRunsNewBootstrapProofBeforeFormalLoadAndNeverRunsTheCanaryInProcess() {
         val source = sourceFile("MainViewModel.kt")
         val loadModel = source.substring(
-            source.indexOf("fun loadModel(requestedModel: ModelManifest)")
+            source.indexOf("fun CoroutineScope.loadModelBody(requestedModel: ModelManifest)")
                 .also { assertTrue(it >= 0) },
             source.indexOf("fun verifyModel(model: ModelManifest)")
                 .also { assertTrue(it >= 0) }

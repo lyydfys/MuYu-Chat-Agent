@@ -87,7 +87,7 @@ class ManagedRuntimeReadinessRefreshGateTest {
     @Test
     fun `every manifest validating UI path publishes the refreshed catalog before continuing`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val load = section(source, "fun loadModel(", "fun verifyModel(")
+        val load = section(source, "fun CoroutineScope.loadModelBody(", "fun verifyModel(")
         val verify = section(source, "fun verifyModel(", "private fun captureLoadedRuntimeSnapshot(")
         val smoke = section(source, "fun runAgentStabilitySmoke(", "fun startAgentTuning()")
         listOf(load, verify, smoke).forEach { body ->
