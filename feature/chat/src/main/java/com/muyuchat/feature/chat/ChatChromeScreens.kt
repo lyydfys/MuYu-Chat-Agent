@@ -6668,8 +6668,15 @@ private fun TableBlock(rows: List<List<String>>) {
     }
 }
 
-/** 表格横向滚动提示的宽度；仅在 `canScrollForward` 时绘制。 */
-private val TABLE_SCROLL_HINT_WIDTH = 22.dp
+/**
+ * 表格横向滚动提示的宽度；仅在 `canScrollForward` 时绘制。
+ *
+ * 取值依据（真机实测，手机 1440×3200 @560dpi）：单元格横向内边距为 10dp，
+ * 原先取 22dp 时渐隐会**明显覆盖第二列文字的尾部**（截图可见 `Relative Scatte…`、
+ * `Efficiency Facto…` 被切在词中）。收到 13dp 后仍覆盖内边距（10dp）并多出 3dp，
+ * 足以在视觉上表达"右侧还有内容"，同时几乎不再压到文字。
+ */
+private val TABLE_SCROLL_HINT_WIDTH = 13.dp
 
 @Composable
 private fun inlineMarkdownText(value: String): AnnotatedString {
