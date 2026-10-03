@@ -1034,6 +1034,27 @@ class MainViewModel @JvmOverloads constructor(
     val uiState = _uiState.asStateFlow()
 
     /**
+     * The single writer for the transient status line the shell shows the user.
+     *
+     * `statusMessage` is App Shell state: it is global, short-lived, and was previously assigned
+     * from 406 places across this file. Those assignments came in two genuinely different kinds,
+     * and only one of them belongs behind a helper:
+     *
+     * - setting *only* the status (a plain notification) -- that is what this function is for;
+     * - updating the status **together with other fields in one `copy(...)`** (for example
+     *   `copy(busy = false, statusMessage = "...")`). Splitting those into two updates would turn
+     *   one atomic state change into two, so they keep their atomic form on purpose. They are not
+     *   a second writer of *this* operation; they are a different operation that happens to carry a
+     *   status.
+     *
+     * New code that only wants to say something to the user must call this, not `copy` directly.
+     * `StatusMessageWriterContractTest` fails if a new single-field assignment appears.
+     */
+    private fun showStatus(message: String?) {
+        _uiState.update { it.copy(statusMessage = message) }
+    }
+
+    /**
      * Publishes coordinator ownership before admission so Compose cannot release a generation-owned
      * content grant while UI, authenticated Local API, or upscale dispatch is materializing inputs.
      * A failed contender keeps the flag asserted when another epoch still owns the coordinator.
@@ -2402,7 +2423,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun clearStatusMessage() {
-        _uiState.update { it.copy(statusMessage = null) }
+        showStatus(null)
     }
 
     fun startBrowserTask(request: com.muyuchat.feature.chat.BrowserTaskLaunch) {
@@ -2440,16 +2461,16 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "当前正在生成，请完成或停止后再压缩上下文。") }
+            showStatus("当前正在生成，请完成或停止后再压缩上下文。")
             return
         }
         if (state.messages.isEmpty()) {
-            _uiState.update { it.copy(statusMessage = "当前对话还没有可压缩的内容。") }
+            showStatus("当前对话还没有可压缩的内容。")
             return
         }
         val sessionId = state.activeChatSessionId
         if (sessionId.isNullOrBlank()) {
-            _uiState.update { it.copy(statusMessage = "当前对话尚未保存，暂时无法安排压缩。") }
+            showStatus("当前对话尚未保存，暂时无法安排压缩。")
             return
         }
         manualContextCompressionRequests.request(sessionId)
@@ -2675,7 +2696,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun attachFile(uriString: String) {
         if (_uiState.value.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再上传文件") }
+            showStatus("请先停止当前生成，再上传文件")
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -2785,7 +2806,7 @@ class MainViewModel @JvmOverloads constructor(
                 } ?: publishImportedAttachment()
                 filesToPersist?.let { persistFiles(it) }
             }.onFailure { error ->
-                _uiState.update { it.copy(statusMessage = error.message ?: "文件上传失败") }
+                showStatus(error.message ?: "文件上传失败")
             }
         }
     }
@@ -3005,7 +3026,7 @@ class MainViewModel @JvmOverloads constructor(
     fun clearFileLibrary() {
         val filesToRemove = _uiState.value.files
         if (filesToRemove.isEmpty()) {
-            _uiState.update { it.copy(statusMessage = "文件库已经为空") }
+            showStatus("文件库已经为空")
             return
         }
         _uiState.update {
@@ -3408,7 +3429,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
         if (targetScale !in setOf(2, 3, 4)) {
-            _uiState.update { it.copy(statusMessage = "图片放大仅支持 2x、3x 或 4x。") }
+            showStatus("图片放大仅支持 2x、3x 或 4x。")
             return
         }
         val requestId = "ui-upscale-${UUID.randomUUID()}"
@@ -3729,11 +3750,11 @@ class MainViewModel @JvmOverloads constructor(
         val sourceJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
         val originalSnapshot = sourceJob?.spec
         if (sourceJob == null || originalSnapshot == null) {
-            _uiState.update { it.copy(statusMessage = "原图片任务参数已不可用，无法按原任务重试。") }
+            showStatus("原图片任务参数已不可用，无法按原任务重试。")
             return
         }
         if (!sourceJob.status.terminal) {
-            _uiState.update { it.copy(statusMessage = "当前图片任务仍在运行，无需重复提交。") }
+            showStatus("当前图片任务仍在运行，无需重复提交。")
             return
         }
         // A retry is a new admission. Re-resolve the current model record and discard prompt
@@ -3803,7 +3824,7 @@ class MainViewModel @JvmOverloads constructor(
         val asset = state.images.firstOrNull { it.id == imageId }
         val history = ImageGenerationHistoryMetadata.fromJsonOrNull(asset?.generationMetadataJson)
         if (asset == null || history == null) {
-            _uiState.update { it.copy(statusMessage = "这张图片没有可复现的完整生成参数。") }
+            showStatus("这张图片没有可复现的完整生成参数。")
             return
         }
         if (!history.canRecreate()) {
@@ -4251,7 +4272,7 @@ class MainViewModel @JvmOverloads constructor(
     ): Boolean {
         val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim()
         if (cleanPrompt.isBlank()) {
-            _uiState.update { it.copy(statusMessage = "请输入图片描述") }
+            showStatus("请输入图片描述")
             return false
         }
         if (cleanPrompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS) {
@@ -4264,7 +4285,7 @@ class MainViewModel @JvmOverloads constructor(
             return false
         }
         if (imageGenerationJob?.isActive == true) {
-            _uiState.update { it.copy(statusMessage = "已有图片生成任务正在运行，请先停止当前任务") }
+            showStatus("已有图片生成任务正在运行，请先停止当前任务")
             return false
         }
         val jobId = requestedJobId ?: "ui-img-${UUID.randomUUID()}"
@@ -4289,7 +4310,7 @@ class MainViewModel @JvmOverloads constructor(
             null
         }
         if (requestedBackend == ImageBackend.LOCAL && requestedLocalModel == null) {
-            _uiState.update { it.copy(statusMessage = "请先在模型管理的本地页导入并选择图像生成引擎。") }
+            showStatus("请先在模型管理的本地页导入并选择图像生成引擎。")
             return false
         }
         requestedLocalModel?.localImageStructuralReadinessMessage()?.let { readiness ->
@@ -4299,7 +4320,7 @@ class MainViewModel @JvmOverloads constructor(
             return false
         }
         if (requestedBackend == ImageBackend.CLOUD && requestedCloudConfig == null) {
-            _uiState.update { it.copy(statusMessage = "请先在模型管理的云端页接入并选择图像生成模型。") }
+            showStatus("请先在模型管理的云端页接入并选择图像生成模型。")
             return false
         }
         val requestedModelId = jobSnapshot?.modelId
@@ -4350,7 +4371,7 @@ class MainViewModel @JvmOverloads constructor(
             if (baseOptions.loras.isNotEmpty() || baseOptions.textualInversionIds.isNotEmpty() ||
                 baseOptions.ultraFix != null
             ) {
-                _uiState.update { it.copy(statusMessage = "云端图片连接器不接受本地模型扩展。") }
+                showStatus("云端图片连接器不接受本地模型扩展。")
                 return false
             }
             baseOptions
@@ -5373,7 +5394,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     val candidates = _uiState.value.images.filter { it.id in requestedIds }
                     if (candidates.isEmpty()) {
-                        _uiState.update { it.copy(statusMessage = "未找到要删除的图片") }
+                        showStatus("未找到要删除的图片")
                         return@withLock emptyList<ImageAssetRecord>() to 0
                     }
                     val staging = stageImageAssetDeletionLeases(
@@ -5445,7 +5466,7 @@ class MainViewModel @JvmOverloads constructor(
     fun setImageAssetFavorite(imageId: String, favorite: Boolean) {
         val image = _uiState.value.images.firstOrNull { it.id == imageId }
         if (image == null) {
-            _uiState.update { it.copy(statusMessage = "未找到要收藏的图片") }
+            showStatus("未找到要收藏的图片")
             return
         }
         val mutation = imageFavoriteMutationSequence.incrementAndGet() to favorite
@@ -5490,7 +5511,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun clearImageLibrary() {
         if (_uiState.value.images.isEmpty()) {
-            _uiState.update { it.copy(statusMessage = "图片库已为空") }
+            showStatus("图片库已为空")
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -5505,7 +5526,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                     val currentImages = _uiState.value.images
                     if (currentImages.isEmpty()) {
-                        _uiState.update { it.copy(statusMessage = "图片库已为空") }
+                        showStatus("图片库已为空")
                         return@withLock emptyList<ImageAssetRecord>() to 0
                     }
                     val staging = stageImageAssetDeletionLeases(
@@ -5671,7 +5692,7 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
         if (!started) {
-            _uiState.update { it.copy(statusMessage = "图片库备份任务正在进行") }
+            showStatus("图片库备份任务正在进行")
         }
     }
 
@@ -5785,7 +5806,7 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
         if (!started) {
-            _uiState.update { it.copy(statusMessage = "图片库备份任务正在进行") }
+            showStatus("图片库备份任务正在进行")
         }
     }
 
@@ -5855,7 +5876,7 @@ class MainViewModel @JvmOverloads constructor(
             if (rejectImageModelSwitchWhileGenerationIsActive()) return@launch
             val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             if (model == null) {
-                _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
+                showStatus("未找到本地图像生成引擎")
                 return@launch
             }
             val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(listOf(model))
@@ -5899,7 +5920,7 @@ class MainViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             if (model == null) {
-                _uiState.update { it.copy(statusMessage = "未找到本地图像生成引擎") }
+                showStatus("未找到本地图像生成引擎")
                 return@launch
             }
             val verificationRequestId = "verify-image-${System.currentTimeMillis()}-${UUID.randomUUID()}"
@@ -6496,7 +6517,7 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress() || state.isGenerating ||
             hasActiveAssistantImageExecution(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "请先结束当前角色请求，再保存角色卡。") }
+            showStatus("请先结束当前角色请求，再保存角色卡。")
             return
         }
         val now = System.currentTimeMillis()
@@ -6594,7 +6615,7 @@ class MainViewModel @JvmOverloads constructor(
         if (existing == null) {
             selectAssistant(assistant.id)
             persistChatSessions()
-            _uiState.update { it.copy(statusMessage = "已创建助手：${assistant.name}") }
+            showStatus("已创建助手：${assistant.name}")
         } else if (shouldSelectAssistant) {
             applyAssistantDefaultModel(assistant)
         }
@@ -6632,7 +6653,7 @@ class MainViewModel @JvmOverloads constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                _uiState.update { it.copy(statusMessage = "保存角色记忆失败：${error.message ?: "存储错误"}") }
+                showStatus("保存角色记忆失败：${error.message ?: "存储错误"}")
             }
         }
     }
@@ -6654,7 +6675,7 @@ class MainViewModel @JvmOverloads constructor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                _uiState.update { it.copy(statusMessage = "删除角色记忆失败：${error.message ?: "存储错误"}") }
+                showStatus("删除角色记忆失败：${error.message ?: "存储错误"}")
             }
         }
     }
@@ -7420,7 +7441,7 @@ class MainViewModel @JvmOverloads constructor(
     fun importChatBackground(scope: ChatAppearanceScope, uriString: String) {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull()
         if (uri == null || uri.scheme.isNullOrBlank()) {
-            _uiState.update { it.copy(statusMessage = "无法读取所选背景图片") }
+            showStatus("无法读取所选背景图片")
             return
         }
         val target = captureChatAppearanceTarget(scope) ?: return
@@ -7460,7 +7481,7 @@ class MainViewModel @JvmOverloads constructor(
         if (normalized?.backgroundImagePath != null &&
             backgroundImageStore.resolve(normalized.backgroundImagePath) == null
         ) {
-            _uiState.update { it.copy(statusMessage = "背景图片已失效，请重新选择") }
+            showStatus("背景图片已失效，请重新选择")
             return
         }
         viewModelScope.launch {
@@ -7491,7 +7512,7 @@ class MainViewModel @JvmOverloads constructor(
             ChatAppearanceScope.ASSISTANT -> {
                 val assistant = state.assistants.firstOrNull { it.id == state.selectedAssistantId }
                 if (assistant == null) {
-                    _uiState.update { it.copy(statusMessage = "当前角色不可用") }
+                    showStatus("当前角色不可用")
                     null
                 } else {
                     ChatAppearanceTarget(scope, assistant.id, assistant.appearance)
@@ -7500,7 +7521,7 @@ class MainViewModel @JvmOverloads constructor(
             ChatAppearanceScope.SESSION -> {
                 val session = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
                 if (session == null) {
-                    _uiState.update { it.copy(statusMessage = "请先发送一条消息，再设置当前会话背景") }
+                    showStatus("请先发送一条消息，再设置当前会话背景")
                     null
                 } else {
                     ChatAppearanceTarget(scope, session.id, session.appearanceOverride ?: ChatAppearance())
@@ -7635,11 +7656,11 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
         if (state.isGenerating || hasActiveAssistantImageExecution(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "请先结束当前角色请求，再删除助手。") }
+            showStatus("请先结束当前角色请求，再删除助手。")
             return
         }
         if (assistantId == AssistantRecord.DEFAULT_ID || state.assistants.size <= 1) {
-            _uiState.update { it.copy(statusMessage = "默认助手不能删除") }
+            showStatus("默认助手不能删除")
             return
         }
         val removed = state.assistants.firstOrNull { it.id == assistantId } ?: return
@@ -7705,7 +7726,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun importAssistantCard(rawJson: String) {
         if (_uiState.value.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入角色卡") }
+            showStatus("请先停止当前生成，再导入角色卡")
             return
         }
         val owner = captureContentImportOwner()
@@ -7729,7 +7750,7 @@ class MainViewModel @JvmOverloads constructor(
     fun removeLocalImageModelRecord(modelId: String) {
         launchModelOperation("模型记录操作未完成") {
             if (activeImageGenerationModelId == modelId || activeLocalApiImageModelId == modelId) {
-                _uiState.update { it.copy(statusMessage = "当前图片任务正在使用该模型，请结束后再移除记录。") }
+                showStatus("当前图片任务正在使用该模型，请结束后再移除记录。")
                 return@launchModelOperation
             }
             val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
@@ -7762,7 +7783,7 @@ class MainViewModel @JvmOverloads constructor(
                 _uiState.update { it.copy(contentImportPreview = preview) }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
-                _uiState.update { it.copy(statusMessage = "导入预览保存失败：${error.message}") }
+                showStatus("导入预览保存失败：${error.message}")
             }
         }
     }
@@ -7776,7 +7797,7 @@ class MainViewModel @JvmOverloads constructor(
                     _uiState.update { it.copy(contentImportPreview = null) }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
-                    _uiState.update { it.copy(statusMessage = "无法关闭导入预览：${error.message}") }
+                    showStatus("无法关闭导入预览：${error.message}")
                 }
             }
         }
@@ -7809,7 +7830,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
-                    _uiState.update { it.copy(statusMessage = "导入尚未完整提交：${error.message}；预览已保留，可重试。") }
+                    showStatus("导入尚未完整提交：${error.message}；预览已保留，可重试。")
                 } finally {
                     _uiState.update { it.copy(contentImportCommitting = false) }
                 }
@@ -7819,7 +7840,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) {
         if (_uiState.value.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入角色卡") }
+            showStatus("请先停止当前生成，再导入角色卡")
             return
         }
         val owner = importOwner ?: captureContentImportOwner()
@@ -7940,7 +7961,7 @@ class MainViewModel @JvmOverloads constructor(
                 selectAssistant(assistant.id)
                 if (_uiState.value.selectedAssistantId == assistant.id &&
                     _uiState.value.activeChatSessionId != currentState.activeChatSessionId) {
-                    _uiState.update { it.copy(statusMessage = importStatus) }
+                    showStatus(importStatus)
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
@@ -8007,7 +8028,7 @@ class MainViewModel @JvmOverloads constructor(
             chatSessionId = owner.sessionId.takeIf { scope == WorldBookScope.CHAT }
         ) }
         val imported = result.book ?: run {
-            _uiState.update { it.copy(statusMessage = "世界书导入失败：${result.error ?: "格式不正确"}") }
+            showStatus("世界书导入失败：${result.error ?: "格式不正确"}")
             return false
         }
         if (commitId == null) {
@@ -8051,7 +8072,7 @@ class MainViewModel @JvmOverloads constructor(
         importOwner: ContentImportOwner? = null
     ) {
         if (_uiState.value.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入世界书") }
+            showStatus("请先停止当前生成，再导入世界书")
             return
         }
         val owner = importOwner ?: captureContentImportOwner()
@@ -8063,7 +8084,7 @@ class MainViewModel @JvmOverloads constructor(
             } }
             result.onSuccess { text -> importWorldBookOwned(text, scope, owner) }
                 .onFailure { error ->
-                    _uiState.update { it.copy(statusMessage = "世界书导入失败：${error.message ?: "无法读取文件"}") }
+                    showStatus("世界书导入失败：${error.message ?: "无法读取文件"}")
                 }
         }
     }
@@ -8091,7 +8112,7 @@ class MainViewModel @JvmOverloads constructor(
     fun createKnowledgeBase(name: String, description: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
             val created = runCatching { knowledgeBaseStore.create(name, description) }.getOrElse { error ->
-                _uiState.update { it.copy(statusMessage = "知识库创建失败：${error.message ?: "名称无效"}") }
+                showStatus("知识库创建失败：${error.message ?: "名称无效"}")
                 return@launch
             }
             _uiState.update { state ->
@@ -8111,16 +8132,16 @@ class MainViewModel @JvmOverloads constructor(
         importOwner: ContentImportOwner? = null
     ) {
         if (_uiState.value.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再导入知识库文件") }
+            showStatus("请先停止当前生成，再导入知识库文件")
             return
         }
         if (knowledgeBaseId in _uiState.value.knowledgeBaseImportingIds) {
-            _uiState.update { it.copy(statusMessage = "该知识库正在导入文件，请稍候") }
+            showStatus("该知识库正在导入文件，请稍候")
             return
         }
         val known = _uiState.value.knowledgeBases.any { it.id == knowledgeBaseId }
         if (!known) {
-            _uiState.update { it.copy(statusMessage = "未找到要导入的知识库") }
+            showStatus("未找到要导入的知识库")
             return
         }
         val owner = importOwner ?: captureContentImportOwner()
@@ -8142,7 +8163,7 @@ class MainViewModel @JvmOverloads constructor(
                     knowledgeDocumentPreview(text, name, knowledgeBaseId, uriString, owner)
                 }.getOrElse { error ->
                     if (error is CancellationException) throw error
-                    _uiState.update { it.copy(statusMessage = "知识库导入失败：${error.message ?: "无法读取文件"}") }
+                    showStatus("知识库导入失败：${error.message ?: "无法读取文件"}")
                     return@launch
                 }
                 stageContentImportPreview(preview)
@@ -8237,7 +8258,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                 }
                 .onFailure { error ->
-                    _uiState.update { it.copy(statusMessage = "知识库删除失败：${error.message ?: "请重试"}") }
+                    showStatus("知识库删除失败：${error.message ?: "请重试"}")
                 }
         }
     }
@@ -8245,7 +8266,7 @@ class MainViewModel @JvmOverloads constructor(
     fun updateReasoningMode(mode: ReasoningMode) {
         val state = _uiState.value
         if (state.selectedChatBackend == ChatBackend.CLOUD) {
-            _uiState.update { it.copy(statusMessage = CLOUD_REASONING_LOCKED_MESSAGE) }
+            showStatus(CLOUD_REASONING_LOCKED_MESSAGE)
             return
         }
         val updatedParams = state.params.copy(
@@ -8265,7 +8286,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun showCloudReasoningModeLocked() {
-        _uiState.update { it.copy(statusMessage = CLOUD_REASONING_LOCKED_MESSAGE) }
+        showStatus(CLOUD_REASONING_LOCKED_MESSAGE)
     }
 
     fun updateCloudApiEnabled(enabled: Boolean) {
@@ -8488,7 +8509,7 @@ class MainViewModel @JvmOverloads constructor(
     fun saveCloudChatModel() {
         val config = _uiState.value.cloudApiConfig.normalized()
         if (!config.configured) {
-            _uiState.update { it.copy(statusMessage = "请先填写对话推理模型的 Base URL、模型名和必要的 API Key。") }
+            showStatus("请先填写对话推理模型的 Base URL、模型名和必要的 API Key。")
             return
         }
         val editing = _uiState.value.cloudModels.firstOrNull {
@@ -8569,7 +8590,7 @@ class MainViewModel @JvmOverloads constructor(
     fun saveCloudImageModel() {
         val config = _uiState.value.cloudApiConfig.normalized()
         if (!config.imageConfigured) {
-            _uiState.update { it.copy(statusMessage = "请先选择支持生图的协议，并填写生图模型、Base URL 和必要的 API Key。") }
+            showStatus("请先选择支持生图的协议，并填写生图模型、Base URL 和必要的 API Key。")
             return
         }
         val displayName = config.displayName.trim().ifBlank { "${config.providerName} · ${config.imageModel}" }
@@ -8635,7 +8656,7 @@ class MainViewModel @JvmOverloads constructor(
     fun testCloudApiConfig() {
         val config = _uiState.value.cloudApiConfig.normalized()
         if (!config.configured) {
-            _uiState.update { it.copy(statusMessage = "请先启用云端 API，并填写 Base URL、API Key 和对话推理模型。") }
+            showStatus("请先启用云端 API，并填写 Base URL、API Key 和对话推理模型。")
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -8666,7 +8687,7 @@ class MainViewModel @JvmOverloads constructor(
         invalidatePendingChatImagePreparation()
         val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.IMAGE }
         if (model == null) {
-            _uiState.update { it.copy(statusMessage = "未找到图像生成模型") }
+            showStatus("未找到图像生成模型")
             return
         }
         cloudApiStore.saveSelectedCloudImageModelId(model.id)
@@ -8685,7 +8706,7 @@ class MainViewModel @JvmOverloads constructor(
         val current = _uiState.value
         val removed = current.cloudModels.firstOrNull { it.id == modelId }
         if (removed == null) {
-            _uiState.update { it.copy(statusMessage = "未找到要删除的云端模型") }
+            showStatus("未找到要删除的云端模型")
             return
         }
         val remaining = current.cloudModels.filterNot { it.id == modelId }
@@ -8829,7 +8850,7 @@ class MainViewModel @JvmOverloads constructor(
             try { operation() }
             catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
-                _uiState.update { it.copy(statusMessage = "导入未完成：${error.message}。请在本地模型页重试或重新选择源文件。") }
+                showStatus("导入未完成：${error.message}。请在本地模型页重试或重新选择源文件。")
             }
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -8899,7 +8920,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) {
         recommendedDownloadBlockReason(model)?.let { reason ->
-            _uiState.update { it.copy(statusMessage = reason) }
+            showStatus(reason)
             return
         }
         viewModelScope.launch(Dispatchers.IO) {
@@ -9079,7 +9100,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
             require(resumed > 0) { "下载任务仍在运行，或没有可恢复任务。" }
-            _uiState.update { it.copy(statusMessage = "已继续下载，保留的临时文件将尝试断点续传。") }
+            showStatus("已继续下载，保留的临时文件将尝试断点续传。")
         }
     }
 
@@ -10258,7 +10279,7 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
         if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "请先确认、取消或等待上一张角色请求的图片完成。") }
+            showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
             return
         }
         val preparedInput = state.prepareChatInput()
@@ -10304,11 +10325,11 @@ class MainViewModel @JvmOverloads constructor(
     ) {
         if (rejectWhileConversationMutationInProgress()) return
         if (!state.canWriteToActiveAssistantSession()) {
-            _uiState.update { it.copy(statusMessage = "此对话的角色归属不明确或角色已删除，请在历史中查看并手动分支。") }
+            showStatus("此对话的角色归属不明确或角色已删除，请在历史中查看并手动分支。")
             return
         }
         if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "请先确认、取消或等待上一张角色请求的图片完成。") }
+            showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
             return
         }
         if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
@@ -10326,7 +10347,7 @@ class MainViewModel @JvmOverloads constructor(
                     else -> null
                 }
                 if (unavailable != null) {
-                    _uiState.update { it.copy(statusMessage = unavailable) }
+                    showStatus(unavailable)
                     return
                 }
             } else if (!localVisionRunnerAvailable()) {
@@ -10347,7 +10368,7 @@ class MainViewModel @JvmOverloads constructor(
             }
             val imageIntent = parseExplicitChatImageIntent(preparedInput.text)
             if (imageIntent == null) {
-                _uiState.update { it.copy(statusMessage = "请在 /image 后输入图片描述，再发送。") }
+                showStatus("请在 /image 后输入图片描述，再发送。")
                 return
             }
             sendChatImageRequestWithPromptBridge(
@@ -10595,7 +10616,7 @@ class MainViewModel @JvmOverloads constructor(
         val pending = pendingChatImageAction?.takeIf { it.id == id } ?: return
         if (!pending.stillOwned()) {
             invalidatePendingChatImagePreparation()
-            _uiState.update { it.copy(statusMessage = "会话、模型或原始草稿已变化，请重新发送。") }
+            showStatus("会话、模型或原始草稿已变化，请重新发送。")
             return
         }
         val text = editedText.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES).text
@@ -10626,7 +10647,7 @@ class MainViewModel @JvmOverloads constructor(
                         allowCloudTranslationFallback = true
                     )
                 } else {
-                    _uiState.update { it.copy(statusMessage = "已取消云端整理，原始描述仍在输入框。") }
+                    showStatus("已取消云端整理，原始描述仍在输入框。")
                 }
             }
         }
@@ -10774,20 +10795,20 @@ class MainViewModel @JvmOverloads constructor(
     fun cancelChatImageTranslationDraft(id: String) {
         if (pendingImageTranslation?.id != id) return
         invalidatePendingChatImagePreparation()
-        _uiState.update { it.copy(statusMessage = "译文草稿已取消，原文已保留。") }
+        showStatus("译文草稿已取消，原文已保留。")
     }
 
     fun confirmChatImageTranslationDraft(id: String, positive: String, negative: String?) {
         val pending = pendingImageTranslation?.takeIf { it.id == id } ?: return
         if (!pending.stillOwned()) {
             invalidatePendingChatImagePreparation()
-            _uiState.update { it.copy(statusMessage = "会话或模型已变化，请重新整理图片描述。") }
+            showStatus("会话或模型已变化，请重新整理图片描述。")
             return
         }
         val currentOwner = _uiState.value
         if (currentOwner.input != pending.visibleUserText) {
             invalidatePendingChatImagePreparation()
-            _uiState.update { it.copy(statusMessage = "原始描述已修改，请重新整理图片提示词。") }
+            showStatus("原始描述已修改，请重新整理图片提示词。")
             return
         }
         if (currentOwner.isGenerating) return
@@ -10814,7 +10835,7 @@ class MainViewModel @JvmOverloads constructor(
                 envelope = pending.handoff.envelope.copy(positive = positive, negative = negative)
             )
         }.getOrElse { error ->
-            _uiState.update { it.copy(statusMessage = error.message ?: "译文草稿无效。") }
+            showStatus(error.message ?: "译文草稿无效。")
             return
         }
         pendingImageTranslation = null
@@ -10836,7 +10857,7 @@ class MainViewModel @JvmOverloads constructor(
         invalidatePendingChatImagePreparation()
         if (rejectWhileConversationMutationInProgress()) return
         if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "请先处理上一张角色请求的图片，再开始新的聊天生图。") }
+            showStatus("请先处理上一张角色请求的图片，再开始新的聊天生图。")
             return
         }
         if (state.isGenerating) {
@@ -10856,7 +10877,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         val prompt = preparedInput.text.trim()
         if (prompt.isBlank()) {
-            _uiState.update { it.copy(statusMessage = "先写下图片描述，再点击生成图片。") }
+            showStatus("先写下图片描述，再点击生成图片。")
             return
         }
         val imagePrompt = parseExplicitChatImageIntent(prompt)?.sourceText ?: prompt
@@ -10886,7 +10907,7 @@ class MainViewModel @JvmOverloads constructor(
         val original = prompt.trim()
         val bridgeContextState = _uiState.value
         if (!bridgeContextState.canWriteToActiveAssistantSession()) {
-            _uiState.update { it.copy(statusMessage = "此会话仅供查看，请先创建角色分支。") }
+            showStatus("此会话仅供查看，请先创建角色分支。")
             return
         }
         val initialImageOptions = runCatching {
@@ -11181,7 +11202,7 @@ class MainViewModel @JvmOverloads constructor(
                     currentCoroutineContext().ensureActive()
                     if (!preparationStillOwned()) return@launch
                     if (_uiState.value.isGenerating) {
-                        _uiState.update { it.copy(statusMessage = "当前对话已开始生成，图片请求未发送。") }
+                        showStatus("当前对话已开始生成，图片请求未发送。")
                     } else {
                         val translatedNegative = if (originalNegativePrompt.isNullOrBlank()) {
                             null
@@ -11360,7 +11381,7 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         val permission = chatImageToolPermissionUiState()
         if (!permission.available) {
-            _uiState.update { it.copy(statusMessage = permission.unavailableReason) }
+            showStatus(permission.unavailableReason)
             return
         }
         val sessionId = state.activeChatSessionId
@@ -11425,16 +11446,16 @@ class MainViewModel @JvmOverloads constructor(
     ) {
         val initialState = _uiState.value
         if (!initialState.canWriteToActiveAssistantSession()) {
-            _uiState.update { it.copy(statusMessage = "此会话仅供查看，请先创建角色分支。") }
+            showStatus("此会话仅供查看，请先创建角色分支。")
             return
         }
         if (initialState.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "当前聊天仍在生成，请等本轮结束后再发送图片请求。") }
+            showStatus("当前聊天仍在生成，请等本轮结束后再发送图片请求。")
             return
         }
         if (rejectWhileConversationMutationInProgress()) return
         chatImageSubmissionBlockMessage(initialState)?.let { message ->
-            _uiState.update { it.copy(statusMessage = message) }
+            showStatus(message)
             return
         }
 
@@ -12016,7 +12037,7 @@ class MainViewModel @JvmOverloads constructor(
             )
             val state = _uiState.value
             if (state.activeChatSessionId != pending.chatSessionId) {
-                _uiState.update { it.copy(statusMessage = "图片任务已结束；请回到原对话查看结果并继续聊天。") }
+                showStatus("图片任务已结束；请回到原对话查看结果并继续聊天。")
                 return
             }
             val cloudModelStillAvailable = state.cloudModels.any {
@@ -12248,7 +12269,7 @@ class MainViewModel @JvmOverloads constructor(
         } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
             ?.let { message -> state.activeChatSessionId?.let { it to message } }
         if (owner == null) {
-            _uiState.update { it.copy(statusMessage = "找不到这条图片请求，可能已从聊天记录删除。") }
+            showStatus("找不到这条图片请求，可能已从聊天记录删除。")
             return
         }
         val (sessionId, message) = owner
@@ -12398,7 +12419,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         val jobId = request.currentJobId
         if (jobId.isNullOrBlank()) {
-            _uiState.update { it.copy(statusMessage = "找不到这条图片任务的执行编号，请刷新聊天后重试。") }
+            showStatus("找不到这条图片任务的执行编号，请刷新聊天后重试。")
             return
         }
         cancelImageGenerationForJob(jobId)
@@ -12737,13 +12758,13 @@ class MainViewModel @JvmOverloads constructor(
         if (rejectWhileConversationMutationInProgress()) return
         if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再删除消息") }
+            showStatus("请先停止当前生成，再删除消息")
             return
         }
         if (index !in state.messages.indices) return
         val removedRequest = state.messages[index].generatedImageRequest
         if (removedRequest?.let(::isChatImageRequestActive) == true) {
-            _uiState.update { it.copy(statusMessage = "这条消息仍关联运行中的图片任务，请等任务结束后再删除。") }
+            showStatus("这条消息仍关联运行中的图片任务，请等任务结束后再删除。")
             return
         }
         val rollback = state.conversationMutationRollbackState()
@@ -12784,12 +12805,12 @@ class MainViewModel @JvmOverloads constructor(
         if (rejectWhileConversationMutationInProgress()) return
         if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "\u8bf7\u5148\u505c\u6b62\u5f53\u524d\u751f\u6210\uff0c\u518d\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd") }
+            showStatus("\u8bf7\u5148\u505c\u6b62\u5f53\u524d\u751f\u6210\uff0c\u518d\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd")
             return
         }
         val prune = state.messages.pruneLastConversationTurn()
         if (prune == null) {
-            _uiState.update { it.copy(statusMessage = "\u6ca1\u6709\u53ef\u5220\u9664\u7684\u672c\u8f6e\u5bf9\u8bdd") }
+            showStatus("\u6ca1\u6709\u53ef\u5220\u9664\u7684\u672c\u8f6e\u5bf9\u8bdd")
             return
         }
         val lastUserIndex = state.messages.indexOfLast { it.role == Role.USER }
@@ -12800,7 +12821,7 @@ class MainViewModel @JvmOverloads constructor(
                 .mapNotNull { it.generatedImageRequest }
         } else emptyList()
         if (removedRequests.any(::isChatImageRequestActive)) {
-            _uiState.update { it.copy(statusMessage = "本轮仍关联运行中的图片任务，请等任务结束后再删除。") }
+            showStatus("本轮仍关联运行中的图片任务，请等任务结束后再删除。")
             return
         }
         val rollback = state.conversationMutationRollbackState()
@@ -13865,11 +13886,11 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return false
         if (hasActiveAssistantImageExecution(state.activeChatSessionId)) {
-            _uiState.update { it.copy(statusMessage = "角色图片请求尚未完成，请先确认、取消或等待任务结束。") }
+            showStatus("角色图片请求尚未完成，请先确认、取消或等待任务结束。")
             return false
         }
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再新建对话") }
+            showStatus("请先停止当前生成，再新建对话")
             return false
         }
         invalidatePendingChatImagePreparation()
@@ -13920,11 +13941,11 @@ class MainViewModel @JvmOverloads constructor(
         if (hasActiveAssistantImageExecution(state.activeChatSessionId) ||
             hasActiveAssistantImageExecution(sessionId)
         ) {
-            _uiState.update { it.copy(statusMessage = "角色图片请求尚未完成，请先确认、取消或等待任务结束。") }
+            showStatus("角色图片请求尚未完成，请先确认、取消或等待任务结束。")
             return
         }
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再切换对话") }
+            showStatus("请先停止当前生成，再切换对话")
             return
         }
         val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
@@ -14053,7 +14074,7 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再删除记录") }
+            showStatus("请先停止当前生成，再删除记录")
             return
         }
         val session = state.chatSessions.firstOrNull { it.id == sessionId } ?: return
@@ -14061,7 +14082,7 @@ class MainViewModel @JvmOverloads constructor(
                 job.spec?.chatSessionId == sessionId && !job.status.terminal
             }
         ) {
-            _uiState.update { it.copy(statusMessage = "该对话仍有图片任务正在执行，请等任务结束后再删除。") }
+            showStatus("该对话仍有图片任务正在执行，请等任务结束后再删除。")
             return
         }
         val rollback = state.conversationMutationRollbackState()
@@ -14105,7 +14126,7 @@ class MainViewModel @JvmOverloads constructor(
         if (rejectWhileConversationMutationInProgress()) return
         val cleanTitle = title.trim().take(48)
         if (cleanTitle.isBlank()) {
-            _uiState.update { it.copy(statusMessage = "标题不能为空") }
+            showStatus("标题不能为空")
             return
         }
         var updatedSessions: List<ChatSessionRecord> = emptyList()
@@ -14157,13 +14178,13 @@ class MainViewModel @JvmOverloads constructor(
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
         if (state.isGenerating) {
-            _uiState.update { it.copy(statusMessage = "请先停止当前生成，再清空历史") }
+            showStatus("请先停止当前生成，再清空历史")
             return
         }
         if (state.chatSessions.any { session -> hasActiveAssistantImageExecution(session.id) } ||
             state.imageJobs.any { job -> job.spec?.chatSessionId != null && !job.status.terminal }
         ) {
-            _uiState.update { it.copy(statusMessage = "仍有角色图片任务正在执行，请等任务结束后再清空历史。") }
+            showStatus("仍有角色图片任务正在执行，请等任务结束后再清空历史。")
             return
         }
         val rollback = state.conversationMutationRollbackState()
@@ -14629,12 +14650,12 @@ class MainViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val initialState = _uiState.value
             if (initialState.isGenerating) {
-                _uiState.update { it.copy(statusMessage = "请先停止当前生成，再运行稳定性自检") }
+                showStatus("请先停止当前生成，再运行稳定性自检")
                 return@launch
             }
             val requestedModel = initialState.models.firstOrNull { it.id == initialState.loadedModelId }
             if (requestedModel == null) {
-                _uiState.update { it.copy(statusMessage = "请先加载一个本地推理模型，再运行稳定性自检") }
+                showStatus("请先加载一个本地推理模型，再运行稳定性自检")
                 return@launch
             }
             busy("正在运行稳定性自检...")
@@ -14801,7 +14822,7 @@ class MainViewModel @JvmOverloads constructor(
     fun applyPendingAgentProfile() {
         val identity = activeRuntimeIdentity ?: return
         if (adaptiveTuningJob?.isActive == true) {
-            _uiState.update { it.copy(statusMessage = "运行时正在执行其他调优生命周期操作。") }
+            showStatus("运行时正在执行其他调优生命周期操作。")
             return
         }
         adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
@@ -14809,7 +14830,7 @@ class MainViewModel @JvmOverloads constructor(
                 val pending = runCatching { runtimeProfileStore.pendingTransaction(identity.identityHash) }
                     .getOrNull()
                 if (pending == null) {
-                    _uiState.update { it.copy(statusMessage = "当前没有可应用的 pending profile。") }
+                    showStatus("当前没有可应用的 pending profile。")
                     return@launch
                 }
                 applyPendingRuntimeTransaction(pending)
@@ -14895,14 +14916,14 @@ class MainViewModel @JvmOverloads constructor(
         preferenceOverride: UserPreference? = null
     ): Boolean {
         if (adaptiveTuningJob?.isActive == true) {
-            _uiState.update { it.copy(statusMessage = "已有调优任务在运行。") }
+            showStatus("已有调优任务在运行。")
             return false
         }
         val identity = activeRuntimeIdentity
         val model = activeModelForRuntimeProfile
         val committed = engine.activeExecutionProfile()
         if (identity == null || model == null || committed == null) {
-            _uiState.update { it.copy(statusMessage = "请先通过正式模型页加载本地模型，再开始智能调参。") }
+            showStatus("请先通过正式模型页加载本地模型，再开始智能调参。")
             return false
         }
         require(precreatedJob == null || precreatedJob.identityKey == identity.identityHash) {
@@ -15594,7 +15615,7 @@ class MainViewModel @JvmOverloads constructor(
         val parentId = activeEntity.parentCommittedProfileId
             ?: current.pointers?.lastKnownGoodProfileId?.takeIf { it != activeEntity.profileId }
         if (parentId == null) {
-            _uiState.update { it.copy(statusMessage = "当前 profile 没有更早的稳定版本可回退。") }
+            showStatus("当前 profile 没有更早的稳定版本可回退。")
             return
         }
         val parentEntity = runtimeProfileStore.profile(parentId) ?: error("回退目标不存在")
@@ -18074,24 +18095,24 @@ class MainViewModel @JvmOverloads constructor(
         when (assistant.defaultModelMode.normalizedAssistantModelMode()) {
             ASSISTANT_MODEL_MODE_CLOUD -> {
                 if (modelId.isBlank()) {
-                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但该助手未绑定云端模型。") }
+                    showStatus("已切换助手：${assistant.name}，但该助手未绑定云端模型。")
                     return
                 }
                 val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
                 if (model == null) {
-                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但绑定的云端模型已不可用。") }
+                    showStatus("已切换助手：${assistant.name}，但绑定的云端模型已不可用。")
                     return
                 }
                 selectCloudChatModel(model.id)
             }
             ASSISTANT_MODEL_MODE_LOCAL -> {
                 if (modelId.isBlank()) {
-                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但该助手未绑定本地模型。") }
+                    showStatus("已切换助手：${assistant.name}，但该助手未绑定本地模型。")
                     return
                 }
                 val model = _uiState.value.models.firstOrNull { it.id == modelId }
                 if (model == null) {
-                    _uiState.update { it.copy(statusMessage = "已切换助手：${assistant.name}，但绑定的本地模型已不可用。") }
+                    showStatus("已切换助手：${assistant.name}，但绑定的本地模型已不可用。")
                     return
                 }
                 if (_uiState.value.selectedChatBackend != ChatBackend.LOCAL || _uiState.value.loadedModelId != model.id) {
