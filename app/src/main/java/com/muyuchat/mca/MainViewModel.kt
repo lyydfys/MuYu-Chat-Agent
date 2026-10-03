@@ -3048,128 +3048,56 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The ViewModel side of [LocalImageUpscalerPort]. The lifecycle lock stays here and is only ever
+     * entered through [withUpscaleLifecycleLock].
+     */
+    private val localImageUpscalerPort: LocalImageUpscalerPort =
+        object : LocalImageUpscalerPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val upscalerStore: LocalImageUpscalerStore
+                get() = this@MainViewModel.localImageUpscalerStore
+
+            override fun persistSelectedUpscalerId(id: String?): Boolean =
+                this@MainViewModel.imageUpscalerPreferences.edit()
+                    .putString(IMAGE_UPSCALER_SELECTED_ID, id)
+                    .commit()
+
+            override fun <T> withUpscaleLifecycleLock(block: (upscaleRunning: Boolean) -> T): T =
+                synchronized(this@MainViewModel.localImageUpscaleLifecycleLock) {
+                    block(this@MainViewModel.activeImageUpscaleJobId != null)
+                }
+        }
+
+    /** Delegates to [importLocalImageUpscalerModel]. */
     fun importLocalImageUpscaler(uriString: String) {
-        val uri = runCatching { Uri.parse(uriString.trim()) }.getOrNull()
-        if (uri == null || !uri.scheme.equals("content", ignoreCase = true)) {
-            _uiState.update {
-                it.copy(localImageUpscalerMessage = "请选择可读取的 ESRGAN 模型文档。")
-            }
-            return
-        }
-        if (_uiState.value.localImageUpscalerImporting) return
-        _uiState.update {
-            it.copy(
-                localImageUpscalerImporting = true,
-                localImageUpscalerMessage = "正在导入放大模型…"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { localImageUpscalerStore.import(uri) }
-                .onSuccess { imported ->
-                    val records = localImageUpscalerStore.load()
-                    val selectedId = imported.id.takeIf { id -> records.any { it.id == id } }
-                        ?: records.firstOrNull()?.id
-                    val selectionSaved = imageUpscalerPreferences.edit()
-                        .putString(IMAGE_UPSCALER_SELECTED_ID, selectedId)
-                        .commit()
-                    if (!selectionSaved) {
-                        _uiState.update {
-                            it.copy(
-                                localImageUpscalers = records,
-                                localImageUpscalerImporting = false,
-                                localImageUpscalerMessage = "放大模型已导入，但所选模型未能持久化。"
-                            )
-                        }
-                        return@onSuccess
-                    }
-                    _uiState.update {
-                        it.copy(
-                            localImageUpscalers = records,
-                            selectedLocalImageUpscalerId = selectedId,
-                            localImageUpscalerImporting = false,
-                            localImageUpscalerMessage = "已导入并选择放大模型：${imported.name}"
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    _uiState.update {
-                        it.copy(
-                            localImageUpscalerImporting = false,
-                            localImageUpscalerMessage =
-                                "放大模型导入失败：${error.message ?: "文件无效"}"
-                        )
-                    }
-                }
-        }
+        importLocalImageUpscalerModel(
+            port = localImageUpscalerPort,
+            scope = viewModelScope,
+            uriString = uriString
+        )
     }
 
+    /** Delegates to [selectLocalImageUpscalerModel]. */
     fun selectLocalImageUpscaler(id: String) {
-        val upscalerId = id.trim()
-        val record = _uiState.value.localImageUpscalers.firstOrNull { it.id == upscalerId }
-        if (record == null) {
-            _uiState.update {
-                it.copy(localImageUpscalerMessage = "所选放大模型已不存在，请重新选择。")
-            }
-            return
-        }
-        val selectionSaved = imageUpscalerPreferences.edit()
-            .putString(IMAGE_UPSCALER_SELECTED_ID, record.id)
-            .commit()
-        if (!selectionSaved) {
-            _uiState.update {
-                it.copy(localImageUpscalerMessage = "所选放大模型未能持久化，请重试。")
-            }
-            return
-        }
-        _uiState.update {
-            it.copy(
-                selectedLocalImageUpscalerId = record.id,
-                localImageUpscalerMessage = "已选择放大模型：${record.name}"
-            )
-        }
+        selectLocalImageUpscalerModel(port = localImageUpscalerPort, id = id)
     }
 
+    /** Delegates to [deleteLocalImageUpscalerModel]. */
     fun deleteLocalImageUpscaler(id: String) {
-        val upscalerId = id.trim()
-        if (upscalerId.isEmpty()) return
-        _uiState.update { it.copy(localImageUpscalerDeletingId = upscalerId) }
-        viewModelScope.launch(Dispatchers.IO) {
-            val message = synchronized(localImageUpscaleLifecycleLock) {
-                if (activeImageUpscaleJobId != null &&
-                    _uiState.value.activeLocalImageUpscalerId == upscalerId
-                ) {
-                    "该放大模型正被当前任务使用，任务结束后才能删除。"
-                } else {
-                    val record = localImageUpscalerStore.load().firstOrNull { it.id == upscalerId }
-                    when {
-                        record == null -> "放大模型已不存在。"
-                        !localImageUpscalerStore.delete(upscalerId) ->
-                            "放大模型删除失败，索引和文件均已保留。"
-                        else -> "已删除放大模型：${record.name}"
-                    }
-                }
-            }
-            val records = localImageUpscalerStore.load()
-            val previousSelectedId = _uiState.value.selectedLocalImageUpscalerId
-            val selectedId = previousSelectedId?.takeIf { id -> records.any { it.id == id } }
-                ?: records.firstOrNull()?.id
-            val selectionSaved = imageUpscalerPreferences.edit()
-                .putString(IMAGE_UPSCALER_SELECTED_ID, selectedId)
-                .commit()
-            _uiState.update {
-                it.copy(
-                    localImageUpscalers = records,
-                    selectedLocalImageUpscalerId = selectedId,
-                    localImageUpscalerDeletingId = null,
-                    localImageUpscalerMessage = if (selectionSaved) {
-                        message
-                    } else {
-                        "$message；后续选择未能持久化。"
-                    }
-                )
-            }
-        }
+        deleteLocalImageUpscalerModel(
+            port = localImageUpscalerPort,
+            scope = viewModelScope,
+            id = id
+        )
     }
+
+
 
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
         if (targetScale !in setOf(2, 3, 4)) {

@@ -77,7 +77,13 @@ class ImageUpscaleProductClosureTest {
             imageAssetFiles,
             "internal suspend fun copyImageAssetStreamAtomically("
         )
-        val deleteUpscaler = functionBody(viewModel, "fun deleteLocalImageUpscaler(")
+        // The delete-upscaler body moved to LocalImageUpscalerOperations.kt during the upscaler
+        // extraction; the ViewModel keeps a forwarding call with the original name. The assertion
+        // below is unchanged -- only the file and signature this section is read from.
+        val deleteUpscaler = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageUpscalerOperations.kt"),
+            "internal fun deleteLocalImageUpscalerModel("
+        )
         val publish = functionBody(viewModel, "private suspend fun createUpscaledImageAsset(")
         val cloudPublish = functionBody(viewModel, "private suspend fun createCloudGeneratedImageAssets(")
         val localPublish = functionBody(
