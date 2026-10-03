@@ -11768,135 +11768,92 @@ class MainViewModel @JvmOverloads constructor(
         continueAssistantImageToolTurn(requestId, output)
     }
 
-    private fun toolResultJson(status: String, message: String): String = JSONObject()
-        .put("status", status)
-        .put("message", message)
-        .toString()
+    /**
+     * The ViewModel side of [ChatImageRequestApprovalPort]: one route per member, no logic of its
+     * own. The three decisions moved to [ChatImageRequestApprovalOperations], which is now the only
+     * place an approval, a rejection or a retry is decided.
+     *
+     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
+     * their name with the ViewModel member they forward to, and an unqualified call would recurse.
+     */
+    private val chatImageRequestApprovalPort: ChatImageRequestApprovalPort =
+        object : ChatImageRequestApprovalPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val imageGenerationJob: Job?
+                get() = this@MainViewModel.imageGenerationJob
+
+            override fun showStatus(message: String?) {
+                this@MainViewModel.showStatus(message)
+            }
+
+            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
+                with(this@MainViewModel) { state.canWriteToActiveAssistantSession() }
+
+            override fun findChatGeneratedImageRequest(
+                requestId: String
+            ): Pair<String, ChatGeneratedImageRequest>? =
+                this@MainViewModel.findChatGeneratedImageRequest(requestId)
+
+            override fun buildChatImageRetrySnapshot(
+                request: ChatGeneratedImageRequest,
+                chatSessionId: String
+            ): ImageGenerationJobSpec? =
+                this@MainViewModel.buildChatImageRetrySnapshot(request, chatSessionId)
+
+            override fun enqueueImageGeneration(
+                prompt: String,
+                inputDraft: LocalImageInputDraft,
+                options: LocalImageGenerationOptions,
+                jobSnapshot: ImageGenerationJobSpec?,
+                requestedJobId: String?,
+                requestedChatSessionId: String?,
+                requestedChatMessageId: String?
+            ): Boolean = this@MainViewModel.enqueueImageGeneration(
+                prompt = prompt,
+                inputDraft = inputDraft,
+                options = options,
+                jobSnapshot = jobSnapshot,
+                requestedJobId = requestedJobId,
+                requestedChatSessionId = requestedChatSessionId,
+                requestedChatMessageId = requestedChatMessageId
+            )
+
+            override fun updateChatGeneratedImageRequest(
+                chatSessionId: String,
+                requestId: String,
+                request: ChatGeneratedImageRequest
+            ) {
+                this@MainViewModel.updateChatGeneratedImageRequest(chatSessionId, requestId, request)
+            }
+
+            override fun updateChatImageRequestFromJob(
+                chatSessionId: String,
+                requestId: String,
+                jobId: String
+            ) {
+                this@MainViewModel.updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+            }
+
+            override fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
+                this@MainViewModel.continueAssistantImageToolTurn(requestId, outputJson)
+            }
+        }
 
     fun retryChatImageGeneration(requestId: String) {
-        val state = _uiState.value
-        if (state.isGenerating || imageGenerationJob?.isActive == true) {
-            _uiState.update {
-                it.copy(statusMessage = "当前有生成任务正在运行，完成或停止后再重试图片。")
-            }
-            return
-        }
-        val owner = state.chatSessions.firstNotNullOfOrNull { session ->
-            session.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
-                ?.let { session.id to it }
-        } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
-            ?.let { message -> state.activeChatSessionId?.let { it to message } }
-        if (owner == null) {
-            showStatus("找不到这条图片请求，可能已从聊天记录删除。")
-            return
-        }
-        val (sessionId, message) = owner
-        if (state.activeChatSessionId != sessionId || !state.canWriteToActiveAssistantSession()) return
-        val previous = message.generatedImageRequest ?: return
-        val jobId = "ui-img-${UUID.randomUUID()}"
-        val snapshot = buildChatImageRetrySnapshot(previous, sessionId)
-        if (snapshot == null) {
-            _uiState.update {
-                it.copy(statusMessage = "原生图模型或参数已不可用；请重新选择原模型，或明确切换模型后再重试。")
-            }
-            return
-        }
-        val queuedRequest = previous.copy(
-            status = ChatGeneratedImageStatus.QUEUED,
-            message = "正在重新排队生成图片。",
-            imageAssetIds = emptyList(),
-            currentJobId = jobId,
-            toolOutputJson = null,
-            toolContinuationStatus = ChatImageToolContinuationStatus.NOT_STARTED,
-            toolContinuationStarted = false
-        )
-        updateChatGeneratedImageRequest(sessionId, requestId, queuedRequest)
-        val admitted = enqueueImageGeneration(
-            prompt = previous.prompt,
-            inputDraft = snapshot.inputDraft,
-            options = snapshot.options,
-            jobSnapshot = snapshot,
-            requestedJobId = jobId,
-            requestedChatSessionId = sessionId,
-            requestedChatMessageId = requestId
-        )
-        if (!admitted) {
-            updateChatGeneratedImageRequest(
-                chatSessionId = sessionId,
-                requestId = requestId,
-                request = queuedRequest.copy(
-                    status = ChatGeneratedImageStatus.FAILED,
-                    message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
-                )
-            )
-        } else {
-            updateChatImageRequestFromJob(sessionId, requestId, jobId)
-        }
+        retryChatImageGeneration(port = chatImageRequestApprovalPort, requestId = requestId)
     }
 
     fun approveChatImageRequest(requestId: String) {
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (chatSessionId, request) = owner
-        val state = _uiState.value
-        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
-        if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
-        val snapshot = buildChatImageRetrySnapshot(request, chatSessionId)
-        if (snapshot == null) {
-            val failed = request.copy(
-                status = ChatGeneratedImageStatus.FAILED,
-                message = "原生图模型已不可用，请恢复该模型后重试；未切换到其他模型。"
-            )
-            updateChatGeneratedImageRequest(chatSessionId, requestId, failed)
-            if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
-                continueAssistantImageToolTurn(requestId, toolResultJson("failed", failed.message))
-            }
-            return
-        }
-        val jobId = "ui-img-${UUID.randomUUID()}"
-        val queued = request.copy(
-            status = ChatGeneratedImageStatus.QUEUED,
-            message = "已确认，正在准备图片生成。",
-            currentJobId = jobId,
-            imageAssetIds = emptyList()
-        )
-        updateChatGeneratedImageRequest(chatSessionId, requestId, queued)
-        val admitted = enqueueImageGeneration(
-            prompt = request.prompt,
-            inputDraft = snapshot.inputDraft,
-            options = snapshot.options,
-            jobSnapshot = snapshot,
-            requestedJobId = jobId,
-            requestedChatSessionId = chatSessionId,
-            requestedChatMessageId = requestId
-        )
-        if (!admitted) {
-            val failed = queued.copy(
-                status = ChatGeneratedImageStatus.FAILED,
-                message = _uiState.value.statusMessage ?: "无法开始图片生成，请检查已选模型。"
-            )
-            updateChatGeneratedImageRequest(chatSessionId, requestId, failed)
-            if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
-                continueAssistantImageToolTurn(requestId, toolResultJson("failed", failed.message))
-            }
-        } else {
-            updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
-        }
+        approveChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
     }
 
     fun rejectChatImageRequest(requestId: String) {
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (chatSessionId, request) = owner
-        val state = _uiState.value
-        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
-        if (request.status != ChatGeneratedImageStatus.AWAITING_APPROVAL) return
-        val rejected = request.copy(
-            status = ChatGeneratedImageStatus.CANCELLED,
-            message = "你拒绝了这次生图请求，未生成图片。"
-        )
-        updateChatGeneratedImageRequest(chatSessionId, requestId, rejected)
-        if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL) {
-            continueAssistantImageToolTurn(requestId, toolResultJson("denied", rejected.message))
-        }
+        rejectChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
     }
 
     /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
