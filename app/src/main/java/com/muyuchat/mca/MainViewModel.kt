@@ -241,6 +241,8 @@ import com.muyuchat.mca.presentation.generateLocalApiImageOperations
 import kotlinx.coroutines.flow.StateFlow
 import com.muyuchat.mca.SelectChatSessionPort
 import com.muyuchat.mca.selectChatSession
+import com.muyuchat.mca.CandidateCanaryResultPort
+import com.muyuchat.mca.toCandidateCanaryResult
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -295,7 +297,11 @@ private data class LocalGenerationSmokeResult(
     val decodeTps: Double
 )
 
-private data class CandidateCanaryResult(
+/**
+ * Widened from `private` so the conversion that builds it can live in its own file; only the
+ * modifier changed. The type is still not part of any public surface.
+ */
+internal data class CandidateCanaryResult(
     val passed: Boolean,
     val output: String,
     val stats: RuntimeStats,
@@ -18381,145 +18387,33 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
+    /**
+     * The ViewModel side of [CandidateCanaryResultPort]: two members, no logic of its own. The
+     * conversion moved to [toCandidateCanaryResult], which is now the only place a probe result
+     * becomes a canary verdict.
+     *
+     * `this@MainViewModel.` is spelled out on purpose: the port member shares its name with the
+     * ViewModel member it forwards to.
+     */
+    private val candidateCanaryResultPort: CandidateCanaryResultPort =
+        object : CandidateCanaryResultPort {
+            override fun currentDeviceProfile(): DeviceProfile =
+                this@MainViewModel.currentDeviceProfile()
+
+            override fun optionalFiniteDouble(root: JSONObject, field: String): Double =
+                root.optionalFiniteDouble(field)
+        }
+
     private fun TuningProbeWorkerProtocol.Result.toCandidateCanaryResult(
         candidate: TuningExecutionProfile
-    ): CandidateCanaryResult {
-        val statsRoot = JSONObject(runtimeStatsJson)
-        val gpuAllocationObserved = statsRoot.optBoolean("gpuOffloadAllocationObserved", false)
-        val gpuExecutionObserved = statsRoot.optBoolean("gpuOffloadExecutionObserved", false)
-        val verifiedGpuExecution = statsRoot.optBoolean("gpuOffloadActive", false) &&
-            gpuAllocationObserved && gpuExecutionObserved
-        val executionEvidence = statsRoot.optJSONObject("executionEvidence")
-        val npuExecutionObserved = statsRoot.optBoolean("npuExecutionProven", false) ||
-            statsRoot.optBoolean("provesNpuExecution", false) ||
-            executionEvidence?.optBoolean("npuExecutionProven", false) == true ||
-            executionEvidence?.optBoolean("qnnGraphExecution", false) == true
-        val npuSupported = statsRoot.optJSONObject("backendCapabilities")
-            ?.takeIf { it.has("npuSupported") }
-            ?.optBoolean("npuSupported")
-        val stats = RuntimeStats(
-            loaded = statsRoot.optBoolean("loaded"),
-            backend = statsRoot.optString("backend")
-                .ifBlank { candidate.runtimeIdentity.runtime.backendId }
-                .let { backend ->
-                    if (!verifiedGpuExecution && backend == "llama.cpp-gpu") "llama.cpp-cpu" else backend
-                },
-            requestedBackend = statsRoot.optString("requestedBackend")
-                .ifBlank { statsRoot.optString("selectedBackend") }
-                .takeIf(String::isNotBlank),
-            actualBackend = statsRoot.optString("actualBackend")
-                .takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) },
-            backendExecutionObserved = executionEvidence?.optBoolean("available", false) == true ||
-                npuExecutionObserved,
-            backendExecutionEvidence = listOf(
-                executionEvidence?.optString("source"),
-                statsRoot.optString("executionEvidenceSource"),
-                statsRoot.optString("backendExecutionProof")
-            ).firstOrNull { it?.isNotBlank() == true },
-            npuExecutionObserved = npuExecutionObserved,
-            npuSupported = npuSupported,
-            loadMs = statsRoot.optLong("loadMs").coerceAtLeast(0L),
-            promptTokens = statsRoot.optInt("promptTokens").coerceAtLeast(0),
-            completionTokens = statsRoot.optInt("completionTokens").coerceAtLeast(0),
-            ttftMs = statsRoot.optLong("ttftMs").coerceAtLeast(0L),
-            prefillMs = statsRoot.optLong("prefillMs").coerceAtLeast(0L),
-            prefillTokens = statsRoot.optInt("prefillTokens", -1)
-                .takeIf { it >= 0 }
-                ?: 0,
-            prefillTps = statsRoot.optionalFiniteDouble("prefillTps"),
-            effectivePromptTps = statsRoot.optionalFiniteDouble("effectivePromptTps"),
-            decodeMs = statsRoot.optLong("decodeMs").coerceAtLeast(0L),
-            decodeTps = statsRoot.optionalFiniteDouble("decodeTps"),
-            e2eTps = statsRoot.optionalFiniteDouble("e2eTps"),
-            nativePssKb = statsRoot.optLong("nativePssKb").coerceAtLeast(0L),
-            processRssKb = statsRoot.optLong("processRssKb").coerceAtLeast(0L),
-            availMemKb = statsRoot.optLong("availMemKb").coerceAtLeast(0L),
-            totalMemKb = statsRoot.optLong("totalMemKb").coerceAtLeast(0L),
-            modelMemoryBudgetKb = statsRoot.optLong("modelMemoryBudgetKb").coerceAtLeast(0L),
-            nThreads = statsRoot.optInt("nThreads").coerceAtLeast(0),
-            nThreadsBatch = statsRoot.optInt("nThreadsBatch").coerceAtLeast(0),
-            nBatch = statsRoot.optInt("nBatch").coerceAtLeast(0),
-            nUbatch = statsRoot.optInt("nUbatch").coerceAtLeast(0),
-            nCtx = statsRoot.optInt("nCtx").coerceAtLeast(0),
-            maxAllTokens = statsRoot.optInt("maxAllTokens").coerceAtLeast(0),
-            maxNewTokens = statsRoot.optInt("maxNewTokens").coerceAtLeast(0),
-            gpuOffloadActive = verifiedGpuExecution,
-            gpuOffloadAllocationObserved = gpuAllocationObserved,
-            gpuOffloadExecutionObserved = gpuExecutionObserved,
-            gpuOffloadBytes = statsRoot.optLong("gpuOffloadBytes").coerceAtLeast(0L),
-            gpuOffloadLayers = statsRoot.optInt("gpuOffloadLayers"),
-            gpuOffloadLayersKnown = statsRoot.optBoolean("gpuOffloadLayersKnown", false),
-            gpuAutoFallbackApplied = statsRoot.optBoolean("gpuAutoFallbackApplied", false),
-            gpuAutoFallbackReason = statsRoot.optString("gpuAutoFallbackReason")
-                .takeIf(String::isNotBlank),
-            isLowMemory = statsRoot.optBoolean("isLowMemory") || lowMemoryTriggered,
-            lastError = statsRoot.optString("lastError").takeIf(String::isNotBlank)
-        )
-        val device = currentDeviceProfile()
-        val start = MeasurementPoint(
-            thermalStatus = device.thermalStatus,
-            batteryPercent = device.batteryPercent,
-            isCharging = device.isCharging,
-            availableMemoryBytes = startAvailableMemoryBytes,
-            pssBytes = startPssBytes,
-            rssBytes = startRssBytes,
-            lowMemoryTriggered = lowMemoryTriggered,
-            appInForeground = true
-        )
-        val end = start.copy(
-            timeMs = start.timeMs + elapsedMs.coerceAtLeast(0L),
-            availableMemoryBytes = endAvailableMemoryBytes,
-            pssBytes = endPssBytes,
-            rssBytes = endRssBytes,
-            lowMemoryTriggered = lowMemoryTriggered || stats.isLowMemory
-        )
-        val decodeTps = stats.decodeTps.takeIf { it.isFinite() && it >= 0.0 }
-            ?: stats.e2eTps.coerceAtLeast(0.0)
-        val measurement = MeasurementEnvelope(
-            start = start,
-            end = end,
-            samples = listOf(
-                PerformanceSample(
-                    ttftMs = stats.ttftMs,
-                    decodeTps = decodeTps,
-                    pssBytes = end.pssBytes,
-                    rssBytes = end.rssBytes,
-                    availableMemoryBytes = end.availableMemoryBytes
-                )
-            )
-        )
-        val expected = candidate.expectedSignatures()
-        val signatures = ParameterSignatureSnapshot(
-            desired = candidate.engineProfile.desiredSignature,
-            resolved = candidate.engineProfile.resolvedLoadSignature,
-            active = expected.activeLoaded,
-            committed = candidate.engineProfile.committedExecutionSignature,
-            override = RuntimeOverrideSignature.none(candidate.runtimeIdentity),
-            effective = expected.effectiveExecution
-        )
-        val verification = AuthorizedPendingSignatureVerification(
-            transactionId = transactionId,
-            profileId = profileId,
-            revision = candidate.revision,
-            signatures = signatures,
-            strictlyMatches = signatureMatched
-        )
-        val safetyPassed = !lowMemoryTriggered && SafetyEnvelope.forDevice(device).assess(measurement).passed
-        return CandidateCanaryResult(
-            passed = passed,
-            output = output,
-            stats = stats,
-            detail = detail,
-            measurement = measurement,
-            safetyPassed = safetyPassed,
-            signatureVerification = verification,
-            testedProfileId = profileId,
-            testedResolvedLoadSignature = resolvedLoadSignature,
-            testedCommittedExecutionSignature = committedExecutionSignature,
-            evidenceJson = evidenceJson
-        )
-    }
+    ): CandidateCanaryResult =
+        toCandidateCanaryResult(port = candidateCanaryResultPort, candidate = candidate)
 
+    /**
+     * Reads a tolerant double out of a JSON object: `0.0` when the field is absent, null, non-numeric
+     * or non-finite. Private to the ViewModel, which is why the conversion reaches it through
+     * [CandidateCanaryResultPort] rather than calling it directly.
+     */
     private fun JSONObject.optionalFiniteDouble(field: String): Double {
         if (!has(field) || isNull(field)) return 0.0
         return optDouble(field, 0.0).takeIf(Double::isFinite) ?: 0.0
