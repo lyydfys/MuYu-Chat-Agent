@@ -16854,6 +16854,76 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /**
+     * The ViewModel side of [CreateLocalGeneratedImageAssetPort]: one delegate per member, no logic
+     * of its own. The publication decision moved to
+     * [CreateLocalGeneratedImageAssetOperations.createLocalGeneratedImageAsset], which is now the
+     * only place a worker result becomes a published image asset.
+     *
+     * `this@MainViewModel.` is spelled out on every forwarding member on purpose: the port members
+     * share their names with the ViewModel members they forward to, so an unqualified call would
+     * recurse into the override instead of reaching the original implementation.
+     */
+    private val createLocalGeneratedImageAssetPort: CreateLocalGeneratedImageAssetPort =
+        object : CreateLocalGeneratedImageAssetPort {
+            /** The same field `cancelActiveImageGeneration` observes, so it stays the port's own property. */
+            override var activeLocalImageWorkerRequestId: String?
+                get() = this@MainViewModel.activeLocalImageWorkerRequestId
+                set(value) {
+                    this@MainViewModel.activeLocalImageWorkerRequestId = value
+                }
+
+            override val localImageWorkerClient: LocalGeneratedImageWorkerGateway =
+                object : LocalGeneratedImageWorkerGateway {
+                    override suspend fun generate(
+                        model: LocalImageModelRecord,
+                        prompt: String,
+                        options: LocalImageGenerationOptions,
+                        inputDraft: LocalImageInputDraft,
+                        requestId: String,
+                        batchLineage: ImageGenerationBatchLineage?,
+                        onProgress: (LocalImageProgress) -> Unit
+                    ): LocalImageResult = this@MainViewModel.localImageWorkerClient.generate(
+                        model = model,
+                        prompt = prompt,
+                        options = options,
+                        inputDraft = inputDraft,
+                        onProgress = onProgress,
+                        requestId = requestId,
+                        batchLineage = batchLineage
+                    )
+                }
+
+            override fun recordLocalImageExecutionOutcome(
+                model: LocalImageModelRecord,
+                failureMessage: String?
+            ) {
+                this@MainViewModel.recordLocalImageExecutionOutcome(model, failureMessage)
+            }
+
+            override fun executionWithQnnVerificationEvidence(
+                model: LocalImageModelRecord,
+                result: LocalImageResult,
+                options: LocalImageGenerationOptions,
+                requestId: String,
+                attemptId: String,
+                entryPoint: QnnImageEvidenceEntryPoint
+            ): String = this@MainViewModel.executionWithQnnVerificationEvidence(
+                model = model,
+                result = result,
+                options = options,
+                requestId = requestId,
+                attemptId = attemptId,
+                entryPoint = entryPoint
+            )
+
+            override val imageAssetWriteMutex: Mutex
+                get() = this@MainViewModel.imageAssetWriteMutex
+
+            override val imageAssetDirectory: File
+                get() = this@MainViewModel.imageAssetDirectory
+        }
+
     private suspend fun createLocalGeneratedImageAsset(
         requestId: String,
         prompt: String,
@@ -16865,116 +16935,20 @@ class MainViewModel @JvmOverloads constructor(
         batchLineage: ImageGenerationBatchLineage? = null,
         outputLineages: List<ImageGenerationBatchLineage>,
         onProgress: (LocalImageProgress) -> Unit = {}
-    ): List<ImageAssetRecord> {
-        val result = try {
-            activeLocalImageWorkerRequestId = requestId
-            try {
-                localImageWorkerClient.generate(
-                    model = model,
-                    prompt = prompt,
-                    options = options,
-                    inputDraft = inputDraft,
-                    onProgress = onProgress,
-                    requestId = requestId,
-                    batchLineage = batchLineage
-                )
-            } finally {
-                if (activeLocalImageWorkerRequestId == requestId) {
-                    activeLocalImageWorkerRequestId = null
-                }
-            }
-        } catch (error: Throwable) {
-            if (error !is CancellationException && error !is LocalImageWorkerCancelledException) {
-                recordLocalImageExecutionOutcome(model, error.message ?: "本地 native 生图执行失败。")
-            }
-            throw error
-        }
-        val effectiveBundleRoot = model.bundleRoot
-            ?.takeIf(String::isNotBlank)
-            ?.let(::File)
-            ?.takeIf(File::isDirectory)
-            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
-        val effectiveProfile = resolveLocalImageExecutionProfile(
+    ): List<ImageAssetRecord> =
+        CreateLocalGeneratedImageAssetOperations.createLocalGeneratedImageAsset(
+            port = createLocalGeneratedImageAssetPort,
+            requestId = requestId,
+            prompt = prompt,
             model = model,
-            options = options.normalizedForPromptExecutionProfile(model.runtime),
-            bundleRoot = effectiveBundleRoot
-        ).profile
-        val preparedPromptExecution = requireNotNull(generationMetadata.promptExecution) {
-            "Local image generation is missing prepared prompt execution evidence."
-        }
-        require(
-            prompt == preparedPromptExecution.effectivePrompt &&
-                options.negativePrompt == preparedPromptExecution.effectiveNegativePrompt
-        ) { "Local image worker inputs do not match prepared prompt execution evidence." }
-        val effectivePromptExecution = preparedPromptExecution
-            .bindToEffectiveExecutionProfile(effectiveProfile)
-        validateLocalImagePromptExecutionBinding(
-            promptExecution = effectivePromptExecution,
-            expectedProfile = effectiveProfile,
-            executionMetadataJson = result.executionMetadataJson
+            options = options,
+            inputDraft = inputDraft,
+            chatSessionId = chatSessionId,
+            generationMetadata = generationMetadata,
+            batchLineage = batchLineage,
+            outputLineages = outputLineages,
+            onProgress = onProgress
         )
-        recordLocalImageExecutionOutcome(model, failureMessage = null)
-        require(outputLineages.size == result.outputs.size) {
-            "Image batch lineage count does not match worker outputs."
-        }
-        val nativeGenerationMetadata = generationMetadata
-            .copy(promptExecution = effectivePromptExecution)
-            .withNativeExecution(executionWithQnnVerificationEvidence(
-                model = model,
-                result = result,
-                options = options,
-                requestId = batchLineage?.parentRequestId ?: requestId,
-                attemptId = requestId,
-                entryPoint = QnnImageEvidenceEntryPoint.MAIN_ACTIVITY
-            ))
-        val timestamp = System.currentTimeMillis()
-        val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
-        return imageAssetWriteMutex.withLock {
-            val writtenFiles = mutableListOf<File>()
-            try {
-                result.outputs.map { output ->
-                    val outputLineage = outputLineages[output.index]
-                    val actualSeed = requireNotNull(output.seed) {
-                        "Generated image ${output.index} is missing its actual seed."
-                    }
-                    require(actualSeed == outputLineage.seed.toLong()) {
-                        "Generated image ${output.index} seed does not match its batch lineage."
-                    }
-                    val generationMetadataJson = nativeGenerationMetadata
-                        .forBatchOutput(outputLineage)
-                        .toJsonString()
-                    val extension = imageExtensionForMime(output.mimeType)
-                    val suffix = if (result.outputs.size == 1) "" else "-${output.index.toString().padStart(3, '0')}"
-                    val outputFile = writeImageAssetBytesAtomically(
-                        directory = imageAssetDirectory,
-                        fileName = "local-image-$timestamp-$requestToken$suffix.$extension",
-                        bytes = output.bytes
-                    )
-                    writtenFiles += outputFile
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-                    require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                        "Generated image ${output.index} could not be decoded after publication."
-                    }
-                    ImageAssetRecord(
-                        id = UUID.randomUUID().toString(),
-                        name = "Local Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date(timestamp))}$suffix.$extension",
-                        uriString = Uri.fromFile(outputFile).toString(),
-                        source = "generated:${model.runtime.label}",
-                        prompt = generationMetadata.requestPrompt,
-                        sizeBytes = outputFile.length(),
-                        width = bounds.outWidth,
-                        height = bounds.outHeight,
-                        generationMetadataJson = generationMetadataJson,
-                        chatSessionId = chatSessionId
-                    )
-                }
-            } catch (error: Throwable) {
-                writtenFiles.forEach { file -> runCatching { file.delete() } }
-                throw error
-            }
-        }
-    }
 
     /**
      * The ViewModel side of [LocalApiImageGenerationPort]: one delegate per member, no logic of its

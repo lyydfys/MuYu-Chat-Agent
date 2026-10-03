@@ -267,12 +267,12 @@ class LocalImagePromptCancellationContractTest {
     fun `main activity validates prompt binding before publishing any image bytes`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val publish = functionBody(
-            source,
-            "private suspend fun createLocalGeneratedImageAsset("
+            localAssetSource(),
+            "suspend fun createLocalGeneratedImageAsset("
         )
         val validate = publish.indexOf("validateLocalImagePromptExecutionBinding(")
         val firstWrite = publish.indexOf("writeImageAssetBytesAtomically(")
-        val attachMetadata = publish.indexOf(".withNativeExecution(executionWithQnnVerificationEvidence(")
+        val attachMetadata = publish.indexOf(".withNativeExecution(port.executionWithQnnVerificationEvidence(")
 
         assertTrue(validate >= 0)
         assertTrue(attachMetadata > validate)
@@ -562,6 +562,11 @@ class LocalImagePromptCancellationContractTest {
      */
     private fun localApiSource(): String = sourceFile(
         "app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"
+    )
+
+    /** The publish half of the local image path, which now lives in its own file. */
+    private fun localAssetSource(): String = sourceFile(
+        "app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"
     )
 
     private fun localImageWorkerClientSource(): String = sourceFile("LocalImageWorkerClient.kt")

@@ -15,7 +15,13 @@ class LocalImageProductClosureTest {
     fun `UI request identity reaches coordinator and worker while API keeps its own identity`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val ui = functionBody(source, "private fun enqueueImageGeneration(")
-        val localAsset = functionBody(source, "private suspend fun createLocalGeneratedImageAsset(")
+        // The publish half moved to its own file. Reading it through `source` used to pass for the
+        // wrong reason: the wrapper left behind is an expression body, so the extractor walked past it
+        // into an unrelated declaration and the assertions below never saw the real code.
+        val localAsset = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"),
+            "suspend fun createLocalGeneratedImageAsset("
+        )
         val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(ui.contains("val jobId = requestedJobId ?: \"ui-img-\${UUID.randomUUID()}\""))
