@@ -6656,76 +6656,12 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun buildAndroidWebSearchNetworkChecks(): List<String> {
-        val app = getApplication<Application>()
-        val checks = mutableListOf<String>()
-        val connectivity = app.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
-        if (connectivity == null) {
-            return listOf("需检查：系统网络状态服务不可用，无法确认当前手机联网环境。")
-        }
-        when (connectivity.restrictBackgroundStatus) {
-            ConnectivityManager.RESTRICT_BACKGROUND_STATUS_ENABLED -> {
-                checks += "需检查：系统流量节省正在限制后台联网；请允许 MCA 使用网络后再测试。"
-            }
-            ConnectivityManager.RESTRICT_BACKGROUND_STATUS_WHITELISTED -> {
-                checks += "通过：系统流量节省未限制 MCA 联网。"
-            }
-        }
-        val activeNetwork = connectivity.activeNetwork
-        if (activeNetwork == null) {
-            checks += "需检查：手机当前没有活动网络，请先连接 Wi-Fi 或移动数据。"
-            checks += "需检查：如果系统浏览器可以联网，请检查系统设置或安全中心是否禁止 MCA 使用 WLAN/移动数据，并排查 VPN、私人 DNS、代理或省电策略。"
-            return checks
-        }
-        val capabilities = connectivity.getNetworkCapabilities(activeNetwork)
-        if (capabilities == null) {
-            checks += "需检查：无法读取当前网络能力，请检查系统网络权限或重新连接网络。"
-            return checks
-        }
-        val transports = buildList {
-            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) add("Wi-Fi")
-            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) add("移动数据")
-            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) add("以太网")
-            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) add("VPN")
-        }.ifEmpty { listOf("未知网络") }
-        checks += "通过：当前活动网络：${transports.joinToString(" / ")}。"
-        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-            checks += "通过：系统报告当前网络具备 Internet 能力。"
-        } else {
-            checks += "需检查：系统报告当前网络不具备 Internet 能力，搜索请求可能无法发出。"
-        }
-        if (capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-            checks += "通过：系统已验证当前网络可访问公网。"
-        } else {
-            checks += "需检查：系统尚未验证当前网络可访问公网，可能是未登录 Wi-Fi、DNS 异常、网络受限或代理/VPN 问题。"
-        }
-        if (!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) ||
-            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-        ) {
-            checks += "提示：当前网络可能经过 VPN；如果 DNS 失败，请优先检查 VPN 或代理规则。"
-        }
-        val proxyHost = listOfNotNull(
-            System.getProperty("http.proxyHost")?.takeIf { it.isNotBlank() },
-            System.getProperty("https.proxyHost")?.takeIf { it.isNotBlank() }
-        ).distinct()
-        if (proxyHost.isNotEmpty()) {
-            checks += "提示：检测到系统代理 ${proxyHost.joinToString(" / ")}；搜索接口会受代理可达性影响。"
-        }
-        runCatching {
-            val resolver = app.contentResolver
-            val privateDnsMode = Settings.Global.getString(resolver, "private_dns_mode").orEmpty()
-            val privateDnsHost = Settings.Global.getString(resolver, "private_dns_specifier").orEmpty()
-            if (privateDnsMode.isNotBlank() && privateDnsMode != "off") {
-                checks += buildString {
-                    append("提示：私人 DNS 模式为 ")
-                    append(privateDnsMode)
-                    if (privateDnsHost.isNotBlank()) append("（$privateDnsHost）")
-                    append("；如域名解析失败，请检查该 DNS 服务。")
-                }
-            }
-        }
-        return checks
-    }
+    /**
+     * Delegates to [androidWebSearchNetworkChecks]. It is a pure Android read, which is why it needed
+     * no port -- only the `Application` this class already held.
+     */
+    private fun buildAndroidWebSearchNetworkChecks(): List<String> =
+        androidWebSearchNetworkChecks(getApplication())
 
     private fun testWebSearchConfig(query: String, config: WebSearchConfig) {
         val cleanQuery = query.trim().ifBlank { "MCA 本地 AI" }
