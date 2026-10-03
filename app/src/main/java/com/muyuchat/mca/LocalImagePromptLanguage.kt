@@ -5,6 +5,7 @@ import com.muyuchat.api.local.imagePromptTranslationProofFingerprint
 import java.security.MessageDigest
 import java.util.Locale
 import org.json.JSONObject
+import com.muyuchat.core.engine.isNativeChineseHanCodePoint
 
 internal const val CURRENT_LOCAL_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 4
 internal const val CURRENT_OFFLINE_IMAGE_PROMPT_TRANSLATION_CONTRACT_VERSION = 5
@@ -104,28 +105,6 @@ internal fun String.isSupportedNativeChineseHanDiffusionPrompt(): Boolean =
             isNativeChineseHanCodePoint(codePoint) ||
             codePoint in SUPPORTED_CHINESE_DIFFUSION_PROMPT_PUNCTUATION
     }
-
-/**
- * Keep the Kotlin/native contract identical rather than relying on platform Unicode tables.
- *
- * This deliberately includes actual CJK unified ideographs and extensions only. Radicals,
- * ideographic-description characters, and compatibility ideographs are not normal prompt text
- * and must not become an accidental Unicode bypass. Unicode cannot distinguish Simplified Chinese
- * from Traditional Chinese or Japanese kanji; the evidence-bound encoder declaration makes that
- * product capability decision.
- */
-private fun isNativeChineseHanCodePoint(codePoint: Int): Boolean =
-    codePoint == 0x3007 ||
-        codePoint in 0x3400..0x4DBF ||
-        codePoint in 0x4E00..0x9FFF ||
-        codePoint in 0x20000..0x2A6DF ||
-        codePoint in 0x2A700..0x2B73F ||
-        codePoint in 0x2B740..0x2B81F ||
-        codePoint in 0x2B820..0x2CEAF ||
-        codePoint in 0x2CEB0..0x2EBEF ||
-        codePoint in 0x2EBF0..0x2EE5D ||
-        codePoint in 0x30000..0x3134A ||
-        codePoint in 0x31350..0x323AF
 
 /**
  * Call only after language admission. A non-ASCII prompt that passed admission must retain the

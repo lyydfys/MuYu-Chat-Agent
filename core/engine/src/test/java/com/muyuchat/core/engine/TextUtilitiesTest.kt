@@ -6,12 +6,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins the two text utilities shared across the app, the chat feature and the Local API.
+ * Pins the three text utilities shared across the app, the chat feature and the Local API.
  *
- * Both existed twice before this and are now one copy each, so this does not cover behaviour
- * that was untested. It matters because both sit on boundaries where two layers have to agree:
- * a trigger word is typed in the UI and validated again when it reaches the contract, and an
- * asset label ordering has to be the same on both sides wherever it feeds an identity.
+ * All three existed more than once before this and are now one copy each. The first two were
+ * byte-identical duplicates; the third was not, and that difference is the reason this file also
+ * pins it.
+ *
+ * They sit on boundaries where two layers have to agree: a trigger word is typed in the UI and
+ * validated again when it reaches the contract, an asset label ordering has to be the same on both
+ * sides wherever it feeds an identity, and the Han code-point set decides whether a Chinese prompt
+ * passes the app's language admission and the API contract's gate.
  */
 class TextUtilitiesTest {
 
@@ -55,5 +59,87 @@ class TextUtilitiesTest {
         val resorted = sorted.sortedWith(::compareUtf8Unsigned)
         assertEquals("sorting must be stable under repetition", sorted, resorted)
         assertEquals("the empty string sorts first", "", sorted.first())
+    }
+
+    // ── isNativeChineseHanCodePoint ─────────────────────────────────────────────────────
+    //
+    // This predicate had two copies that were NOT identical: the app listed
+    // U+2EBF0..U+2EE5D (CJK Unified Ideographs Extension I, Unicode 15.1) and api:local did not.
+    // A prompt containing an Ext-I ideograph therefore passed the app's language admission and was
+    // rejected by the API contract describing that same admission. The shared copy adopts the
+    // union, so every range below — including the one that used to differ — is now pinned.
+
+    @Test
+    fun `every declared han range is accepted at both boundaries`() {
+        val ranges = listOf(
+            0x3400 to 0x4DBF,
+            0x4E00 to 0x9FFF,
+            0x20000 to 0x2A6DF,
+            0x2A700 to 0x2B73F,
+            0x2B740 to 0x2B81F,
+            0x2B820 to 0x2CEAF,
+            0x2CEB0 to 0x2EBEF,
+            0x2EBF0 to 0x2EE5D,
+            0x30000 to 0x3134A,
+            0x31350 to 0x323AF
+        )
+        ranges.forEach { (first, last) ->
+            assertTrue("U+%04X (first of its range)".format(first), isNativeChineseHanCodePoint(first))
+            assertTrue("U+%04X (last of its range)".format(last), isNativeChineseHanCodePoint(last))
+            if (last - first > 2) {
+                val middle = (first + last) / 2
+                assertTrue("U+%04X (middle of its range)".format(middle), isNativeChineseHanCodePoint(middle))
+            }
+        }
+    }
+
+    @Test
+    fun `the ideographic zero is accepted`() {
+        assertTrue(isNativeChineseHanCodePoint(0x3007))
+    }
+
+    @Test
+    fun `extension I is accepted because the app side always accepted it`() {
+        // The exact range that used to diverge. If this ever fails, the two layers disagree again.
+        assertTrue("first Ext-I ideograph", isNativeChineseHanCodePoint(0x2EBF0))
+        assertTrue("last Ext-I ideograph", isNativeChineseHanCodePoint(0x2EE5D))
+    }
+
+    @Test
+    fun `radicals, description characters and compatibility ideographs stay rejected`() {
+        // The documented rationale: these are not normal prompt text and must not become an
+        // accidental Unicode bypass. Each one sits just outside every declared range.
+        val rejected = listOf(
+            0x2E80 to "CJK Radicals Supplement",
+            0x2F00 to "Kangxi Radicals",
+            0x2FF0 to "Ideographic Description Characters",
+            0xF900 to "CJK Compatibility Ideographs",
+            0xFA6E to "inside the compatibility block",
+            0x2F800 to "CJK Compatibility Ideographs Supplement"
+        )
+        rejected.forEach { (codePoint, label) ->
+            assertFalse("U+%04X (%s) must not count as prompt Han text".format(codePoint, label), isNativeChineseHanCodePoint(codePoint))
+        }
+    }
+
+    @Test
+    fun `ascii and the boundaries just outside the han ranges are rejected`() {
+        listOf(0x00, ' '.code, 'A'.code, 'z'.code, '0'.code, '_'.code).forEach {
+            assertFalse("U+%04X".format(it), isNativeChineseHanCodePoint(it))
+        }
+        // One below the first range and one above the last.
+        assertFalse("U+33FF is below 0x3400", isNativeChineseHanCodePoint(0x33FF))
+        assertFalse("U+323B0 is above 0x323AF", isNativeChineseHanCodePoint(0x323B0))
+    }
+
+    @Test
+    fun `the suppression ranges do not leak into each other`() {
+        // 0x2EBEF ends Ext F and 0x2EBF0 starts Ext I; both sides of that seam must be accepted,
+        // because the seam is exactly what the two old copies disagreed about.
+        assertTrue(isNativeChineseHanCodePoint(0x2EBEF))
+        assertTrue(isNativeChineseHanCodePoint(0x2EBF0))
+        // 0x2EE5D ends Ext I and 0x2EE5E must not be accepted by any later range.
+        assertTrue(isNativeChineseHanCodePoint(0x2EE5D))
+        assertFalse(isNativeChineseHanCodePoint(0x2EE5E))
     }
 }

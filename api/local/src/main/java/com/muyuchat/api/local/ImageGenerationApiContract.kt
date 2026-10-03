@@ -7,6 +7,7 @@ import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.Base64
 import com.muyuchat.core.engine.compareUtf8Unsigned
+import com.muyuchat.core.engine.isNativeChineseHanCodePoint
 
 fun imagePromptExecutionSha256(prompt: String, negativePrompt: String?): String {
     val digest = MessageDigest.getInstance("SHA-256")
@@ -3917,18 +3918,6 @@ private fun isSafeAsciiDiffusionPromptCodePoint(codePoint: Int): Boolean =
         codePoint in '0'.code..'9'.code ||
         (codePoint <= Char.MAX_VALUE.code &&
             codePoint.toChar() in SAFE_ASCII_DIFFUSION_PROMPT_PUNCTUATION)
-
-private fun isNativeChineseHanCodePoint(codePoint: Int): Boolean =
-    codePoint == 0x3007 ||
-        codePoint in 0x3400..0x4DBF ||
-        codePoint in 0x4E00..0x9FFF ||
-        codePoint in 0x20000..0x2A6DF ||
-        codePoint in 0x2A700..0x2B73F ||
-        codePoint in 0x2B740..0x2B81F ||
-        codePoint in 0x2B820..0x2CEAF ||
-        codePoint in 0x2CEB0..0x2EBEF ||
-        codePoint in 0x30000..0x3134A ||
-        codePoint in 0x31350..0x323AF
 
 private val SUPPORTED_NATIVE_CHINESE_HAN_PROMPT_PUNCTUATION = setOf(
     0xFF0C, 0xFF1B, 0x3002, 0xFF01, 0xFF1F, 0xFF08, 0xFF09,

@@ -34,6 +34,46 @@ package com.muyuchat.core.engine
 public fun Char.isAsciiTriggerWordCharacter(): Boolean =
     this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9' || this == '_'
 
+/**
+ * True when [codePoint] is an actual CJK unified ideograph or one of its extensions.
+ *
+ * ## Why this had to become one function
+ *
+ * It existed twice with **different** range lists: `isNativeChineseHanCodePoint` in api:local's
+ * ImageGenerationApiContract and in app's LocalImagePromptLanguage. The app copy listed
+ * `U+2EBF0..U+2EE5D` (CJK Unified Ideographs Extension I, added in Unicode 15.1) and the API copy
+ * did not. The result was a live divergence on the same input: a prompt containing an Ext-I
+ * ideograph passed the app's language admission and was then rejected by the API contract that is
+ * supposed to describe exactly that admission. The API's copy was verified to be a strict subset
+ * of the app's, so this file adopts the **union** — the API now accepts everything the app accepts.
+ *
+ * That direction is deliberate. Widening the API to match the app cannot admit anything the app
+ * would refuse, and refusing a genuine Han ideograph is not one of the concrete runtime conditions
+ * (corrupt package, invalid format, missing binary, failed native load or execution) that may
+ * justify a rejection.
+ *
+ * ## Why the list is explicit rather than delegated to a platform table
+ *
+ * The Kotlin contract and the native contract must agree, so the ranges are written out instead of
+ * relying on platform Unicode data that can differ by OS version. Radicals, ideographic-description
+ * characters and compatibility ideographs are intentionally excluded: they are not normal prompt
+ * text and must not become an accidental Unicode bypass. Unicode cannot distinguish Simplified
+ * Chinese from Traditional Chinese or Japanese kanji; the evidence-bound encoder declaration in the
+ * image execution contract carries that product decision instead.
+ */
+public fun isNativeChineseHanCodePoint(codePoint: Int): Boolean =
+    codePoint == 0x3007 ||
+        codePoint in 0x3400..0x4DBF ||
+        codePoint in 0x4E00..0x9FFF ||
+        codePoint in 0x20000..0x2A6DF ||
+        codePoint in 0x2A700..0x2B73F ||
+        codePoint in 0x2B740..0x2B81F ||
+        codePoint in 0x2B820..0x2CEAF ||
+        codePoint in 0x2CEB0..0x2EBEF ||
+        codePoint in 0x2EBF0..0x2EE5D ||
+        codePoint in 0x30000..0x3134A ||
+        codePoint in 0x31350..0x323AF
+
 /** Byte-wise unsigned comparison of two strings' UTF-8 encodings; see the file comment. */
 public fun compareUtf8Unsigned(left: String, right: String): Int {
     val leftBytes = left.toByteArray(Charsets.UTF_8)
