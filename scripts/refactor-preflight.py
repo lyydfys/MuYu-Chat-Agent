@@ -40,10 +40,15 @@ MEMBER_DECL = re.compile(
     r"lateinit |const |abstract |final |data |sealed |enum |annotation |companion |tailrec |external )*"
     r"(?:fun|val|var|class|object|interface|init|constructor)\b"
 )
-# A declaration that is private to the ViewModel: unusable from another file.
-VM_PRIVATE = re.compile(
-    r"^    (?:@\w+\s+)*(?:private|@Volatile\s+private)\s+"
-    r"(?:suspend\s+)?(?:fun|val|var)\s+(?:[\w.<>]+\.)?(\w+)",
+# ANY ViewModel instance member, not just a private one. A moved body becomes a top-level function,
+# so it cannot call a public `selectAssistant` any more than a private `showStatus` -- the first
+# version of this script only collected `private` members and therefore missed `selectAssistant`
+# entirely, which cost a whole slice. Over-reporting is the safe direction here.
+VM_MEMBER = re.compile(
+    r"^    (?:@\w+\s+)*"
+    r"(?:private |internal |public |protected |override |open |suspend |inline |operator |"
+    r"lateinit |const |abstract |final |tailrec |external |@Volatile\s+)*"
+    r"(?:fun|val|var)\s+(?:[\w.<>]+\.)?(\w+)",
     re.M,
 )
 IDENT = re.compile(r"(?<![\w.])([A-Za-z_]\w{2,})")
@@ -136,11 +141,11 @@ def main():
     print("=" * 78)
     print("2. PRIVATE VIEWMODEL ACCESS (must go behind the port)")
     print("=" * 78)
-    private_names = {}
-    for match in VM_PRIVATE.finditer(vm):
-        private_names.setdefault(match.group(1), match.start())
+    vm_members = {}
+    for match in VM_MEMBER.finditer(vm):
+        vm_members.setdefault(match.group(1), match.start())
     hits = []
-    for name, offset in private_names.items():
+    for name, offset in vm_members.items():
         # Three call shapes have to be covered, and the first version missed two of them:
         #   * `name(...)`      -- a plain member call or property read/write;
         #   * `x.name(...)`    -- a PRIVATE EXTENSION, which is how `normalized` and
@@ -171,7 +176,7 @@ def main():
         hits.append((name, vm[:offset].count("\n") + 1, shape))
     if hits:
         for name, lineno, usage in sorted(hits, key=lambda item: item[1]):
-            print("   PRIVATE  %-44s declared at line %-6d %s" % (name, lineno, usage))
+            print("   %-9s %-44s declared at line %-6d %s" % ("EXTENSION" if usage == "extension" else "MEMBER", name, lineno, usage))
     else:
         print("   none")
     print("   _uiState uses            : %d" % text.count("_uiState"))
