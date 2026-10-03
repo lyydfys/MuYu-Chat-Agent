@@ -136,12 +136,28 @@ class AppForegroundRecoveryContractTest {
     @Test
     fun imagesAndUpscaleKeepTheCallerAliveUntilTheJobHasFinished() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        for (signature in listOf("private fun enqueueImageGeneration(", "fun upscaleImageAsset(")) {
-            val body = functionBody(viewModel, signature)
+        // The two callers no longer live in the same file: the upscale body moved to
+        // ImageUpscaleOwner.kt (which owns the job and the lifecycle lock), takes its scope as a
+        // parameter, and reaches the context through the port instead of `getApplication()`.
+        // The ordering contract asserted below is unchanged -- acquire the foreground lease before
+        // launching, release it only after completion, and keep the release inside a `finally`;
+        // only the two spellings follow the extraction.
+        val callers = listOf(
+            functionBody(viewModel, "private fun enqueueImageGeneration(") to
+                ("val executionJob = viewModelScope.launch" to
+                    "McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)"),
+            functionBody(
+                sourceFile("app/src/main/java/com/muyuchat/mca/ImageUpscaleOwner.kt"),
+                "fun upscaleImageAsset(imageId: String, targetScale: Int, scope: CoroutineScope)"
+            ) to ("val executionJob = scope.launch" to
+                "McaGenerationForegroundService.release(port.context, foregroundLease)")
+        )
+        for ((body, spellings) in callers) {
+            val (launchSpelling, releaseSpelling) = spellings
             val acquire = body.indexOf("val foregroundLease = McaGenerationForegroundService.acquire(")
-            val launch = body.indexOf("val executionJob = viewModelScope.launch")
+            val launch = body.indexOf(launchSpelling)
             val completion = body.indexOf("executionJob.invokeOnCompletion")
-            val release = body.indexOf("McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)")
+            val release = body.indexOf(releaseSpelling)
             assertTrue(acquire >= 0 && acquire < launch)
             assertTrue(completion > launch && release > completion)
             assertTrue(body.substring(completion, release).contains("finally"))

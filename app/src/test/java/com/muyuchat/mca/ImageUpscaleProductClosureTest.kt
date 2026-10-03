@@ -64,7 +64,12 @@ class ImageUpscaleProductClosureTest {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt")
-        val upscale = functionBody(viewModel, "fun upscaleImageAsset(")
+        // The upscale body moved to ImageUpscaleOwner.kt, which owns the job and the lifecycle lock.
+        // It takes the scope as a parameter now, so the signature below is the owner's.
+        val upscale = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageUpscaleOwner.kt"),
+            "fun upscaleImageAsset(imageId: String, targetScale: Int, scope: CoroutineScope)"
+        )
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
@@ -105,20 +110,25 @@ class ImageUpscaleProductClosureTest {
         assertTrue(upscale.contains("ImageUpscaleJobSpec("))
         assertTrue(upscale.contains("requestId = requestId"))
         assertTrue(upscale.contains("chatSessionStore.upsertImages(listOf(generated))"))
-        assertTrue(upscale.contains("imageLibraryMutationMutex.withLock"))
+        // The image-library mutation lock is now entered through the port
+        // (`withImageLibraryMutationLock`); the lock itself stays in the ViewModel. Same contract.
+        assertTrue(upscale.contains("withImageLibraryMutationLock"))
         assertTrue(upscale.contains("ImageUpscaleStatusRecord.CANCEL_REQUESTED"))
         assertTrue(upscale.contains("executionJob.invokeOnCompletion"))
         assertTrue(upscale.contains("releaseObservedImageGenerationLease(lease)"))
         assertFalse(upscale.contains("deviceProfile"))
-        assertTrue(deleteImages.contains("activeImageUpscaleSourceImageId"))
+        // The active upscale identity and its lifecycle lock now live in ImageUpscaleOwner, so
+        // these two assertions name the owner's calls. The contract is unchanged: the check runs
+        // under the upscale lifecycle lock, inside the image-library mutation lock.
+        assertTrue(deleteImages.contains("imageUpscaleOwner.activeSourceImageId()"))
         assertTrue(deleteImages.contains("imageLibraryMutationMutex.withLock"))
-        assertTrue(deleteImages.contains("synchronized(localImageUpscaleLifecycleLock)"))
+        assertTrue(deleteImages.contains("imageUpscaleOwner.withUpscaleLifecycleLock {"))
         assertTrue(deleteImages.contains("stageImageAssetDeletionLeases("))
         assertTrue(deleteImages.contains("retainedImages = _uiState.value.images.filterNot"))
         assertTrue(deleteImages.contains("commitImageAssetDeletionLeases(leases)"))
-        assertTrue(clearImages.contains("activeImageUpscaleSourceImageId"))
+        assertTrue(clearImages.contains("imageUpscaleOwner.activeSourceImageId()"))
         assertTrue(clearImages.contains("imageLibraryMutationMutex.withLock"))
-        assertTrue(clearImages.contains("synchronized(localImageUpscaleLifecycleLock)"))
+        assertTrue(clearImages.contains("imageUpscaleOwner.withUpscaleLifecycleLock {"))
         assertTrue(clearImages.contains("stageImageAssetDeletionLeases("))
         assertTrue(clearImages.contains("retainedImages = emptyList()"))
         assertTrue(clearImages.contains("commitImageAssetDeletionLeases(leases)"))

@@ -440,7 +440,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
         private const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
-        private const val IMAGE_UPSCALE_TILE_SIZE = 128
         private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_STREAM_PUBLISH_CHARS = 2 * 1024
         private const val ASSISTANT_STREAM_PUBLISH_INTERVAL_MS = 75L
@@ -847,7 +846,72 @@ class MainViewModel @JvmOverloads constructor(
     private val pendingAssistantImageToolTurns = java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
     private val assistantImageContinuationLock = Any()
     private val assistantImageContinuationsInFlight = mutableSetOf<String>()
-    private var imageUpscaleJob: Job? = null
+    /**
+     * The ViewModel side of [ImageUpscalePort]. The owner holds the job and the lock; this object only
+     * supplies the app-level collaborators the owner needs.
+     */
+    private val imageUpscalePort: ImageUpscalePort =
+        object : ImageUpscalePort {
+            override val context: Application
+                get() = this@MainViewModel.getApplication()
+
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val imageAssetDirectory: File
+                get() = this@MainViewModel.imageAssetDirectory
+
+            override val localImageWorkerClient: LocalImageWorkerClient
+                get() = this@MainViewModel.localImageWorkerClient
+
+            override val chatSessionStore: ChatSessionStore
+                get() = this@MainViewModel.chatSessionStore
+
+            override val localImageUpscalerStore: LocalImageUpscalerStore
+                get() = this@MainViewModel.localImageUpscalerStore
+
+            override suspend fun <T> withImageLibraryMutationLock(block: suspend () -> T): T =
+                this@MainViewModel.imageLibraryMutationMutex.withLock { block() }
+
+            override fun showStatus(message: String?) {
+                this@MainViewModel.showStatus(message)
+            }
+
+            override suspend fun awaitImageLibraryStartupReconciliation() {
+                this@MainViewModel.awaitImageLibraryStartupReconciliation()
+            }
+
+            override suspend fun createUpscaledImageAsset(
+                spec: ImageUpscaleJobSpec,
+                result: LocalImageResult,
+                requestId: String
+            ): ImageAssetRecord = this@MainViewModel.createUpscaledImageAsset(spec, result, requestId)
+
+            override fun tryAcquireObservedImageGenerationLease(
+                requestId: String
+            ): LocalImageGenerationCoordinator.Lease? =
+                this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
+
+            override fun releaseObservedImageGenerationLease(
+                lease: LocalImageGenerationCoordinator.Lease
+            ): Boolean = this@MainViewModel.releaseObservedImageGenerationLease(lease)
+        }
+
+    /** The single owner of the image-upscale execution. */
+    private val imageUpscaleOwner = ImageUpscaleOwner(imageUpscalePort)
+
+    /** Delegates to [ImageUpscaleOwner.upscaleImageAsset]. */
+    fun upscaleImageAsset(imageId: String, targetScale: Int) {
+        imageUpscaleOwner.upscaleImageAsset(imageId, targetScale, viewModelScope)
+    }
+
+    /** Delegates to [ImageUpscaleOwner.cancelImageUpscale]. */
+    fun cancelImageUpscale() {
+        imageUpscaleOwner.cancelImageUpscale(viewModelScope)
+    }
     @Volatile private var imageLibraryBackupJob: Job? = null
     private val imageLibraryBackupSequence = AtomicLong(0L)
     private val imageLibraryBackupLifecycleLock = Any()
@@ -869,15 +933,12 @@ class MainViewModel @JvmOverloads constructor(
     @Volatile private var activeImageGenerationModelId: String? = null
     @Volatile private var activeLocalImageWorkerRequestId: String? = null
     @Volatile private var activeLocalApiImageModelId: String? = null
-    @Volatile private var activeImageUpscaleJobId: String? = null
-    @Volatile private var activeImageUpscaleSourceImageId: String? = null
     private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
     private val localImageGenerationCoordinatorObservationLock = Any()
     private val localApiImageGenerationLifecycleLock = Any()
     private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
     private val localImageLoraLifecycleLock = Any()
     private val localImageTextualInversionLifecycleLock = Any()
-    private val localImageUpscaleLifecycleLock = Any()
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
         if (imageLibraryStartupReconciliation.await() != null) {
@@ -2262,7 +2323,7 @@ class MainViewModel @JvmOverloads constructor(
                 this@MainViewModel.activeImageGenerationJobId != null
 
             override fun hasActiveImageUpscale(): Boolean =
-                this@MainViewModel.activeImageUpscaleJobId != null
+                this@MainViewModel.imageUpscaleOwner.hasActiveUpscale()
 
             override fun hasActiveLocalApiImageGeneration(): Boolean =
                 this@MainViewModel.activeLocalApiImageModelId != null
@@ -3069,9 +3130,7 @@ class MainViewModel @JvmOverloads constructor(
                     .commit()
 
             override fun <T> withUpscaleLifecycleLock(block: (upscaleRunning: Boolean) -> T): T =
-                synchronized(this@MainViewModel.localImageUpscaleLifecycleLock) {
-                    block(this@MainViewModel.activeImageUpscaleJobId != null)
-                }
+                this@MainViewModel.imageUpscaleOwner.withUpscaleLifecycleLock(block)
         }
 
     /** Delegates to [importLocalImageUpscalerModel]. */
@@ -3099,311 +3158,7 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    fun upscaleImageAsset(imageId: String, targetScale: Int) {
-        if (targetScale !in setOf(2, 3, 4)) {
-            showStatus("图片放大仅支持 2x、3x 或 4x。")
-            return
-        }
-        val requestId = "ui-upscale-${UUID.randomUUID()}"
-        val lease = tryAcquireObservedImageGenerationLease(requestId)
-        if (lease == null) {
-            _uiState.update {
-                it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
-            }
-            return
-        }
-        val spec = synchronized(localImageUpscaleLifecycleLock) {
-            val state = _uiState.value
-            val source = state.images.firstOrNull { it.id == imageId }
-            val selectedUpscalerId = state.selectedLocalImageUpscalerId
-            val upscaler = localImageUpscalerStore.load()
-                .firstOrNull { it.id == selectedUpscalerId }
-            if (source == null || upscaler == null) {
-                check(releaseObservedImageGenerationLease(lease)) {
-                    "Upscale lease was replaced during request admission."
-                }
-                _uiState.update {
-                    it.copy(
-                        localImageUpscalers = localImageUpscalerStore.load(),
-                        selectedLocalImageUpscalerId = upscaler?.id,
-                        localImageUpscalerMessage = if (source == null) {
-                            "源图片已不存在。"
-                        } else {
-                            "请先导入并选择一个 ESRGAN 放大模型。"
-                        }
-                    )
-                }
-                return
-            }
-            ImageUpscaleJobSpec(
-                sourceImageSnapshot = source,
-                upscalerSnapshot = upscaler.toPrepared(),
-                targetScale = targetScale,
-                tileSize = IMAGE_UPSCALE_TILE_SIZE,
-                threads = Runtime.getRuntime().availableProcessors().coerceIn(1, 5)
-            ).also { snapshot ->
-                activeImageUpscaleJobId = requestId
-                activeImageUpscaleSourceImageId = source.id
-                _uiState.update {
-                    it.copy(
-                        localImageUpscalers = localImageUpscalerStore.load(),
-                        activeLocalImageUpscalerId = upscaler.id,
-                        imageUpscaleJob = ImageUpscaleJobRecord(
-                            id = requestId,
-                            spec = snapshot,
-                            status = ImageUpscaleStatusRecord.QUEUED,
-                            message = "图片放大任务已排队"
-                        ),
-                        localImageUpscalerMessage = "图片放大任务已排队"
-                    )
-                }
-            }
-        }
-        val foregroundLease = McaGenerationForegroundService.acquire(
-            getApplication<Application>(),
-            McaGenerationForegroundService.KIND_IMAGE
-        )
-        val executionJob = viewModelScope.launch(Dispatchers.IO) {
-            var unpublishedImage: ImageAssetRecord? = null
-            try {
-                awaitImageLibraryStartupReconciliation()
-                _uiState.update { state ->
-                    val job = state.imageUpscaleJob
-                    if (job?.id == requestId) {
-                        state.copy(
-                            imageUpscaleJob = job.copy(
-                                status = ImageUpscaleStatusRecord.RUNNING,
-                                message = "正在运行本地 ESRGAN 放大"
-                            )
-                        )
-                    } else {
-                        state
-                    }
-                }
-                val result = localImageWorkerClient.upscale(
-                    inputImageReference = spec.sourceImageSnapshot.uriString,
-                    upscaler = spec.upscalerSnapshot,
-                    targetScale = spec.targetScale,
-                    tileSize = spec.tileSize,
-                    threads = spec.threads,
-                    requestId = requestId,
-                    onProgress = { progress ->
-                        _uiState.update { state ->
-                            val job = state.imageUpscaleJob
-                            if (job?.id == requestId && !job.status.terminal) {
-                                state.copy(
-                                    imageUpscaleJob = job.copy(
-                                        message = progress.toImageUpscaleMessage()
-                                    )
-                                )
-                            } else {
-                                state
-                            }
-                        }
-                    }
-                )
-                currentCoroutineContext().ensureActive()
-                if (_uiState.value.imageUpscaleJob?.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED) {
-                    throw CancellationException("Image upscale was cancelled before publication.")
-                }
-                val generated = createUpscaledImageAsset(spec, result, requestId)
-                unpublishedImage = generated
-                val commitError = runCatching {
-                    imageLibraryMutationMutex.withLock {
-                        currentCoroutineContext().ensureActive()
-                        val admittedJob = _uiState.value.imageUpscaleJob
-                        if (activeImageUpscaleJobId != requestId ||
-                            admittedJob == null ||
-                            admittedJob.id != requestId ||
-                            admittedJob.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED ||
-                            admittedJob.status.terminal
-                        ) {
-                            throw CancellationException(
-                                "Image upscale lost ownership before library commit."
-                            )
-                        }
-                        chatSessionStore.upsertImages(listOf(generated))
-                        _uiState.update { state ->
-                            val job = state.imageUpscaleJob
-                            if (activeImageUpscaleJobId != requestId ||
-                                job == null ||
-                                job.id != requestId ||
-                                job.status == ImageUpscaleStatusRecord.CANCEL_REQUESTED ||
-                                job.status.terminal
-                            ) {
-                                state
-                            } else {
-                                state.copy(
-                                    images = (
-                                        listOf(generated) + state.images.filterNot {
-                                            it.id == generated.id
-                                        }
-                                    ).sortedImagesForLibrary(),
-                                    imageUpscaleJob = job.copy(
-                                        status = ImageUpscaleStatusRecord.DONE,
-                                        resultImageAssetId = generated.id,
-                                        message = "放大结果已保存到图片库"
-                                    ),
-                                    localImageUpscalerMessage = "放大结果已保存：${generated.name}",
-                                    statusMessage = "图片放大完成并已保存到图片库"
-                                )
-                            }
-                        }
-                        val published = _uiState.value.imageUpscaleJob?.let { job ->
-                            job.id == requestId &&
-                                job.status == ImageUpscaleStatusRecord.DONE &&
-                                job.resultImageAssetId == generated.id
-                        } == true
-                        if (!published) {
-                            val rolledBack = runCatching {
-                                chatSessionStore.deleteImages(listOf(generated.id))
-                            }.isSuccess
-                            if (rolledBack) {
-                                throw CancellationException(
-                                    "Image upscale was cancelled during library commit."
-                                )
-                            }
-                            // The database owns the file now. Reflect that durable state instead of
-                            // deleting the bytes and leaving a hidden row with a broken URI.
-                            _uiState.update { state ->
-                                val job = state.imageUpscaleJob
-                                if (job?.id != requestId) {
-                                    state
-                                } else {
-                                    state.copy(
-                                        images = (
-                                            listOf(generated) + state.images.filterNot {
-                                                it.id == generated.id
-                                            }
-                                        ).sortedImagesForLibrary(),
-                                        imageUpscaleJob = job.copy(
-                                            status = ImageUpscaleStatusRecord.DONE,
-                                            resultImageAssetId = generated.id,
-                                            message = "放大结果已保存到图片库"
-                                        ),
-                                        localImageUpscalerMessage =
-                                            "放大结果已保存：${generated.name}",
-                                        statusMessage = "图片放大完成并已保存到图片库"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }.exceptionOrNull()
-                if (commitError != null) {
-                    generated.deleteLocalCopy(imageAssetDirectory)
-                    unpublishedImage = null
-                    throw commitError
-                }
-                unpublishedImage = null
-            } catch (error: Throwable) {
-                unpublishedImage?.deleteLocalCopy(imageAssetDirectory)
-                unpublishedImage = null
-                val cancelled = error is CancellationException ||
-                    error is LocalImageWorkerCancelledException
-                val message = if (cancelled) {
-                    "已取消图片放大"
-                } else {
-                    error.message ?: "图片放大失败"
-                }
-                _uiState.update { state ->
-                    val job = state.imageUpscaleJob
-                    if (job?.id != requestId) return@update state
-                    state.copy(
-                        imageUpscaleJob = job.copy(
-                            status = if (cancelled) {
-                                ImageUpscaleStatusRecord.CANCELLED
-                            } else {
-                                ImageUpscaleStatusRecord.FAILED
-                            },
-                            message = message
-                        ),
-                        localImageUpscalerMessage = message,
-                        statusMessage = if (cancelled) message else "图片放大失败：$message"
-                    )
-                }
-            }
-        }
-        imageUpscaleJob = executionJob
-        executionJob.invokeOnCompletion { completion ->
-            try {
-                synchronized(localImageUpscaleLifecycleLock) {
-                    val ownsActiveUpscale = activeImageUpscaleJobId == requestId
-                    if (ownsActiveUpscale) {
-                        activeImageUpscaleJobId = null
-                        activeImageUpscaleSourceImageId = null
-                    }
-                    val released = releaseObservedImageGenerationLease(lease)
-                    _uiState.update { state ->
-                        val job = state.imageUpscaleJob
-                        val terminalJob = if (completion is CancellationException &&
-                            job?.id == requestId && !job.status.terminal
-                        ) {
-                            job.copy(
-                                status = ImageUpscaleStatusRecord.CANCELLED,
-                                message = "已取消图片放大"
-                            )
-                        } else {
-                            job
-                        }
-                        state.copy(
-                            activeLocalImageUpscalerId = if (ownsActiveUpscale) {
-                                null
-                            } else {
-                                state.activeLocalImageUpscalerId
-                            },
-                            imageUpscaleJob = terminalJob,
-                            localImageUpscalerMessage = if (terminalJob?.status ==
-                                ImageUpscaleStatusRecord.CANCELLED
-                            ) {
-                                "已取消图片放大"
-                            } else {
-                                state.localImageUpscalerMessage
-                            },
-                            statusMessage = if (!released) {
-                                "图片放大任务已结束，但 coordinator lease 状态不一致。"
-                            } else {
-                                state.statusMessage
-                            }
-                        )
-                    }
-                }
-                if (imageUpscaleJob === executionJob) imageUpscaleJob = null
-            } finally {
-                McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)
-            }
-        }
-    }
 
-    fun cancelImageUpscale() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val requestId = activeImageUpscaleJobId
-            if (requestId == null) {
-                _uiState.update { it.copy(localImageUpscalerMessage = "当前没有正在运行的图片放大任务。") }
-                return@launch
-            }
-            _uiState.update { state ->
-                val job = state.imageUpscaleJob
-                if (job?.id == requestId && !job.status.terminal) {
-                    state.copy(
-                        imageUpscaleJob = job.copy(
-                            status = ImageUpscaleStatusRecord.CANCEL_REQUESTED,
-                            message = "正在停止图片放大，等待 worker 释放本次执行"
-                        ),
-                        localImageUpscalerMessage = "正在停止图片放大…"
-                    )
-                } else {
-                    state
-                }
-            }
-            val nativeCancelRequested = localImageWorkerClient.cancel(requestId)
-            if (!nativeCancelRequested) {
-                imageUpscaleJob
-                    ?.takeIf { activeImageUpscaleJobId == requestId }
-                    ?.cancel(CancellationException("Image upscale cancelled by user."))
-            }
-        }
-    }
 
     fun generateImageAsset(
         prompt: String,
@@ -4625,21 +4380,6 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun LocalImageProgress.toImageUpscaleMessage(): String {
-        val elapsedSeconds = (elapsedMs / 1_000L).coerceAtLeast(0L)
-        val size = if (width > 0 && height > 0) " · ${width}x$height" else ""
-        return when {
-            cancelRequested || phase == "cancelling" -> "正在停止图片放大 · ${elapsedSeconds}s"
-            phase == "loading" || phase == "loading_upscaler" ->
-                "正在加载 ESRGAN 放大模型 · ${elapsedSeconds}s"
-            phase == "upscaling" || phase == "sampling" ->
-                "正在分块放大图片 · ${elapsedSeconds}s$size"
-            phase == "writing" -> "正在写入放大结果 · ${elapsedSeconds}s$size"
-            phase == "completed" -> "图片放大完成 · ${elapsedSeconds}s$size"
-            phase == "failed" -> message.ifBlank { "图片放大失败" }
-            else -> "正在准备图片放大 · ${elapsedSeconds}s$size"
-        }
-    }
 
     private fun publishLocalImagePreview(
         jobId: String,
@@ -4788,18 +4528,18 @@ class MainViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             awaitImageLibraryStartupReconciliation()
             val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
-                synchronized(localImageUpscaleLifecycleLock) {
-                    val activeSourceId = activeImageUpscaleSourceImageId
+                imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
+                    val activeSourceId = imageUpscaleOwner.activeSourceImageId()
                     if (activeSourceId != null && activeSourceId in requestedIds) {
                         _uiState.update {
                             it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能删除。")
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val candidates = _uiState.value.images.filter { it.id in requestedIds }
                     if (candidates.isEmpty()) {
                         showStatus("未找到要删除的图片")
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val staging = stageImageAssetDeletionLeases(
                         images = candidates,
@@ -4821,7 +4561,7 @@ class MainViewModel @JvmOverloads constructor(
                                 }
                             )
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val removedIds = candidates.map(ImageAssetRecord::id)
                     val error = runCatching { chatSessionStore.deleteImages(removedIds) }.exceptionOrNull()
@@ -4840,7 +4580,7 @@ class MainViewModel @JvmOverloads constructor(
                                 }
                             )
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     removedIds.forEach(latestImageFavoriteMutations::remove)
                     _uiState.update { state ->
@@ -4921,17 +4661,17 @@ class MainViewModel @JvmOverloads constructor(
         viewModelScope.launch(Dispatchers.IO) {
             awaitImageLibraryStartupReconciliation()
             val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
-                synchronized(localImageUpscaleLifecycleLock) {
-                    if (activeImageUpscaleSourceImageId != null) {
+                imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
+                    if (imageUpscaleOwner.activeSourceImageId() != null) {
                         _uiState.update {
                             it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能清空图片库。")
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val currentImages = _uiState.value.images
                     if (currentImages.isEmpty()) {
                         showStatus("图片库已为空")
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val staging = stageImageAssetDeletionLeases(
                         images = currentImages,
@@ -4951,7 +4691,7 @@ class MainViewModel @JvmOverloads constructor(
                                 }
                             )
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
                     if (error != null) {
@@ -4969,7 +4709,7 @@ class MainViewModel @JvmOverloads constructor(
                                 }
                             )
                         }
-                        return@withLock emptyList<ImageAssetRecord>() to 0
+                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                     }
                     latestImageFavoriteMutations.clear()
                     _uiState.update {
