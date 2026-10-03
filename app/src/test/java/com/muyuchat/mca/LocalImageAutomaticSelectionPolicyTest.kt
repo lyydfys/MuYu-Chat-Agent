@@ -70,7 +70,11 @@ class LocalImageAutomaticSelectionPolicyTest {
 
     @Test
     fun `product selection does not inherit debug local-test preference when real model exists`() {
-        val source = File("src/main/java/com/muyuchat/mca/MainViewModel.kt").readText()
+        // The guard and its explanatory comment moved with `selectedReadyLocalImageModelId` during the
+        // pure-helper extraction. Reading both files keeps the same contract under test; the asserted
+        // text is unchanged.
+        val source = File("src/main/java/com/muyuchat/mca/MainViewModel.kt").readText() +
+            File("src/main/java/com/muyuchat/mca/ManagedRuntimeVerificationHelpers.kt").readText()
         assertTrue(source.contains("preferred?.source.equals(\"local-test\", ignoreCase = true)"))
         assertTrue(source.contains("must not silently become the product's default"))
     }

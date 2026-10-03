@@ -2201,92 +2201,14 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun LocalImageModelRecord.qnnBundleRootForVerification(): File? =
-        bundleRoot
-            ?.takeIf { it.isNotBlank() }
-            ?.let(::File)
-            ?.takeIf { it.isDirectory }
-            ?: File(path).parentFile?.takeIf { it.isDirectory }
 
     /** Must be called from an IO coroutine. */
-    private fun currentQnnImageVerificationByModelId(
-        models: List<LocalImageModelRecord>
-    ): Map<String, Boolean> {
-        val context = getApplication<Application>()
-        return models
-            .asSequence()
-            .filter { it.runtime == LocalImageRuntime.QNN_HTP }
-            .associate { model ->
-                model.id to (model.qnnBundleRootForVerification()
-                    ?.let { root -> model.hasCurrentQnnVerificationStamp(context, root) }
-                    ?: false)
-            }
-    }
 
-    /** Must be called from an IO coroutine. */
-    private fun currentQairtVerifiedLocalModelIds(
-        models: List<ModelManifest>
-    ): Set<String> {
-        val context = getApplication<Application>()
-        val verifiedIdentities = QairtExecutionVerificationStore
-            .forContext(context)
-            .verifiedIdentities()
-        return models.asSequence()
-            .filter { it.runtime == ChatModelRuntime.GENIEX_QAIRT }
-            .filter { model ->
-                isExactQairtExecutionVerified(
-                    identity = qairtRuntimeIdentityFor(context, model.sha256),
-                    verifiedIdentities = verifiedIdentities
-                )
-            }
-            .map(ModelManifest::id)
-            .toSet()
-    }
-
-    private fun verifiedQairtRecommendationIds(
-        models: List<ModelManifest>,
-        verifiedLocalModelIds: Set<String>,
-        recommendations: List<ModelScopeRecommendedModel>
-    ): Set<String> {
-        val verifiedRepoIds = models.asSequence()
-            .filter { it.id in verifiedLocalModelIds }
-            .mapNotNull(ModelManifest::repoId)
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .toSet()
-        return recommendations.asSequence()
-            .filter { it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT }
-            .filter { it.repoId.trim() in verifiedRepoIds }
-            .map(ModelScopeRecommendedModel::id)
-            .toSet()
-    }
 
     private fun LocalImageModelRecord.isReadyForManagedSelection(
         qnnVerificationCurrentByModelId: Map<String, Boolean>
     ): Boolean = localImageReadinessForUi(qnnVerificationCurrentByModelId[id]) == null
 
-    private fun selectedReadyLocalImageModelId(
-        models: List<LocalImageModelRecord>,
-        qnnVerificationCurrentByModelId: Map<String, Boolean>,
-        preferredId: String?
-    ): String? {
-        // Keep the verification map in the call shape for UI refresh bookkeeping, but never use
-        // verification/certification as automatic-selection admission.
-        @Suppress("UNUSED_VARIABLE")
-        val advisoryVerification = qnnVerificationCurrentByModelId
-        val preferred = models.firstOrNull { it.id == preferredId }
-        // Debug smoke records share the app UID and may survive an interrupted run. They are
-        // valid test fixtures, but must not silently become the product's default when a real
-        // imported/downloaded engine is available. Manual selection remains unaffected.
-        val preferredForProduct = preferredId?.takeUnless {
-            preferred?.source.equals("local-test", ignoreCase = true) &&
-                models.any {
-                    !it.source.equals("local-test", ignoreCase = true) &&
-                        it.localImageStructuralReadinessMessage() == null
-                }
-        }
-        return selectStructurallyReadyLocalImageModelId(models, preferredForProduct)
-    }
 
     /**
      * validateForLoad may rewrite a QAIRT directory fingerprint. Invalidate any in-flight
@@ -2298,7 +2220,7 @@ class MainViewModel @JvmOverloads constructor(
     private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot {
         managedRuntimeReadinessRefreshGate.invalidate()
         val models = modelStore.listModels()
-        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(models)
+        val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(getApplication(), models)
         _uiState.update { state ->
             state.copy(
                 models = models,
@@ -2355,9 +2277,9 @@ class MainViewModel @JvmOverloads constructor(
             // Keep the models visible and let the real load/graph path report the concrete
             // runtime failure when the user selects one.
             val qnnVerificationCurrentByModelId = runCatching {
-                currentQnnImageVerificationByModelId(localImageModels)
+                currentQnnImageVerificationByModelId(getApplication(), localImageModels)
             }.getOrElse { emptyMap() }
-            val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(localModels)
+            val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(getApplication(), localModels)
             if (!managedRuntimeReadinessRefreshGate.isCurrent(refreshToken)) return
 
             _uiState.update { latest ->
@@ -5506,7 +5428,7 @@ class MainViewModel @JvmOverloads constructor(
                 showStatus("未找到本地图像生成引擎")
                 return@launch
             }
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(listOf(model))
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), listOf(model))
             model.localImageReadinessForUi(qnnVerificationCurrentByModelId[model.id])?.let { message ->
                 _uiState.update {
                     it.copy(
@@ -5596,7 +5518,7 @@ class MainViewModel @JvmOverloads constructor(
                     qnnVerificationStamp = qnnPersistence.stamp
                 )
                 val models = localImageModelStore.updateModel(verifiedModel)
-                val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+                val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), models)
                 val selectedId = selectedReadyLocalImageModelId(
                     models = models,
                     qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
@@ -5868,7 +5790,7 @@ class MainViewModel @JvmOverloads constructor(
     ): LocalImageSelection {
         val models = localImageModelStore.loadModels()
         val preferredModel = models.firstOrNull { it.matchesCatalogId(preferred.id) } ?: preferred
-        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), models)
         val currentSelectedId = localImageModelStore.loadSelectedModelId()
         val currentBackend = localImageModelStore.loadSelectedBackend()
         val currentReadyId = currentSelectedId?.takeIf { id ->
@@ -5910,7 +5832,7 @@ class MainViewModel @JvmOverloads constructor(
             val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
             val models = localImageModelStore.loadModels()
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(models)
+            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), models)
             val selectedId = selectedReadyLocalImageModelId(
                 models = models,
                 qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
@@ -7319,7 +7241,7 @@ class MainViewModel @JvmOverloads constructor(
             val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = localImageModelStore.removeModelRecord(modelId)
             val models = localImageModelStore.loadModels()
-            val verification = currentQnnImageVerificationByModelId(models)
+            val verification = currentQnnImageVerificationByModelId(getApplication(), models)
             val selectedId = selectedReadyLocalImageModelId(
                 models = models,
                 qnnVerificationCurrentByModelId = verification,
@@ -9491,7 +9413,7 @@ class MainViewModel @JvmOverloads constructor(
                 null
             }
             val localModels = modelStore.listModels()
-            val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(localModels)
+            val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), localModels)
             val qairtVerified = validatedModel.id in qairtVerifiedIds
             managedRuntimeReadinessRefreshGate.invalidate()
             _uiState.update {
@@ -9739,7 +9661,7 @@ class MainViewModel @JvmOverloads constructor(
                 check(modelStore.deleteModel(model.id)) { "模型文件或记录未能删除" }
             }.onSuccess {
                 val remainingModels = modelStore.listModels()
-                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(remainingModels)
+                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), remainingModels)
                 managedRuntimeReadinessRefreshGate.invalidate()
                 _uiState.update {
                     it.copy(
@@ -9765,7 +9687,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }.onFailure { error ->
                 val currentModels = modelStore.listModels()
-                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(currentModels)
+                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), currentModels)
                 val failureMessage = if (nativeReleased) {
                     buildString {
                         append("删除失败，但模型已安全卸载：")
@@ -14839,19 +14761,6 @@ class MainViewModel @JvmOverloads constructor(
         runCatching { runtimeProfileStore.resumeTuningJob(jobId) }
     }
 
-    private fun agentJobState(job: TuningJobEntity): AgentTuningJobState = when {
-        job.cancellationRequested -> AgentTuningJobState.CANCELING
-        else -> when (job.state.uppercase(Locale.ROOT)) {
-            PersistedTuningJobState.QUEUED.name -> AgentTuningJobState.QUEUED
-            PersistedTuningJobState.RUNNING.name -> AgentTuningJobState.RUNNING
-            PersistedTuningJobState.PAUSED.name -> AgentTuningJobState.PAUSED
-            PersistedTuningJobState.CANCELING.name -> AgentTuningJobState.CANCELING
-            PersistedTuningJobState.VALIDATING.name -> AgentTuningJobState.VALIDATING
-            PersistedTuningJobState.SUCCEEDED.name -> AgentTuningJobState.SUCCEEDED
-            PersistedTuningJobState.RECOVERING.name -> AgentTuningJobState.RECOVERING
-            else -> AgentTuningJobState.FAILED
-        }
-    }
 
     private fun estimateTuningEtaSeconds(model: ModelManifest, mode: AgentDebugMode): Long {
         val history = _uiState.value.benchmarkHistory
@@ -17119,19 +17028,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun currentOpenApiAddress(): String =
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")
 
-    private fun detectLanIpAddress(): String? {
-        return runCatching {
-            NetworkInterface.getNetworkInterfaces().asSequence()
-                .filter { it.isUp && !it.isLoopback }
-                .flatMap { it.inetAddresses.asSequence() }
-                .filterIsInstance<Inet4Address>()
-                .firstOrNull { address ->
-                    val host = address.hostAddress.orEmpty()
-                    !address.isLoopbackAddress && !host.startsWith("127.")
-                }
-                ?.hostAddress
-        }.getOrNull()
-    }
 
     private fun <T> java.util.Enumeration<T>.asSequence(): Sequence<T> = sequence {
         while (hasMoreElements()) yield(nextElement())
@@ -17190,7 +17086,7 @@ class MainViewModel @JvmOverloads constructor(
                 device = currentDeviceProfile(),
                 installationScopeId = installationScopeId,
                 qairtAdmissionPassed = model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
-                    model.id in currentQairtVerifiedLocalModelIds(modelStore.listModels())
+                    model.id in currentQairtVerifiedLocalModelIds(getApplication(), modelStore.listModels())
             )
         val profile = activeProfile
             ?.takeIf { it.runtimeIdentity.identityHash == identity.identityHash }
@@ -17585,15 +17481,6 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun agentVerification(value: String): AgentProfileVerification = when {
-        value.equals(PersistedProfileVerificationLevel.DEVICE_VERIFIED.name, ignoreCase = true) ->
-            AgentProfileVerification.DEVICE_VERIFIED
-        value.equals(PersistedProfileVerificationLevel.COMPATIBLE.name, ignoreCase = true) ->
-            AgentProfileVerification.COMPATIBLE
-        value.equals(PersistedProfileVerificationLevel.SAFE.name, ignoreCase = true) ->
-            AgentProfileVerification.SAFE
-        else -> AgentProfileVerification.UNKNOWN
-    }
 
     private suspend fun runIsolatedTuningCandidateCanary(
         candidate: TuningExecutionProfile,
