@@ -156,6 +156,8 @@ import com.muyuchat.mca.presentation.VisionCapabilityUi
 import com.muyuchat.mca.presentation.liteRtVisionInputReadyForUi
 import com.muyuchat.mca.presentation.liteRtVisionVerifiedReadyForUi
 import com.muyuchat.mca.presentation.chatVisionCapability
+import com.muyuchat.feature.chat.ChatRoute
+import com.muyuchat.feature.chat.ChatRouteInputs
 
 private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
 class MainActivity : ComponentActivity() {
@@ -501,7 +503,7 @@ private fun McaApp(
             val sessionPresentations = remember(state.chatSessions, state.assistants) {
                 state.chatSessions.assistantSessionPresentations(state.assistants)
             }
-            ChatScreen(
+            ChatRoute(
 state = buildChatUiState(
                     state = state,
                     sessionPresentations = sessionPresentations,
@@ -511,6 +513,7 @@ state = buildChatUiState(
                     preparedImageUi = preparedImageUi,
                     generationParamsForChatModel = viewModel::generationParamsForChatModel
                 ),
+                inputs = ChatRouteInputs(
 chatBackground = effectiveChatAppearance.toUiState(),
 globalChatBackground = state.globalChatAppearance.toUiState(),
 assistantChatBackground = assistantAppearance?.toUiState(),
@@ -533,7 +536,8 @@ offlineTranslationInstalling = state.offlineTranslationInstalling,
 offlineTranslationDownloading = state.offlineTranslationDownloading,
 offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
 appMenuOpen = appMenuOpen,
-modifier = Modifier.fillMaxSize(),
+                ),
+                modifier = Modifier.fillMaxSize(),
     actions = ChatScreenActions(
         conversation = ChatConversationActions(
             onClearHistory = viewModel::clearChatHistory,
@@ -738,7 +742,7 @@ modifier = Modifier.fillMaxSize(),
             onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
         ),
     ),
-)
+            )
 
 
 
