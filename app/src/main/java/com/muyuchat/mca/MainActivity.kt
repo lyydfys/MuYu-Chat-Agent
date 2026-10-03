@@ -94,6 +94,12 @@ import com.muyuchat.feature.chat.npuAvailabilityForChatBackend
 import com.muyuchat.feature.chat.selectedChatBackendId
 import com.muyuchat.feature.chat.withChatBackend
 import com.muyuchat.feature.chat.ChatUiState
+import com.muyuchat.feature.chat.ChatScreenActions
+import com.muyuchat.feature.chat.ChatConversationActions
+import com.muyuchat.feature.chat.ChatGenerationActions
+import com.muyuchat.feature.chat.ChatContentActions
+import com.muyuchat.feature.chat.ChatImageActions
+import com.muyuchat.feature.chat.ChatShellActions
 import com.muyuchat.feature.chat.ContextSummaryUiItem
 import com.muyuchat.feature.chat.ContextSummaryModelOption
 import com.muyuchat.feature.chat.KnowledgeBaseUiItem
@@ -496,7 +502,7 @@ private fun McaApp(
                 state.chatSessions.assistantSessionPresentations(state.assistants)
             }
             ChatScreen(
-                state = buildChatUiState(
+state = buildChatUiState(
                     state = state,
                     sessionPresentations = sessionPresentations,
                     timestampLocale = timestampLocale,
@@ -505,19 +511,13 @@ private fun McaApp(
                     preparedImageUi = preparedImageUi,
                     generationParamsForChatModel = viewModel::generationParamsForChatModel
                 ),
-                chatBackground = effectiveChatAppearance.toUiState(),
-                globalChatBackground = state.globalChatAppearance.toUiState(),
-                assistantChatBackground = assistantAppearance?.toUiState(),
-                sessionChatBackground = sessionAppearance?.toUiState(),
-                hasActiveChatSession = activeChatSession != null,
-                chatBackgroundImporting = state.chatBackgroundImporting,
-                onChatBackgroundChange = { scope, appearance ->
-                    viewModel.setChatAppearance(scope.toAppearanceScope(), appearance?.toAppearance())
-                },
-                onChatBackgroundImageSelected = { scope, uri ->
-                    viewModel.importChatBackground(scope.toAppearanceScope(), uri)
-                },
-                assistantMemories = state.assistantMemories.map { memory ->
+chatBackground = effectiveChatAppearance.toUiState(),
+globalChatBackground = state.globalChatAppearance.toUiState(),
+assistantChatBackground = assistantAppearance?.toUiState(),
+sessionChatBackground = sessionAppearance?.toUiState(),
+hasActiveChatSession = activeChatSession != null,
+chatBackgroundImporting = state.chatBackgroundImporting,
+assistantMemories = state.assistantMemories.map { memory ->
                     AssistantMemoryUiItem(
                         id = memory.id,
                         assistantId = memory.assistantId,
@@ -527,52 +527,129 @@ private fun McaApp(
                         createdAt = memory.createdAt
                     )
                 },
-                onInputChange = viewModel::onInputChange,
-                onDismissStatusMessage = viewModel::clearStatusMessage,
-                onSend = viewModel::sendMessage,
-                onSendImagePrompt = viewModel::sendChatImagePrompt,
-                onResolveImageActionDraft = viewModel::resolveChatImageActionDraft,
-                onSearchContextSummarySources = viewModel::contextSummaryEvidenceForQuery,
-                onBrowserTaskEvent = viewModel::onBrowserTaskEvent,
-                onSetAssistantImageToolAutoApproval = viewModel::setAssistantImageToolAutoApproval,
-                onApproveChatImageRequest = viewModel::approveChatImageRequest,
-                onRejectChatImageRequest = viewModel::rejectChatImageRequest,
-                onCancelChatImageGeneration = viewModel::cancelChatImageGeneration,
-                onContinueAssistantImageTurn = viewModel::continueAssistantImageTurn,
-                onStop = viewModel::stopGeneration,
-                onCreateConversationForAssistant = viewModel::createChatForAssistant,
-                onSelectConversation = viewModel::selectChatSession,
-                onBranchMixedConversation = viewModel::branchMixedChatSession,
-                onDeleteConversation = viewModel::deleteChatSession,
-                onClearHistory = viewModel::clearChatHistory,
-                onRenameConversation = viewModel::renameChatSession,
-                onTogglePinConversation = viewModel::toggleChatSessionPinned,
-                onExportConversation = onExportChatSession,
-                onRegenerate = viewModel::regenerateLastResponse,
-                onDeleteMessage = viewModel::deleteMessageAt,
-                onTogglePinMessage = viewModel::toggleMessagePinned,
-                onDeleteLastTurn = viewModel::deleteLastConversationTurn,
-                onUploadFile = viewModel::attachFile,
-                onUseImageAsset = viewModel::useImageAsset,
-                onDeleteImageAsset = viewModel::deleteImageAsset,
-                onDeleteImageAssets = viewModel::deleteImageAssets,
-                onSetImageAssetFavorite = viewModel::setImageAssetFavorite,
-                onExportImageLibraryBackup = viewModel::exportImageLibraryBackup,
-                onImportImageLibraryBackup = viewModel::importImageLibraryBackup,
-                onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
-                onImportImageLora = viewModel::importLocalImageLora,
-                onDownloadOfficialViggleLora = viewModel::downloadOfficialViggleLora,
-                onDeleteImageLora = viewModel::deleteLocalImageLora,
-                onImportImageTextualInversion = viewModel::importLocalImageTextualInversion,
-                onDeleteImageTextualInversion = viewModel::deleteLocalImageTextualInversion,
-                onImportImageUpscaler = viewModel::importLocalImageUpscaler,
-                onDeleteImageUpscaler = viewModel::deleteLocalImageUpscaler,
-                onSelectImageUpscaler = viewModel::selectLocalImageUpscaler,
-                onUpscaleImageAsset = viewModel::upscaleImageAsset,
-                onCancelImageUpscale = viewModel::cancelImageUpscale,
-                onUseFileAsset = viewModel::useFileAsset,
-                onDeleteFileAsset = viewModel::deleteFileAsset,
-                onGenerateImagePrompt = generateImage@{ prompt, uiOptions ->
+offlineTranslationStatus = state.offlineTranslationStatus,
+offlineTranslationInstalled = state.offlineTranslationInstalled,
+offlineTranslationInstalling = state.offlineTranslationInstalling,
+offlineTranslationDownloading = state.offlineTranslationDownloading,
+offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
+appMenuOpen = appMenuOpen,
+modifier = Modifier.fillMaxSize(),
+    actions = ChatScreenActions(
+        conversation = ChatConversationActions(
+            onClearHistory = viewModel::clearChatHistory,
+            onDeleteConversation = viewModel::deleteChatSession,
+            onDeleteLastTurn = viewModel::deleteLastConversationTurn,
+            onDeleteMessage = viewModel::deleteMessageAt,
+            onExportConversation = onExportChatSession,
+            onRenameConversation = viewModel::renameChatSession,
+            onSelectConversation = viewModel::selectChatSession,
+            onTogglePinConversation = viewModel::toggleChatSessionPinned,
+            onTogglePinMessage = viewModel::toggleMessagePinned,
+            onBranchMixedConversation = viewModel::branchMixedChatSession,
+            onCreateConversationForAssistant = viewModel::createChatForAssistant,
+            onRegenerate = viewModel::regenerateLastResponse,
+            onRequestContextCompression = viewModel::requestContextCompression,
+            onSetContextCompressionThreshold = viewModel::setContextCompressionThreshold,
+            onSetContextSummaryModel = viewModel::setContextSummaryModel,
+            onUndoContextSummary = viewModel::undoContextSummary,
+            onSearchContextSummarySources = viewModel::contextSummaryEvidenceForQuery,
+        ),
+        generation = ChatGenerationActions(
+            onInputChange = viewModel::onInputChange,
+            onSend = viewModel::sendMessage,
+            onSendImagePrompt = viewModel::sendChatImagePrompt,
+            onStop = viewModel::stopGeneration,
+            onGenerationParamsChange = viewModel::updateParams,
+            onReasoningModeChange = viewModel::updateReasoningMode,
+            onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
+            onModelBackendChange = { modelId, backendId ->
+                    viewModel.updateModelBackendPreference(modelId, backendId)
+                },
+            onLoadModel = viewModel::selectChatModel,
+            onUploadFile = viewModel::attachFile,
+            releaseGenerationImageGrantsIfCoordinatorIdle =
+                    viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
+        ),
+        content = ChatContentActions(
+            onDeleteAssistant = viewModel::deleteAssistant,
+            onSaveAssistant = { draft: AssistantEditorDraft ->
+                    viewModel.saveAssistantProfile(
+                        id = draft.id,
+                        name = draft.name,
+                        avatar = draft.avatar,
+                        tag = draft.tag,
+                        systemPrompt = draft.systemPrompt,
+                        defaultModelMode = draft.defaultModelMode,
+                        defaultModelId = draft.defaultModelId?.removePrefix(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX),
+                        temperature = draft.temperature,
+                        topP = draft.topP,
+                        nPredict = draft.nPredict,
+                        topK = draft.topK,
+                        minP = draft.minP,
+                        repeatPenalty = draft.repeatPenalty,
+                        presencePenalty = draft.presencePenalty,
+                        frequencyPenalty = draft.frequencyPenalty,
+                        stopWords = draft.stopWords,
+                        reasoningMode = draft.reasoningMode,
+                        memoryEnabled = draft.memoryEnabled,
+                        memorySummaryInterval = draft.memorySummaryInterval,
+                        webSearchEnabled = draft.webSearchEnabled,
+                        fileContextEnabled = draft.fileContextEnabled
+                    )
+                },
+            onSelectAssistant = viewModel::selectAssistant,
+            onImportAssistantCard = viewModel::importAssistantCard,
+            onImportAssistantCardFile = onImportAssistantCardFile,
+            onDeleteWorldBook = viewModel::deleteWorldBook,
+            onImportWorldBookFile = onImportWorldBookFile,
+            onCreateKnowledgeBase = { name -> viewModel.createKnowledgeBase(name) },
+            onDeleteKnowledgeBase = viewModel::deleteKnowledgeBase,
+            onImportKnowledgeDocument = onImportKnowledgeDocument,
+            onSetKnowledgeBaseSelected = viewModel::setKnowledgeBaseSelected,
+            onDeleteAssistantMemory = viewModel::deleteAssistantMemory,
+            onUpsertAssistantMemory = viewModel::upsertAssistantMemory,
+            onChatBackgroundChange = { scope, appearance ->
+                    viewModel.setChatAppearance(scope.toAppearanceScope(), appearance?.toAppearance())
+                },
+            onChatBackgroundImageSelected = { scope, uri ->
+                    viewModel.importChatBackground(scope.toAppearanceScope(), uri)
+                },
+        ),
+        image = ChatImageActions(
+            onApproveChatImageRequest = viewModel::approveChatImageRequest,
+            onRejectChatImageRequest = viewModel::rejectChatImageRequest,
+            onRetryChatImageRequest = viewModel::retryChatImageGeneration,
+            onCancelChatImageGeneration = viewModel::cancelChatImageGeneration,
+            onCancelImageGeneration = viewModel::cancelImageGeneration,
+            onChatImageLoraSelectionChange = { selections ->
+                    viewModel.updateChatImageLoraSelection(
+                        selections?.map { selection -> selection.id to selection.multiplier }
+                    )
+                },
+            onConfirmImageTranslationDraft = viewModel::confirmChatImageTranslationDraft,
+            onCancelImageTranslationDraft = viewModel::cancelChatImageTranslationDraft,
+            onResolveImageActionDraft = viewModel::resolveChatImageActionDraft,
+            onDeleteImageAsset = viewModel::deleteImageAsset,
+            onDeleteImageAssets = viewModel::deleteImageAssets,
+            onDeleteImageLora = viewModel::deleteLocalImageLora,
+            onDeleteImageTextualInversion = viewModel::deleteLocalImageTextualInversion,
+            onDeleteImageUpscaler = viewModel::deleteLocalImageUpscaler,
+            onExportImageLibraryBackup = viewModel::exportImageLibraryBackup,
+            onImportImageLibraryBackup = viewModel::importImageLibraryBackup,
+            onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
+            onImportImageLora = viewModel::importLocalImageLora,
+            onImportImageModel = onImportLocalImageModel,
+            onImportImageTextualInversion = viewModel::importLocalImageTextualInversion,
+            onImportImageUpscaler = viewModel::importLocalImageUpscaler,
+            onSelectImageModel = viewModel::selectImageGenerationModel,
+            onSelectImageUpscaler = viewModel::selectLocalImageUpscaler,
+            onSetImageAssetFavorite = viewModel::setImageAssetFavorite,
+            onUpscaleImageAsset = viewModel::upscaleImageAsset,
+            onCancelImageUpscale = viewModel::cancelImageUpscale,
+            onRecreateImageAsset = viewModel::recreateImageAsset,
+            onRetryImageGeneration = viewModel::retryImageGeneration,
+            onUseImageAsset = viewModel::useImageAsset,
+            onGenerateImagePrompt = generateImage@{ prompt, uiOptions ->
                     val loras = uiOptions.loras.mapNotNull { selection ->
                         state.localImageLoras
                             .firstOrNull { adapter -> adapter.id == selection.id }
@@ -625,102 +702,43 @@ private fun McaApp(
                         )
                     )
                 },
-                onMeasureImagePromptTokens = viewModel::measureImagePromptTokens,
-                onRetryImageGeneration = viewModel::retryImageGeneration,
-                onRetryChatImageRequest = viewModel::retryChatImageGeneration,
-                onRecreateImageAsset = viewModel::recreateImageAsset,
-                onCancelImageGeneration = viewModel::cancelImageGeneration,
-                releaseGenerationImageGrantsIfCoordinatorIdle =
-                    viewModel::releaseGenerationImageGrantsIfCoordinatorIdle,
-                onSelectImageModel = viewModel::selectImageGenerationModel,
-                onChatImageLoraSelectionChange = { selections ->
-                    viewModel.updateChatImageLoraSelection(
-                        selections?.map { selection -> selection.id to selection.multiplier }
-                    )
-                },
-                onConfirmImageTranslationDraft = viewModel::confirmChatImageTranslationDraft,
-                onCancelImageTranslationDraft = viewModel::cancelChatImageTranslationDraft,
-                onModelBackendChange = { modelId, backendId ->
-                    viewModel.updateModelBackendPreference(modelId, backendId)
-                },
-                onGenerationParamsChange = viewModel::updateParams,
-                onReasoningModeChange = viewModel::updateReasoningMode,
-                onCloudReasoningModeLocked = viewModel::showCloudReasoningModeLocked,
-                onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
-                onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
-                onOpenBrowserTask = viewModel::startBrowserTask,
-                onLoadModel = viewModel::selectChatModel,
-                onOpenAgent = { onTab(AppTab.AGENT) },
-                onOpenModels = { startModelsInRecommended = false; onTab(AppTab.MODELS) },
-                onOpenRecommendedModels = {
+            onContinueAssistantImageTurn = viewModel::continueAssistantImageTurn,
+            onSetAssistantImageToolAutoApproval = viewModel::setAssistantImageToolAutoApproval,
+            onDownloadOfficialViggleLora = viewModel::downloadOfficialViggleLora,
+            onTranslateImagePrompt = viewModel::translateImagePromptPreview,
+            onTranslateImageNegativePrompt = viewModel::translateImageNegativePromptPreview,
+            onMeasureImagePromptTokens = viewModel::measureImagePromptTokens,
+        ),
+        shell = ChatShellActions(
+            onAppMenuOpenChange = { appMenuOpen = it },
+            onDismissStatusMessage = viewModel::clearStatusMessage,
+            onOpenModels = { startModelsInRecommended = false; onTab(AppTab.MODELS) },
+            onOpenRecommendedModels = {
                     startModelsInRecommended = true
                     onTab(AppTab.MODELS)
                 },
-                onImportChatModel = requestModelImport,
-                onImportImageModel = onImportLocalImageModel,
-                offlineTranslationStatus = state.offlineTranslationStatus,
-                offlineTranslationInstalled = state.offlineTranslationInstalled,
-                offlineTranslationInstalling = state.offlineTranslationInstalling,
-                offlineTranslationDownloading = state.offlineTranslationDownloading,
-                offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress,
-                onDownloadOfflineTranslation = viewModel::downloadOfflinePromptTranslationBundle,
-                onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
-                onTranslateImagePrompt = viewModel::translateImagePromptPreview,
-                onTranslateImageNegativePrompt = viewModel::translateImageNegativePromptPreview,
-                onOpenApi = { onTab(AppTab.API) },
-                onOpenSettings = {
+            onOpenSettings = {
                     startSettingsInWebSearch = false
                     onTab(AppTab.SETTINGS)
                 },
-                onRequestContextCompression = viewModel::requestContextCompression,
-                onUndoContextSummary = viewModel::undoContextSummary,
-                onSetContextCompressionThreshold = viewModel::setContextCompressionThreshold,
-                onSetContextSummaryModel = viewModel::setContextSummaryModel,
-                onOpenWebSearchSettings = {
+            onOpenAgent = { onTab(AppTab.AGENT) },
+            onOpenApi = { onTab(AppTab.API) },
+            onOpenWebSearchSettings = {
                     startSettingsInWebSearch = true
                     onTab(AppTab.SETTINGS)
                 },
-                onSaveAssistant = { draft: AssistantEditorDraft ->
-                    viewModel.saveAssistantProfile(
-                        id = draft.id,
-                        name = draft.name,
-                        avatar = draft.avatar,
-                        tag = draft.tag,
-                        systemPrompt = draft.systemPrompt,
-                        defaultModelMode = draft.defaultModelMode,
-                        defaultModelId = draft.defaultModelId?.removePrefix(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX),
-                        temperature = draft.temperature,
-                        topP = draft.topP,
-                        nPredict = draft.nPredict,
-                        topK = draft.topK,
-                        minP = draft.minP,
-                        repeatPenalty = draft.repeatPenalty,
-                        presencePenalty = draft.presencePenalty,
-                        frequencyPenalty = draft.frequencyPenalty,
-                        stopWords = draft.stopWords,
-                        reasoningMode = draft.reasoningMode,
-                        memoryEnabled = draft.memoryEnabled,
-                        memorySummaryInterval = draft.memorySummaryInterval,
-                        webSearchEnabled = draft.webSearchEnabled,
-                        fileContextEnabled = draft.fileContextEnabled
-                    )
-                },
-                onUpsertAssistantMemory = viewModel::upsertAssistantMemory,
-                onDeleteAssistantMemory = viewModel::deleteAssistantMemory,
-                onSelectAssistant = viewModel::selectAssistant,
-                onDeleteAssistant = viewModel::deleteAssistant,
-                onImportAssistantCard = viewModel::importAssistantCard,
-                onImportAssistantCardFile = onImportAssistantCardFile,
-                onImportWorldBookFile = onImportWorldBookFile,
-                onDeleteWorldBook = viewModel::deleteWorldBook,
-                onCreateKnowledgeBase = { name -> viewModel.createKnowledgeBase(name) },
-                onImportKnowledgeDocument = onImportKnowledgeDocument,
-                onSetKnowledgeBaseSelected = viewModel::setKnowledgeBaseSelected,
-                onDeleteKnowledgeBase = viewModel::deleteKnowledgeBase,
-                appMenuOpen = appMenuOpen,
-                onAppMenuOpenChange = { appMenuOpen = it },
-                modifier = Modifier.fillMaxSize()
-            )
+            onImportChatModel = requestModelImport,
+            onBrowserTaskEvent = viewModel::onBrowserTaskEvent,
+            onOpenBrowserTask = viewModel::startBrowserTask,
+            onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
+            onToggleWebSearchForTurn = viewModel::toggleWebSearchForNextTurn,
+            onDeleteFileAsset = viewModel::deleteFileAsset,
+            onUseFileAsset = viewModel::useFileAsset,
+            onDownloadOfflineTranslation = viewModel::downloadOfflinePromptTranslationBundle,
+            onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
+        ),
+    ),
+)
 
 
 

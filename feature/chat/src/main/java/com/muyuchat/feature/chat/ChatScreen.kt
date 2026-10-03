@@ -2018,120 +2018,118 @@ data class ChatHistoryItem(
 @OptIn(ExperimentalLayoutApi::class)
 fun ChatScreen(
     state: ChatUiState,
-    onInputChange: (String) -> Unit,
-    onDismissStatusMessage: () -> Unit = {},
-    onSend: () -> Unit,
-    onSendImagePrompt: () -> Unit = onSend,
-    onConfirmImageTranslationDraft: (String, String, String?) -> Unit = { _, _, _ -> },
-    onCancelImageTranslationDraft: (String) -> Unit = {},
-    onResolveImageActionDraft: (String, Boolean, String) -> Unit = { _, _, _ -> },
-    onBrowserTaskEvent: (BrowserTaskEvent) -> Unit = {},
-    onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem> = { emptyList() },
-    onSetAssistantImageToolAutoApproval: (Boolean) -> Unit = {},
-    onStop: () -> Unit,
-    onCreateConversationForAssistant: (String) -> Unit,
-    onSelectConversation: (String) -> Unit,
-    onBranchMixedConversation: (String, String) -> Unit = { _, _ -> },
-    onDeleteConversation: (String) -> Unit,
-    onClearHistory: () -> Unit,
-    onRenameConversation: (String, String) -> Unit,
-    onTogglePinConversation: (String) -> Unit,
-    onExportConversation: (String) -> Unit,
-    onRegenerate: () -> Unit,
-    onDeleteMessage: (Int) -> Unit,
-    onTogglePinMessage: (String) -> Unit = {},
-    onDeleteLastTurn: () -> Unit = {},
-    onUploadFile: (String) -> Unit,
-    onUseImageAsset: (String) -> Unit = {},
-    onDeleteImageAsset: (String) -> Unit = {},
-    onDeleteImageAssets: (List<String>) -> Unit = {},
-    onSetImageAssetFavorite: (String, Boolean) -> Unit = { _, _ -> },
-    onExportImageLibraryBackup: (String, Boolean) -> Unit = { _, _ -> },
-    onImportImageLibraryBackup: (String) -> Unit = {},
-    onCancelImageLibraryBackup: () -> Unit = {},
-    onImportImageLora: (String) -> Unit = {},
-    onDownloadOfficialViggleLora: () -> Unit = {},
-    onDeleteImageLora: (String) -> Unit = {},
-    onImportImageTextualInversion: (String, String) -> Unit = { _, _ -> },
-    onDeleteImageTextualInversion: (String) -> Unit = {},
-    onImportImageUpscaler: (String) -> Unit = {},
-    onDeleteImageUpscaler: (String) -> Unit = {},
-    onSelectImageUpscaler: (String) -> Unit = {},
-    onUpscaleImageAsset: (String, Int) -> Unit = { _, _ -> },
-    onCancelImageUpscale: () -> Unit = {},
-    onUseFileAsset: (String) -> Unit = {},
-    onDeleteFileAsset: (String) -> Unit = {},
-    onGenerateImagePrompt: (String, ImageGenerationUiOptions) -> Boolean = { _, _ -> false },
-    onTranslateImagePrompt: (suspend (String) -> String)? = null,
-    onTranslateImageNegativePrompt: (suspend (String) -> String)? = null,
-    onRetryImageGeneration: (String) -> Unit = {},
-    onRetryChatImageRequest: (String) -> Unit = {},
-    onCancelChatImageGeneration: (String) -> Unit = {},
-    onApproveChatImageRequest: (String) -> Unit = {},
-    onRejectChatImageRequest: (String) -> Unit = {},
-    onContinueAssistantImageTurn: (String) -> Unit = {},
-    onRecreateImageAsset: (String) -> Unit = {},
-    onCancelImageGeneration: () -> Unit = {},
-    releaseGenerationImageGrantsIfCoordinatorIdle: ((() -> Unit) -> Boolean),
-    onSelectImageModel: (String) -> Unit = {},
-    onChatImageLoraSelectionChange: (List<ImageGenerationUiLoraSelection>?) -> Unit = {},
-    onModelBackendChange: (String, String) -> Unit = { _, _ -> },
-    onGenerationParamsChange: (GenerationParams) -> Unit = {},
-    onReasoningModeChange: (ReasoningMode) -> Unit,
-    onCloudReasoningModeLocked: () -> Unit = {},
-    onToggleWebSearchForTurn: () -> Unit = {},
-    onSelectWebSearchResearchMode: (String) -> Unit = {},
-    onOpenWebSearchSettings: () -> Unit = {},
-    onOpenBrowserTask: (BrowserTaskLaunch) -> Unit = {},
-    onLoadModel: (String) -> Unit = {},
-    onOpenAgent: () -> Unit,
-    onOpenModels: () -> Unit,
-    onOpenRecommendedModels: () -> Unit = onOpenModels,
-    onImportChatModel: () -> Unit = onOpenModels,
-    onImportImageModel: () -> Unit = onOpenModels,
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
     offlineTranslationDownloading: Boolean = false,
     offlineTranslationDownloadProgress: Float? = null,
-    onDownloadOfflineTranslation: () -> Unit = {},
-    onCancelOfflineTranslationDownload: () -> Unit = {},
-    onOpenApi: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onRequestContextCompression: () -> Unit = {},
-    onUndoContextSummary: () -> Unit = {},
-    onSetContextCompressionThreshold: (Int) -> Unit = {},
-    onSetContextSummaryModel: (String) -> Unit = {},
-    onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
     assistantMemories: List<AssistantMemoryUiItem> = emptyList(),
-    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit = { _, _, _, _ -> },
-    onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
-    onSelectAssistant: (String) -> Unit = {},
-    onDeleteAssistant: (String) -> Unit = {},
-    onImportAssistantCard: (String) -> Unit = {},
-    onImportAssistantCardFile: () -> Unit = {},
-    onImportWorldBookFile: (WorldBookImportScope) -> Unit = {},
-    onDeleteWorldBook: (String) -> Unit = {},
-    onCreateKnowledgeBase: (String) -> Unit = {},
-    onImportKnowledgeDocument: (String) -> Unit = {},
-    onSetKnowledgeBaseSelected: (String, Boolean) -> Unit = { _, _ -> },
-    onDeleteKnowledgeBase: (String) -> Unit = {},
     appMenuOpen: Boolean = false,
-    onAppMenuOpenChange: (Boolean) -> Unit = {},
-    onMeasureImagePromptTokens: (suspend (
-        modelId: String,
-        prompt: String,
-    ) -> ImagePromptTokenMeasurement?)? = null,
     chatBackground: ChatBackgroundState = ChatBackgroundState(),
     globalChatBackground: ChatBackgroundState = ChatBackgroundState(),
     assistantChatBackground: ChatBackgroundState? = null,
     sessionChatBackground: ChatBackgroundState? = null,
     hasActiveChatSession: Boolean = false,
     chatBackgroundImporting: Boolean = false,
-    onChatBackgroundChange: (ChatBackgroundScope, ChatBackgroundState?) -> Unit = { _, _ -> },
-    onChatBackgroundImageSelected: (ChatBackgroundScope, String) -> Unit = { _, _ -> },
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    actions: ChatScreenActions,
 ) {
+    val onClearHistory = actions.conversation.onClearHistory
+    val onDeleteConversation = actions.conversation.onDeleteConversation
+    val onDeleteLastTurn = actions.conversation.onDeleteLastTurn
+    val onDeleteMessage = actions.conversation.onDeleteMessage
+    val onExportConversation = actions.conversation.onExportConversation
+    val onRenameConversation = actions.conversation.onRenameConversation
+    val onSelectConversation = actions.conversation.onSelectConversation
+    val onTogglePinConversation = actions.conversation.onTogglePinConversation
+    val onTogglePinMessage = actions.conversation.onTogglePinMessage
+    val onBranchMixedConversation = actions.conversation.onBranchMixedConversation
+    val onCreateConversationForAssistant = actions.conversation.onCreateConversationForAssistant
+    val onRegenerate = actions.conversation.onRegenerate
+    val onRequestContextCompression = actions.conversation.onRequestContextCompression
+    val onSetContextCompressionThreshold = actions.conversation.onSetContextCompressionThreshold
+    val onSetContextSummaryModel = actions.conversation.onSetContextSummaryModel
+    val onUndoContextSummary = actions.conversation.onUndoContextSummary
+    val onSearchContextSummarySources = actions.conversation.onSearchContextSummarySources
+    val onInputChange = actions.generation.onInputChange
+    val onSend = actions.generation.onSend
+    val onSendImagePrompt = actions.generation.onSendImagePrompt
+    val onStop = actions.generation.onStop
+    val onGenerationParamsChange = actions.generation.onGenerationParamsChange
+    val onReasoningModeChange = actions.generation.onReasoningModeChange
+    val onCloudReasoningModeLocked = actions.generation.onCloudReasoningModeLocked
+    val onModelBackendChange = actions.generation.onModelBackendChange
+    val onLoadModel = actions.generation.onLoadModel
+    val onUploadFile = actions.generation.onUploadFile
+    val releaseGenerationImageGrantsIfCoordinatorIdle = actions.generation.releaseGenerationImageGrantsIfCoordinatorIdle
+    val onDeleteAssistant = actions.content.onDeleteAssistant
+    val onSaveAssistant = actions.content.onSaveAssistant
+    val onSelectAssistant = actions.content.onSelectAssistant
+    val onImportAssistantCard = actions.content.onImportAssistantCard
+    val onImportAssistantCardFile = actions.content.onImportAssistantCardFile
+    val onDeleteWorldBook = actions.content.onDeleteWorldBook
+    val onImportWorldBookFile = actions.content.onImportWorldBookFile
+    val onCreateKnowledgeBase = actions.content.onCreateKnowledgeBase
+    val onDeleteKnowledgeBase = actions.content.onDeleteKnowledgeBase
+    val onImportKnowledgeDocument = actions.content.onImportKnowledgeDocument
+    val onSetKnowledgeBaseSelected = actions.content.onSetKnowledgeBaseSelected
+    val onDeleteAssistantMemory = actions.content.onDeleteAssistantMemory
+    val onUpsertAssistantMemory = actions.content.onUpsertAssistantMemory
+    val onChatBackgroundChange = actions.content.onChatBackgroundChange
+    val onChatBackgroundImageSelected = actions.content.onChatBackgroundImageSelected
+    val onApproveChatImageRequest = actions.image.onApproveChatImageRequest
+    val onRejectChatImageRequest = actions.image.onRejectChatImageRequest
+    val onRetryChatImageRequest = actions.image.onRetryChatImageRequest
+    val onCancelChatImageGeneration = actions.image.onCancelChatImageGeneration
+    val onCancelImageGeneration = actions.image.onCancelImageGeneration
+    val onChatImageLoraSelectionChange = actions.image.onChatImageLoraSelectionChange
+    val onConfirmImageTranslationDraft = actions.image.onConfirmImageTranslationDraft
+    val onCancelImageTranslationDraft = actions.image.onCancelImageTranslationDraft
+    val onResolveImageActionDraft = actions.image.onResolveImageActionDraft
+    val onDeleteImageAsset = actions.image.onDeleteImageAsset
+    val onDeleteImageAssets = actions.image.onDeleteImageAssets
+    val onDeleteImageLora = actions.image.onDeleteImageLora
+    val onDeleteImageTextualInversion = actions.image.onDeleteImageTextualInversion
+    val onDeleteImageUpscaler = actions.image.onDeleteImageUpscaler
+    val onExportImageLibraryBackup = actions.image.onExportImageLibraryBackup
+    val onImportImageLibraryBackup = actions.image.onImportImageLibraryBackup
+    val onCancelImageLibraryBackup = actions.image.onCancelImageLibraryBackup
+    val onImportImageLora = actions.image.onImportImageLora
+    val onImportImageModel = actions.image.onImportImageModel
+    val onImportImageTextualInversion = actions.image.onImportImageTextualInversion
+    val onImportImageUpscaler = actions.image.onImportImageUpscaler
+    val onSelectImageModel = actions.image.onSelectImageModel
+    val onSelectImageUpscaler = actions.image.onSelectImageUpscaler
+    val onSetImageAssetFavorite = actions.image.onSetImageAssetFavorite
+    val onUpscaleImageAsset = actions.image.onUpscaleImageAsset
+    val onCancelImageUpscale = actions.image.onCancelImageUpscale
+    val onRecreateImageAsset = actions.image.onRecreateImageAsset
+    val onRetryImageGeneration = actions.image.onRetryImageGeneration
+    val onUseImageAsset = actions.image.onUseImageAsset
+    val onGenerateImagePrompt = actions.image.onGenerateImagePrompt
+    val onContinueAssistantImageTurn = actions.image.onContinueAssistantImageTurn
+    val onSetAssistantImageToolAutoApproval = actions.image.onSetAssistantImageToolAutoApproval
+    val onDownloadOfficialViggleLora = actions.image.onDownloadOfficialViggleLora
+    val onTranslateImagePrompt = actions.image.onTranslateImagePrompt
+    val onTranslateImageNegativePrompt = actions.image.onTranslateImageNegativePrompt
+    val onMeasureImagePromptTokens = actions.image.onMeasureImagePromptTokens
+    val onAppMenuOpenChange = actions.shell.onAppMenuOpenChange
+    val onDismissStatusMessage = actions.shell.onDismissStatusMessage
+    val onOpenModels = actions.shell.onOpenModels
+    val onOpenRecommendedModels = actions.shell.onOpenRecommendedModels
+    val onOpenSettings = actions.shell.onOpenSettings
+    val onOpenAgent = actions.shell.onOpenAgent
+    val onOpenApi = actions.shell.onOpenApi
+    val onOpenWebSearchSettings = actions.shell.onOpenWebSearchSettings
+    val onImportChatModel = actions.shell.onImportChatModel
+    val onBrowserTaskEvent = actions.shell.onBrowserTaskEvent
+    val onOpenBrowserTask = actions.shell.onOpenBrowserTask
+    val onSelectWebSearchResearchMode = actions.shell.onSelectWebSearchResearchMode
+    val onToggleWebSearchForTurn = actions.shell.onToggleWebSearchForTurn
+    val onDeleteFileAsset = actions.shell.onDeleteFileAsset
+    val onUseFileAsset = actions.shell.onUseFileAsset
+    val onDownloadOfflineTranslation = actions.shell.onDownloadOfflineTranslation
+    val onCancelOfflineTranslationDownload = actions.shell.onCancelOfflineTranslationDownload
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
