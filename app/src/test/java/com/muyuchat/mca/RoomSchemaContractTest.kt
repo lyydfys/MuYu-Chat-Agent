@@ -26,7 +26,9 @@ class RoomSchemaContractTest {
     @Test
     fun `both databases export the version declared in source`() {
         val chatSource = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStore.kt")
-        val profileSource = sourceFile("app/src/main/java/com/muyuchat/mca/ModelRuntimeProfileStore.kt")
+        // The runtime profile @Database declaration moved to its own file in the data-layer split.
+        // The contract below is unchanged: it still reads the declaration, not the store.
+        val profileSource = sourceFile("app/src/main/java/com/muyuchat/mca/ModelRuntimeProfileDatabase.kt")
 
         assertEquals(
             "chat database version must match the exported schema name",
