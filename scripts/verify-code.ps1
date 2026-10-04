@@ -187,6 +187,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $map = [ordered]@{
             '^app/'              = ':app:testDebugUnitTest'
             '^core/engine/'      = ':core:engine:testDebugUnitTest'
+            '^core/download/'    = ':core:download:testDebugUnitTest'
             '^api/local/'        = ':api:local:testDebugUnitTest'
             '^feature/chat/'     = ':feature:chat:testDebugUnitTest'
             '^feature/agent/'    = ':feature:agent:testDebugUnitTest'
@@ -218,8 +219,12 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         # The feature modules ship their own test source sets, and three of the tests in
         # :feature:chat read ChatScreen.kt as source text. Running only :app would silently skip
         # 351 tests -- including exactly the anchors a presentation refactor can break.
+        # :core:download carries the catalog/download suites (ModelScopeClient etc.); it sat outside
+        # the gate until the P6 lane touched it (2026-10-05) and a `-Changed` run silently fell back
+        # to :app. 101 tests, counted in the totals below via extraResultDirs.
         $testArgs += @(
             ':core:engine:testDebugUnitTest',
+            ':core:download:testDebugUnitTest',
             ':api:local:testDebugUnitTest',
             ':feature:chat:testDebugUnitTest',
             ':feature:agent:testDebugUnitTest',
@@ -234,7 +239,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             Write-Host '          Use -FeatureTests for chat-module anchors, or -Tests alone for :app.' -ForegroundColor Red
             exit 2
         }
-        Write-Host '   plus :core:engine, :api:local and the four :feature:* test tasks'
+        Write-Host '   plus :core:engine, :core:download, :api:local and the four :feature:* test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
     if ($Rerun) {
@@ -283,7 +288,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     # When -FullTests runs the feature/library modules too, their reports live beside app's.
     $extraResultDirs = @()
     if ($FullTests) {
-        $extraResultDirs = @('core\engine', 'api\local', 'feature\chat', 'feature\agent',
+        $extraResultDirs = @('core\engine', 'core\download', 'api\local', 'feature\chat', 'feature\agent',
             'feature\modelhub', 'feature\settings') |
             ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
             Where-Object { Test-Path $_ }
