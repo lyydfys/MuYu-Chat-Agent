@@ -121,7 +121,8 @@ class ModelScopeClient(
                         endpoint = endpoint,
                         body = body,
                         provider = ModelRepositoryProvider.MODELSCOPE,
-                        extensions = extensions
+                        extensions = extensions,
+                        huggingFaceEndpoints = huggingFaceEndpoints
                     )
                     require(files.isNotEmpty()) { "未在该仓库找到可下载模型组件。" }
                     files
@@ -151,7 +152,8 @@ class ModelScopeClient(
                         endpoint = endpoint,
                         body = response.body?.string().orEmpty(),
                         provider = ModelRepositoryProvider.HUGGING_FACE,
-                        extensions = extensions
+                        extensions = extensions,
+                        huggingFaceEndpoints = huggingFaceEndpoints
                     )
                     require(files.isNotEmpty()) { "未在该 Hugging Face 仓库找到可下载模型组件。" }
                     files
@@ -480,20 +482,6 @@ class ModelScopeClient(
             .header("Accept", "application/json,*/*")
             .build()
 
-    private fun collectGgufFiles(
-        repoId: String,
-        revision: String,
-        endpoint: String,
-        body: String,
-        provider: ModelRepositoryProvider,
-        extensions: Set<String> = setOf("gguf")
-    ): List<RemoteModelFile> {
-        val root = runCatching { JSONObject(body) }.getOrNull()
-        if (root != null) return collectFromJson(repoId, revision, endpoint, provider, root, extensions)
-        val array = runCatching { JSONArray(body) }.getOrNull() ?: return emptyList()
-        return collectFromArray(repoId, revision, endpoint, provider, array, extensions)
-    }
-
     internal fun parseGgufFilesForTest(
         repoId: String,
         revision: String,
@@ -506,7 +494,8 @@ class ModelScopeClient(
         endpoint = endpoint,
         body = body,
         provider = provider,
-        extensions = setOf("gguf")
+        extensions = setOf("gguf"),
+        huggingFaceEndpoints = huggingFaceEndpoints
     )
 
     internal fun parseLiteRtLmFilesForTest(
@@ -521,147 +510,9 @@ class ModelScopeClient(
         endpoint = endpoint,
         body = body,
         provider = provider,
-        extensions = setOf("litertlm")
+        extensions = setOf("litertlm"),
+        huggingFaceEndpoints = huggingFaceEndpoints
     )
-
-    private fun collectFromJson(
-        repoId: String,
-        revision: String,
-        endpoint: String,
-        provider: ModelRepositoryProvider,
-        json: JSONObject,
-        extensions: Set<String>
-    ): List<RemoteModelFile> {
-        val result = mutableListOf<RemoteModelFile>()
-        maybeFile(repoId, revision, endpoint, provider, json, extensions)?.let(result::add)
-        json.keys().forEach { key ->
-            when (val value = json.opt(key)) {
-                is JSONObject -> result += collectFromJson(repoId, revision, endpoint, provider, value, extensions)
-                is JSONArray -> result += collectFromArray(repoId, revision, endpoint, provider, value, extensions)
-            }
-        }
-        return result.distinctBy { it.path }
-    }
-
-    private fun collectFromArray(
-        repoId: String,
-        revision: String,
-        endpoint: String,
-        provider: ModelRepositoryProvider,
-        array: JSONArray,
-        extensions: Set<String>
-    ): List<RemoteModelFile> {
-        val result = mutableListOf<RemoteModelFile>()
-        for (index in 0 until array.length()) {
-            when (val value = array.opt(index)) {
-                is JSONObject -> result += collectFromJson(repoId, revision, endpoint, provider, value, extensions)
-                is JSONArray -> result += collectFromArray(repoId, revision, endpoint, provider, value, extensions)
-            }
-        }
-        return result
-    }
-
-    private fun maybeFile(
-        repoId: String,
-        revision: String,
-        endpoint: String,
-        provider: ModelRepositoryProvider,
-        json: JSONObject,
-        extensions: Set<String>
-    ): RemoteModelFile? {
-        val path = listOf("Path", "path", "Name", "name", "FileName", "fileName", "rfilename")
-            .firstNotNullOfOrNull { key -> json.optString(key).takeIf { it.isNotBlank() } }
-            ?: return null
-        val extension = path.substringAfterLast('.', "").lowercase()
-        if (extension !in extensions) return null
-        val name = path.substringAfterLast('/')
-        val rawUrl = listOf("DownloadUrl", "downloadUrl", "download_url", "Url", "url")
-            .firstNotNullOfOrNull { key -> json.optString(key).takeIf { it.startsWith("http") } }
-            ?: when (provider) {
-                ModelRepositoryProvider.MODELSCOPE ->
-                    "$endpoint/models/$repoId/resolve/${revision.urlEncode()}/${path.urlEncodePath()}"
-                ModelRepositoryProvider.HUGGING_FACE ->
-                    "$endpoint/$repoId/resolve/${revision.urlEncode()}/${path.urlEncodePath()}?download=true"
-            }
-        val url = if (provider == ModelRepositoryProvider.HUGGING_FACE) {
-            preferHuggingFaceDownloadUrl(rawUrl)
-        } else {
-            rawUrl
-        }
-        // Hugging Face's ordinary Git tree entries expose `oid` as a
-        // 40-character Git blob SHA-1.  The downloader compares this field
-        // with a content SHA-256, so carrying it as `RemoteModelFile.sha256`
-        // makes complete files fail verification.  Keep only an actual
-        // 64-hex SHA-256 here.  LFS `oid` values are SHA-256 and therefore
-        // still pass this normalization; unknown/malformed digests remain
-        // unavailable instead of being used as a false integrity contract.
-        val sha = listOf("Sha256", "sha256", "SHA256")
-            .asSequence()
-            .mapNotNull { key -> normalizedRemoteSha256OrNull(json.optString(key)) }
-            .firstOrNull()
-            ?: json.optJSONObject("lfs")?.let { lfs ->
-                listOf("sha256", "oid")
-                    .asSequence()
-                    .mapNotNull { key -> normalizedRemoteSha256OrNull(lfs.optString(key)) }
-                    .firstOrNull()
-            }
-            ?: normalizedRemoteSha256OrNull(json.optString("oid"))
-        val size = listOf("Size", "size", "sizeBytes")
-            .firstNotNullOfOrNull { key -> json.optLong(key).takeIf { it > 0 } }
-            ?: json.optJSONObject("lfs")?.firstLong("size", "Size")
-        return RemoteModelFile(
-            repoId = repoId,
-            revision = revision,
-            path = path,
-            name = name,
-            sizeBytes = size,
-            sha256 = sha,
-            downloadUrl = url,
-            provider = provider
-        )
-    }
-
-    private fun parseModelSearchResult(query: String, body: String): ModelScopeModelSearchResult {
-        val root = JSONObject(body)
-        val data = root.optJSONObject("data") ?: root.optJSONObject("Data") ?: root
-        val modelsArray = data.firstArray("models", "Models", "items", "Items", "list", "List", "modelList")
-            ?: root.firstArray("data", "Data")
-            ?: JSONArray()
-        val models = buildList {
-            for (index in 0 until modelsArray.length()) {
-                val item = modelsArray.optJSONObject(index) ?: continue
-                val id = item.firstString("id", "model_id", "modelId", "ModelId", "name", "Name")
-                    ?.trim('/')
-                    ?.takeIf { it.contains('/') }
-                    ?: continue
-                add(
-                    ModelScopeHubModel(
-                        id = id,
-                        displayName = item.firstString("display_name", "displayName", "model_name", "modelName", "name", "Name")
-                            ?: id.substringAfter('/'),
-                        description = item.firstString("description", "Description").orEmpty(),
-                        downloads = item.firstLong("downloads", "download_count", "downloadCount", "downloads_count"),
-                        likes = item.firstLong("likes", "like_count", "likeCount", "stars"),
-                        license = item.firstString("license", "License")
-                            ?.takeIf { it.isNotBlank() && it != "null" },
-                        tasks = item.firstArray("tasks", "Tasks", "task_tags").toStringList(),
-                        fileSizeBytes = item.firstLong("file_size", "fileSize", "size", "Size"),
-                        params = item.firstLong("params", "parameter_count", "parameterCount"),
-                        tags = item.firstArray("tags", "Tags").toStringList(),
-                        private = item.optBoolean("private"),
-                        gated = item.optBoolean("gated")
-                    )
-                )
-            }
-        }
-        return ModelScopeModelSearchResult(
-            query = query,
-            pageNumber = data.optInt("page_number", 1),
-            pageSize = data.optInt("page_size", models.size),
-            totalCount = data.optInt("total_count", models.size),
-            models = models
-        )
-    }
 
     internal fun parseModelSearchResultForTest(query: String, body: String): ModelScopeModelSearchResult =
         parseModelSearchResult(query, body)
@@ -693,31 +544,11 @@ class ModelScopeClient(
             QAIRT_IMAGE_RELEASE_ASSET_SHA256[modelId]?.takeIf { exactNamedArchive }
     }
 
-    private fun preferHuggingFaceDownloadUrl(url: String): String {
-        val preferred = huggingFaceEndpoints.firstOrNull {
-            !it.contains("huggingface.co", ignoreCase = true)
-        } ?: return url
-        val normalized = url.trim()
-        return when {
-            normalized.startsWith("https://huggingface.co/", ignoreCase = true) ->
-                normalized.replaceFirst(Regex("""^https://huggingface\.co(?=/)""", RegexOption.IGNORE_CASE), preferred.trimEnd('/'))
-            normalized.startsWith("https://www.huggingface.co/", ignoreCase = true) ->
-                normalized.replaceFirst(Regex("""^https://www\.huggingface\.co(?=/)""", RegexOption.IGNORE_CASE), preferred.trimEnd('/'))
-            normalized.startsWith("https://hf.co/", ignoreCase = true) ->
-                normalized.replaceFirst(Regex("""^https://hf\.co(?=/)""", RegexOption.IGNORE_CASE), preferred.trimEnd('/'))
-            else -> url
-        }
-    }
+    private fun preferHuggingFaceDownloadUrl(url: String): String =
+        preferredHuggingFaceMirrorUrl(url, huggingFaceEndpoints)
 
-    private fun String.isHuggingFaceHost(): Boolean {
-        val host = trim().lowercase().removePrefix("www.")
-        return host == "huggingface.co" ||
-            host == "hf.co" ||
-            huggingFaceEndpoints.any { endpoint ->
-                runCatching { URI(endpoint).host.orEmpty().lowercase().removePrefix("www.") }.getOrDefault("") == host
-            }
-    }
-
+    private fun String.isHuggingFaceHost(): Boolean =
+        this.isHuggingFaceHost(huggingFaceEndpoints)
 
     companion object {
         private const val QNN_SD15_EXECUTION_PROFILE_REVISION = 5
