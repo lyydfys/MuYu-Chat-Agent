@@ -616,7 +616,7 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun splitSdxlRuntimeFallbackRequiresExactBinderDeathProof() {
-        val source = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
+        val source = localImageWorkerSource("SdxlTwoPhaseCoordinatorPhaseClient.kt")
         val runtimeSelection = localImageWorkerSource("SdxlTwoPhaseCoordinatorRuntimeSelection.kt")
         val execute = functionBody(source, "suspend fun execute(request: SdxlImagePhaseRequest")
         val executeCandidates = functionBody(

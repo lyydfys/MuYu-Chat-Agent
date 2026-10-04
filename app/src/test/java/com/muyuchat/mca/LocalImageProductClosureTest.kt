@@ -453,8 +453,8 @@ class LocalImageProductClosureTest {
 
     @Test
     fun `SDXL phase client rejects stale terminals and retires late connections`() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt")
-        val start = source.indexOf("private class SdxlPhaseClient(")
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseClient.kt")
+        val start = source.indexOf("internal class SdxlPhaseClient(")
         val end = source.indexOf("private const val SDXL_PHASE_EXIT_CONFIRM_TIMEOUT_MS", start)
         require(start >= 0 && end > start)
         val client = source.substring(start, end)
