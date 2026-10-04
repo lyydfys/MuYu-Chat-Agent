@@ -34,7 +34,8 @@ param(
     [string[]] $Tests = @(),
     [switch] $FullTests,
     [switch] $SkipTests,
-    [switch] $FeatureTests
+    [switch] $FeatureTests,
+    [switch] $Rerun
 )
 
 # Native tools write progress to stderr; with 'Stop' a PowerShell host turns that into a terminating
@@ -74,7 +75,13 @@ function Invoke-Gradle {
     param([string[]] $Arguments, [string] $LogPath)
     $held = $false
     try {
-        $held = $script:buildMutex.WaitOne([TimeSpan]::FromMinutes(30))
+        try {
+            $held = $script:buildMutex.WaitOne([TimeSpan]::FromMinutes(30))
+        } catch [System.Threading.AbandonedMutexException] {
+            # A previous invocation (or a killed agent) terminated while holding the queue. The
+            # wait still transfers ownership, so the documented recovery is to proceed.
+            $held = $true
+        }
         if (-not $held) {
             Write-Host '   could not acquire the build queue within 30 minutes' -ForegroundColor Red
             return 1
@@ -125,11 +132,14 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     # `-FeatureTests` runs the chat module's own test source set. It has to be its own Gradle
     # invocation: `--tests` filters are global to the whole invocation, so combining a chat-only
     # filter with :app/:core/:api would make every other task fail with "No tests found".
-    $testArgs = if ($FeatureTests) {
-        @(':feature:chat:testDebugUnitTest')
+    # The @(...) wrapper is required: PowerShell unrolls a one-element array returned from an
+    # if-expression into a string, and the later `+=` would then concatenate instead of append
+    # (observed: -FullTests passed one glued ':app:testDebugUnitTest:core:engine:...' argument).
+    $testArgs = @(if ($FeatureTests) {
+        ':feature:chat:testDebugUnitTest'
     } else {
-        @(':app:testDebugUnitTest')
-    }
+        ':app:testDebugUnitTest'
+    })
     if ($Tests.Count -gt 0) {
         foreach ($t in $Tests) { $testArgs += @('--tests', $t) }
         Write-Host ('   filter: ' + ($Tests -join ', '))
@@ -159,7 +169,33 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         Write-Host '   plus :core:engine, :api:local and the four :feature:* test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
-    $testCode = Invoke-Gradle -Arguments $testArgs -LogPath $testLog
+    if ($Rerun) {
+        # `-Rerun` forces a real execution even when Gradle considers the test tasks up-to-date
+        # (up-to-date state is a valid "still passing" signal, but a baseline freeze needs fresh
+        # report files). Two dead ends are recorded here so they are not retried:
+        #  * `--rerun-tasks` reruns the *whole* task graph, including :core:native's CMake /
+        #    llama.cpp build -- a multi-tens-of-minutes native rebuild a test freeze must not
+        #    trigger (observed and aborted);
+        #  * `--rerun` with six test tasks in one invocation re-executed only one of them (the
+        #    last; the other five modules kept their old report files -- XML mtimes proved it).
+        # So each selected test task gets its own invocation with `--rerun`, which re-executes
+        # just that task while its dependencies stay incremental.
+        $taskNames = @($testArgs | Where-Object { $_ -like ':*' })
+        $filterArgs = @($testArgs | Where-Object { $_ -notlike ':*' })
+        $testCode = 0
+        $merged = New-Object System.Text.StringBuilder
+        foreach ($taskName in $taskNames) {
+            $oneLog = "$testLog.$($taskName -replace '[:]', '_')"
+            $code = Invoke-Gradle -Arguments (@($taskName) + $filterArgs + @('--rerun')) -LogPath $oneLog
+            if (Test-Path $oneLog) {
+                [void] $merged.AppendLine((Get-Content $oneLog -Raw -ErrorAction SilentlyContinue))
+            }
+            if ($code -ne 0) { $testCode = $code; break }
+        }
+        [System.IO.File]::WriteAllText($testLog, $merged.ToString())
+    } else {
+        $testCode = Invoke-Gradle -Arguments $testArgs -LogPath $testLog
+    }
     $testText = Get-Content $testLog -Raw -ErrorAction SilentlyContinue
     if ($testText -match 'BUILD SUCCESSFUL' -and $testCode -eq 0) {
         Write-Host '   ok' -ForegroundColor Green
@@ -184,18 +220,24 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
             Where-Object { Test-Path $_ }
     }
-    if (Test-Path $dir) {
-        # Each JUnit XML nests <testsuite> elements; read only the outermost one per file so counts
-        # are not double-counted.
-        [int] $totalTests = 0
-        [int] $totalFailures = 0
-        [int] $totalErrors = 0
-        [int] $totalSkipped = 0
-        # Only count reports written by THIS run. Parallel agents share the report directory, so
-        # counting every XML on disk reports another agent's (possibly stale) results as ours -
-        # observed: a filtered run reported tests=14 from a different test class entirely.
-        [datetime] $runStart = (Get-Date).AddMinutes(-20)
-        foreach ($file in Get-ChildItem $dir -Filter '*.xml' | Where-Object { $_.LastWriteTime -gt $runStart }) {
+    # -FullTests produces reports in every module's own build directory; aggregate them all so the
+    # printed totals describe the whole invocation instead of only :app.
+    $countDirs = @($dir) + $extraResultDirs
+    # Each JUnit XML nests <testsuite> elements; read only the outermost one per file so counts
+    # are not double-counted.
+    [int] $totalTests = 0
+    [int] $totalFailures = 0
+    [int] $totalErrors = 0
+    [int] $totalSkipped = 0
+    # Only count reports written by THIS run. Parallel agents share the report directory, so
+    # counting every XML on disk reports another agent's (possibly stale) results as ours -
+    # observed: a filtered run reported tests=14 from a different test class entirely.
+    [datetime] $runStart = (Get-Date).AddMinutes(-20)
+    $countedDirs = 0
+    foreach ($countDir in $countDirs) {
+        if (-not (Test-Path $countDir)) { continue }
+        $countedDirs = $countedDirs + 1
+        foreach ($file in Get-ChildItem $countDir -Filter '*.xml' | Where-Object { $_.LastWriteTime -gt $runStart }) {
             [string] $xml = [System.IO.File]::ReadAllText($file.FullName)
             [System.Text.RegularExpressions.Match] $suite = [regex]::Match($xml, '<testsuite\s[^>]*>')
             if (-not $suite.Success) { continue }
@@ -205,12 +247,17 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             $totalErrors = $totalErrors + [int] ([regex]::Match($head, 'errors="(\d+)"').Groups[1].Value)
             $totalSkipped = $totalSkipped + [int] ([regex]::Match($head, 'skipped="(\d+)"').Groups[1].Value)
         }
+    }
+    if ($countedDirs -gt 0) {
         Write-Host ("   reports (this run only): tests=$totalTests failures=$totalFailures errors=$totalErrors skipped=$totalSkipped")
         if ($totalFailures -gt 0 -or $totalErrors -gt 0) {
-            foreach ($file in Get-ChildItem $dir -Filter '*.xml') {
-                [string] $xml = [System.IO.File]::ReadAllText($file.FullName)
-                foreach ($m in [regex]::Matches($xml, '<testcase name="([^"]+)" classname="([^"]+)"[^>]*>\s*<(failure|error)')) {
-                    Write-Host ('      FAILED ' + $m.Groups[2].Value + '.' + $m.Groups[1].Value) -ForegroundColor Red
+            foreach ($countDir in $countDirs) {
+                if (-not (Test-Path $countDir)) { continue }
+                foreach ($file in Get-ChildItem $countDir -Filter '*.xml') {
+                    [string] $xml = [System.IO.File]::ReadAllText($file.FullName)
+                    foreach ($m in [regex]::Matches($xml, '<testcase name="([^"]+)" classname="([^"]+)"[^>]*>\s*<(failure|error)')) {
+                        Write-Host ('      FAILED ' + $m.Groups[2].Value + '.' + $m.Groups[1].Value) -ForegroundColor Red
+                    }
                 }
             }
         }
