@@ -4902,21 +4902,6 @@ private fun qnnRuntimeFileIdentity(role: String, rawPath: String): JSONObject {
         .put("sha256", digest)
 }
 
-private fun File.sha256Contents(): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    inputStream().buffered().use { input ->
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (read > 0) digest.update(buffer, 0, read)
-        }
-    }
-    return digest.digest().joinToString(separator = "") { byte ->
-        "%02x".format(byte.toInt() and 0xff)
-    }
-}
-
 internal fun sdxlQnnConditioningGraphSha256(conditioningRoot: File): String {
     val executionAssetNames = buildList {
         add(SDXL_QNN_CONDITIONING_REQUIRED_EXECUTION_ASSET_NAMES.first())

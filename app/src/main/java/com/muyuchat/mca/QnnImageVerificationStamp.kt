@@ -362,18 +362,5 @@ private fun MessageDigest.updateLong(value: Long) {
     }
 }
 
-private fun File.sha256Contents(): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    inputStream().buffered().use { input ->
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            if (read > 0) digest.update(buffer, 0, read)
-        }
-    }
-    return digest.digest().toHexString()
-}
-
 private fun ByteArray.toHexString(): String =
     joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }

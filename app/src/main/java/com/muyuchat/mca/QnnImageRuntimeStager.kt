@@ -422,19 +422,6 @@ private fun String.isValidQnnBuildTimestamp(): Boolean {
     }.isSuccess
 }
 
-private fun File.sha256Contents(): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    inputStream().buffered().use { input ->
-        val buffer = ByteArray(STAGING_BUFFER_BYTES)
-        while (true) {
-            val count = input.read(buffer)
-            if (count < 0) break
-            digest.update(buffer, 0, count)
-        }
-    }
-    return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-}
-
 private const val QNN_IMAGE_RUNTIME_STAGE_DIRECTORY = "qnn-image-runtime"
 private const val STAGING_BUFFER_BYTES = 128 * 1024
 private const val QNN_BUILD_ID_SCAN_BYTES = 256 * 1024
