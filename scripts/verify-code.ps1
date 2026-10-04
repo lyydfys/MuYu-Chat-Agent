@@ -54,6 +54,16 @@ if (-not (Test-Path $env:MCA_QNN_SDK_ROOT)) {
 if (-not (Test-Path (Join-Path $env:JAVA_HOME 'bin\java.exe'))) {
     throw "JAVA_HOME does not look like a JDK: $env:JAVA_HOME"
 }
+# The LiteRT-LM SDK dependency ships class-file 65.0 (Java 21). Running the build on an older JDK
+# fails five :core:engine tests with UnsupportedClassVersionError while every other module stays
+# green -- observed 2026-10-05 from a shell whose JAVA_HOME was JDK 17, after the app module had
+# already passed. Fail loudly instead of letting a half-green gate through.
+$javaMajor = & (Join-Path $env:JAVA_HOME 'bin\java.exe') -version 2>&1 |
+    Select-String -Pattern 'version "(\d+)' | ForEach-Object { [int] $_.Matches[0].Groups[1].Value } |
+    Select-Object -First 1
+if ($javaMajor -and $javaMajor -lt 21) {
+    throw "JAVA_HOME is JDK $javaMajor; MCA requires JDK 21 (LiteRT-LM SDK classes are class-file 65.0). Unset JAVA_HOME to use the built-in jdk-21 default, or point it at the jdk-21 toolchain."
+}
 
 # Module -> compile task. All three are Android modules (the two libraries have debug/release
 # variants too), so compileKotlin is ambiguous; the variant-specific name is required.
@@ -189,7 +199,18 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
                 if ($p -match $k) { $sel += $map[$k]; break }
             }
         }
-        if ($sel.Count -eq 0) { $sel = @(':app:testDebugUnitTest') }
+        if ($sel.Count -eq 0) {
+            # Two distinct empty cases, each stated loudly (never a silent pass for nothing):
+            if ($changedFiles.Count -eq 0) {
+                # No tracked change at all since -Since. Reporting a pass here would be a green
+                # badge for an empty change set, so this is an error, not a fallback.
+                Write-Host ('   ERROR: -Changed found no changed files vs ' + $Since + '; refusing to run an empty lane.') -ForegroundColor Red
+                Write-Host '          Use -FullTests for the full gate, or make the change first.' -ForegroundColor Red
+                exit 2
+            }
+            Write-Host ('   -Changed: files changed but no module matched (' + ($changedFiles -join ', ') + '); falling back to :app:testDebugUnitTest') -ForegroundColor Yellow
+            $sel = @(':app:testDebugUnitTest')
+        }
         $testArgs = @($sel | Select-Object -Unique)
         Write-Host ('   -Changed vs ' + $Since + ': ' + ($testArgs -join ', '))
     }
