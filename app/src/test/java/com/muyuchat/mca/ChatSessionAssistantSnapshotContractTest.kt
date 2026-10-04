@@ -9,10 +9,12 @@ class ChatSessionAssistantSnapshotContractTest {
     @Test
     fun snapshotIsReadFromLegacyAndRoomPathsAndWrittenBackToRoom() {
         // The write-back assertion below moved to ChatSessionPersistenceMapping when the chat store
-        // was split; the other four are still in ChatSessionStore. Reading both keeps the same
-        // contract under test -- the assertions themselves are unchanged.
+        // was split, and the column declaration moved to ChatSessionStoreEntities when the Room
+        // contracts did; the other assertions are still in ChatSessionStore. Reading all of them
+        // keeps the same contract under test -- the assertions themselves are unchanged.
         val source = sourceFile("ChatSessionStore.kt") +
-            sourceFile("ChatSessionPersistenceMapping.kt")
+            sourceFile("ChatSessionPersistenceMapping.kt") +
+            sourceFile("ChatSessionStoreEntities.kt")
 
         assertTrue(source.contains("optString(\"assistantSnapshotJson\")"))
         assertTrue(source.contains("optJSONObject(\"assistantSnapshot\")?.toString()"))

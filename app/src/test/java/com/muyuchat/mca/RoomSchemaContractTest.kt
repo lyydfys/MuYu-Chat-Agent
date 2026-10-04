@@ -25,7 +25,9 @@ class RoomSchemaContractTest {
 
     @Test
     fun `both databases export the version declared in source`() {
-        val chatSource = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStore.kt")
+        // The chat @Database declaration moved to its own file in the persistence-layer split.
+        // The contract below is unchanged: it still reads the declaration, not the store.
+        val chatSource = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
         // The runtime profile @Database declaration moved to its own file in the data-layer split.
         // The contract below is unchanged: it still reads the declaration, not the store.
         val profileSource = sourceFile("app/src/main/java/com/muyuchat/mca/ModelRuntimeProfileDatabase.kt")
@@ -110,7 +112,9 @@ class RoomSchemaContractTest {
 
     @Test
     fun `a migration path exists from every historical version to the current one`() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStore.kt")
+        // The migration chain moved to the database file in the persistence-layer split; the
+        // walk below is unchanged.
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
         val current = declaredVersion(source)
 
         val migrations = Regex("Migration\\((\\d+),\\s*(\\d+)\\)")
@@ -141,7 +145,9 @@ class RoomSchemaContractTest {
 
     @Test
     fun `the migration chain retires every version below the current one`() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStore.kt")
+        // The migration chain moved to the database file in the persistence-layer split; the
+        // registration check below is unchanged.
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
         val current = declaredVersion(source)
         val registered = Regex("addMigrations\\(([^)]*)\\)", RegexOption.DOT_MATCHES_ALL)
             .findAll(source)

@@ -436,7 +436,14 @@ class KnowledgeBaseRoomContractTest {
         return source.substring(start, end)
     }
 
-    private fun chatSessionStoreSource(): String = sourceFile("ChatSessionStore.kt")
+    // The Room schema, DAO and entity declarations moved to their own files in the
+    // persistence-layer split. The contract below reads the same declarations as before --
+    // only the files they are read from changed; the assertions themselves are unchanged.
+    private fun chatSessionStoreSource(): String =
+        sourceFile("ChatSessionStore.kt") +
+            sourceFile("ChatSessionStoreRoomDatabase.kt") +
+            sourceFile("ChatSessionStoreDao.kt") +
+            sourceFile("ChatSessionStoreEntities.kt")
 
     private fun knowledgeBaseStoreSource(): String = sourceFile("KnowledgeBaseStore.kt")
 
