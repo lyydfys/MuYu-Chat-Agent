@@ -654,7 +654,9 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun splitSdxlProviderCleanupRetainsGlobalGateUntilPersistentRequestBarrier() {
         val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
-        val provider = localImageWorkerSource("LocalImageProvider.kt")
+        // P5/L10: the provider-side Qwen generation body (incl. its cacheDir output root)
+        // moved out of LocalImageProvider.kt into this owner file.
+        val qwenGeneration = localImageWorkerSource("LocalImageQwenImage21Operations.kt")
         // P5/L8: the provider-side SPLIT request lease tail lives in the generate() body.
         val generation = localImageWorkerSource("LocalImageGenerationOperations.kt")
         val phaseService = localImageWorkerSource("SdxlImagePhaseWorkerService.kt")
@@ -693,7 +695,7 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(phaseService.contains("noBackupFilesDir"))
         assertTrue(workerService.contains("coordinationRoot = File("))
         assertTrue(workerService.contains("noBackupFilesDir"))
-        assertTrue(provider.contains("appContext.cacheDir"))
+        assertTrue(qwenGeneration.contains("appContext.cacheDir"))
         assertTrue(generation.contains("SDXL_TWO_PHASE_DIRECTORY"))
     }
 
