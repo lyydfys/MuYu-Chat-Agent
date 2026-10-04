@@ -178,11 +178,16 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(doneBody.contains("persistChatSessions(generationRunId = generationRunId)"))
         assertTrue(errorBody.contains("flushPendingAssistantOutput(generationRunId)"))
 
-        val append = functionBody(source, "private fun appendAssistant(")
-        val flush = functionBody(source, "private fun flushPendingAssistantOutput(")
-        assertTrue(append.contains("assistantOutputBufferGenerationId"))
-        assertTrue(append.contains("generationRunSequence.get() != generationRunId"))
-        assertTrue(flush.contains("generationRunSequence.get() != generationRunId"))
+        // The buffering itself moved to ChatStreamAccumulator: appendAssistant and
+        // flushPendingAssistantOutput are one-line forwarders now, and the generation-ownership
+        // guard lives in the owner. The contract under test is unchanged -- it is read where the
+        // guard now is.
+        val accumulator = chatStreamAccumulatorSource()
+        val append = functionBody(accumulator, "fun append(")
+        val flush = functionBody(accumulator, "fun flush(")
+        assertTrue(append.contains("bufferGenerationId"))
+        assertTrue(append.contains("currentRunId() != generationRunId"))
+        assertTrue(flush.contains("currentRunId() != generationRunId"))
 
         val provider = source.substring(
             source.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
@@ -539,6 +544,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** The owner that holds the streamed-output buffer and its generation-ownership guard. */
+    private fun chatStreamAccumulatorSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatStreamAccumulator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatStreamAccumulator.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("ChatStreamAccumulator.kt not found from ${System.getProperty("user.dir")}")
     }
 
     private fun functionBody(source: String, signature: String): String {

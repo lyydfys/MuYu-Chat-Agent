@@ -428,8 +428,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
         private const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
         private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
-        private const val ASSISTANT_STREAM_PUBLISH_CHARS = 2 * 1024
-        private const val ASSISTANT_STREAM_PUBLISH_INTERVAL_MS = 75L
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
         private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
@@ -751,22 +749,74 @@ class MainViewModel @JvmOverloads constructor(
     /** New UI generations join this job before entering the engine, preventing a stale stop. */
     /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
     private val generationRunSequence = AtomicLong(0L)
-    private val uiGenerationOwnership = UiGenerationOwnership(generationRunSequence)
-    // Streaming often arrives one token at a time. Publish bounded batches so
-    // immutable ChatMessage copies do not repeatedly duplicate the full reply.
-    private val assistantOutputBufferLock = Any()
-    private val pendingAssistantOutput = StringBuilder()
-    private val pendingAssistantReasoning = StringBuilder()
-    /** Generation epoch that currently owns the pending stream batch. */
-    private var assistantOutputBufferGenerationId: Long? = null
-    private var pendingAssistantReasoningDurationMs = 0L
-    private var assistantOutputLastPublishedAtMs = 0L
-    private var assistantOutputPublishJob: Job? = null
-    private data class AssistantOutputBatch(
-        val content: String,
-        val reasoning: String,
-        val reasoningDurationMs: Long
+    /**
+     * Owns the streamed assistant output: the buffer lock, the buffered text, the deferred publish
+     * job and the generation id they belong to. See [ChatStreamAccumulator].
+     */
+    private val chatStreamAccumulator = ChatStreamAccumulator(
+        scope = viewModelScope,
+        currentRunId = { generationRunSequence.get() },
+        activeSessionId = { _uiState.value.activeChatSessionId },
+        hasAssistantMessage = { _uiState.value.messages.any { it.role == Role.ASSISTANT } },
+        commit = { batch, isStillCurrent ->
+            _uiState.update { state ->
+                if (!isStillCurrent()) {
+                    state
+                } else {
+                    val updated = state.messages.toMutableList()
+                    val index = updated.indexOfLast { it.role == Role.ASSISTANT }
+                    if (index >= 0) {
+                        val current = updated[index]
+                        updated[index] = current.copy(
+                            content = current.content + batch.content,
+                            reasoningContent = current.reasoningContent + batch.reasoning,
+                            reasoningDurationMs = maxOf(
+                                current.reasoningDurationMs,
+                                batch.reasoningDurationMs
+                            )
+                        )
+                    }
+                    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
+                    state.copy(
+                        messages = updated,
+                        activeChatSessionId = sessionId,
+                        chatSessions = state.chatSessions.upsertSession(
+                            sessionId = sessionId,
+                            messages = updated,
+                            assistantId = state.selectedAssistantId,
+                            modelMode = state.selectedChatBackend.bindingValue(),
+                            modelId = state.currentChatModelId()
+                        )
+                    )
+                }
+            }
+        }
     )
+
+    /** Delegates to [ChatStreamAccumulator.append]. Signature kept verbatim. */
+    private fun appendAssistant(
+        delta: String,
+        reasoningDelta: String = "",
+        reasoningDurationMs: Long = 0L,
+        forcePublish: Boolean = false,
+        generationRunId: Long? = null
+    ) = chatStreamAccumulator.append(
+        delta = delta,
+        reasoningDelta = reasoningDelta,
+        reasoningDurationMs = reasoningDurationMs,
+        forcePublish = forcePublish,
+        generationRunId = generationRunId
+    )
+
+    /** Delegates to [ChatStreamAccumulator.flush]. Signature kept verbatim. */
+    private fun flushPendingAssistantOutput(generationRunId: Long? = null): Boolean =
+        chatStreamAccumulator.flush(generationRunId)
+
+    /** Delegates to [ChatStreamAccumulator.discard]. Signature kept verbatim. */
+    private fun discardPendingAssistantOutput(generationRunId: Long? = null) =
+        chatStreamAccumulator.discard(generationRunId)
+
+    private val uiGenerationOwnership = UiGenerationOwnership(generationRunSequence)
     @Volatile
     private var localConversationContextNeedsInvalidation = false
     private val localConversationContextInvalidationSequence = AtomicLong(0L)
@@ -13638,161 +13688,6 @@ contextTraceJson: String?
                     statusMessage = audit.statusMessage
                 )
             }
-        }
-    }
-
-    private fun appendAssistant(
-        delta: String,
-        reasoningDelta: String = "",
-        reasoningDurationMs: Long = 0L,
-        forcePublish: Boolean = false,
-        generationRunId: Long? = null
-    ) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val shouldPublish = synchronized(assistantOutputBufferLock) {
-            // Re-check while holding the buffer lock. A cancelled producer can
-            // race a new send between the caller's check and this append.
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
-                return@synchronized false
-            }
-            if (generationRunId != null &&
-                assistantOutputBufferGenerationId != null &&
-                assistantOutputBufferGenerationId != generationRunId
-            ) {
-                assistantOutputPublishJob?.cancel()
-                assistantOutputPublishJob = null
-                pendingAssistantOutput.setLength(0)
-                pendingAssistantReasoning.setLength(0)
-                pendingAssistantReasoningDurationMs = 0L
-            }
-            if (generationRunId != null) {
-                assistantOutputBufferGenerationId = generationRunId
-            }
-            pendingAssistantOutput.append(delta)
-            pendingAssistantReasoning.append(reasoningDelta)
-            pendingAssistantReasoningDurationMs = maxOf(
-                pendingAssistantReasoningDurationMs,
-                reasoningDurationMs
-            )
-            forcePublish ||
-                pendingAssistantOutput.length + pendingAssistantReasoning.length >=
-                ASSISTANT_STREAM_PUBLISH_CHARS ||
-                now - assistantOutputLastPublishedAtMs >= ASSISTANT_STREAM_PUBLISH_INTERVAL_MS
-        }
-        if (shouldPublish) {
-            flushPendingAssistantOutput(generationRunId)
-        } else {
-            scheduleAssistantOutputPublication(generationRunId ?: generationRunSequence.get())
-        }
-    }
-
-    private fun scheduleAssistantOutputPublication(generationRunId: Long) {
-        val sessionId = _uiState.value.activeChatSessionId
-        lateinit var scheduled: Job
-        val next = synchronized(assistantOutputBufferLock) {
-            if (generationRunSequence.get() != generationRunId || assistantOutputPublishJob != null ||
-                (pendingAssistantOutput.isEmpty() && pendingAssistantReasoning.isEmpty() &&
-                    pendingAssistantReasoningDurationMs <= 0L)
-            ) return@synchronized null
-            scheduled = viewModelScope.launch(start = CoroutineStart.LAZY) {
-                delay(ASSISTANT_STREAM_PUBLISH_INTERVAL_MS)
-                val ownsPublication = synchronized(assistantOutputBufferLock) {
-                    if (assistantOutputPublishJob !== scheduled) false else {
-                        assistantOutputPublishJob = null
-                        generationRunSequence.get() == generationRunId &&
-                            _uiState.value.activeChatSessionId == sessionId
-                    }
-                }
-                if (ownsPublication) flushPendingAssistantOutput(generationRunId)
-            }
-            assistantOutputPublishJob = scheduled
-            scheduled
-        }
-        next?.start()
-    }
-
-    /** Publishes accumulated stream text once, preserving message metadata. */
-    private fun flushPendingAssistantOutput(generationRunId: Long? = null): Boolean {
-        val pending = synchronized(assistantOutputBufferLock) {
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
-                null
-            } else if (generationRunId != null &&
-                assistantOutputBufferGenerationId != null &&
-                assistantOutputBufferGenerationId != generationRunId
-            ) {
-                null
-            } else if (pendingAssistantOutput.isEmpty() && pendingAssistantReasoning.isEmpty() &&
-                pendingAssistantReasoningDurationMs <= 0L
-            ) {
-                null
-            } else {
-                AssistantOutputBatch(
-                    content = pendingAssistantOutput.toString(),
-                    reasoning = pendingAssistantReasoning.toString(),
-                    reasoningDurationMs = pendingAssistantReasoningDurationMs
-                ).also {
-                    assistantOutputPublishJob?.cancel()
-                    assistantOutputPublishJob = null
-                    pendingAssistantOutput.setLength(0)
-                    pendingAssistantReasoning.setLength(0)
-                    pendingAssistantReasoningDurationMs = 0L
-                    assistantOutputBufferGenerationId = null
-                    assistantOutputLastPublishedAtMs = android.os.SystemClock.elapsedRealtime()
-                }
-            }
-        } ?: return false
-        // Do not append a drained batch to a newer assistant message if the
-        // generation changed while the buffer was being published.
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) {
-            return false
-        }
-        if (_uiState.value.messages.none { it.role == Role.ASSISTANT }) return false
-        _uiState.update { state ->
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
-                return@update state
-            }
-            val updated = state.messages.toMutableList()
-            val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-            if (index >= 0) {
-                val current = updated[index]
-                updated[index] = current.copy(
-                    content = current.content + pending.content,
-                    reasoningContent = current.reasoningContent + pending.reasoning,
-                    reasoningDurationMs = maxOf(
-                        current.reasoningDurationMs,
-                        pending.reasoningDurationMs
-                    )
-                )
-            }
-            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-            state.copy(
-                messages = updated,
-                activeChatSessionId = sessionId,
-                chatSessions = state.chatSessions.upsertSession(
-                    sessionId = sessionId,
-                    messages = updated,
-                    assistantId = state.selectedAssistantId,
-                    modelMode = state.selectedChatBackend.bindingValue(),
-                    modelId = state.currentChatModelId()
-                )
-            )
-        }
-        return true
-    }
-
-    private fun discardPendingAssistantOutput(generationRunId: Long? = null) {
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
-        synchronized(assistantOutputBufferLock) {
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
-                return@synchronized
-            }
-            pendingAssistantOutput.setLength(0)
-            pendingAssistantReasoning.setLength(0)
-            pendingAssistantReasoningDurationMs = 0L
-            assistantOutputBufferGenerationId = null
-            assistantOutputLastPublishedAtMs = 0L
-            assistantOutputPublishJob?.cancel()
-            assistantOutputPublishJob = null
         }
     }
 
