@@ -1,7 +1,6 @@
 package com.muyuchat.mca
 
 import java.io.File
-import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -24,11 +23,6 @@ private fun nativeFloatMatches(first: Double, second: Double): Boolean {
     val scale = maxOf(1.0, kotlin.math.abs(first), kotlin.math.abs(second))
     return kotlin.math.abs(first - second) <= NATIVE_FLOAT_RELATIVE_TOLERANCE * scale
 }
-
-class LocalImageProductContractException(
-    val code: String,
-    override val message: String
-) : IllegalArgumentException(message)
 
 /** Product-visible image operation. This is independent of runtime or device discovery. */
 enum class LocalImageTaskMode(val wireName: String) {
@@ -62,556 +56,6 @@ enum class LocalImagePreviewMode(val wireName: String) {
     }
 }
 
-data class LocalImagePreparedLora(
-    val id: String,
-    val name: String,
-    val path: String,
-    val sha256: String,
-    val sizeBytes: Long,
-    val multiplier: Double
-) {
-    init {
-        require(ID_PATTERN.matches(id)) { "LoRA id must be a UUID." }
-        require(name.isNotBlank() && name.length <= MAX_NAME_CHARS) { "LoRA name is invalid." }
-        require(path.isNotBlank() && path.length <= MAX_PATH_CHARS) { "LoRA path is invalid." }
-        require(SHA256_PATTERN.matches(sha256)) { "LoRA sha256 is invalid." }
-        require(sizeBytes in 16..MAX_LORA_BYTES) { "LoRA size is invalid." }
-        require(multiplier.isFinite() &&
-            multiplier in MIN_MULTIPLIER..MAX_MULTIPLIER &&
-            kotlin.math.abs(multiplier) >= MIN_ABSOLUTE_MULTIPLIER
-        ) {
-            "LoRA multiplier must be in [-4, -0.01] or [0.01, 4]."
-        }
-    }
-
-    fun toJson(includePath: Boolean = true): JSONObject = JSONObject()
-        .put("id", id)
-        .put("name", name)
-        .put("sha256", sha256)
-        .put("sizeBytes", sizeBytes)
-        .put("multiplier", multiplier)
-        .apply { if (includePath) put("path", path) }
-
-    companion object {
-        const val MAX_COUNT = 8
-        const val MIN_MULTIPLIER = -4.0
-        const val MAX_MULTIPLIER = 4.0
-        const val MIN_ABSOLUTE_MULTIPLIER = 0.01
-        private const val MAX_NAME_CHARS = 128
-        private const val MAX_PATH_CHARS = 4_096
-        private const val MAX_LORA_BYTES = 2L * 1024L * 1024L * 1024L
-        private val SHA256_PATTERN = Regex("[0-9a-f]{64}")
-        private val ID_PATTERN =
-            Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-
-        fun fromJson(json: JSONObject): LocalImagePreparedLora = LocalImagePreparedLora(
-            id = json.requiredString("id"),
-            name = json.requiredString("name"),
-            path = json.requiredString("path"),
-            sha256 = json.requiredString("sha256").lowercase(),
-            sizeBytes = json.requiredExactLong("sizeBytes"),
-            multiplier = json.requiredFiniteDouble("multiplier")
-        )
-    }
-}
-
-data class LocalImageVaeTilingOptions(
-    val tileSize: Int,
-    val overlap: Double
-) {
-    init {
-        require(tileSize in MIN_TILE_SIZE..MAX_TILE_SIZE && tileSize % 8 == 0) {
-            "vaeTiling.tileSize must be an 8-pixel multiple between $MIN_TILE_SIZE and $MAX_TILE_SIZE."
-        }
-        require(overlap.isFinite() && overlap >= 0.0 && overlap <= 0.5) {
-            "vaeTiling.overlap must be a finite ratio in [0, 0.5]."
-        }
-    }
-
-    fun toJson(): JSONObject = JSONObject()
-        .put("tileSize", tileSize)
-        .put("overlap", overlap)
-
-    companion object {
-        private const val MIN_TILE_SIZE = 64
-        private const val MAX_TILE_SIZE = 4_096
-
-        fun fromJson(json: JSONObject): LocalImageVaeTilingOptions = LocalImageVaeTilingOptions(
-            tileSize = json.requiredExactInt("tileSize"),
-            overlap = json.requiredFiniteDouble("overlap")
-        )
-    }
-}
-
-data class LocalImagePreviewOptions(
-    val interval: Int,
-    val mode: LocalImagePreviewMode
-) {
-    init {
-        require(interval in 1..100) { "preview.interval must be between 1 and 100 steps." }
-        require(mode != LocalImagePreviewMode.NONE) {
-            "Omit preview instead of specifying preview.mode=none."
-        }
-    }
-
-    fun toJson(): JSONObject = JSONObject()
-        .put("interval", interval)
-        .put("mode", mode.wireName)
-
-    companion object {
-        fun fromJson(json: JSONObject): LocalImagePreviewOptions = LocalImagePreviewOptions(
-            interval = json.requiredExactInt("interval"),
-            mode = LocalImagePreviewMode.fromWireName(json.requiredString("mode"))
-        )
-    }
-}
-
-/**
- * A bounded app-private copy ready to cross Binder. No data URL, content URI, or arbitrary path is
- * permitted in this type. The worker copies it once more into its own request directory before
- * native execution.
- */
-data class LocalImagePreparedInput(
-    val path: String,
-    val mimeType: String,
-    val sha256: String,
-    val sizeBytes: Long,
-    /** Encoded pixel dimensions before EXIF orientation is applied. */
-    val width: Int,
-    val height: Int,
-    /** Logical dimensions seen by native decoders after EXIF orientation is applied. */
-    val orientedWidth: Int = width,
-    val orientedHeight: Int = height,
-    val exifOrientation: Int = 1
-) {
-    init {
-        require(path.isNotBlank()) { "Prepared image input path must not be blank." }
-        require(mimeType.startsWith("image/") && mimeType.length <= 128) {
-            "Prepared image input MIME type must use image/*."
-        }
-        require(SHA256_PATTERN.matches(sha256)) {
-            "Prepared image input sha256 must be a lowercase 64-character digest."
-        }
-        require(sizeBytes in 1..MAX_INPUT_BYTES) {
-            "Prepared image input size must be between 1 byte and $MAX_INPUT_BYTES bytes."
-        }
-        require(width in 1..MAX_IMAGE_SIDE && height in 1..MAX_IMAGE_SIDE) {
-            "Prepared image input dimensions must be between 1 and $MAX_IMAGE_SIDE pixels per side."
-        }
-        require(width.toLong() * height.toLong() <= MAX_IMAGE_PIXELS) {
-            "Prepared image input exceeds the $MAX_IMAGE_PIXELS pixel limit."
-        }
-        require(orientedWidth in 1..MAX_IMAGE_SIDE && orientedHeight in 1..MAX_IMAGE_SIDE &&
-            orientedWidth.toLong() * orientedHeight.toLong() <= MAX_IMAGE_PIXELS
-        ) { "Prepared image input oriented dimensions are invalid." }
-        require(exifOrientation in 1..8) {
-            "Prepared image input EXIF orientation must be between 1 and 8."
-        }
-        require(
-            (orientedWidth to orientedHeight) ==
-                localImageOrientedDimensions(width, height, exifOrientation)
-        ) { "Prepared image input dimensions do not match its EXIF orientation." }
-    }
-
-    fun toJson(includePath: Boolean = true): JSONObject = JSONObject()
-        .apply { if (includePath) put("path", path) }
-        .put("mimeType", mimeType)
-        .put("sha256", sha256)
-        .put("sizeBytes", sizeBytes)
-        .put("width", width)
-        .put("height", height)
-        .put("orientedWidth", orientedWidth)
-        .put("orientedHeight", orientedHeight)
-        .put("exifOrientation", exifOrientation)
-
-    companion object {
-        const val MAX_INPUT_BYTES: Long = 32L * 1024L * 1024L
-        const val MAX_IMAGE_SIDE: Int = 8_192
-        const val MAX_IMAGE_PIXELS: Long = 64L * 1024L * 1024L
-        private val SHA256_PATTERN = Regex("[a-f0-9]{64}")
-
-        fun fromJson(json: JSONObject): LocalImagePreparedInput {
-            val width = json.requiredExactInt("width")
-            val height = json.requiredExactInt("height")
-            val exifOrientation = if (json.has("exifOrientation")) {
-                json.requiredExactInt("exifOrientation")
-            } else {
-                1
-            }
-            val defaultOriented = localImageOrientedDimensions(width, height, exifOrientation)
-            return LocalImagePreparedInput(
-                path = json.requiredString("path"),
-                mimeType = json.requiredString("mimeType"),
-                sha256 = json.requiredString("sha256").lowercase(),
-                sizeBytes = json.requiredExactLong("sizeBytes"),
-                width = width,
-                height = height,
-                orientedWidth = if (json.has("orientedWidth")) {
-                    json.requiredExactInt("orientedWidth")
-                } else defaultOriented.first,
-                orientedHeight = if (json.has("orientedHeight")) {
-                    json.requiredExactInt("orientedHeight")
-                } else defaultOriented.second,
-                exifOrientation = exifOrientation
-            )
-        }
-    }
-}
-
-internal fun localImageOrientedDimensions(
-    encodedWidth: Int,
-    encodedHeight: Int,
-    exifOrientation: Int
-): Pair<Int, Int> {
-    require(encodedWidth > 0 && encodedHeight > 0)
-    require(exifOrientation in 1..8)
-    return if (exifOrientation in setOf(5, 6, 7, 8)) {
-        encodedHeight to encodedWidth
-    } else {
-        encodedWidth to encodedHeight
-    }
-}
-
-/** Mirrors the Float strength crossing JNI so every layer selects the same denoising tail. */
-internal fun localImageDenoisingTailStepCount(totalSteps: Int, strength: Double): Int {
-    require(totalSteps > 0) { "Denoising step count must be positive." }
-    val wireStrength = strength.toFloat()
-    require(wireStrength.isFinite() && wireStrength in 0.0f..1.0f) {
-        "Denoising strength must be finite and in [0, 1]."
-    }
-    val beginIndex = (totalSteps.toFloat() * (1.0f - wireStrength))
-        .toInt()
-        .coerceIn(0, totalSteps - 1)
-    return totalSteps - beginIndex
-}
-
-/** Canonical quality-noise seed binding shared by the native stable and QNN bridges. */
-internal fun localImageUltraFixNoiseSeedFingerprint(
-    seed: Long,
-    denoiseStepCount: Int
-): String {
-    require(denoiseStepCount > 0) { "UltraFix denoising tail must be positive." }
-    val descriptor = "mca-ultrafix-quality-noise-v1|seed=${seed.toULong()}|steps=$denoiseStepCount"
-    return MessageDigest.getInstance("SHA-256")
-        .digest(descriptor.toByteArray(Charsets.UTF_8))
-        .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
-}
-
-/**
- * Rebuilds the fixed graph-aligned QNN tile plan descriptor. QNN UltraFix uses an 8x latent
- * spatial scale and an 8-latent-origin alignment for both the shared and isolated topologies.
- */
-internal data class LocalQnnUltraFixTilePlanEvidence(
-    val tileCount: Long,
-    val tilePlanSha256: String
-)
-
-internal fun localQnnUltraFixTilePlanEvidence(
-    request: LocalImageUltraFixOptions
-): LocalQnnUltraFixTilePlanEvidence {
-    val scale = 8
-    val alignment = 8
-    require(request.targetWidth >= request.tileSize && request.targetHeight >= request.tileSize) {
-        "QNN UltraFix target dimensions must cover the fixed tile canvas."
-    }
-    require(request.targetWidth % (scale * alignment) == 0 &&
-        request.targetHeight % (scale * alignment) == 0 &&
-        request.tileSize % (scale * alignment) == 0
-    ) { "QNN UltraFix dimensions must align to the fixed latent origin grid." }
-
-    fun axisPositions(extentPixels: Int): List<Int> {
-        val extent = extentPixels / scale
-        val tile = request.tileSize / scale
-        require(extent > 0 && tile > 0 && tile <= extent)
-        if (extent == tile) return listOf(0)
-        val minimumOverlap = kotlin.math.floor(tile.toDouble() * request.overlap).toInt()
-        require(minimumOverlap in 0 until tile)
-        val maximumStride = tile - minimumOverlap
-        val finalStart = extent - tile
-        val intervalCount = (finalStart + maximumStride - 1) / maximumStride
-        require(intervalCount > 0)
-        val baseStride = finalStart / intervalCount
-        val remainder = finalStart % intervalCount
-        val unaligned = ArrayList<Int>(intervalCount + 1)
-        unaligned += 0
-        var cursor = 0
-        repeat(intervalCount) { index ->
-            val step = baseStride + if (index < remainder) 1 else 0
-            require(step > 0) { "QNN UltraFix tile stride did not advance." }
-            cursor += step
-            unaligned += cursor
-        }
-        unaligned[unaligned.lastIndex] = finalStart
-        val positions = unaligned.mapIndexed { index, position ->
-            if (index == unaligned.lastIndex) finalStart else (position / alignment) * alignment
-        }.distinct()
-        require(positions.first() == 0 && positions.last() == finalStart) {
-            "QNN UltraFix aligned tile grid did not cover both canvas edges."
-        }
-        return positions
-    }
-
-    val xPositions = axisPositions(request.targetWidth)
-    val yPositions = axisPositions(request.targetHeight)
-    val tile = request.tileSize / scale
-    val descriptor = buildString {
-        append("ultrafix-tile-plan-v2|target=")
-        append(request.targetWidth).append('x').append(request.targetHeight)
-        append("|tile=").append(request.tileSize)
-        append("|scale=").append(scale)
-        append("|alignment=").append(alignment)
-        append("|overlapBits=").append(qnnUltraFixOverlapBits(request.overlap))
-        append("|tiles=").append(xPositions.size.toLong() * yPositions.size.toLong())
-        yPositions.forEachIndexed { yIndex, latentY ->
-            xPositions.forEachIndexed { xIndex, latentX ->
-                val left = if (xIndex == 0) 0 else
-                    xPositions[xIndex - 1] + tile - latentX
-                val right = if (xIndex + 1 == xPositions.size) 0 else
-                    latentX + tile - xPositions[xIndex + 1]
-                val top = if (yIndex == 0) 0 else
-                    yPositions[yIndex - 1] + tile - latentY
-                val bottom = if (yIndex + 1 == yPositions.size) 0 else
-                    latentY + tile - yPositions[yIndex + 1]
-                require(left in 0 until tile && right in 0 until tile &&
-                    top in 0 until tile && bottom in 0 until tile
-                ) { "QNN UltraFix tile overlap consumed an entire latent tile." }
-                append('|')
-                    .append(latentX * scale).append(',').append(latentY * scale).append(',')
-                    .append(latentX).append(',').append(latentY).append(',')
-                    .append(left * scale).append(',').append(right * scale).append(',')
-                    .append(top * scale).append(',').append(bottom * scale).append(',')
-                    .append(left).append(',').append(right).append(',')
-                    .append(top).append(',').append(bottom)
-            }
-        }
-    }
-    val digest = MessageDigest.getInstance("SHA-256")
-        .digest(descriptor.toByteArray(Charsets.UTF_8))
-        .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
-    return LocalQnnUltraFixTilePlanEvidence(
-        tileCount = xPositions.size.toLong() * yPositions.size.toLong(),
-        tilePlanSha256 = digest
-    )
-}
-
-private fun qnnUltraFixOverlapBits(value: Double): String =
-    value.toRawBits().toULong().toString(radix = 16).padStart(16, '0')
-
-/** Raw main-process references. These are never serialized into worker IPC. */
-data class LocalImageInputDraft(
-    val taskMode: LocalImageTaskMode = LocalImageTaskMode.TEXT_TO_IMAGE,
-    val inputImageReference: String? = null,
-    val maskImageReference: String? = null,
-    val controlImageReference: String? = null,
-    val strength: Double? = null,
-    val controlStrength: Double? = null
-) {
-    fun validate() {
-        validateImageInputShape(
-            taskMode = taskMode,
-            inputPresent = !inputImageReference.isNullOrBlank(),
-            maskPresent = !maskImageReference.isNullOrBlank(),
-            controlPresent = !controlImageReference.isNullOrBlank(),
-            strength = strength,
-            controlStrength = controlStrength
-        )
-        listOfNotNull(inputImageReference, maskImageReference, controlImageReference).forEach { reference ->
-            require(reference.length <= MAX_REFERENCE_CHARS) {
-                "Image input reference exceeds the $MAX_REFERENCE_CHARS character limit."
-            }
-        }
-    }
-
-    internal fun validateForHistory() {
-        validateImageInputShape(
-            taskMode = taskMode,
-            inputPresent = !inputImageReference.isNullOrBlank(),
-            maskPresent = !maskImageReference.isNullOrBlank(),
-            controlPresent = !controlImageReference.isNullOrBlank(),
-            strength = strength,
-            controlStrength = controlStrength,
-            allowMissingRequiredInputs = true
-        )
-        listOfNotNull(inputImageReference, maskImageReference, controlImageReference).forEach { reference ->
-            require(reference.length <= MAX_REFERENCE_CHARS) {
-                "Image input reference exceeds the $MAX_REFERENCE_CHARS character limit."
-            }
-        }
-    }
-
-    internal fun hasRequiredInputReferences(): Boolean = when (taskMode) {
-        LocalImageTaskMode.TEXT_TO_IMAGE -> true
-        LocalImageTaskMode.IMG2IMG,
-        LocalImageTaskMode.EDIT -> !inputImageReference.isNullOrBlank()
-        LocalImageTaskMode.INPAINT ->
-            !inputImageReference.isNullOrBlank() && !maskImageReference.isNullOrBlank()
-        LocalImageTaskMode.CONTROL -> !controlImageReference.isNullOrBlank()
-    }
-
-    companion object {
-        const val MAX_REFERENCE_CHARS: Int = 48 * 1024 * 1024
-    }
-}
-
-internal fun LocalImageGenerationOptions.validateProductInputContract(
-    requirePreparedPaths: Boolean = true
-) {
-    validateImageInputShape(
-        taskMode = taskMode,
-        inputPresent = inputImage != null,
-        maskPresent = maskImage != null,
-        controlPresent = controlImage != null,
-        strength = strength,
-        controlStrength = controlStrength
-    )
-    require(batchCount in 1..8) { "batchCount must be between 1 and 8." }
-    require(loras.size <= LocalImagePreparedLora.MAX_COUNT) {
-        "At most ${LocalImagePreparedLora.MAX_COUNT} LoRA adapters may be used per request."
-    }
-    require(loras.map(LocalImagePreparedLora::id).distinct().size == loras.size) {
-        "LoRA adapter ids must be unique per request."
-    }
-    require(loras.map { File(it.path).canonicalPath }.distinct().size == loras.size) {
-        "LoRA adapter paths must be unique per request."
-    }
-    clipSkip?.let { value ->
-        require(value in -1..32) { "clipSkip must be -1 (model default) or between 0 and 32." }
-    }
-    if (maskImage != null && inputImage != null) {
-        require(maskImage.orientedWidth == inputImage.orientedWidth &&
-            maskImage.orientedHeight == inputImage.orientedHeight
-        ) {
-            "maskImage oriented dimensions must exactly match inputImage dimensions."
-        }
-    }
-    if (requirePreparedPaths) {
-        listOfNotNull(inputImage, maskImage, controlImage).forEach { input ->
-            require(input.path.isNotBlank()) { "Prepared image input path must not be blank." }
-        }
-    }
-    ultraFix?.let { request ->
-        require(taskMode == LocalImageTaskMode.IMG2IMG && inputImage != null) {
-            "UltraFix requires one prepared img2img source."
-        }
-        require(maskImage == null && controlImage == null) {
-            "UltraFix does not accept mask or control inputs."
-        }
-        require(batchCount == 1) { "UltraFix supports exactly one output per native request." }
-        require(preview == null) { "UltraFix does not publish live previews." }
-        require(width == null || width == request.targetWidth)
-        require(height == null || height == request.targetHeight)
-        require(steps == null || steps == request.refinementSteps)
-        require(strength == null || kotlin.math.abs(strength - request.strength) <= 1.0e-12)
-        require(vaeTiling == null || (
-            vaeTiling.tileSize == request.tileSize &&
-                kotlin.math.abs(vaeTiling.overlap - request.overlap) <= 1.0e-12
-            )) {
-            "UltraFix outer execution controls must match its structured request."
-        }
-    }
-}
-
-/** Validates path-free persisted controls before a history item is shown or restaged. */
-internal fun LocalImageGenerationOptions.validateHistoryProductInputContract() {
-    require(inputImage == null && maskImage == null && controlImage == null &&
-        loras.isEmpty() && preview == null
-    ) { "Image history must not retain transient execution artifacts." }
-    validateImageInputShape(
-        taskMode = taskMode,
-        inputPresent = false,
-        maskPresent = false,
-        controlPresent = false,
-        strength = strength,
-        controlStrength = controlStrength,
-        allowMissingRequiredInputs = true
-    )
-    require(batchCount in 1..8) { "Image history batchCount must be between 1 and 8." }
-    clipSkip?.let { require(it in -1..32) { "Image history clipSkip is invalid." } }
-    ultraFix?.let { request ->
-        require(taskMode == LocalImageTaskMode.IMG2IMG && batchCount == 1) {
-            "UltraFix history must retain one img2img output."
-        }
-        require(width == request.targetWidth && height == request.targetHeight &&
-            steps == request.refinementSteps &&
-            strength != null && kotlin.math.abs(strength - request.strength) <= 1.0e-12 &&
-            vaeTiling?.tileSize == request.tileSize &&
-            kotlin.math.abs((vaeTiling?.overlap ?: Double.NaN) - request.overlap) <= 1.0e-12
-        ) { "UltraFix history controls conflict with its structured request." }
-    }
-}
-
-/**
- * UltraFix owns its target canvas, denoising tail, and VAE tile plan. UI and Local API callers may
- * omit the duplicated outer controls, but a conflicting duplicate is always rejected.
- */
-internal fun LocalImageGenerationOptions.withCanonicalUltraFixControls(): LocalImageGenerationOptions {
-    val request = ultraFix ?: return this
-    validateProductInputContract(requirePreparedPaths = false)
-    return copy(
-        width = request.targetWidth,
-        height = request.targetHeight,
-        steps = request.refinementSteps,
-        strength = request.strength,
-        vaeTiling = LocalImageVaeTilingOptions(request.tileSize, request.overlap)
-    )
-}
-
-internal fun LocalImageGenerationOptions.inputAuditJson(): JSONObject = JSONObject()
-    .put("taskMode", taskMode.wireName)
-    .put("batchCount", batchCount)
-    .apply {
-        inputImage?.let { put("inputImage", it.toJson(includePath = false)) }
-        maskImage?.let { put("maskImage", it.toJson(includePath = false)) }
-        controlImage?.let { put("controlImage", it.toJson(includePath = false)) }
-        strength?.let { put("strength", it) }
-        controlStrength?.let { put("controlStrength", it) }
-        clipSkip?.let { put("clipSkip", it) }
-        vaeTiling?.let { put("vaeTiling", it.toJson()) }
-        ultraFix?.let { put("ultraFix", it.toJson()) }
-        preview?.let { put("preview", it.toJson()) }
-    }
-
-internal fun LocalImageGenerationOptions.putProductInputNativeParams(target: JSONObject): JSONObject {
-    validateProductInputContract()
-    target.put("taskMode", taskMode.wireName)
-        .put("batchCount", batchCount)
-    inputImage?.let { input ->
-        target.put("inputImagePath", input.path)
-            .put("inputImageSha256", input.sha256)
-    }
-    maskImage?.let { input ->
-        target.put("maskImagePath", input.path)
-            .put("maskImageSha256", input.sha256)
-    }
-    controlImage?.let { input ->
-        target.put("controlImagePath", input.path)
-            .put("controlImageSha256", input.sha256)
-    }
-    strength?.let { target.put("strength", it) }
-    controlStrength?.let { target.put("controlStrength", it) }
-    clipSkip?.let { target.put("clipSkip", it) }
-    target.put("loraCount", loras.size)
-    if (loras.isNotEmpty()) {
-        val canonicalParents = loras.map { File(it.path).canonicalFile.parentFile?.canonicalPath }.distinct()
-        val loraRoot = canonicalParents.singleOrNull()
-        require(!loraRoot.isNullOrBlank()) {
-            "All LoRA adapters must be direct children of one app-private root."
-        }
-        target.put("loraRootPath", loraRoot)
-        target.put(
-            "loras",
-            JSONArray().apply { loras.forEach { adapter -> put(adapter.toJson()) } }
-        )
-    } else {
-        target.put("loraRootPath", "")
-        target.put("loras", JSONArray())
-    }
-    vaeTiling?.let { target.put("vaeTiling", it.toJson()) }
-    ultraFix?.let { target.put("ultraFix", it.toJson()) }
-    preview?.let { target.put("preview", it.toJson()) }
-    return target
-}
-
 internal fun validateLocalImageRuntimeProductOptions(
     runtime: LocalImageRuntime,
     options: LocalImageGenerationOptions
@@ -622,13 +66,13 @@ internal fun validateLocalImageRuntimeProductOptions(
             LocalImageRuntime.QNN_HTP
         )
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_ultrafix",
             "Runtime ${runtime.name} does not expose a complete native UltraFix pipeline."
         )
     }
     if (options.batchCount != 1 && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_batch_count",
             "Runtime ${runtime.name} currently supports one output per request; native execution was not started."
         )
@@ -637,13 +81,13 @@ internal fun validateLocalImageRuntimeProductOptions(
         runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
         runtime != LocalImageRuntime.QNN_HTP
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_preview",
             "Runtime ${runtime.name} does not expose a native preview callback."
         )
     }
     if (options.clipSkip != null && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_clip_skip",
             "Runtime ${runtime.name} does not consume clipSkip; native execution was not started."
         )
@@ -652,13 +96,13 @@ internal fun validateLocalImageRuntimeProductOptions(
         runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
         !(runtime == LocalImageRuntime.QNN_HTP && options.ultraFix != null)
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_vae_tiling",
             "Runtime ${runtime.name} does not expose native VAE tiling controls."
         )
     }
     if (options.loras.isNotEmpty() && runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_lora",
             "Runtime ${runtime.name} does not expose a native LoRA execution path."
         )
@@ -666,13 +110,13 @@ internal fun validateLocalImageRuntimeProductOptions(
     if (runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP &&
         options.distilledGuidance != null
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_distilled_guidance",
             "Runtime ${runtime.name} has no distilled-guidance graph input; native execution was not started."
         )
     }
     if (runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP && options.flowShift != null) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_flow_shift",
             "Runtime ${runtime.name} does not expose a writable native flow-shift control."
         )
@@ -681,7 +125,7 @@ internal fun validateLocalImageRuntimeProductOptions(
         options.taskMode == LocalImageTaskMode.EDIT
     ) {
         if (options.strength != null) {
-            rejectProductInput(
+            localImageInputReject(
                 "unsupported_edit_strength",
                 "This MNN edit execution path does not consume strength; native execution was not started."
             )
@@ -705,7 +149,7 @@ internal fun validateLocalImageProfileProductOptions(
     val qwen21TextOnly = profile.runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
         profile.variant == ImageModelVariant.QWEN_IMAGE_21
     if (qwen21TextOnly && options.taskMode != LocalImageTaskMode.TEXT_TO_IMAGE) {
-        rejectProductInput("task_mode_execution_unsupported", "Qwen-Image-2.1 GGUF 当前原生引擎仅接入文生图，未包含图像编辑编码器执行链。")
+        localImageInputReject("task_mode_execution_unsupported", "Qwen-Image-2.1 GGUF 当前原生引擎仅接入文生图，未包含图像编辑编码器执行链。")
     }
     val sharedQnnVaePreview = profile.hasSharedQnnVaePreviewTopology()
     val runtimeHasNativePreview =
@@ -722,7 +166,7 @@ internal fun validateLocalImageProfileProductOptions(
             LocalImageTaskMode.EDIT -> false
         }
         if (!hasExecutableTaskTopology) {
-            rejectProductInput(
+            localImageInputReject(
                 "task_mode_execution_unsupported",
                 "The resolved QNN graph topology cannot execute ${options.taskMode.wireName}; " +
                     "a concrete compatible input graph is required before native execution starts."
@@ -733,13 +177,13 @@ internal fun validateLocalImageProfileProductOptions(
         (!profile.capabilities.supportsTextualInversion ||
             !profile.tokenizer.supportsTextualInversion)
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "textual_inversion_execution_unsupported",
             "The resolved tokenizer and conditioning graph do not support textual inversion."
         )
     }
     if (options.ultraFix != null && !profile.capabilities.supportsUltraFix) {
-        rejectProductInput(
+        localImageInputReject(
             "ultrafix_execution_unsupported",
             "The resolved graph does not expose the complete UltraFix pipeline."
         )
@@ -765,13 +209,13 @@ internal fun validateLocalImageProfileProductOptions(
         requestedScheduler = profile.scheduler.algorithm
     )
     if (options.batchCount > capabilities.maxBatchCount) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_batch_count",
             "Profile ${profile.profileId} supports at most ${capabilities.maxBatchCount} output(s) per request."
         )
     }
     if (options.clipSkip != null && !capabilities.supportsClipSkip) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_clip_skip",
             "Profile ${profile.profileId} has no CLIP layer-skip execution path."
         )
@@ -779,20 +223,20 @@ internal fun validateLocalImageProfileProductOptions(
     if (options.vaeTiling != null && options.ultraFix == null &&
         !capabilities.supportsVaeTiling
     ) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_vae_tiling",
             "Profile ${profile.profileId} does not consume native VAE tiling controls."
         )
     }
     if (options.preview != null && !runtimeHasNativePreview) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_preview",
             "Profile ${profile.profileId} does not expose a native live-preview callback."
         )
     }
     if (options.preview != null && profile.runtime == LocalImageRuntime.QNN_HTP) {
         if (options.preview.interval !in 1..10) {
-            rejectProductInput(
+            localImageInputReject(
                 "invalid_preview_interval",
                 "QNN live preview interval must be between 1 and 10 steps."
             )
@@ -800,119 +244,18 @@ internal fun validateLocalImageProfileProductOptions(
         val supportedPreview =
             sharedQnnVaePreview && options.preview.mode == LocalImagePreviewMode.VAE
         if (!supportedPreview) {
-            rejectProductInput(
+            localImageInputReject(
                 "unsupported_preview",
                 "QNN preview requires a resolved shared-QNN VAE topology."
             )
         }
     }
     if (options.loras.isNotEmpty() && !capabilities.supportsLora) {
-        rejectProductInput(
+        localImageInputReject(
             "unsupported_lora",
             "Profile ${profile.profileId} does not expose LoRA adapter execution."
         )
     }
-}
-
-/**
- * Scheduler availability is a product-task property, not a model-id or device admission rule.
- * QNN img2img and inpaint start from a strength-derived denoising index. PNDM/PLMS has a stateful
- * PRK/PLMS warm-up and cannot enter that schedule at an arbitrary index, while the same scheduler
- * remains valid for a full text-to-image timetable.
- */
-internal fun ImageExecutionProfile.supportedSchedulersForProductTask(
-    taskMode: LocalImageTaskMode
-): Set<ImageSchedulerAlgorithm> {
-    val declared = capabilities.supportedSchedulers
-    return when {
-        taskMode == LocalImageTaskMode.IMG2IMG && hasExecutableQnnImg2ImgTopology() ->
-            declared - ImageSchedulerAlgorithm.PNDM_PLMS
-        taskMode == LocalImageTaskMode.INPAINT && hasExecutableQnnInpaintTopology() ->
-            supportedQnnInpaintSchedulers()
-        else -> declared
-    }
-}
-
-private val PRODUCT_TASK_SAMPLER_PREFERENCE = listOf(
-    ImageSchedulerAlgorithm.DPMPP_2M,
-    ImageSchedulerAlgorithm.EULER,
-    ImageSchedulerAlgorithm.EULER_A,
-    ImageSchedulerAlgorithm.DDIM,
-    ImageSchedulerAlgorithm.LCM,
-    ImageSchedulerAlgorithm.FLOW_MATCH,
-    ImageSchedulerAlgorithm.PNDM_PLMS
-)
-
-/**
- * Chooses the deterministic sampler used when a request omits `sampler`/`sampleMethod`.
- *
- * The profile's own default remains authoritative whenever it is valid for the selected task.
- * Only a task-incompatible default (notably generic QNN profiles whose legacy default is PNDM)
- * is replaced. The fallback order is intentionally independent of recommendation id, chipset,
- * and device validation state.
- */
-internal fun ImageExecutionProfile.defaultSchedulerForProductTask(
-    taskMode: LocalImageTaskMode
-): ImageSchedulerAlgorithm {
-    val supported = supportedSchedulersForProductTask(taskMode)
-    scheduler.algorithm.takeIf { it in supported }?.let { return it }
-    PRODUCT_TASK_SAMPLER_PREFERENCE.firstOrNull { it in supported }?.let { return it }
-    rejectProductInput(
-        "unsupported_sampler",
-        "The resolved image profile has no sampler supported for ${taskMode.wireName}."
-    )
-}
-
-internal fun ImageExecutionProfile.orderedSchedulersForProductTask(
-    taskMode: LocalImageTaskMode
-): List<ImageSchedulerAlgorithm> {
-    val supported = supportedSchedulersForProductTask(taskMode)
-    if (supported.isEmpty()) return emptyList()
-    val taskDefault = defaultSchedulerForProductTask(taskMode)
-    return buildList {
-        add(taskDefault)
-        PRODUCT_TASK_SAMPLER_PREFERENCE.forEach { scheduler ->
-            if (scheduler != taskDefault && scheduler in supported) add(scheduler)
-        }
-        supported.forEach { scheduler ->
-            if (scheduler !in this) add(scheduler)
-        }
-    }
-}
-
-internal fun validateLocalImageTaskSamplerCapability(
-    profile: ImageExecutionProfile,
-    taskMode: LocalImageTaskMode,
-    requestedScheduler: ImageSchedulerAlgorithm
-) {
-    if (requestedScheduler in profile.supportedSchedulersForProductTask(taskMode)) return
-    if (
-        taskMode == LocalImageTaskMode.IMG2IMG &&
-        profile.hasExecutableQnnImg2ImgTopology() &&
-        requestedScheduler == ImageSchedulerAlgorithm.PNDM_PLMS
-    ) {
-        rejectProductInput(
-            "unsupported_img2img_sampler",
-            "QNN img2img cannot use PNDM/PLMS because that scheduler cannot start at the " +
-            "strength-derived denoising index. Select another sampler supported by this model."
-        )
-    }
-    if (
-        taskMode == LocalImageTaskMode.INPAINT &&
-        profile.hasExecutableQnnInpaintTopology() &&
-        requestedScheduler == ImageSchedulerAlgorithm.PNDM_PLMS
-    ) {
-        rejectProductInput(
-            "unsupported_inpaint_sampler",
-            "QNN inpaint cannot use PNDM/PLMS because that scheduler cannot start at the " +
-                "strength-derived denoising index. Select another sampler supported by this model."
-        )
-    }
-    rejectProductInput(
-        "unsupported_sampler",
-        "The resolved image profile does not support ${imageSchedulerProductName(requestedScheduler)} " +
-            "for ${taskMode.wireName}."
-    )
 }
 
 /**
@@ -924,7 +267,7 @@ internal fun verifyAndSanitizeStableDiffusionProductInput(
     options: LocalImageGenerationOptions
 ): JSONObject {
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "stable-diffusion.cpp did not report nativeEffective image input evidence."
         )
@@ -1277,7 +620,7 @@ internal fun verifyAndSanitizeMnnProductInput(
     options: LocalImageGenerationOptions
 ): JSONObject {
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "MNN-Diffusion did not report nativeEffective image input evidence."
         )
@@ -1294,7 +637,7 @@ internal fun verifyAndSanitizeMnnProductInput(
     }
 
     val outputs = result.optJSONArray("outputs")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "MNN-Diffusion did not report its concrete outputs array."
         )
@@ -1437,7 +780,7 @@ internal fun verifyAndSanitizeQnnProductInput(
         "QNN image-input evidence is currently defined only for a control request."
     }
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "QNN ControlNet did not report nativeEffective image input evidence."
         )
@@ -1543,7 +886,7 @@ internal fun verifyAndSanitizeQnnImg2ImgProductInput(
         options.inputImage != null && options.maskImage == null && options.controlImage == null
     ) { "QNN SDXL img2img verification requires exactly one prepared input image." }
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "QNN SDXL img2img did not report nativeEffective image input evidence."
         )
@@ -1742,7 +1085,7 @@ internal fun verifyAndSanitizeSharedQnnImg2ImgProductInput(
         "Shared-QNN img2img did not prove a real VAE encoder graphExecute call."
     }
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "Shared-QNN img2img did not report nativeEffective image input evidence."
         )
@@ -1982,7 +1325,7 @@ internal fun verifyAndSanitizeQnnTextToImagePrivatePaths(
             options.inputImage == null && options.maskImage == null && options.controlImage == null
     ) { "QNN text-to-image path sanitization requires a request without image inputs." }
     val nativeEffective = result.optJSONObject("nativeEffective")
-        ?: rejectProductInput(
+        ?: localImageInputReject(
             "invalid_native_input_evidence",
             "QNN text-to-image did not report nativeEffective input evidence."
         )
@@ -2012,91 +1355,3 @@ internal fun verifyAndSanitizeQnnTextToImagePrivatePaths(
     }
 }
 
-private fun rejectProductInput(code: String, message: String): Nothing =
-    throw LocalImageProductContractException(code, message)
-
-private fun validateImageInputShape(
-    taskMode: LocalImageTaskMode,
-    inputPresent: Boolean,
-    maskPresent: Boolean,
-    controlPresent: Boolean,
-    strength: Double?,
-    controlStrength: Double?,
-    allowMissingRequiredInputs: Boolean = false
-) {
-    strength?.let { value ->
-        require(value.isFinite() && value >= 0.0 && value <= 1.0) {
-            "strength must be finite and in the interval [0, 1]."
-        }
-    }
-    controlStrength?.let { value ->
-        require(value.isFinite() && value >= 0.0 && value <= 2.0) {
-            "controlStrength must be finite and in the interval [0, 2]."
-        }
-    }
-    when (taskMode) {
-        LocalImageTaskMode.TEXT_TO_IMAGE -> {
-            require(!inputPresent && !maskPresent && !controlPresent) {
-                "text_to_image does not accept input, mask, or control images."
-            }
-            require(strength == null && controlStrength == null) {
-                "text_to_image does not accept strength controls."
-            }
-        }
-        LocalImageTaskMode.IMG2IMG -> {
-            require(inputPresent || allowMissingRequiredInputs) { "img2img requires inputImage." }
-            require(!maskPresent && !controlPresent) { "img2img accepts only inputImage." }
-            require(controlStrength == null) { "img2img does not accept controlStrength." }
-        }
-        LocalImageTaskMode.INPAINT -> {
-            require(inputPresent && maskPresent || allowMissingRequiredInputs) {
-                "inpaint requires inputImage and maskImage."
-            }
-            require(!controlPresent) { "inpaint does not accept controlImage." }
-            require(controlStrength == null) { "inpaint does not accept controlStrength." }
-        }
-        LocalImageTaskMode.CONTROL -> {
-            require(controlPresent || allowMissingRequiredInputs) { "control requires controlImage." }
-            require(!inputPresent && !maskPresent) { "control accepts only controlImage." }
-            require(strength == null) { "control does not accept img2img strength." }
-        }
-        LocalImageTaskMode.EDIT -> {
-            require(inputPresent || allowMissingRequiredInputs) { "edit requires inputImage." }
-            require(!maskPresent && !controlPresent) { "edit accepts only inputImage." }
-            require(controlStrength == null) { "edit does not accept controlStrength." }
-        }
-    }
-}
-
-private fun JSONObject.requiredString(name: String): String {
-    require(has(name) && !isNull(name)) { "$name is required." }
-    val raw = get(name)
-    require(raw is String) { "$name must be a string." }
-    return raw.trim().also { require(it.isNotEmpty()) { "$name must not be blank." } }
-}
-
-private fun JSONObject.requiredExactInt(name: String): Int {
-    val value = requiredExactLong(name)
-    require(value in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong()) {
-        "$name must fit a 32-bit integer."
-    }
-    return value.toInt()
-}
-
-private fun JSONObject.requiredExactLong(name: String): Long {
-    require(has(name) && !isNull(name)) { "$name is required." }
-    val raw = get(name)
-    require(raw is Number) { "$name must be an integer." }
-    val doubleValue = raw.toDouble()
-    require(doubleValue.isFinite() && doubleValue % 1.0 == 0.0) { "$name must be an integer." }
-    val longValue = raw.toLong()
-    require(longValue.toDouble() == doubleValue) { "$name must be an exact integer." }
-    return longValue
-}
-
-private fun JSONObject.requiredFiniteDouble(name: String): Double {
-    require(has(name) && !isNull(name)) { "$name is required." }
-    val raw = get(name)
-    require(raw is Number) { "$name must be numeric." }
-    return raw.toDouble().also { value -> require(value.isFinite()) { "$name must be finite." } }
-}
