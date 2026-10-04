@@ -33,10 +33,12 @@ class QnnSharedImg2ImgProductWiringContractTest {
 
     @Test
     fun `vae encoder graph name follows resolved artifact then smoke then generic fallback`() {
-        val provider = source("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
-        val start = provider.indexOf("private fun JSONObject.putQnnSemanticDefaults(")
+        // P5/L6: putQnnSemanticDefaults moved to LocalImageNativeConfigSupport.kt as a top-level
+        // internal extension; the assertions are unchanged -- read where the body now lives.
+        val support = source("app/src/main/java/com/muyuchat/mca/LocalImageNativeConfigSupport.kt")
+        val start = support.indexOf("internal fun JSONObject.putQnnSemanticDefaults(")
         assertTrue(start >= 0)
-        val semanticDefaults = provider.substring(start)
+        val semanticDefaults = support.substring(start)
 
         assertOrdered(
             semanticDefaults,

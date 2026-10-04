@@ -135,6 +135,10 @@ class LocalImageProductClosureTest {
         val isolatedSdxl = sourceFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
         val mnn = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+        // P5/L6: the QNN semantic-defaults JSON builder moved to LocalImageNativeConfigSupport.kt;
+        // that one assertion reads the body where it now lives (everything else stays in provider).
+        val nativeConfigSupport =
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageNativeConfigSupport.kt")
         val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt")
         val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
@@ -162,7 +166,7 @@ class LocalImageProductClosureTest {
         assertTrue(mnn.contains("external_mnn_sdxl_embeddings"))
         assertTrue(mnn.contains("clip.mnn+clip_2.mnn"))
         assertTrue(provider.contains("sdxlQnnConditioningGraphSha256(conditioningRoot)"))
-        assertTrue(provider.contains("put(\"vaeEncoderContextSha256\", encoderContext.sha256Contents())"))
+        assertTrue(nativeConfigSupport.contains("put(\"vaeEncoderContextSha256\", encoderContext.sha256Contents())"))
         assertTrue(source.contains("context_binary_sha256 = mca::qnn::controlnet::sha256_hex_bytes("))
         assertTrue(isolatedSdxl.contains("expected_encoder_context_sha256"))
         assertTrue(isolatedSdxl.contains("encoderContextSha256"))
