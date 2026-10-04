@@ -2112,167 +2112,6 @@ private fun WebSearchPlan.shouldRunSearchProvider(config: WebSearchConfig): Bool
     return explicitSearchRequested || queries.size >= 4
 }
 
-private fun JSONArray?.toSearchDocuments(provider: String): List<WebSearchDocument> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            val source = item.optJSONObject("source")
-            val url = item.cleanString(
-                "url",
-                "link",
-                "href",
-                "html_url",
-                "story_url",
-                "permalink",
-                "canonical_url",
-                "uri",
-                "display_link",
-                "displayLink",
-                "formatted_url",
-                "formattedUrl"
-            ).ifBlank {
-                source?.cleanString("url", "link", "href", "canonical_url", "canonicalUrl").orEmpty()
-            }
-            if (url.isBlank()) continue
-            val snippet = item.cleanString(
-                "snippet",
-                "description",
-                "summary",
-                "excerpt",
-                "content",
-                "text",
-                "comment_text",
-                "story_text",
-                "answer"
-            )
-            val rawContent = item.cleanString(
-                "raw_content",
-                "rawContent",
-                "body",
-                "page_content",
-                "pageContent",
-                "markdown",
-                "content_text",
-                "contentText",
-                "article"
-            )
-            val dateSignals = item.cleanString("age", "page_age", "published", "published_at", "date")
-                .takeIf { it.isNotBlank() }
-                ?.let { listOf("时间：$it") }
-                .orEmpty()
-            val extraSnippets = item.optJSONArray("extra_snippets")
-                ?.toStringList()
-                .orEmpty()
-                .map { it.cleanWebSearchText() }
-            add(
-                WebSearchDocument(
-                    title = item.cleanString("title", "name", "full_name", "story_title", "question")
-                        .ifBlank { source?.cleanString("title", "name", "site_name", "siteName").orEmpty() }
-                        .ifBlank { url },
-                    url = url,
-                    snippet = (listOf(snippet) + dateSignals + extraSnippets).filter { it.isNotBlank() }.joinToString("\n").limitForPrompt(1_000),
-                    content = rawContent.limitForPrompt(3_000),
-                    provider = provider
-                )
-            )
-        }
-    }
-}
-
-private fun JSONObject.toBraveSearchDocuments(
-    provider: String,
-    maxResults: Int
-): List<WebSearchDocument> {
-    val typedDocuments = mapOf(
-        "web" to optJSONObject("web").toBraveTypedDocuments(provider, "Web"),
-        "news" to optJSONObject("news").toBraveTypedDocuments(provider, "News"),
-        "discussions" to optJSONObject("discussions").toBraveTypedDocuments(provider, "Discussions"),
-        "faq" to optJSONObject("faq").toBraveTypedDocuments(provider, "FAQ"),
-        "videos" to optJSONObject("videos").toBraveTypedDocuments(provider, "Videos")
-    )
-    val mixedDocuments = optJSONObject("mixed")
-        ?.optJSONArray("main")
-        .toBraveMixedDocuments(typedDocuments)
-    return (mixedDocuments.ifEmpty { typedDocuments.values.flatten() })
-        .distinctBy { it.url.normalizedUrlKey() }
-        .take(maxResults)
-}
-
-private fun JSONObject?.toBraveTypedDocuments(
-    provider: String,
-    typeLabel: String
-): List<WebSearchDocument> {
-    val results = this?.optJSONArray("results") ?: return emptyList()
-    val typedProvider = if (typeLabel == "Web") provider else "$provider · $typeLabel"
-    return results.toSearchDocuments(typedProvider)
-}
-
-private fun JSONArray?.toBraveMixedDocuments(
-    typedDocuments: Map<String, List<WebSearchDocument>>
-): List<WebSearchDocument> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            val type = item.optString("type").lowercase(Locale.ROOT)
-            val resultIndex = item.optInt("index", -1)
-            if (type.isBlank() || resultIndex < 0) continue
-            typedDocuments[type]?.getOrNull(resultIndex)?.let(::add)
-        }
-    }
-}
-
-private fun JSONObject.toBraveLlmContextDocuments(provider: String): List<WebSearchDocument> {
-    val grounding = optJSONObject("grounding") ?: return emptyList()
-    val sources = optJSONObject("sources")
-    val generic = grounding.optJSONArray("generic").toBraveLlmContextItems(provider, sources)
-    val map = grounding.optJSONArray("map").toBraveLlmContextItems(provider, sources)
-    val poi = grounding.optJSONObject("poi")
-        ?.takeIf { it.length() > 0 }
-        ?.let { listOfNotNull(it.toBraveLlmContextDocument(provider, sources)) }
-        .orEmpty()
-    return (generic + map + poi).distinctBy { it.url.normalizedUrlKey() }
-}
-
-private fun JSONArray?.toBraveLlmContextItems(
-    provider: String,
-    sources: JSONObject?
-): List<WebSearchDocument> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            item.toBraveLlmContextDocument(provider, sources)?.let(::add)
-        }
-    }
-}
-
-private fun JSONObject.toBraveLlmContextDocument(
-    provider: String,
-    sources: JSONObject?
-): WebSearchDocument? {
-    val url = cleanString("url", "link", "href").ifBlank { return null }
-    val source = sources?.optJSONObject(url)
-    val snippets = optJSONArray("snippets")
-        ?.toStringList()
-        .orEmpty()
-        .map { it.cleanWebSearchText() }
-        .filter { it.isNotBlank() }
-    val sourceTitle = source?.cleanString("title", "site_name").orEmpty()
-    val sourceHost = source?.cleanString("hostname").orEmpty()
-    val title = cleanString("title", "name")
-        .ifBlank { sourceTitle }
-        .ifBlank { sourceHost }
-        .ifBlank { url }
-    return WebSearchDocument(
-        title = title,
-        url = url,
-        snippet = snippets.take(2).joinToString("\n").limitForPrompt(1_000),
-        content = snippets.joinToString("\n\n").limitForPrompt(3_000),
-        provider = provider
-    )
-}
 
 private fun WebSearchResult.toClosedLoopChecks(
     promptContext: String,
@@ -2927,54 +2766,6 @@ private fun List<WebSearchDocument>.toWebSearchQualityReport(): WebSearchQuality
     return WebSearchQualityReport(score = score, label = label, reasons = reasons)
 }
 
-private fun JSONObject.cleanString(vararg keys: String): String =
-    keys.firstNotNullOfOrNull { key ->
-        optString(key).takeIf { it.isNotBlank() && it != "null" }
-    }.orEmpty().cleanWebSearchText()
-
-private fun String.parseCustomSearchDocuments(provider: String): List<WebSearchDocument> {
-    val payload = trim()
-    val results = if (payload.startsWith("[")) {
-        JSONArray(payload)
-    } else {
-        val root = JSONObject(payload)
-        root.firstSearchResultArray()
-            ?: JSONArray()
-    }
-    return results.toSearchDocuments(provider)
-}
-
-private fun JSONObject.firstSearchResultArray(): JSONArray? =
-    firstArray("results", "items", "data", "organic_results", "organic", "hits")
-        ?: optJSONObject("web")?.firstSearchResultArray()
-        ?: optJSONObject("search")?.firstSearchResultArray()
-        ?: optJSONObject("data")?.firstSearchResultArray()
-        ?: optJSONObject("response")?.firstSearchResultArray()
-
-private fun JSONObject.firstArray(vararg keys: String): JSONArray? =
-    keys.firstNotNullOfOrNull { key -> optJSONArray(key) }
-
-private fun String.extractErrorMessage(): String =
-    runCatching {
-        val root = JSONObject(this)
-        root.cleanString("message", "detail", "error_description")
-            .ifBlank {
-                val error = root.opt("error")
-                when (error) {
-                    is JSONObject -> error.cleanString("message", "detail", "reason", "type")
-                    is String -> error
-                    else -> ""
-                }
-            }
-            .ifBlank { root.toString().take(220) }
-    }.getOrDefault(take(220))
-
-private fun JSONArray.toStringList(): List<String> = buildList {
-    for (index in 0 until length()) {
-        val value = optString(index).normalizeWhitespace()
-        if (value.isNotBlank()) add(value)
-    }
-}
 
 private fun JSONObject.toWebSearchDiagnosticHealthReport(): WebSearchHealthReport {
     val explicitLabel = optString("healthLabel")
@@ -3024,29 +2815,8 @@ private fun JSONObject.toWebSearchDiagnosticHealthReport(): WebSearchHealthRepor
     return WebSearchHealthReport(score = score, label = label, reasons = reasons.distinct().take(8))
 }
 
-private fun JSONArray?.toSourceReferences(): List<ChatSourceReference> {
-    if (this == null) return emptyList()
-    return buildList {
-        for (index in 0 until length()) {
-            val item = optJSONObject(index) ?: continue
-            val url = item.optString("url")
-            if (url.isBlank()) continue
-            add(
-                ChatSourceReference(
-                    title = item.optString("title").ifBlank { url },
-                    url = url,
-                    snippet = item.optString("snippet"),
-                    provider = item.optString("provider"),
-                    hostLabel = item.optString("hostLabel"),
-                    trustLabel = item.optString("trustLabel"),
-                    trustReason = item.optString("trustReason")
-                )
-            )
-        }
-    }
-}
 
-private val urlRegex = Regex("""https?://[^\s，。！？、）)\]}>"'`]+""", RegexOption.IGNORE_CASE)
+internal val urlRegex = Regex("""https?://[^\s，。！？、）)\]}>"'`]+""", RegexOption.IGNORE_CASE)
 private val yearRegex = Regex("""\b20\d{2}\b""")
 private val webSearchCitationRegex = Regex("""(?:\[(\d{1,2})]|［(\d{1,2})］)""")
 private const val DEFAULT_WEB_SEARCH_CACHE_TTL_MS = 2 * 60 * 1000L
@@ -3057,7 +2827,7 @@ private const val WEB_SEARCH_PREFLIGHT_PUBLIC_HOST = "example.com"
 private const val WEB_SEARCH_CACHE_HIT = "命中本机短缓存"
 private const val WEB_SEARCH_CACHE_STORED = "实时检索，已写入本机短缓存"
 private const val WEB_SEARCH_CACHE_NOT_USED = "未使用缓存"
-private val knownSearchNameTerms = setOf(
+internal val knownSearchNameTerms = setOf(
     "OpenAI",
     "ChatGPT",
     "GitHub",
@@ -3760,16 +3530,16 @@ private fun String.containsAnySearchHint(hints: List<String>): Boolean {
     return hints.any { text.contains(it.lowercase(Locale.ROOT)) }
 }
 
-private fun String.normalizedUrlKey(): String =
+internal fun String.normalizedUrlKey(): String =
     trim().trimEnd('/').substringBefore("#")
 
 internal fun jinaReaderUrlFor(url: String): String =
     "https://r.jina.ai/http://$url"
 
-private fun String.normalizeWhitespace(): String =
+internal fun String.normalizeWhitespace(): String =
     replace(Regex("""\s+"""), " ").trim()
 
-private fun String.limitForPrompt(maxChars: Int): String =
+internal fun String.limitForPrompt(maxChars: Int): String =
     if (length <= maxChars) this else take(maxChars).trimEnd() + "..."
 
 private fun String.expandCompactSearchWords(): String =
@@ -3786,7 +3556,7 @@ private fun String.restoreKnownSearchNames(): String =
         .replace(Regex("""\bDash Scope\b""", RegexOption.IGNORE_CASE), "DashScope")
         .replace(Regex("""\bMi Mo\b""", RegexOption.IGNORE_CASE), "MiMo")
 
-private fun String.cleanWebSearchText(): String =
+internal fun String.cleanWebSearchText(): String =
     decodeBasicHtmlEntities()
         .replace(Regex("""(?is)<script\b[^>]*>.*?</script>"""), " ")
         .replace(Regex("""(?is)<style\b[^>]*>.*?</style>"""), " ")
@@ -3800,7 +3570,7 @@ private fun String.cleanWebSearchText(): String =
         .decodeBasicHtmlEntities()
         .normalizeWhitespace()
 
-private fun String.htmlToReadableText(): String =
+internal fun String.htmlToReadableText(): String =
     replace(Regex("""(?is)<script\b[^>]*>.*?</script>"""), " ")
         .replace(Regex("""(?is)<style\b[^>]*>.*?</style>"""), " ")
         .replace(Regex("""(?is)<noscript\b[^>]*>.*?</noscript>"""), " ")
@@ -3819,7 +3589,7 @@ private fun String.htmlToReadableText(): String =
         .take(80)
         .joinToString("\n")
 
-private fun String.extractHtmlTitle(): String =
+internal fun String.extractHtmlTitle(): String =
     Regex("""(?is)<title[^>]*>(.*?)</title>""")
         .find(this)
         ?.groupValues
@@ -3862,7 +3632,7 @@ internal fun String.jinaReaderToReadableText(): String {
         .joinToString("\n")
 }
 
-private fun String.decodeBasicHtmlEntities(): String =
+internal fun String.decodeBasicHtmlEntities(): String =
     replace("&nbsp;", " ")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -3871,7 +3641,7 @@ private fun String.decodeBasicHtmlEntities(): String =
         .replace("&#39;", "'")
         .decodeNumericHtmlEntities()
 
-private fun String.decodeNumericHtmlEntities(): String =
+internal fun String.decodeNumericHtmlEntities(): String =
     replace(Regex("""&#(x?[0-9A-Fa-f]+);""")) { match ->
         val raw = match.groupValues.getOrNull(1).orEmpty()
         val codePoint = if (raw.startsWith("x", ignoreCase = true)) {
