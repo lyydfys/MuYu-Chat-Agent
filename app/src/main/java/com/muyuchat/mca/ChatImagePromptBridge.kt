@@ -731,102 +731,6 @@ private class ChatImagePromptBridgeException(
     message: String
 ) : IllegalStateException(message)
 
-/** Creates an isolated request; no image tool is ever exposed to the translation call. */
-internal fun chatImagePromptBridgeRequest(
-    prompt: String,
-    params: GenerationParams,
-    systemPrompt: String = ChatImagePromptBridge.SYSTEM_PROMPT,
-    assistantName: String? = null,
-    characterContext: String? = null,
-    conversationContext: List<ChatMessage> = emptyList(),
-    /**
-     * Request-scoped world-book/knowledge context. This is deliberately kept separate from the
-     * assistant's permanent system prompt so image requests can use the currently selected lore
-     * without mutating or leaking it into the saved character card. The value is rendered as
-     * inert reference data by [formatChatImagePromptReferenceContext].
-     */
-    runtimeContext: String? = null,
-    /** Image-skill summaries treat arbitrary numeric metadata as model input, not hard syntax. */
-    protectNumericLiterals: Boolean = true
-): ChatRequest {
-    val protectedPrompt = chatImagePromptProtect(
-        prompt,
-        protectNumericLiterals = protectNumericLiterals
-    ).payload
-    val outputTokenBudget = (protectedPrompt.length / 3 + 160)
-        .coerceIn(256, 1_024)
-    val referenceContext = formatChatImagePromptReferenceContext(
-        assistantName = assistantName,
-        characterContext = characterContext,
-        conversationContext = conversationContext,
-        runtimeContext = runtimeContext
-    )
-    val userContent = buildString {
-        if (referenceContext != null) {
-            append("<reference_data>\n")
-            append(referenceContext)
-            append("\n</reference_data>\n")
-        }
-        append("<image_description>\n")
-        append(protectedPrompt)
-        append("\n</image_description>")
-    }
-    return ChatRequest(
-        messages = listOf(
-            ChatMessage(Role.SYSTEM, systemPrompt),
-            ChatMessage(Role.USER, userContent)
-        ),
-        params = params.copy(
-            nPredict = minOf(maxOf(params.effectiveNPredict(), outputTokenBudget), 1_024),
-            temperature = 0f,
-            reasoningMode = ReasoningMode.OFF,
-            hideReasoning = true,
-            stopWords = emptyList()
-        ),
-        tools = emptyList(),
-        toolExchanges = emptyList()
-    )
-}
-
-/** Builds a compact, sanitized, explicitly non-instructional visual reference for prompt translation. */
-internal fun formatChatImagePromptReferenceContext(
-    assistantName: String?,
-    characterContext: String?,
-    conversationContext: List<ChatMessage>,
-    runtimeContext: String? = null
-): String? {
-    fun inertText(value: String, limit: Int): String = value
-        .replace(Regex("[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F]"), " ")
-        .replace("<", "‹")
-        .replace(">", "›")
-        .replace(Regex("\\s+"), " ")
-        .trim()
-        .take(limit)
-
-    val lines = buildList {
-        assistantName?.let { inertText(it, 96).takeIf(String::isNotBlank) }
-            ?.let { add("Character name (reference only): $it") }
-        characterContext?.let { inertText(it, 700).takeIf(String::isNotBlank) }
-            ?.let { add("Character description (reference only): $it") }
-        conversationContext.asSequence()
-            .filter { it.role == Role.USER || it.role == Role.ASSISTANT }
-            .mapNotNull { message ->
-                inertText(message.content, 110)
-                    .takeIf(String::isNotBlank)
-                    ?.let { "${message.role.name.lowercase()}: $it" }
-            }
-            .toList()
-            .takeLast(6)
-            .forEach(::add)
-        runtimeContext?.let { inertText(it, 1_100).takeIf(String::isNotBlank) }
-            ?.let { add("Selected lore and knowledge (reference only): $it") }
-    }
-    if (lines.isEmpty()) return null
-    return lines.joinToString("\n").also { context ->
-        check(context.length <= 2_800) { "Image reference context exceeded its reserved source budget." }
-    }
-}
-
     // Test-facing name kept on the object; the implementation lives in
     // ChatImagePromptBridgeNormalization.kt.
     internal fun normalizeChatImagePromptResponse(raw: String):
@@ -835,6 +739,39 @@ internal fun formatChatImagePromptReferenceContext(
     // ChatImagePromptBridgeInputParsing.kt.
     internal fun parseChatImagePromptInput(prompt: String):
         ChatImagePromptInputParts = chatImagePromptParseInput(prompt)
+    // Callers use the object form; the implementations live in
+    // ChatImagePromptBridgeRequestConstruction.kt.
+    internal fun chatImagePromptBridgeRequest(
+        prompt: String,
+        params: GenerationParams,
+        systemPrompt: String = ChatImagePromptBridge.SYSTEM_PROMPT,
+        assistantName: String? = null,
+        characterContext: String? = null,
+        conversationContext: List<ChatMessage> = emptyList(),
+        runtimeContext: String? = null,
+        protectNumericLiterals: Boolean = true
+    ): ChatRequest = chatImagePromptBuildRequest(
+        prompt = prompt,
+        params = params,
+        systemPrompt = systemPrompt,
+        assistantName = assistantName,
+        characterContext = characterContext,
+        conversationContext = conversationContext,
+        runtimeContext = runtimeContext,
+        protectNumericLiterals = protectNumericLiterals
+    )
+
+    internal fun formatChatImagePromptReferenceContext(
+        assistantName: String?,
+        characterContext: String?,
+        conversationContext: List<ChatMessage>,
+        runtimeContext: String? = null
+    ): String? = chatImagePromptFormatReferenceContext(
+        assistantName = assistantName,
+        characterContext = characterContext,
+        conversationContext = conversationContext,
+        runtimeContext = runtimeContext
+    )
 }
 
 internal typealias PromptEnvelope = ChatImagePromptBridge.PromptEnvelope
