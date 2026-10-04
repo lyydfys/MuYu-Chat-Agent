@@ -22,7 +22,9 @@ class PersistentPrefixCacheSettingsContractTest {
         assertTrue(toggle.contains("engine.setPersistentPrefixCacheEnabled(enabled)"))
         assertTrue(toggle.contains("markLocalConversationContextInvalid()"))
         assertTrue(clear.contains("engine.clearPersistentPrefixCache()"))
-        assertTrue(clear.contains("generationJob?.takeIf { it.isActive }?.join()"))
+        // The run handle is owned by ChatRunOwnership now; the contract -- clearing waits for the
+        // active generation job -- is unchanged.
+        assertTrue(clear.contains("chatRuns.activePublishedJob()?.join()"))
     }
 
     @Test

@@ -740,7 +740,6 @@ class MainViewModel @JvmOverloads constructor(
         ?: cloudApiStore.loadSelectedBackend()
     private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
     @Volatile
-    private var generationJob: Job? = null
     private var replyGenerationMetrics: ReplyGenerationMetrics? = null
     /** Prevents double taps from invalidating the stop epoch twice and losing UI cleanup. */
     private val stopGenerationInProgress = AtomicBoolean(false)
@@ -748,14 +747,15 @@ class MainViewModel @JvmOverloads constructor(
     private val chatImageSubmissionPreflight = AtomicBoolean(false)
     /** New UI generations join this job before entering the engine, preventing a stale stop. */
     /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
-    private val generationRunSequence = AtomicLong(0L)
+    /** Identity, cancellation and the published run handle for the UI chat run. */
+    private val chatRuns = ChatRunOwnership()
     /**
      * Owns the streamed assistant output: the buffer lock, the buffered text, the deferred publish
      * job and the generation id they belong to. See [ChatStreamAccumulator].
      */
     private val chatStreamAccumulator = ChatStreamAccumulator(
         scope = viewModelScope,
-        currentRunId = { generationRunSequence.get() },
+        currentRunId = { chatRuns.currentRunId() },
         activeSessionId = { _uiState.value.activeChatSessionId },
         hasAssistantMessage = { _uiState.value.messages.any { it.role == Role.ASSISTANT } },
         commit = { batch, isStillCurrent ->
@@ -816,7 +816,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun discardPendingAssistantOutput(generationRunId: Long? = null) =
         chatStreamAccumulator.discard(generationRunId)
 
-    private val uiGenerationOwnership = UiGenerationOwnership(generationRunSequence)
     @Volatile
     private var localConversationContextNeedsInvalidation = false
     private val localConversationContextInvalidationSequence = AtomicLong(0L)
@@ -1385,10 +1384,10 @@ contextTraceJson: String?
                 ?.removePrefix("ui-")
                 ?.substringBefore('-')
                 ?.toLongOrNull()
-                ?: uiRequestId?.let { generationRunSequence.get() }
+                ?: uiRequestId?.let { chatRuns.currentRunId() }
 
             fun ownsUiLifecycle(): Boolean = uiLifecycleRunId == null ||
-                generationRunSequence.get() == uiLifecycleRunId
+                chatRuns.matches(uiLifecycleRunId)
 
             val effectiveRequest = if (
                 executionContext.loadAuthorization == null &&
@@ -2292,7 +2291,7 @@ contextTraceJson: String?
             val actualSession = current.chatSessions.firstOrNull {
                 it.id == initialState.activeChatSessionId
             }
-            return generationRunSequence.get() == generationRunId &&
+            return chatRuns.matches(generationRunId) &&
                 current.activeChatSessionId == initialState.activeChatSessionId &&
                 current.messages == initialState.messages &&
                 expectedSession != null && actualSession != null &&
@@ -10149,7 +10148,7 @@ contextTraceJson: String?
                 removeChatImageContinuationPlaceholder(pending.chatSessionId)
             }
         } finally {
-            if (!started) reservation?.let { uiGenerationOwnership.cancelPending(it) }
+            if (!started) reservation?.let { chatRuns.cancelPending(it) }
             synchronized(assistantImageContinuationLock) {
                 assistantImageContinuationsInFlight.remove(requestId)
             }
@@ -10550,10 +10549,10 @@ contextTraceJson: String?
             sessions = sessionsToPersist,
             rollback = rollback,
             onCommitted = { startGeneration(kept.dropLast(1), generationReservation) },
-            onCommitFailed = { uiGenerationOwnership.cancelPending(generationReservation) }
+            onCommitFailed = { chatRuns.cancelPending(generationReservation) }
         )
         persistenceJob.invokeOnCompletion {
-            uiGenerationOwnership.cancelPending(generationReservation)
+            chatRuns.cancelPending(generationReservation)
             McaGenerationForegroundService.release(getApplication<Application>(), preparationLease)
         }
     }
@@ -10666,14 +10665,14 @@ contextTraceJson: String?
     }
 
     private fun reserveUiGenerationStart(): UiGenerationReservation? =
-        uiGenerationOwnership.reserveStart()?.also { reservation ->
+        chatRuns.reserveStart()?.also { reservation ->
             (reservation.supersededOwner as? Job)?.cancel()
         }
 
     private fun cancelGenerationJob(): UiGenerationCancellation {
         // A cancelled flow still runs finally blocks. The ownership gate advances the epoch
         // before exposing the captured Job, so late cleanup cannot claim a replacement request.
-        val cancellation = uiGenerationOwnership.cancelCurrent()
+        val cancellation = chatRuns.cancelCurrent()
         (cancellation.owner as? Job)?.cancel()
         return cancellation
     }
@@ -10698,7 +10697,7 @@ contextTraceJson: String?
             var continuationFailureMessage = "角色回复未完成，可点击继续角色回复重试。"
             val preparedUiVisionFiles = mutableListOf<File>()
             fun generationStillOwnsUi(): Boolean =
-                generationRunSequence.get() == generationRunId
+                chatRuns.matches(generationRunId)
 
             fun settleGenerationUi(
                 stats: RuntimeStats,
@@ -10742,7 +10741,7 @@ contextTraceJson: String?
                 // Foreground reconciliation probes the isolated worker on IO. A send issued
                 // immediately after returning to the app must not overtake that probe and
                 // observe the transient unloaded projection before worker-loss recovery is armed.
-                foregroundRecoveryJob?.takeUnless { it === generationJob }?.join()
+                chatRuns.publishedJobUnless(foregroundRecoveryJob)?.join()
                 if (!generationStillOwnsUi()) return@launch
             }
             val assistantSnapshot = frozenAssistantSnapshot
@@ -11247,7 +11246,7 @@ contextTraceJson: String?
             } else {
                 UiGenerationRuntimePhase.CLOUD_ACTIVE
             }
-            if (!uiGenerationOwnership.markPhase(
+            if (!chatRuns.markPhase(
                     generationRunId,
                     ownedGenerationJob,
                     runtimePhase
@@ -11313,7 +11312,7 @@ contextTraceJson: String?
                     is GenerateEvent.Done -> {
                         if (!generationStillOwnsUi()) return@collect
                         replyMetrics.record(event.stats)
-                        uiGenerationOwnership.markPhase(
+                        chatRuns.markPhase(
                             generationRunId,
                             ownedGenerationJob,
                             UiGenerationRuntimePhase.TERMINAL
@@ -11447,7 +11446,7 @@ contextTraceJson: String?
                     }
                     is GenerateEvent.Error -> {
                         if (!generationStillOwnsUi()) return@collect
-                        uiGenerationOwnership.markPhase(
+                        chatRuns.markPhase(
                             generationRunId,
                             ownedGenerationJob,
                             UiGenerationRuntimePhase.TERMINAL
@@ -11497,7 +11496,7 @@ contextTraceJson: String?
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                uiGenerationOwnership.markPhase(
+                chatRuns.markPhase(
                     generationRunId,
                     ownedGenerationJob,
                     UiGenerationRuntimePhase.TERMINAL
@@ -11530,7 +11529,7 @@ contextTraceJson: String?
                     preparedUiVisionFiles.forEach { file -> runCatching { file.delete() } }
                     preparedUiVisionFiles.clear()
                 }
-                uiGenerationOwnership.markPhase(
+                chatRuns.markPhase(
                     generationRunId,
                     ownedGenerationJob,
                     UiGenerationRuntimePhase.TERMINAL
@@ -11566,9 +11565,9 @@ contextTraceJson: String?
                 }
             }
         }
-        if (!uiGenerationOwnership.activate(admittedReservation, ownedGenerationJob)) {
+        if (!chatRuns.activate(admittedReservation, ownedGenerationJob)) {
             ownedGenerationJob.cancel()
-            uiGenerationOwnership.cancelPending(admittedReservation)
+            chatRuns.cancelPending(admittedReservation)
             return false
         }
         // Keep the main process eligible to finish cloud/UI chat work after
@@ -11579,14 +11578,12 @@ contextTraceJson: String?
             getApplication<Application>(),
             McaGenerationForegroundService.KIND_CHAT
         )
-        generationJob = ownedGenerationJob
+        chatRuns.publishJob(ownedGenerationJob)
         replyGenerationMetrics = replyMetrics
         ownedGenerationJob.invokeOnCompletion {
             try {
-                uiGenerationOwnership.finish(generationRunId, ownedGenerationJob)
-                if (generationJob === ownedGenerationJob) {
-                    generationJob = null
-                }
+                chatRuns.finish(generationRunId, ownedGenerationJob)
+                chatRuns.retirePublishedJob(ownedGenerationJob)
             } finally {
                 McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)
             }
@@ -11604,14 +11601,14 @@ contextTraceJson: String?
         viewModelScope.launch {
             try {
                 if (!_uiState.value.isGenerating) return@launch
-                val metrics = replyGenerationMetrics?.takeIf { it.runId == generationRunSequence.get() }
+                val metrics = replyGenerationMetrics?.takeIf { chatRuns.isCurrent(it.runId) }
                     ?.finish()
                 val cancellation = cancelGenerationJob()
                 val stoppedJob = cancellation.owner as? Job
                 val stopLocalRuntime = cancellation.stopLocalRuntime ||
                     (cancellation.pendingCancelled &&
                         engine.activeGenerationStopToken()?.requestId?.startsWith("ui-") == true)
-                val cancelledEpoch = generationRunSequence.get()
+                val cancelledEpoch = chatRuns.currentRunId()
                 _uiState.update { state ->
                     val task = state.browserTask
                     if (task?.phase != com.muyuchat.feature.chat.BrowserTaskPhase.SEARCHING) state
@@ -11631,7 +11628,7 @@ contextTraceJson: String?
                     stoppedJob?.join()
                     true
                 } == true
-                if (generationRunSequence.get() != cancelledEpoch) return@launch
+                if (!chatRuns.isCurrent(cancelledEpoch)) return@launch
                 flushPendingAssistantOutput()
                 val rollback = _uiState.value.conversationMutationRollbackState()
                 var sessionsToPersist: List<ChatSessionRecord> = emptyList()
@@ -12042,7 +12039,7 @@ contextTraceJson: String?
             // finishes. Temporarily suppress new exports, then wait for the
             // in-flight UI turn so clear cannot race a late atomic commit.
             engine.setPersistentPrefixCacheEnabled(false)
-            generationJob?.takeIf { it.isActive }?.join()
+            chatRuns.activePublishedJob()?.join()
             val cleared = engine.clearPersistentPrefixCache()
             val summary = engine.persistentPrefixCacheSummary()
             val enabledNow = _uiState.value.persistentPrefixCacheEnabled
@@ -12081,7 +12078,7 @@ contextTraceJson: String?
         // isolated local worker or cloud transport while the activity is not
         // visible.  Its foreground service owns process priority and its
         // terminal/persistence callbacks retain the same generation epoch.
-        uiGenerationOwnership.background()
+        chatRuns.background()
         _uiState.update { state ->
             val imageActive = state.imageJobs.any { job -> !job.status.terminal }
             if ((state.isGenerating || imageActive) &&
@@ -12105,7 +12102,7 @@ contextTraceJson: String?
     fun onAppForegrounded() {
         // A file removed or replaced while backgrounded must restore the download action.
         viewModelScope.launch { verifiedOfflineTranslationBundle() }
-        uiGenerationOwnership.foreground()
+        chatRuns.foreground()
         _uiState.update { state ->
             if (state.statusMessage != BACKGROUND_TASK_STATUS) {
                 state
@@ -13606,10 +13603,10 @@ contextTraceJson: String?
     private fun applyWebSearchAnswerGuardsToLastAssistant(
         generationRunId: Long? = null
     ): WebSearchCitationAudit? {
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return null
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
         var citationAudit: WebSearchCitationAudit? = null
         _uiState.update { state ->
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 return@update state
             }
             val updated = state.messages.toMutableList()
@@ -13639,9 +13636,9 @@ contextTraceJson: String?
     }
 
     private fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long? = null) {
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
         _uiState.update { state ->
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 return@update state
             }
             val updated = state.messages.withVisibleAssistantCompletionFallback()
@@ -13670,7 +13667,7 @@ contextTraceJson: String?
         generationRunId: Long? = null
     ) {
         if (recordId.isNullOrBlank()) return
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
         val current = _uiState.value.webSearchDiagnostics.firstOrNull { it.id == recordId } ?: return
         val updatedRecord = current.copy(
             message = current.message + if (audit.repaired) " · 引用已修正" else " · 引用已审计",
@@ -13679,7 +13676,7 @@ contextTraceJson: String?
         )
         val records = webSearchDiagnosticStore.replace(updatedRecord)
         _uiState.update {
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 it
             } else {
                 it.copy(
@@ -13698,7 +13695,7 @@ contextTraceJson: String?
     private fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
         discardPendingAssistantOutput(generationRunId)
         _uiState.update { state ->
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 return@update state
             }
             val index = state.messages.indexOfLast { it.role == Role.ASSISTANT }
@@ -13739,9 +13736,9 @@ contextTraceJson: String?
         generationRunId: Long? = null
     ) {
         if (sources.isEmpty() && trace?.hasContent != true) return
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
         _uiState.update { state ->
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 return@update state
             }
             val updated = state.messages.toMutableList()
@@ -13940,11 +13937,11 @@ contextTraceJson: String?
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
     ): Job? {
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return null
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
         // A completion can end between chunks. Materialize its final bounded
         // buffer before taking the Room snapshot.
         flushPendingAssistantOutput(generationRunId)
-        if (generationRunId != null && generationRunSequence.get() != generationRunId) return null
+        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
         val snapshot = (sessions ?: _uiState.value.chatSessions).map { session ->
             session.copy(messages = session.messages.toList())
         }
@@ -13955,11 +13952,11 @@ contextTraceJson: String?
         }
         val sequence = chatSessionPersistenceSequence.incrementAndGet()
         return viewModelScope.launch(Dispatchers.IO) {
-            if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                 return@launch
             }
             chatSessionPersistenceMutex.withLock {
-                if (generationRunId != null && generationRunSequence.get() != generationRunId) {
+                if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
                     return@withLock
                 }
                 // A newer snapshot supersedes this one before it reaches the
@@ -14313,10 +14310,10 @@ contextTraceJson: String?
         assistantMessageId: String?
     ) {
         if (traceJson == null || sessionId == null || assistantMessageId == null ||
-            generationRunSequence.get() != generationRunId
+            !chatRuns.isCurrent(generationRunId)
         ) return
         _uiState.update { state ->
-            if (generationRunSequence.get() != generationRunId ||
+            if (!chatRuns.isCurrent(generationRunId) ||
                 state.activeChatSessionId != sessionId
             ) return@update state
             val index = state.messages.indexOfLast {

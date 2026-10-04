@@ -299,7 +299,8 @@ class MainViewModelCompletionFallbackTest {
     fun backgroundKeepsTheCapturedGenerationAndItsCompletionProtection() {
         val source = mainViewModelSource()
         val body = functionBody(source, "fun onAppBackgrounded()")
-        assertTrue(body.contains("uiGenerationOwnership.background()"))
+        // Read at its new owner: the fact -- backgrounding keeps the captured generation -- is the same.
+        assertTrue(body.contains("chatRuns.background()"))
         assertFalse(body.contains("stopGeneration"))
         assertFalse(body.contains("generationJob?.cancel()"))
         assertFalse(body.contains("backgroundedJob.cancel()"))
@@ -524,7 +525,8 @@ class MainViewModelCompletionFallbackTest {
     @Test
     fun localSendWaitsForForegroundWorkerReconciliation() {
         val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
-        val wait = body.indexOf("foregroundRecoveryJob?.takeUnless")
+        // The published-job handle moved behind ChatRunOwnership; the wait itself is unchanged.
+        val wait = body.indexOf("chatRuns.publishedJobUnless(foregroundRecoveryJob)")
         val invalidate = body.indexOf("ensureLocalConversationContextInvalidated()")
 
         assertTrue(wait >= 0)

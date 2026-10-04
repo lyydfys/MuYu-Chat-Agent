@@ -123,7 +123,9 @@ class AppForegroundRecoveryContractTest {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val body = functionBody(viewModel, "fun onAppBackgrounded()")
 
-        assertTrue(body.contains("uiGenerationOwnership.background()"))
+        // The ownership seam is ChatRunOwnership now; the fact under test -- backgrounding is not
+        // a cancellation -- is unchanged, and the other assertions in this test are untouched.
+        assertTrue(body.contains("chatRuns.background()"))
         assertTrue(body.contains("pauseAgentTuning()"))
         assertFalse(body.contains("engine.stopGenerationIfActive"))
         assertFalse(body.contains("backgroundedJob.cancel()"))

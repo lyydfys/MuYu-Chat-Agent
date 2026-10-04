@@ -134,7 +134,9 @@ class GenerationFlagAccountingContractTest {
 
     @Test
     fun `the run id guard is still what keeps a stale generation from clearing a newer flag`() {
-        val guard = Regex("""fun generationStillOwnsUi\(\): Boolean\s*=\s*generationRunSequence\.get\(\)\s*==\s*generationRunId""")
+        // The guard is the same rule expressed through the ownership seam: matches() is the strict
+        // "an id was given and the epoch equals it" form the old raw comparison spelled out.
+        val guard = Regex("""fun generationStillOwnsUi\(\): Boolean\s*=\s*chatRuns\.matches\(generationRunId\)""")
         assertTrue(
             "the ownership guard is the reason a superseded generation cannot clear a newer flag",
             guard.containsMatchIn(mainViewModel)

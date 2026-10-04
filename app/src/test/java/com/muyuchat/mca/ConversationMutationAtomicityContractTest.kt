@@ -46,7 +46,7 @@ class ConversationMutationAtomicityContractTest {
         )
         assertTrue(
             body.contains(
-                "onCommitFailed = { uiGenerationOwnership.cancelPending(generationReservation) }"
+                "onCommitFailed = { chatRuns.cancelPending(generationReservation) }"
             )
         )
         assertFalse(body.contains("persistChatSessions("))
