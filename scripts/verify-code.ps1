@@ -33,7 +33,8 @@
 param(
     [string[]] $Tests = @(),
     [switch] $FullTests,
-    [switch] $SkipTests
+    [switch] $SkipTests,
+    [switch] $FeatureTests
 )
 
 # Native tools write progress to stderr; with 'Stop' a PowerShell host turns that into a terminating
@@ -121,7 +122,14 @@ if ($crashed) {
 
 if (-not $SkipTests -and $failed.Count -eq 0) {
     Write-Host '== tests ==' -ForegroundColor Cyan
-    $testArgs = @(':app:testDebugUnitTest')
+    # `-FeatureTests` runs the chat module's own test source set. It has to be its own Gradle
+    # invocation: `--tests` filters are global to the whole invocation, so combining a chat-only
+    # filter with :app/:core/:api would make every other task fail with "No tests found".
+    $testArgs = if ($FeatureTests) {
+        @(':feature:chat:testDebugUnitTest')
+    } else {
+        @(':app:testDebugUnitTest')
+    }
     if ($Tests.Count -gt 0) {
         foreach ($t in $Tests) { $testArgs += @('--tests', $t) }
         Write-Host ('   filter: ' + ($Tests -join ', '))
@@ -140,6 +148,14 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             ':feature:modelhub:testDebugUnitTest',
             ':feature:settings:testDebugUnitTest'
         )
+        # NOTE: `--tests` is global to a Gradle invocation, so only pass filters when a single test
+        # task is selected. `-FullTests` therefore rejects `-Tests` rather than silently reporting
+        # "no tests found" for six of the seven tasks.
+        if ($Tests.Count -gt 0) {
+            Write-Host '   ERROR: -FullTests cannot be combined with -Tests (Gradle --tests is invocation-global).' -ForegroundColor Red
+            Write-Host '          Use -FeatureTests for chat-module anchors, or -Tests alone for :app.' -ForegroundColor Red
+            exit 2
+        }
         Write-Host '   plus :core:engine, :api:local and the four :feature:* test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
@@ -155,7 +171,11 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $failed += 'tests'
     }
 
-    $dir = Join-Path $repo 'app\build\test-results\testDebugUnitTest'
+    $dir = if ($FeatureTests) {
+        Join-Path $repo 'feature\chat\build\test-results\testDebugUnitTest'
+    } else {
+        Join-Path $repo 'app\build\test-results\testDebugUnitTest'
+    }
     # When -FullTests runs the feature/library modules too, their reports live beside app's.
     $extraResultDirs = @()
     if ($FullTests) {
