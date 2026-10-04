@@ -86,7 +86,11 @@ function Invoke-Gradle {
             Write-Host '   could not acquire the build queue within 30 minutes' -ForegroundColor Red
             return 1
         }
-        $all = @('-p', $repo) + $Arguments + @('--no-daemon', '--console=plain')
+        # Serialization is the named mutex above; `--no-daemon` never prevented the Kotlin
+        # daemon from sharing the build directory anyway. Reusing the resident Gradle daemon
+        # removes the ~20-30s JVM cold start on every call, which the -Rerun lane (up to 7
+        # separate invocations) pays repeatedly.
+        $all = @('-p', $repo) + $Arguments + @('--console=plain')
     # No --rerun-tasks and no clean on purpose: Kotlin/Gradle incrementality and the build cache are
     # what make this the fast loop. The strict path lives in build.ps1.
         & $gradlew @all > $LogPath 2>&1
