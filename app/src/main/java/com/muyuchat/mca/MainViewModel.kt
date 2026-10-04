@@ -1361,55 +1361,7 @@ contextTraceJson: String?
                 forceServerStop = false
             )
         }
-        LocalApiRuntime.engine = engine
-        LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
-            val uiRequestId = executionContext.requestId.takeIf { it.startsWith("ui-") }
-            // UI requests encode the epoch that created them. Capturing the
-            // current value here would let an old coroutine that reaches this
-            // provider late claim a newer generation's lifecycle callbacks.
-            val uiLifecycleRunId = uiRequestId
-                ?.removePrefix("ui-")
-                ?.substringBefore('-')
-                ?.toLongOrNull()
-                ?: uiRequestId?.let { chatRuns.currentRunId() }
-
-            fun ownsUiLifecycle(): Boolean = uiLifecycleRunId == null ||
-                chatRuns.matches(uiLifecycleRunId)
-
-            val effectiveRequest = if (
-                executionContext.loadAuthorization == null &&
-                executionContext.requestId.startsWith("ui-")
-            ) {
-                engine.activeExecutionProfile()
-                    ?.let { profile -> request.copy(params = mergeExecutionProfile(request.params, profile)) }
-                    ?: request
-            } else {
-                request
-            }
-            engine.streamChat(effectiveRequest, executionContext)
-                .onStart {
-                    if (ownsUiLifecycle()) {
-                        _uiState.update { state ->
-                            if (ownsUiLifecycle()) state.afterGenerationStarted() else state
-                        }
-                    }
-                }
-                .onCompletion {
-                    if (ownsUiLifecycle()) {
-                        _uiState.update { state ->
-                            if (ownsUiLifecycle()) {
-                                state.afterGenerationCompleted(engine.stats.value)
-                            } else {
-                                state
-                            }
-                        }
-                    }
-                }
-        }
-        LocalApiRuntime.stopGenerationProvider = {
-            cancelActiveLocalApiImageGeneration("Local API generation was stopped by the client.")
-            engine.stopGeneration()
-        }
+        installChatLocalApiProviders(chatLocalApiProviderPort)
         LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
             val token = engine.activeGenerationStopToken()
                 ?.takeIf { it.requestId == requestId }
@@ -12256,6 +12208,21 @@ contextTraceJson: String?
     }
 
     /** The ViewModel side of [ChatGenerationExecutionPort]. */
+    private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
+        object : ChatLocalApiProviderPort {
+            override val engine get() = this@MainViewModel.engine
+            override val chatRuns get() = this@MainViewModel.chatRuns
+            override val uiState get() = this@MainViewModel._uiState
+
+            override fun mergeExecutionProfile(
+                generation: GenerationParams,
+                profile: ModelExecutionProfile
+            ): GenerationParams = this@MainViewModel.mergeExecutionProfile(generation, profile)
+
+            override fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
+                this@MainViewModel.cancelActiveLocalApiImageGeneration(reason)
+        }
+
     private val chatExecutionPort: ChatGenerationExecutionPort =
         object : ChatGenerationExecutionPort {
             override val uiState: MutableStateFlow<MainUiState> = this@MainViewModel._uiState

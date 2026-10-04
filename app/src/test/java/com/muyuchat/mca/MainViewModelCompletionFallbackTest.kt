@@ -194,9 +194,10 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(append.contains("currentRunId() != generationRunId"))
         assertTrue(flush.contains("currentRunId() != generationRunId"))
 
-        val provider = source.substring(
-            source.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
-            source.indexOf("LocalApiRuntime.stopGenerationProvider =")
+        val install = chatLocalApiProviderSource()
+        val provider = install.substring(
+            install.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
+            install.indexOf("LocalApiRuntime.stopGenerationProvider =")
         )
         assertTrue(provider.contains("substringBefore('-')"))
         assertTrue(execution.contains("ui-\$generationRunId-"))
@@ -339,10 +340,14 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun localApiProviderOwnsSharedGenerationLifecycle() {
+        // P3 step 2 moved the provider installation to ChatLocalApiProviderOperations; the
+        // lifecycle assertions are unchanged -- the provider is read where it now lives. The
+        // two `source.contains` facts below stay on MainViewModel.
         val source = mainViewModelSource()
-        val provider = source.substring(
-            source.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
-            source.indexOf("LocalApiRuntime.stopGenerationProvider =")
+        val install = chatLocalApiProviderSource()
+        val provider = install.substring(
+            install.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
+            install.indexOf("LocalApiRuntime.stopGenerationProvider =")
         )
 
         assertTrue(provider.contains(".onStart"))
@@ -602,6 +607,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("ChatExecutionOperations.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** The owner that installs the Local API chat providers (P3 step 2). */
+    private fun chatLocalApiProviderSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatLocalApiProviderOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatLocalApiProviderOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("ChatLocalApiProviderOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     /** The owner that orchestrates the user-facing stop path. */
