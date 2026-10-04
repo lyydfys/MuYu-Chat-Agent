@@ -47,7 +47,10 @@ class LocalImageUpscalerExecutionContractTest {
 
     @Test
     fun providerRequiresPhysicalEvidenceAndBoundsBitmapPublicationMemory() {
-        val provider = source("LocalImageProvider.kt")
+        // P5/L9: the upscale body and the MAX_UPSCALE_* bounds moved to
+        // LocalImageUpscaleOperations.kt; read both files so presence/absence checks stay
+        // whole-path scoped.
+        val provider = source("LocalImageProvider.kt") + source("LocalImageUpscaleOperations.kt")
 
         listOf(
             "modelHashVerified",
