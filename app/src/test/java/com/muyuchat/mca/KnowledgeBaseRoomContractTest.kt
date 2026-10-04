@@ -187,7 +187,9 @@ class KnowledgeBaseRoomContractTest {
         )
 
         val source = sourceFile("MainViewModel.kt")
-        val persistBody = declaredFunctionBody(source, "persistChatSessions")
+        // P4: the session writer moved to ChatSessionPersistenceOperations; the assertions are
+        // unchanged -- the body is read where it now lives.
+        val persistBody = functionBody(sourceFile("ChatSessionPersistenceOperations.kt"), "runChatSessionPersistence")
         assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
         assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
         assertFalse(persistBody.contains("knowledgeBaseStore.setSelectedKnowledgeBaseIds"))
@@ -198,7 +200,7 @@ class KnowledgeBaseRoomContractTest {
 
     @Test
     fun coalescedSnapshotsKeepPendingBindingsAndDiscardDeletedSessionBindings() {
-        val body = declaredFunctionBody(sourceFile("MainViewModel.kt"), "persistChatSessions")
+        val body = functionBody(sourceFile("ChatSessionPersistenceOperations.kt"), "runChatSessionPersistence")
 
         assertCallsInOrder(
             body,
@@ -223,7 +225,7 @@ class KnowledgeBaseRoomContractTest {
     @Test
     fun worldBookCleanupRunsOnlyAfterCanonicalOwnerPersistence() {
         val source = sourceFile("MainViewModel.kt")
-        val persistBody = declaredFunctionBody(source, "persistChatSessions")
+        val persistBody = functionBody(sourceFile("ChatSessionPersistenceOperations.kt"), "runChatSessionPersistence")
         assertCallsInOrder(
             persistBody,
             "chatSessionStore.save(snapshot, knowledgeBindingsForSave)",

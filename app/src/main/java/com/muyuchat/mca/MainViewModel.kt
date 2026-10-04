@@ -12202,6 +12202,35 @@ contextTraceJson: String?
     }
 
     /** The ViewModel side of [ChatGenerationExecutionPort]. */
+    private val chatSessionPersistencePort: ChatSessionPersistencePort =
+        object : ChatSessionPersistencePort {
+            override val uiState get() = this@MainViewModel._uiState
+            override val scope get() = this@MainViewModel.viewModelScope
+            override val chatRuns get() = this@MainViewModel.chatRuns
+            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
+            override val chatSessionPersistenceMutex get() = this@MainViewModel.chatSessionPersistenceMutex
+            override val chatSessionPersistenceSequence get() = this@MainViewModel.chatSessionPersistenceSequence
+            override val chatSessionPersistenceStateLock get() = this@MainViewModel.chatSessionPersistenceStateLock
+            override val pendingKnowledgeBindings get() = this@MainViewModel.pendingKnowledgeBindings
+            override var durableChatSessions: List<ChatSessionRecord>
+                get() = this@MainViewModel.durableChatSessions
+                set(value) { this@MainViewModel.durableChatSessions = value }
+
+            override fun flushPendingAssistantOutput(generationRunId: Long?): Boolean =
+                this@MainViewModel.flushPendingAssistantOutput(generationRunId)
+
+            override fun reconciledChatSessionsAfterSave(snapshot: List<ChatSessionRecord>): List<ChatSessionRecord> =
+                this@MainViewModel.reconciledChatSessionsAfterSave(snapshot)
+
+            override fun publishReconciledChatSessions(requested: List<ChatSessionRecord>, persisted: List<ChatSessionRecord>) {
+                this@MainViewModel.publishReconciledChatSessions(requested, persisted)
+            }
+
+            override fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) {
+                this@MainViewModel.cleanupPendingWorldBooksAfterOwnerCommit(scope, retainedOwnerIds)
+            }
+        }
+
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
         object : ChatLocalApiProviderPort {
             override val engine get() = this@MainViewModel.engine
@@ -12730,80 +12759,12 @@ contextTraceJson: String?
         if (activeCorrection) cancelGenerationJob()
     }
 
+    /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
     private fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
-    ): Job? {
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
-        // A completion can end between chunks. Materialize its final bounded
-        // buffer before taking the Room snapshot.
-        flushPendingAssistantOutput(generationRunId)
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
-        val snapshot = (sessions ?: _uiState.value.chatSessions).map { session ->
-            session.copy(messages = session.messages.toList())
-        }
-        synchronized(chatSessionPersistenceStateLock) {
-            knowledgeBinding?.let { (sessionId, knowledgeBaseIds) ->
-                pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()
-            }
-        }
-        val sequence = chatSessionPersistenceSequence.incrementAndGet()
-        return viewModelScope.launch(Dispatchers.IO) {
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                return@launch
-            }
-            chatSessionPersistenceMutex.withLock {
-                if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                    return@withLock
-                }
-                // A newer snapshot supersedes this one before it reaches the
-                // database; skipping it prevents an old delete/rename snapshot
-                // from landing after a newer conversation state.
-                if (sequence != chatSessionPersistenceSequence.get()) return@withLock
-                val liveSessionIds = snapshot.mapTo(hashSetOf()) { it.id }
-                val knowledgeBindingsForSave = synchronized(chatSessionPersistenceStateLock) {
-                    pendingKnowledgeBindings
-                        .filterKeys { it in liveSessionIds }
-                        .mapValues { (_, ids) -> ids.toSet() }
-                }
-                runCatching {
-                    chatSessionStore.save(snapshot, knowledgeBindingsForSave)
-                }.onSuccess {
-                    val persisted = reconciledChatSessionsAfterSave(snapshot)
-                    // This write reached Room even if a newer in-memory snapshot
-                    // arrived while it was running. Keep the rollback anchor in
-                    // lockstep with the last transaction that actually committed.
-                    durableChatSessions = persisted
-                    // A newer snapshot may have arrived while Room was writing.
-                    // It owns pending state and orphan cleanup.
-                    if (sequence != chatSessionPersistenceSequence.get()) return@onSuccess
-                    publishReconciledChatSessions(snapshot, persisted)
-                    synchronized(chatSessionPersistenceStateLock) {
-                        knowledgeBindingsForSave.forEach { (sessionId, persistedIds) ->
-                            if (pendingKnowledgeBindings[sessionId] == persistedIds) {
-                                pendingKnowledgeBindings.remove(sessionId)
-                            }
-                        }
-                        pendingKnowledgeBindings.keys
-                            .filterNot { it in liveSessionIds }
-                            .forEach(pendingKnowledgeBindings::remove)
-                    }
-                    cleanupPendingWorldBooksAfterOwnerCommit(
-                        scope = WorldBookScope.CHAT,
-                        retainedOwnerIds = liveSessionIds
-                    )
-                }.onFailure { error ->
-                    if (sequence == chatSessionPersistenceSequence.get()) {
-                        _uiState.update {
-                            it.copy(statusMessage = "聊天历史保存失败，关联世界书已保留：${error.message}")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    ): Job? = runChatSessionPersistence(chatSessionPersistencePort, sessions, knowledgeBinding, generationRunId)
     /**
      * Durable destructive-edit boundary.  Room is committed before any native
      * cache is invalidated: after a process death the next runtime starts with
