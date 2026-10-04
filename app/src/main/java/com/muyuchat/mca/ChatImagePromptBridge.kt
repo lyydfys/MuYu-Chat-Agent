@@ -272,7 +272,7 @@ internal fun chatImagePromptBridgeHandoff(
 ): ChatImagePromptBridgeHandoff {
     if (!allowNegativePrompt) {
         val authoredNegative = parseChatImagePromptInput(result.originalPrompt).negativePrompt
-            ?.takeUnless(::isEmptyNegativePromptPlaceholder)
+            ?.takeUnless(::chatImagePromptIsEmptyNegativePromptPlaceholder)
         require(authoredNegative.isNullOrBlank()) {
             "The selected image backend has no negative branch; an authored negative prompt requires an explicit edit or omit decision."
         }
@@ -290,7 +290,7 @@ internal fun chatImagePromptBridgeHandoff(
         original = originalNegativePrompt,
         translated = translatedModelNegativePrompt,
         nativeMultilingual = nativeMultilingual
-    )?.takeUnless(::isEmptyNegativePromptPlaceholder)
+    )?.takeUnless(::chatImagePromptIsEmptyNegativePromptPlaceholder)
     // The bridge's generic quality branch is only a fallback. Once a resolved image profile has
     // supplied a model-specific default, keep that profile value authoritative instead of sending
     // two near-duplicate negative lists to the text encoder.
@@ -773,11 +773,11 @@ suspend fun translateChatImagePrompt(
     }
     // Treat authored placeholders such as `negative_prompt: none` as an explicit opt-out rather
     // than sending the literal word `none` to the image encoder.
-    val explicitNegative = inputParts.negativePrompt?.takeUnless(::isEmptyNegativePromptPlaceholder)
+    val explicitNegative = inputParts.negativePrompt?.takeUnless(::chatImagePromptIsEmptyNegativePromptPlaceholder)
     val effectiveNegative = when {
         explicitNegative.isNullOrBlank() -> {
             normalizedNegative ?: DEFAULT_QUALITY_NEGATIVE_PROMPT.takeUnless {
-                !requireModelSummary || inputExplicitlyDisablesNegativePrompt(original)
+                !requireModelSummary || chatImagePromptInputDisablesNegativePrompt(original)
             }
         }
         explicitNegative.containsHanScript() -> {
@@ -807,7 +807,7 @@ suspend fun translateChatImagePrompt(
                     .filter {
                         it.isNotBlank() &&
                             !it.containsHanScript() &&
-                            !isStructuredImageMetadataClause(it)
+                            !chatImagePromptIsStructuredMetadataClause(it)
                     }
                     .joinToString(", ")
             )
@@ -870,50 +870,6 @@ suspend fun translateChatImagePrompt(
         translated = requireModelSummary || shouldBridgeChatImagePrompt(translationSource),
         effectiveNegativePrompt = effectiveNegative
     )
-}
-
-/**
- * Filters transport metadata that can appear after a YAML/JSON negative section. These keys
- * describe the generation request, not visual exclusions, and must never become negative prompt
- * text when the chat model has already returned the canonical branch.
- */
-private fun isStructuredImageMetadataClause(value: String): Boolean {
-    val normalized = value.trim().lowercase()
-    if (normalized.isBlank()) return true
-    return normalized == "```" || normalized.startsWith("```") ||
-        normalized == "metadata" || normalized == "metadata:" ||
-        normalized.startsWith("metadata:") ||
-        normalized.matches(
-            Regex("(?:size|width|height|steps|step|seed|sampler|cfg|guidance|batch|count|n|token|tokens)\\s*[:=].*")
-        )
-}
-
-/** Treat provider placeholders as an absent negative branch rather than executable prompt text. */
-private fun isEmptyNegativePromptPlaceholder(value: String): Boolean {
-    val normalized = value.trim().lowercase()
-        .replace(Regex("[\\s._-]+"), "")
-    return normalized.isBlank() || normalized in setOf(
-        "none",
-        "na",
-        "notapplicable",
-        "notprovided",
-        "无",
-        "无负面",
-        "无负面提示词",
-        "不适用"
-    )
-}
-
-/** The user can explicitly opt out of the automatic quality branch. */
-private fun inputExplicitlyDisablesNegativePrompt(value: String): Boolean {
-    val normalized = value.trim().lowercase()
-    return Regex(
-        "(?is)(?:no|without|none|n/?a|无|没有|不需要|不要)\\s*(?:a\\s+)?" +
-            "(?:negative(?:\\s+prompt)?|负面(?:提示词)?|负向(?:提示词)?)"
-    ).containsMatchIn(normalized) || Regex(
-        "(?is)(?:negative(?:\\s+prompt)?|negative_prompt|负面(?:提示词)?|负向(?:提示词)?)" +
-            "\\s*[:：=]\\s*(?:none|n/?a|无|无负面|不适用)"
-    ).containsMatchIn(normalized)
 }
 
 /** Structured output used by the bridge.  The negative branch is optional for legacy models. */
@@ -1008,7 +964,7 @@ private fun normalizeChatImagePromptParts(
     val positive = normalizeChatImagePromptOutputInternal(parts.positive) ?: return null
     val negative = parts.negative?.let(::normalizeChatImagePromptOutputInternal)
         ?.takeIf(String::isNotBlank)
-        ?.takeUnless(::isEmptyNegativePromptPlaceholder)
+        ?.takeUnless(::chatImagePromptIsEmptyNegativePromptPlaceholder)
     return NormalizedChatImagePromptResponse(positive, negative)
 }
 
