@@ -323,7 +323,11 @@ class LocalImageProductClosureTest {
         // the ViewModel. No assertion changed -- only the file each one reads.
         val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
         val retry = functionBody(viewModel, "fun retryImageGeneration(")
-        val recreate = functionBody(viewModel, "fun recreateImageAsset(")
+        // Re-creation moved to ImageAssetCreationOperations.kt; the ViewModel keeps a forwarder.
+        val recreate = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),
+            "internal fun recreateAsset("
+        )
 
         assertTrue(persistedRecords.contains("val spec: ImageGenerationJobSpec? = null"))
         assertTrue(retry.contains("jobSnapshot = snapshot"))

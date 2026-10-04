@@ -2805,93 +2805,84 @@ contextTraceJson: String?
         return normalizedIds
     }
 
+    /** The ViewModel side of [ImageAssetCreationPort]. */
+    private val imageAssetCreationPort: ImageAssetCreationPort =
+        object : ImageAssetCreationPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override val context: Application
+                get() = this@MainViewModel.getApplication()
+
+            override suspend fun <T> withImageAssetWriteLock(block: suspend () -> T): T =
+                this@MainViewModel.imageAssetWriteMutex.withLock { block() }
+
+            override val imageAssetDirectory: File
+                get() = this@MainViewModel.imageAssetDirectory
+
+            override val localImageModelStore: LocalImageModelStore
+                get() = this@MainViewModel.localImageModelStore
+
+            override fun showStatus(message: String?)
+                = this@MainViewModel.showStatus(message = message)
+
+            override fun invalidatePendingChatImagePreparation()
+                = this@MainViewModel.invalidatePendingChatImagePreparation()
+
+            override fun canReadGenerationHistoryInput(reference: String): Boolean
+                = this@MainViewModel.canReadGenerationHistoryInput(reference = reference)
+
+            override fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean
+                = this@MainViewModel.rejectImageModelSwitchWhileGenerationIsActive()
+
+            override fun enqueueImageGeneration(
+            prompt: String,
+            inputDraft: LocalImageInputDraft,
+            options: LocalImageGenerationOptions,
+            jobSnapshot: ImageGenerationJobSpec?,
+            // Keep the generated UI id in the function body so callers that retry
+            // or continue an assistant tool turn can provide their own stable id.
+            // This also keeps the public admission signature free of interpolation
+            // braces, which makes source-level lifecycle checks unambiguous.
+            requestedJobId: String?,
+            requestedChatSessionId: String?,
+            requestedChatMessageId: String?
+            ): Boolean
+                = this@MainViewModel.enqueueImageGeneration(prompt = prompt, inputDraft = inputDraft, options = options, jobSnapshot = jobSnapshot, requestedChatSessionId = requestedChatSessionId, requestedChatMessageId = requestedChatMessageId)
+
+            override fun resolveCurrentLocalImageLoras(
+            selections: List<Pair<String, Double>>,
+            records: List<LocalImageLoraRecord>
+            ): List<LocalImagePreparedLora>
+                = this@MainViewModel.resolveCurrentLocalImageLoras(selections = selections, records = records)
+
+            override fun activeImageGenerationJobId(): String? =
+                this@MainViewModel.activeImageGenerationJobId
+
+            override fun activeImageGenerationModelId(): String? =
+                this@MainViewModel.activeImageGenerationModelId
+        }
+
+/** Delegates to [recreateAsset]. Signature kept verbatim. */
     fun recreateImageAsset(imageId: String) {
-        val state = _uiState.value
-        val asset = state.images.firstOrNull { it.id == imageId }
-        val history = ImageGenerationHistoryMetadata.fromJsonOrNull(asset?.generationMetadataJson)
-        if (asset == null || history == null) {
-            showStatus("这张图片没有可复现的完整生成参数。")
-            return
-        }
-        if (!history.canRecreate()) {
-            _uiState.update {
-                it.copy(statusMessage = "历史记录缺少当前生成方式必需的输入图片，无法直接重现。")
-            }
-            return
-        }
-        val snapshot = when (history.backend) {
-            ImageBackend.LOCAL -> {
-                val model = state.localImageModels.firstOrNull { it.matchesCatalogId(history.modelId) }
-                if (model == null) {
-                    _uiState.update {
-                        it.copy(statusMessage = "原本地模型已删除；重新导入同一模型后才能按原参数生成。")
-                    }
-                    return
-                }
-                val resolvedLoras = runCatching {
-                    resolveCurrentLocalImageLoras(
-                        history.loras.map { selection -> selection.id to selection.multiplier }
-                    )
-                }.getOrElse { error ->
-                    _uiState.update {
-                        it.copy(
-                            statusMessage = "历史任务需要的 LoRA 已缺失：${error.message ?: "请重新导入后再试"}"
-                        )
-                    }
-                    return
-                }
-                ImageGenerationJobSpec(
-                    prompt = history.requestPrompt,
-                    backend = ImageBackend.LOCAL,
-                    localModelSnapshot = model,
-                    modelId = model.id,
-                    modelName = history.modelName,
-                    inputDraft = history.inputDraft,
-                    options = history.options.copy(loras = resolvedLoras),
-                    promptExecution = history.promptExecution?.takeIf { execution ->
-                        execution.method.isReusableFromImageHistory()
-                    },
-                    chatSessionId = asset.chatSessionId
-                )
-            }
-            ImageBackend.CLOUD -> {
-                val config = state.cloudModels
-                    .firstOrNull { it.id == history.modelId && it.kind == CloudModelKind.IMAGE }
-                    ?.toImageConfig()
-                    ?.normalized()
-                if (config == null) {
-                    _uiState.update {
-                        it.copy(statusMessage = "原云端图片模型已移除；恢复同一连接后才能重新生成。")
-                    }
-                    return
-                }
-                ImageGenerationJobSpec(
-                    prompt = history.requestPrompt,
-                    backend = ImageBackend.CLOUD,
-                    cloudConfigSnapshot = config,
-                    modelId = history.modelId,
-                    modelName = history.modelName,
-                    inputDraft = LocalImageInputDraft(),
-                    options = LocalImageGenerationOptions(),
-                    chatSessionId = asset.chatSessionId
-                )
-            }
-        }
-        val unreadableInput = history.requiredContentInputReferences().firstOrNull { reference ->
-            !canReadGenerationHistoryInput(reference)
-        }
-        if (unreadableInput != null) {
-            _uiState.update {
-                it.copy(statusMessage = "历史输入图片的读取权限已失效，请重新选择输入后再生成。")
-            }
-            return
-        }
-        enqueueImageGeneration(
-            prompt = snapshot.prompt,
-            inputDraft = snapshot.inputDraft,
-            options = snapshot.options,
-            jobSnapshot = snapshot
-        )
+        recreateAsset(port = imageAssetCreationPort, imageId = imageId)
+    }
+
+/** Delegates to [applyLocalImageModelSelection]. Signature kept verbatim. */
+    fun selectLocalImageModel(modelId: String) {
+        applyLocalImageModelSelection(port = imageAssetCreationPort, modelId = modelId, scope = viewModelScope)
+    }
+
+/** Delegates to [createUpscaledAsset]. Signature kept verbatim. */
+    suspend fun createUpscaledImageAsset(
+        spec: ImageUpscaleJobSpec,
+        result: LocalImageResult,
+        requestId: String
+    ): ImageAssetRecord = imageAssetWriteMutex.withLock {
+        return createUpscaledAsset(port = imageAssetCreationPort, spec = spec, result = result, requestId = requestId)
     }
 
     private fun canReadGenerationHistoryInput(reference: String): Boolean {
@@ -4572,52 +4563,6 @@ contextTraceJson: String?
         return true
     }
 
-    fun selectLocalImageModel(modelId: String) {
-        if (rejectImageModelSwitchWhileGenerationIsActive()) return
-        invalidatePendingChatImagePreparation()
-        viewModelScope.launch(Dispatchers.IO) {
-            if (rejectImageModelSwitchWhileGenerationIsActive()) return@launch
-            val model = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
-            if (model == null) {
-                showStatus("未找到本地图像生成引擎")
-                return@launch
-            }
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), listOf(model))
-            model.localImageReadinessForUi(qnnVerificationCurrentByModelId[model.id])?.let { message ->
-                _uiState.update {
-                    it.copy(
-                        qnnImageVerificationCurrentByModelId = it.qnnImageVerificationCurrentByModelId +
-                            qnnVerificationCurrentByModelId,
-                        statusMessage = message
-                    )
-                }
-                return@launch
-            }
-            val diagnostic = model.localImageVerificationDiagnosticMessage()
-            val runningModelName = activeImageGenerationModelId
-                ?.let { activeId -> _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(activeId) } }
-                ?.displayName
-            localImageModelStore.saveSelectedModelId(model.id)
-            localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
-            _uiState.update {
-                it.copy(
-                    qnnImageVerificationCurrentByModelId = it.qnnImageVerificationCurrentByModelId +
-                        qnnVerificationCurrentByModelId,
-                    selectedLocalImageModelId = model.id,
-                    selectedImageBackend = ImageBackend.LOCAL,
-                    statusMessage = buildString {
-                        append("图片页已切换到本地生图：${model.displayName}")
-                        if (activeImageGenerationJobId != null) {
-                            append("；当前任务仍固定使用")
-                            append(runningModelName?.let { " $it" }.orEmpty())
-                            append("，本次切换从下一任务生效")
-                        }
-                        diagnostic?.let { append("；").append(it) }
-                    }
-                )
-            }
-        }
-    }
 
     fun verifyLocalImageModel(modelId: String) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -14709,76 +14654,6 @@ contextTraceJson: String?
         )
     }
 
-    private suspend fun createUpscaledImageAsset(
-        spec: ImageUpscaleJobSpec,
-        result: LocalImageResult,
-        requestId: String
-    ): ImageAssetRecord = imageAssetWriteMutex.withLock {
-        require(result.outputs.size == 1 && result.mimeType == "image/png") {
-            "ESRGAN product upscale must publish exactly one PNG output."
-        }
-        val requestToken = requestId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48)
-        val timestamp = System.currentTimeMillis()
-        val outputFile = writeImageAssetBytesAtomically(
-            directory = imageAssetDirectory,
-            fileName = "upscaled-image-$timestamp-$requestToken.png",
-            bytes = result.bytes
-        )
-        try {
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-            require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                "Upscaled image could not be decoded after atomic publication."
-            }
-            val source = spec.sourceImageSnapshot
-            val sourceDimensionsAreNative = source.source.startsWith("generated", true) ||
-                source.source.startsWith("upscaled", true)
-            val lineage = ImageUpscaleHistoryMetadata.fromNativeExecution(
-                sourceImageId = source.id,
-                sourceWidthHint = source.width.takeIf { sourceDimensionsAreNative } ?: 0,
-                sourceHeightHint = source.height.takeIf { sourceDimensionsAreNative } ?: 0,
-                upscaler = spec.upscalerSnapshot,
-                targetScale = spec.targetScale,
-                tileSize = spec.tileSize,
-                threads = spec.threads,
-                outputWidth = bounds.outWidth,
-                outputHeight = bounds.outHeight,
-                nativeExecutionJson = result.executionMetadataJson
-            )
-            val sourceMetadata = ImageGenerationHistoryMetadata.fromJsonOrNull(
-                source.generationMetadataJson
-            ) ?: ImageGenerationHistoryMetadata(
-                backend = ImageBackend.LOCAL,
-                modelId = "source-image:${source.id}",
-                modelName = "原始图片",
-                requestPrompt = source.prompt.trim().takeIf(String::isNotEmpty)
-                    ?: source.name.ifBlank { "Source image" },
-                options = LocalImageGenerationOptions(
-                    width = source.width.takeIf { it > 0 },
-                    height = source.height.takeIf { it > 0 }
-                ),
-                inputDraft = LocalImageInputDraft(),
-                sourceGenerationAvailable = false
-            )
-            val metadata = sourceMetadata.withUpscale(lineage).toJsonString()
-            ImageAssetRecord(
-                id = UUID.randomUUID().toString(),
-                name = "Upscaled Image ${java.text.SimpleDateFormat("HHmmss", Locale.getDefault()).format(java.util.Date(timestamp))}.png",
-                uriString = Uri.fromFile(outputFile).toString(),
-                source = "upscaled:ESRGAN",
-                prompt = source.prompt,
-                sizeBytes = outputFile.length(),
-                width = bounds.outWidth,
-                height = bounds.outHeight,
-                generationMetadataJson = metadata,
-                chatSessionId = source.chatSessionId,
-                projectId = source.projectId
-            )
-        } catch (error: Throwable) {
-            runCatching { outputFile.delete() }
-            throw error
-        }
-    }
 
     private suspend fun createCloudGeneratedImageAssets(
         request: CloudImageRequest,

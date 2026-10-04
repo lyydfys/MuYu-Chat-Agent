@@ -89,7 +89,12 @@ class ImageUpscaleProductClosureTest {
             sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageUpscalerOperations.kt"),
             "internal fun deleteLocalImageUpscalerModel("
         )
-        val publish = functionBody(viewModel, "private suspend fun createUpscaledImageAsset(")
+        // The write itself moved to ImageAssetCreationOperations.kt with the asset-creation family;
+        // the ViewModel keeps a forwarding call. The assertions below are unchanged.
+        val publish = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),
+            "internal suspend fun createUpscaledAsset("
+        )
         val cloudPublish = functionBody(viewModel, "private suspend fun createCloudGeneratedImageAssets(")
         val localPublish = functionBody(
             sourceFile("app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"),
@@ -134,7 +139,10 @@ class ImageUpscaleProductClosureTest {
         assertTrue(clearImages.contains("commitImageAssetDeletionLeases(leases)"))
         assertTrue(deleteUpscaler.contains("activeLocalImageUpscalerId"))
         assertTrue(publish.contains("writeImageAssetBytesAtomically("))
-        assertTrue(publish.contains("imageAssetWriteMutex.withLock"))
+        // The asset write still happens under the image-asset write lock, but that lock no longer
+        // leaves the ViewModel: the extracted code enters it through `withImageAssetWriteLock`.
+        // Same contract, new spelling -- the other two publishers below are untouched.
+        assertTrue(publish.contains("withImageAssetWriteLock"))
         assertTrue(cloudPublish.contains("imageAssetWriteMutex.withLock"))
         assertTrue(localPublish.contains("imageAssetWriteMutex.withLock"))
         assertTrue(previewPublish.contains("imageAssetWriteMutex.tryLock()"))

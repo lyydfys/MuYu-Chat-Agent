@@ -300,7 +300,11 @@ class LocalImagePromptCancellationContractTest {
 
     @Test
     fun `persisted translated prompt evidence cannot bypass current phase B verification`() {
-        val recreate = functionBody(mainViewModelSource(), "fun recreateImageAsset(")
+        // Re-creation moved to ImageAssetCreationOperations.kt; the ViewModel keeps a forwarder.
+        val recreate = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),
+            "internal fun recreateAsset("
+        )
         val captured = recreate.indexOf("promptExecution = history.promptExecution?.takeIf")
         val trustBoundary = recreate.indexOf(
             "execution.method.isReusableFromImageHistory()",
