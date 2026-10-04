@@ -10348,7 +10348,7 @@ contextTraceJson: String?
             }
             if (effectiveChatBackend == ChatBackend.LOCAL && baseParams != initialState.params) {
                 persistGenerationParams(baseParams)
-                _uiState.update { it.copy(params = baseParams) }
+                generationUiPublisher.publishNormalizedTurnParams(baseParams)
             }
             val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams
             val memoryForTurn = if (characterMemoryEnabled) {
@@ -10386,7 +10386,7 @@ contextTraceJson: String?
             val manualCompression = manualContextCompressionRequests.consume(initialState.activeChatSessionId)
             val compressionThreshold = loadContextCompressionThreshold()
             if (manualCompression) {
-                _uiState.update { it.copy(contextCompressionPending = false) }
+                generationUiPublisher.publishManualCompressionConsumed()
             }
             val summaryRecords = frozenSession.contextSummaries
             val allowSummaryCandidate = manualCompression || summaryRecords.isEmpty() || summaryRecords.any { it.active }
@@ -10481,13 +10481,7 @@ contextTraceJson: String?
                 initialState.webSearchTurnMode != WebSearchTurnMode.FOLLOW ||
                 initialState.webSearchResearchModeOverride != null
             ) {
-                _uiState.update {
-                    it.copy(
-                        webSearchTurnMode = WebSearchTurnMode.FOLLOW,
-                        webSearchResearchModeOverride = null,
-                        webSearchOneShotEnabled = false
-                    )
-                }
+                generationUiPublisher.publishWebSearchTurnReset()
             }
             var browserSearchTaskId: String? = null
             val rawWebSearchTurn = executeWebSearchForChatTurn(
@@ -10585,13 +10579,11 @@ contextTraceJson: String?
             )
             if (webSearchTurn.requested) {
                 val diagnostics = webSearchTurn.diagnostic?.let(::appendWebSearchDiagnostic)
-                _uiState.update {
-                    it.copy(
-                        webSearchStatusMessage = webSearchTurn.webSearchStatusMessage ?: it.webSearchStatusMessage,
-                        webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
-                        statusMessage = webSearchTurn.statusMessage ?: it.statusMessage
-                    )
-                }
+                generationUiPublisher.publishWebSearchOutcome(
+                    webSearchStatusMessage = webSearchTurn.webSearchStatusMessage,
+                    diagnostics = diagnostics,
+                    statusMessage = webSearchTurn.statusMessage
+                )
             }
             val contextAdmission = localContextWindowAdmission(
                 ChatRequest(

@@ -12,6 +12,9 @@ import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
 import com.muyuchat.mca.ReplyGenerationMetrics
+import com.muyuchat.mca.WebSearchDiagnosticRecord
+import com.muyuchat.mca.WebSearchResearchMode
+import com.muyuchat.mca.WebSearchTurnMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -218,5 +221,94 @@ class ChatGenerationUiPublisherTest {
         val freshPublisher = ChatGenerationUiPublisher(chatRuns, secondRunId, uiState)
         freshPublisher.publishContextStatusMessage("fresh")
         assertEquals("fresh", uiState.value.statusMessage)
+    }
+
+    @Test
+    fun preStreamTurnNormalizationWritesItsExactFields() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(
+            MainUiState(
+                contextCompressionPending = true,
+                webSearchTurnMode = WebSearchTurnMode.ON,
+                webSearchResearchModeOverride = WebSearchResearchMode.DEEP,
+                webSearchOneShotEnabled = true
+            )
+        )
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+
+        val normalized = uiState.value.params.copy(nPredict = 321)
+        publisher.publishNormalizedTurnParams(normalized)
+        assertEquals(321, uiState.value.params.nPredict)
+
+        publisher.publishManualCompressionConsumed()
+        assertEquals(false, uiState.value.contextCompressionPending)
+
+        publisher.publishWebSearchTurnReset()
+        assertEquals(WebSearchTurnMode.FOLLOW, uiState.value.webSearchTurnMode)
+        assertNull(uiState.value.webSearchResearchModeOverride)
+        assertEquals(false, uiState.value.webSearchOneShotEnabled)
+    }
+
+    @Test
+    fun preStreamNormalizationIsDeliberatelyNotRunGated() {
+        // These four sites were NOT run-gated inline: they run before/around the stream with the
+        // values already frozen into the run, so the publication writes exactly like the old site.
+        val chatRuns = ChatRunOwnership()
+        val firstRunId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState(webSearchTurnMode = WebSearchTurnMode.ON))
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState)
+        ownershipWithFreshRun(chatRuns)
+
+        val normalized = uiState.value.params.copy(nPredict = 321)
+        stalePublisher.publishNormalizedTurnParams(normalized)
+        stalePublisher.publishManualCompressionConsumed()
+        stalePublisher.publishWebSearchTurnReset()
+        stalePublisher.publishWebSearchOutcome("stale search", emptyList(), "stale status")
+
+        assertEquals(321, uiState.value.params.nPredict)
+        assertEquals(false, uiState.value.contextCompressionPending)
+        assertEquals(WebSearchTurnMode.FOLLOW, uiState.value.webSearchTurnMode)
+        assertEquals("stale search", uiState.value.webSearchStatusMessage)
+        assertEquals("stale status", uiState.value.statusMessage)
+    }
+
+    @Test
+    fun webSearchOutcomeKeepsExistingValuesForNullInputs() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val record = WebSearchDiagnosticRecord(
+            providerLabel = "test-provider",
+            triggerModeLabel = "手动",
+            query = "q",
+            success = true,
+            message = "ok"
+        )
+        val uiState = MutableStateFlow(
+            MainUiState(
+                webSearchStatusMessage = "previous search",
+                webSearchDiagnostics = listOf(record),
+                statusMessage = "previous status"
+            )
+        )
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+
+        publisher.publishWebSearchOutcome(
+            webSearchStatusMessage = null,
+            diagnostics = null,
+            statusMessage = null
+        )
+        assertEquals("previous search", uiState.value.webSearchStatusMessage)
+        assertEquals(1, uiState.value.webSearchDiagnostics.size)
+        assertEquals("previous status", uiState.value.statusMessage)
+
+        publisher.publishWebSearchOutcome(
+            webSearchStatusMessage = "fresh search",
+            diagnostics = emptyList(),
+            statusMessage = "fresh status"
+        )
+        assertEquals("fresh search", uiState.value.webSearchStatusMessage)
+        assertEquals(0, uiState.value.webSearchDiagnostics.size)
+        assertEquals("fresh status", uiState.value.statusMessage)
     }
 }

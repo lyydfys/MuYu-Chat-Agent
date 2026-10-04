@@ -2,6 +2,7 @@ package com.muyuchat.mca.presentation
 
 import com.muyuchat.core.engine.ChatGenerationMetrics
 import com.muyuchat.core.engine.GenerationPhase
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.RuntimeStats
@@ -9,6 +10,8 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.WebSearchDiagnosticRecord
+import com.muyuchat.mca.WebSearchTurnMode
 import com.muyuchat.mca.withReplyGenerationMetrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -18,15 +21,23 @@ import kotlinx.coroutines.flow.update
 // Why this exists: startGeneration carried twenty-odd `_uiState.update { … }` sites whose
 // transform was an arbitrary `(MainUiState) -> MainUiState`, gated only by the run id. The guard
 // is right; the unbounded transform is what makes the execution owner impossible to move out of
-// the ViewModel, because every write can touch any field. These publications give the gated
-// writes names and fixed signatures, so the eventual owner depends on this surface instead of on
-// the transform type. The first group (this file) covers the sites that publish status, stream
-// progress and completion bookkeeping; they neither write `isGenerating` nor carry side effects.
+// the ViewModel, because every write can touch any field. These publications give the writes
+// names and fixed signatures, so the eventual owner depends on this surface instead of on the
+// transform type.
 //
-// Every method is a verbatim move of one call site: same fields, same values, same guard shape.
-// The gate below is the same two-check form as `MainViewModel.updateGenerationUi` -- checked
-// before the update and again inside it -- so a superseded run cannot publish, exactly as the
-// inline sites could not.
+// Two deliberate write classes live here:
+//
+// 1. Run-gated publications (status, stream progress, completion bookkeeping, refusals). Each is
+//    a verbatim move of one call site: same fields, same values, same guard shape. The gate is
+//    the same two-check form as `MainViewModel.updateGenerationUi` -- checked before the update
+//    and again inside it -- so a superseded run cannot publish, exactly as the inline sites could
+//    not.
+// 2. Pre-stream turn normalization (`publishNormalizedTurnParams`, `publishManualCompressionConsumed`,
+//    `publishWebSearchTurnReset`, `publishWebSearchOutcome`). These inline sites were NOT
+//    run-gated, and they are NOT gated here: their values were already frozen into the run's
+//    own `initialState`/`baseParams` before the write, so adding a gate would change behaviour
+//    rather than fix a race. They are named for the execution-owner seam and their un-gated
+//    semantics are pinned by ChatGenerationUiPublisherTest.
 //
 // Guard semantics: both checks read `ChatRunOwnership.matches(generationRunId)`, the strict
 // "an id was given and it matches" form. The publisher is constructed per run, bound to the same
@@ -145,6 +156,49 @@ internal class ChatGenerationUiPublisher(
             } else {
                 state
             }
+        }
+    }
+
+    /**
+     * The turn's normalized parameters after they were persisted (local nPredict ceiling / cloud
+     * reasoning overrides). Not run-gated: see write class 2 in the file comment.
+     */
+    fun publishNormalizedTurnParams(params: GenerationParams) {
+        uiState.update { it.copy(params = params) }
+    }
+
+    /** The manual-compression flag flips off once the queued request is consumed. Not run-gated. */
+    fun publishManualCompressionConsumed() {
+        uiState.update { it.copy(contextCompressionPending = false) }
+    }
+
+    /** One-shot / research-override switches reset to FOLLOW for the next turn. Not run-gated. */
+    fun publishWebSearchTurnReset() {
+        uiState.update {
+            it.copy(
+                webSearchTurnMode = WebSearchTurnMode.FOLLOW,
+                webSearchResearchModeOverride = null,
+                webSearchOneShotEnabled = false
+            )
+        }
+    }
+
+    /**
+     * The web-search outcome lines: the search status, the diagnostic appended for this turn and
+     * the chat status line. Null inputs keep the current values, exactly like the inline site's
+     * `?:` chains. Not run-gated.
+     */
+    fun publishWebSearchOutcome(
+        webSearchStatusMessage: String?,
+        diagnostics: List<WebSearchDiagnosticRecord>?,
+        statusMessage: String?
+    ) {
+        uiState.update {
+            it.copy(
+                webSearchStatusMessage = webSearchStatusMessage ?: it.webSearchStatusMessage,
+                webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
+                statusMessage = statusMessage ?: it.statusMessage
+            )
         }
     }
 }
