@@ -124,8 +124,8 @@ internal data class PromptEnvelope(
     val original: String,
     val positive: String,
     val negative: String? = null,
-    val originalPositive: String = parseChatImagePromptInput(original).positivePrompt,
-    val originalNegative: String? = parseChatImagePromptInput(original).negativePrompt,
+    val originalPositive: String = chatImagePromptParseInput(original).positivePrompt,
+    val originalNegative: String? = chatImagePromptParseInput(original).negativePrompt,
     val negativeOrigin: ChatImageNegativeOrigin = if (originalNegative.isNullOrBlank())
         ChatImageNegativeOrigin.NONE else ChatImageNegativeOrigin.USER_AUTHORED,
     val protectedSpans: List<ProtectedPromptSpan> = chatImagePromptProtectedSpans(original),
@@ -191,7 +191,7 @@ internal fun chatImagePromptRecovery(
     original: String,
     nativeMultilingual: Boolean
 ): ChatImagePromptRecovery {
-    val parts = parseChatImagePromptInput(original)
+    val parts = chatImagePromptParseInput(original)
     val positive = parts.positivePrompt.trim()
     val negative = parts.negativePrompt?.trim()?.takeIf(String::isNotBlank)
     val structuredWrapper = original.trimStart().let {
@@ -271,7 +271,7 @@ internal fun chatImagePromptBridgeHandoff(
     allowNegativePrompt: Boolean = true
 ): ChatImagePromptBridgeHandoff {
     if (!allowNegativePrompt) {
-        val authoredNegative = parseChatImagePromptInput(result.originalPrompt).negativePrompt
+        val authoredNegative = chatImagePromptParseInput(result.originalPrompt).negativePrompt
             ?.takeUnless(::chatImagePromptIsEmptyNegativePromptPlaceholder)
         require(authoredNegative.isNullOrBlank()) {
             "The selected image backend has no negative branch; an authored negative prompt requires an explicit edit or omit decision."
@@ -323,12 +323,12 @@ fun shouldBridgeChatImagePrompt(prompt: String): Boolean =
     prompt.containsHanScript()
 
 internal fun shouldNormalizeChatImagePromptInput(prompt: String): Boolean =
-    parseChatImagePromptInput(prompt).let { parts ->
+    chatImagePromptParseInput(prompt).let { parts ->
         parts.hasExplicitSections || parts.cleanedInput != prompt.trim()
     }
 
 internal fun shouldTranslateChatImagePrompt(prompt: String): Boolean =
-    shouldBridgeChatImagePrompt(parseChatImagePromptInput(prompt).translationSource())
+    shouldBridgeChatImagePrompt(chatImagePromptParseInput(prompt).translationSource())
 
 /**
  * Detects the failure shown by the old chat-image flow: a multi-clause Chinese request is
@@ -342,7 +342,7 @@ internal fun chatImagePromptNeedsDetailRepair(
     val source = originalPrompt.trim()
     if (source.length < 24) return false
     val hasChinese = source.containsHanScript()
-    val hasStructuredSections = parseChatImagePromptInput(source).hasExplicitSections
+    val hasStructuredSections = chatImagePromptParseInput(source).hasExplicitSections
     val sourceClauses = source
         .split(',', '，', '、', ';', '；', '\n')
         .map(String::trim)
@@ -381,8 +381,6 @@ internal fun chatImagePromptNeedsDetailRepair(
         (denseChineseBrief && outputClauses < 5 && output.length < maxOf(96, source.length / 2))
 }
 
-private enum class ChatImagePromptSection { POSITIVE, NEGATIVE }
-
 internal data class ChatImagePromptInputParts(
     val cleanedInput: String,
     val positivePrompt: String,
@@ -411,164 +409,6 @@ internal data class ChatImagePromptInputParts(
     }
 }
 
-/** Splits explicit positive/negative sections and discards UI token-count annotations. */
-internal fun parseChatImagePromptInput(prompt: String): ChatImagePromptInputParts {
-    val sections = linkedMapOf(
-        ChatImagePromptSection.POSITIVE to mutableListOf<String>(),
-        ChatImagePromptSection.NEGATIVE to mutableListOf<String>()
-    )
-    var currentSection = ChatImagePromptSection.POSITIVE
-    var currentSectionIsEnglishPositive = false
-    var explicitSections = false
-    var explicitEnglishPositive = false
-    val explicitEnglishPositiveLines = mutableListOf<String>()
-    val cleanedLines = mutableListOf<String>()
-
-    // Accept the common one-line form too ("a cat, negative prompt: blurry"). Splitting this
-    // before section parsing keeps the negative branch out of the positive encoder even when a
-    // user did not paste each section on its own line.
-    val inputLines = prompt.lines().flatMap { rawLine ->
-        val inlineNegative = topLevelInlineNegative(rawLine)
-        if (inlineNegative != null && inlineNegative.first.isNotBlank()) {
-            listOf(
-                // The separator may be matched as whitespace rather than the comma itself.
-                // Strip punctuation left on the positive branch so an inline negative label
-                // never changes the authored prompt (`a cat, negative_prompt: blurry` ->
-                // `a cat`, not `a cat,`).
-                inlineNegative.first.trim().trimEnd(',', '，', ';', '；').trim(),
-                "负面提示词：${inlineNegative.second.trim()}"
-            )
-        } else {
-            listOf(rawLine)
-        }
-    }
-    for (rawLine in inputLines) {
-        if (CHAT_IMAGE_TOKEN_ANNOTATION_PATTERNS.any { it.matches(rawLine.trim()) }) continue
-        val line = CHAT_IMAGE_PROMPT_LABEL_ANNOTATION
-            .replace(CHAT_IMAGE_TOKEN_ANNOTATION_SUFFIX.replace(rawLine, ""), "")
-            .trimEnd()
-        if (line.isBlank()) continue
-        val englishLabel = CHAT_IMAGE_ENGLISH_SECTION.matchEntire(line)
-        val chineseLabel = CHAT_IMAGE_CHINESE_SECTION.matchEntire(line)
-        cleanedLines += line
-        when {
-            englishLabel != null -> {
-                explicitSections = true
-                val value = englishLabel.groupValues[2].trim()
-                val isNegative = englishLabel.groupValues[1].contains("negative", ignoreCase = true)
-                currentSection = if (isNegative) {
-                    ChatImagePromptSection.NEGATIVE
-                } else {
-                    ChatImagePromptSection.POSITIVE
-                }
-                currentSectionIsEnglishPositive = !isNegative
-                value.takeIf(String::isNotBlank)?.let {
-                    when {
-                        currentSection == ChatImagePromptSection.NEGATIVE ->
-                            sections.getValue(currentSection).add(it)
-                        it.containsHanScript() -> sections.getValue(currentSection).add(it)
-                        else -> {
-                            explicitEnglishPositive = true
-                            explicitEnglishPositiveLines.add(it)
-                        }
-                    }
-                }
-            }
-            chineseLabel != null -> {
-                explicitSections = true
-                val label = chineseLabel.groupValues[1]
-                val isNegative = label.contains("负")
-                currentSection = if (isNegative) ChatImagePromptSection.NEGATIVE else ChatImagePromptSection.POSITIVE
-                val isEnglishPositive = label.startsWith("英文") && !isNegative
-                currentSectionIsEnglishPositive = isEnglishPositive
-                chineseLabel.groupValues[2].trim().takeIf(String::isNotBlank)?.let { value ->
-                    if (isEnglishPositive && !value.containsHanScript()) {
-                        explicitEnglishPositive = true
-                        explicitEnglishPositiveLines.add(value)
-                    } else {
-                        sections.getValue(currentSection).add(value)
-                    }
-                }
-            }
-            else -> line.trim().takeIf(String::isNotBlank)
-                ?.let { value ->
-                    if (currentSection == ChatImagePromptSection.POSITIVE &&
-                        currentSectionIsEnglishPositive && !value.containsHanScript()
-                    ) {
-                        explicitEnglishPositive = true
-                        explicitEnglishPositiveLines.add(value)
-                    } else {
-                        sections.getValue(currentSection).add(value)
-                    }
-                }
-        }
-    }
-
-    val cleaned = cleanedLines.joinToString("\n").trim()
-    val positiveSection = sections.getValue(ChatImagePromptSection.POSITIVE).joinToString("\n").trim()
-    val explicitEnglish = explicitEnglishPositiveLines.joinToString("\n").trim()
-    val negative = sections.getValue(ChatImagePromptSection.NEGATIVE).joinToString("\n").trim()
-        .takeIf(String::isNotBlank)
-    val positive = positiveSection.ifBlank {
-        explicitEnglish.ifBlank { if (explicitSections && negative != null) "" else cleaned }
-    }
-    val englishPositive = explicitEnglish.takeIf(String::isNotBlank)
-        ?: positive.takeIf {
-            it.isNotBlank() && (explicitEnglishPositive || (explicitSections && !it.containsHanScript()))
-        }
-    return ChatImagePromptInputParts(
-        cleanedInput = cleaned,
-        positivePrompt = positive,
-        englishPositivePrompt = englishPositive,
-        negativePrompt = negative,
-        hasExplicitSections = explicitSections
-    )
-}
-
-private fun topLevelInlineNegative(value: String): Pair<String, String>? {
-    val closing = ArrayDeque<Char>()
-    var quote: Char? = null
-    var escaped = false
-    value.forEachIndexed { index, char ->
-        when {
-            escaped -> escaped = false
-            char == '\\' -> escaped = true
-            quote != null -> if (char == quote) quote = null
-            char == '"' || char == '\'' -> quote = char
-            char == '(' || char == '[' || char == '<' ->
-                closing.addLast(when (char) { '(' -> ')'; '[' -> ']'; else -> '>' })
-            closing.isNotEmpty() && char == closing.last() -> closing.removeLast()
-            closing.isEmpty() && (char.isWhitespace() || char in ",，;；") -> {
-                val remainder = value.substring(index).trimStart(',', '，', ';', '；', ' ', '\t')
-                val label = CHAT_IMAGE_INLINE_NEGATIVE_LABEL.matchEntire(remainder)
-                if (label != null) return value.substring(0, index) to label.groupValues[1]
-            }
-        }
-    }
-    return null
-}
-
-private val CHAT_IMAGE_ENGLISH_SECTION = Regex(
-    "(?i)^\\s*((?:english[\\s_-]+)?(?:positive|negative)(?:[\\s_-]+prompt)?)(?:\\s*[:：=]\\s*(.*))?\\s*$"
-)
-private val CHAT_IMAGE_CHINESE_SECTION = Regex(
-    "^\\s*(中文正向|中文正面|英文正向|英文正面|英文负向|英文负面|正向|正面|负向|负面)(?:提示词)?(?:\\s*[:：]\\s*(.*))?\\s*$"
-)
-private val CHAT_IMAGE_INLINE_NEGATIVE_LABEL = Regex(
-    "(?is)^(?:negative(?:[\\s_-]+prompt)?|负面提示词|负向|负面)\\s*[:：=]\\s*(.+)$"
-)
-private val CHAT_IMAGE_PROMPT_LABEL_ANNOTATION = Regex(
-    "(?i)\\s*[（(][^）)]*(?:token(?:s)?|令牌|推荐)[^）)]*[）)]"
-)
-private val CHAT_IMAGE_TOKEN_ANNOTATION_PATTERNS = listOf(
-    Regex("(?i)^\\s*(?:prompt\\s*)?tokens?(?:\\s*(?:count|数量|数))?\\s*[:：]?\\s*\\d+\\s*/\\s*\\d+(?:\\s*(?:tokens?|个令牌|令牌|个))?\\s*$"),
-    Regex("(?i)^\\s*提示词\\s*token(?:数量|数)?\\s*[:：]?\\s*\\d+\\s*/\\s*\\d+(?:\\s*(?:tokens?|个令牌|令牌|个))?\\s*$"),
-    Regex("(?i)^\\s*\\d+\\s*/\\s*\\d+\\s*(?:tokens?|个令牌|令牌)\\s*$")
-)
-private val CHAT_IMAGE_TOKEN_ANNOTATION_SUFFIX = Regex(
-    "(?i)(?:[,，;；]\\s*|\\s+)(?:prompt\\s*)?tokens?(?:\\s*(?:count|数量|数))?\\s*[:：]?\\s*\\d+\\s*/\\s*\\d+(?:\\s*(?:tokens?|个令牌|令牌|个))?\\s*$"
-)
-
 /**
  * Collects a provider stream under a hard timeout and validates the model's output. The Flow is
  * supplied by either the selected cloud connector or the selected local chat runner.
@@ -586,7 +426,7 @@ suspend fun translateChatImagePrompt(
             "图片描述为空或超过 ${LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS} 字符上限。"
         )
     }
-    val inputParts = parseChatImagePromptInput(original)
+    val inputParts = chatImagePromptParseInput(original)
     val recovery = chatImagePromptRecovery(original, nativeMultilingual = false)
     fun failed(code: Code, message: String): Result.Failed = Result.Failed(
         code = code,
@@ -991,6 +831,10 @@ internal fun formatChatImagePromptReferenceContext(
     // ChatImagePromptBridgeNormalization.kt.
     internal fun normalizeChatImagePromptResponse(raw: String):
         NormalizedChatImagePromptResponse? = chatImagePromptNormalizeResponse(raw)
+    // Callers reach the parser through the object; the implementation lives in
+    // ChatImagePromptBridgeInputParsing.kt.
+    internal fun parseChatImagePromptInput(prompt: String):
+        ChatImagePromptInputParts = chatImagePromptParseInput(prompt)
 }
 
 internal typealias PromptEnvelope = ChatImagePromptBridge.PromptEnvelope
