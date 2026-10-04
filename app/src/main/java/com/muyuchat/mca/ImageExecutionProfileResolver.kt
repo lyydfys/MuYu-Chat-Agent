@@ -1628,13 +1628,13 @@ internal object ImageExecutionProfileResolver {
         conversion: ImageEmbeddingConversionStrategy = ImageEmbeddingConversionStrategy.NONE,
         defaultNegativePrompt: String = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
         profileRevision: Int = QNN_SD15_EXECUTION_PROFILE_REVISION
-    ): ImageExecutionProfile = profile(
+    ): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.QNN_HTP,
         family = LocalImageModelFamily.SD15,
         variant = variant,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             ImageSchedulerAlgorithm.DPMPP_2M,
             ImagePredictionType.EPSILON,
             steps,
@@ -1650,13 +1650,13 @@ internal object ImageExecutionProfileResolver {
             timestepSpacing = ImageTimestepSpacing.LEADING,
             order = 2
         ),
-        tokenizer = clipTokenizer(
+        tokenizer = imageExecutionProfileClipTokenizerContract(
             ImageTokenizerBackend.TOKENIZERS_CPP,
             supportsTextualInversion = true
         ),
-        conditioning = conditioning(conditioningType, conversion, 768),
-        vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
-        graph = qnnGraph(
+        conditioning = imageExecutionProfileConditioningContract(conditioningType, conversion, 768),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
+        graph = imageExecutionProfileQnnGraphContract(
             "clip_v2.mnn",
             "unet.bin",
             "vae_decoder.bin",
@@ -1668,14 +1668,14 @@ internal object ImageExecutionProfileResolver {
             tokenizerSidecar = null,
             runtimeAssets = QNN_SD15_CONDITIONING_RUNTIME_ASSETS
         ),
-        defaults = defaults(
+        defaults = imageExecutionProfileDefaults(
             512,
             steps,
             cfg,
             useCfg = true,
             defaultNegativePrompt = defaultNegativePrompt
         ),
-        capabilities = capabilities(
+        capabilities = imageExecutionProfileCapabilities(
             512,
             setOf(
                 ImageSchedulerAlgorithm.DPMPP_2M,
@@ -1707,13 +1707,13 @@ internal object ImageExecutionProfileResolver {
         timestepSpacing: ImageTimestepSpacing = ImageTimestepSpacing.TRAILING,
         defaultNegativePrompt: String? = RecommendedImageDefaults.SDXL_NEGATIVE_PROMPT,
         supportsNegativePrompt: Boolean = true
-    ): ImageExecutionProfile = profile(
+    ): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.QNN_HTP,
         family = LocalImageModelFamily.SDXL,
         variant = variant,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             ImageSchedulerAlgorithm.DPMPP_2M,
             ImagePredictionType.EPSILON,
             steps,
@@ -1722,15 +1722,15 @@ internal object ImageExecutionProfileResolver {
             timestepSpacing = timestepSpacing,
             order = 2
         ),
-        tokenizer = clipTokenizer(
+        tokenizer = imageExecutionProfileClipTokenizerContract(
             ImageTokenizerBackend.TOKENIZERS_CPP,
             dualClip = true,
             supportsTextualInversion = true,
             separateNegativePrompt = supportsNegativePrompt
         ),
-        conditioning = conditioning(ImageEmbeddingDiskDataType.FP16, ImageEmbeddingConversionStrategy.NONE, 2_048, dualEncoder = true, pooled = true),
-        vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025, 1024),
-        graph = qnnGraph(
+        conditioning = imageExecutionProfileConditioningContract(ImageEmbeddingDiskDataType.FP16, ImageEmbeddingConversionStrategy.NONE, 2_048, dualEncoder = true, pooled = true),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.13025, 1024),
+        graph = imageExecutionProfileQnnGraphContract(
             textEncoder = "clip.mnn",
             unet = "unet.bin",
             vae = "vae_decoder.bin",
@@ -1744,8 +1744,8 @@ internal object ImageExecutionProfileResolver {
             configSidecars = listOf("clip_2.mnn", "clip_2.mnn.weight", "tokenizer.json", "token_emb.bin",
                 "token_emb_2.bin", "pos_emb.bin", "pos_emb_2.bin")
         ),
-        defaults = defaults(1024, steps, cfg, useCfg, defaultNegativePrompt),
-        capabilities = capabilities(
+        defaults = imageExecutionProfileDefaults(1024, steps, cfg, useCfg, defaultNegativePrompt),
+        capabilities = imageExecutionProfileCapabilities(
             1024,
             setOf(ImageSchedulerAlgorithm.DPMPP_2M, ImageSchedulerAlgorithm.EULER),
             supportsTextualInversion = true,
@@ -1770,14 +1770,14 @@ internal object ImageExecutionProfileResolver {
         profileId: String,
         fingerprint: String,
         sd21: Boolean
-    ): ImageExecutionProfile = profile(
+    ): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.QNN_HTP,
         family = if (sd21) LocalImageModelFamily.SD21 else LocalImageModelFamily.SD15,
         variant = if (sd21) ImageModelVariant.SD21 else ImageModelVariant.STANDARD,
         scheduler = if (sd21) {
-            scheduler(
+            imageExecutionProfileSchedulerContract(
                 ImageSchedulerAlgorithm.DDIM,
                 ImagePredictionType.V_PREDICTION,
                 20,
@@ -1790,7 +1790,7 @@ internal object ImageExecutionProfileResolver {
                 clipSample = false
             )
         } else {
-            scheduler(
+            imageExecutionProfileSchedulerContract(
                 ImageSchedulerAlgorithm.EULER,
                 ImagePredictionType.EPSILON,
                 20,
@@ -1803,22 +1803,22 @@ internal object ImageExecutionProfileResolver {
                 skipPrk = true
             )
         },
-        tokenizer = clipTokenizer(
+        tokenizer = imageExecutionProfileClipTokenizerContract(
             ImageTokenizerBackend.TOKENIZERS_CPP,
             padZero = sd21,
             supportsPromptWeighting = false
         ),
-        conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, if (sd21) 1_024 else 768),
-        vae = vae(ImageVaeScalingLocation.GRAPH_INTERNAL, 0.18215, 512),
+        conditioning = imageExecutionProfileConditioningContract(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, if (sd21) 1_024 else 768),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.GRAPH_INTERNAL, 0.18215, 512),
         graph = qnnGen5Graph(if (sd21) "stable_diffusion_v2_1" else "stable_diffusion_v1_5"),
-        defaults = defaults(
+        defaults = imageExecutionProfileDefaults(
             512,
             20,
             7.5,
             useCfg = true,
             defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
         ),
-        capabilities = capabilities(
+        capabilities = imageExecutionProfileCapabilities(
             512,
             setOf(if (sd21) ImageSchedulerAlgorithm.DDIM else ImageSchedulerAlgorithm.EULER),
             supportsPromptWeighting = false,
@@ -1838,20 +1838,20 @@ internal object ImageExecutionProfileResolver {
     }
 
     private fun qnnGen5Graph(prefix: String, controlNet: Boolean = false): ImageGraphContract =
-        qnnGraph("text_encoder.bin", "unet.bin", "vae.bin", "2.45.0.260326154327", 81).copy(
+        imageExecutionProfileQnnGraphContract("text_encoder.bin", "unet.bin", "vae.bin", "2.45.0.260326154327", 81).copy(
             textEncoder = ImageGraphArtifactContract("text_encoder.bin", "${prefix}_text_encoder"),
             unet = ImageGraphArtifactContract("unet.bin", "${prefix}_unet"),
             vae = ImageGraphArtifactContract("vae.bin", "${prefix}_vae"),
             controlNet = if (controlNet) ImageGraphArtifactContract("controlnet.bin", "${prefix}_controlnet") else null
         )
 
-    private fun mnnSd15Profile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
+    private fun mnnSd15Profile(profileId: String, fingerprint: String): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.MNN_DIFFUSION,
         family = LocalImageModelFamily.SD15,
         variant = ImageModelVariant.STANDARD,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             ImageSchedulerAlgorithm.DPMPP_2M,
             ImagePredictionType.EPSILON,
             20,
@@ -1860,26 +1860,26 @@ internal object ImageExecutionProfileResolver {
             timestepSpacing = ImageTimestepSpacing.LEADING,
             order = 2
         ),
-        tokenizer = clipTokenizer(
+        tokenizer = imageExecutionProfileClipTokenizerContract(
             ImageTokenizerBackend.MNN_MTOK,
             supportsPromptWeighting = false
         ),
-        conditioning = conditioning(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, 768),
-        vae = vae(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
+        conditioning = imageExecutionProfileConditioningContract(ImageEmbeddingDiskDataType.GRAPH_INTERNAL, ImageEmbeddingConversionStrategy.GRAPH_EXECUTION, 768),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.HOST_BEFORE_GRAPH, 0.18215, 512),
         graph = ImageGraphContract(
             textEncoder = ImageGraphArtifactContract("text_encoder.mnn"),
             unet = ImageGraphArtifactContract("unet.mnn"),
             vae = ImageGraphArtifactContract("vae_decoder.mnn"),
             workerStrategy = ImageWorkerStrategy.IN_PROCESS
         ),
-        defaults = defaults(
+        defaults = imageExecutionProfileDefaults(
             512,
             20,
             7.0,
             useCfg = true,
             defaultNegativePrompt = RecommendedImageDefaults.SD15_NEGATIVE_PROMPT
         ),
-        capabilities = capabilities(
+        capabilities = imageExecutionProfileCapabilities(
             512,
             setOf(
                 ImageSchedulerAlgorithm.DPMPP_2M,
@@ -1890,14 +1890,14 @@ internal object ImageExecutionProfileResolver {
         )
     )
 
-    private fun sanaEditProfile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
+    private fun sanaEditProfile(profileId: String, fingerprint: String): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.MNN_DIFFUSION,
         family = LocalImageModelFamily.SANA,
         variant = ImageModelVariant.SANA_EDIT,
         task = ImageTask.IMAGE_EDIT,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             ImageSchedulerAlgorithm.FLOW_MATCH,
             ImagePredictionType.FLOW,
             10,
@@ -1911,13 +1911,13 @@ internal object ImageExecutionProfileResolver {
             supportsPromptWeighting = false,
             separateNegativePrompt = true
         ),
-        conditioning = conditioning(
+        conditioning = imageExecutionProfileConditioningContract(
             ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
             ImageEmbeddingConversionStrategy.GRAPH_EXECUTION,
             width = 1,
             maxLength = 256
         ),
-        vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, 512),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, 512),
         graph = ImageGraphContract(
             textEncoder = ImageGraphArtifactContract("llm/llm.mnn"),
             unet = ImageGraphArtifactContract("transformer.mnn"),
@@ -1926,27 +1926,27 @@ internal object ImageExecutionProfileResolver {
             configSidecars = listOf("llm/meta_queries.mnn"),
             workerStrategy = ImageWorkerStrategy.DEDICATED_WORKER
         ),
-        defaults = defaults(
+        defaults = imageExecutionProfileDefaults(
             512,
             10,
             4.5,
             useCfg = true,
             defaultNegativePrompt = RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT
         ),
-        capabilities = capabilities(
+        capabilities = imageExecutionProfileCapabilities(
             512,
             setOf(ImageSchedulerAlgorithm.FLOW_MATCH),
             supportsPromptWeighting = false
         ).copy(requiresInputImage = true, supportsMask = false)
     )
 
-    private fun qwenImage21MnnProfile(profileId: String, fingerprint: String): ImageExecutionProfile = profile(
+    private fun qwenImage21MnnProfile(profileId: String, fingerprint: String): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = LocalImageRuntime.MNN_DIFFUSION,
         family = LocalImageModelFamily.QWEN_IMAGE,
         variant = ImageModelVariant.QWEN_IMAGE_21,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             ImageSchedulerAlgorithm.FLOW_MATCH,
             ImagePredictionType.FLOW,
             20,
@@ -1961,7 +1961,7 @@ internal object ImageExecutionProfileResolver {
             supportsTextualInversion = false,
             separateNegativePrompt = false
         ),
-        conditioning = conditioning(
+        conditioning = imageExecutionProfileConditioningContract(
             ImageEmbeddingDiskDataType.GRAPH_INTERNAL,
             ImageEmbeddingConversionStrategy.GRAPH_EXECUTION,
             width = 4_096,
@@ -1996,7 +1996,7 @@ internal object ImageExecutionProfileResolver {
             ),
             workerStrategy = ImageWorkerStrategy.DEDICATED_WORKER
         ),
-        defaults = defaults(512, 20, 1.0, useCfg = false),
+        defaults = imageExecutionProfileDefaults(512, 20, 1.0, useCfg = false),
         capabilities = ImageGenerationCapabilities(
             // The pinned MNN port resizes the DiT/VAE graph. Only the explicit
             // QwenImage21SizeContract grid is product-verified; provider and
@@ -2030,7 +2030,7 @@ internal object ImageExecutionProfileResolver {
                 bosId = null, eosId = null, padId = null, lowercase = false,
                 supportsPromptWeighting = false, clip1PadRule = ImageClipPadRule.MODEL_DECLARED
             ),
-            conditioning = conditioning(ImageEmbeddingDiskDataType.RUNTIME_NATIVE, ImageEmbeddingConversionStrategy.RUNTIME_NATIVE, 4096, maxLength = 512),
+            conditioning = imageExecutionProfileConditioningContract(ImageEmbeddingDiskDataType.RUNTIME_NATIVE, ImageEmbeddingConversionStrategy.RUNTIME_NATIVE, 4096, maxLength = 512),
             latent = ImageLatentContract(64, 16, ImageTensorLayout.NCHW, ImageTensorLayout.NCHW, listOf(1, 64, 32, 32)),
             vae = base.vae.copy(
                 inputShape = listOf(1, 64, 32, 32),
@@ -2080,43 +2080,43 @@ internal object ImageExecutionProfileResolver {
         supportsNegativePrompt: Boolean = true,
         runtime: LocalImageRuntime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
         maxPromptTokens: Int = 77
-    ): ImageExecutionProfile = profile(
+    ): ImageExecutionProfile = imageExecutionProfileContract(
         profileId = profileId,
         fingerprint = fingerprint,
         runtime = runtime,
         family = family,
         variant = variant,
-        scheduler = scheduler(
+        scheduler = imageExecutionProfileSchedulerContract(
             algorithm,
             if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) ImagePredictionType.FLOW else ImagePredictionType.EPSILON,
             steps,
             1,
             100
         ),
-        tokenizer = clipTokenizer(
+        tokenizer = imageExecutionProfileClipTokenizerContract(
             ImageTokenizerBackend.SDCPP_NATIVE,
             maxLength = maxPromptTokens,
             separateNegativePrompt = supportsNegativePrompt,
             supportsTextualInversion = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
-                family.supportsStableDiffusionCppTextualInversion()
+                family.imageExecutionProfileFamilySupportsTextualInversion()
         ),
-        conditioning = conditioning(
+        conditioning = imageExecutionProfileConditioningContract(
             ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
             ImageEmbeddingConversionStrategy.RUNTIME_NATIVE,
             1,
             maxLength = maxPromptTokens,
             separateNegativePrompt = supportsNegativePrompt
         ),
-        vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
+        vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
         graph = ImageGraphContract(workerStrategy = ImageWorkerStrategy.IN_PROCESS),
-        defaults = defaults(
+        defaults = imageExecutionProfileDefaults(
             size,
             steps,
             cfg,
             useCfg = kotlin.math.abs(cfg - 1.0) > 1.0e-12,
             defaultNegativePrompt = defaultNegativePrompt
         ),
-        capabilities = stableDiffusionCapabilities(
+        capabilities = imageExecutionProfileStableDiffusionCapabilities(
             when (algorithm) {
                 ImageSchedulerAlgorithm.FLOW_MATCH -> setOf(ImageSchedulerAlgorithm.FLOW_MATCH)
                 ImageSchedulerAlgorithm.EULER_A -> setOf(
@@ -2130,7 +2130,7 @@ internal object ImageExecutionProfileResolver {
             supportsNegativePrompt = supportsNegativePrompt,
             fixedSize = size
         ),
-        profileRevision = if (family.supportsStableDiffusionCppTextualInversion() || maxPromptTokens > 77) 2 else 1
+        profileRevision = if (family.imageExecutionProfileFamilySupportsTextualInversion() || maxPromptTokens > 77) 2 else 1
     )
 
     private fun genericProfile(
@@ -2174,7 +2174,7 @@ internal object ImageExecutionProfileResolver {
             else -> ImageSchedulerAlgorithm.EULER
         }
         val graph = when (runtime) {
-            LocalImageRuntime.QNN_HTP -> qnnGraph(
+            LocalImageRuntime.QNN_HTP -> imageExecutionProfileQnnGraphContract(
                 "text_encoder.bin",
                 "unet.bin",
                 "vae.bin",
@@ -2190,13 +2190,13 @@ internal object ImageExecutionProfileResolver {
             )
             else -> ImageGraphContract(workerStrategy = ImageWorkerStrategy.IN_PROCESS)
         }
-        return profile(
+        return imageExecutionProfileContract(
             profileId = "generic.compat.${runtime.name.lowercase()}.${family.name.lowercase()}",
             fingerprint = fingerprint,
             runtime = runtime,
             family = family,
             variant = ImageModelVariant.GENERIC_COMPATIBLE,
-            scheduler = scheduler(
+            scheduler = imageExecutionProfileSchedulerContract(
                 algorithm,
                 if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) {
                     ImagePredictionType.FLOW
@@ -2208,7 +2208,7 @@ internal object ImageExecutionProfileResolver {
                 100,
                 skipPrk = algorithm == ImageSchedulerAlgorithm.PNDM_PLMS
             ),
-            tokenizer = clipTokenizer(
+            tokenizer = imageExecutionProfileClipTokenizerContract(
                 if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
                     ImageTokenizerBackend.SDCPP_NATIVE
                 } else {
@@ -2216,24 +2216,24 @@ internal object ImageExecutionProfileResolver {
                 },
                 separateNegativePrompt = !conditionalOnly,
                 supportsTextualInversion = runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP &&
-                    family.supportsStableDiffusionCppTextualInversion()
+                    family.imageExecutionProfileFamilySupportsTextualInversion()
             ),
-            conditioning = conditioning(
+            conditioning = imageExecutionProfileConditioningContract(
                 ImageEmbeddingDiskDataType.RUNTIME_NATIVE,
                 ImageEmbeddingConversionStrategy.RUNTIME_NATIVE,
                 1,
                 separateNegativePrompt = !conditionalOnly
             ),
-            vae = vae(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
+            vae = imageExecutionProfileVaeContract(ImageVaeScalingLocation.RUNTIME_NATIVE, 1.0, size),
             graph = graph,
-            defaults = defaults(
+            defaults = imageExecutionProfileDefaults(
                 size,
                 genericSteps,
                 genericCfg,
                 useCfg = !conditionalOnly
             ),
             capabilities = if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP) {
-                stableDiffusionCapabilities(
+                imageExecutionProfileStableDiffusionCapabilities(
                     if (flowFamily) {
                         setOf(ImageSchedulerAlgorithm.FLOW_MATCH)
                     } else {
@@ -2243,7 +2243,7 @@ internal object ImageExecutionProfileResolver {
                     supportsNegativePrompt = !conditionalOnly
                 )
             } else {
-                capabilities(
+                imageExecutionProfileCapabilities(
                     size,
                     ImageSchedulerAlgorithm.entries.toSet(),
                     supportsPromptWeighting = false,
@@ -2255,243 +2255,6 @@ internal object ImageExecutionProfileResolver {
                 primarySource = ImageProfileSource.GENERIC_FALLBACK,
                 sources = listOf(ImageProfileSource.GENERIC_FALLBACK)
             )
-        )
-    }
-
-    private fun profile(
-        profileId: String,
-        fingerprint: String,
-        runtime: LocalImageRuntime,
-        family: LocalImageModelFamily,
-        variant: ImageModelVariant,
-        scheduler: ImageSchedulerContract,
-        tokenizer: ImageTokenizerContract,
-        conditioning: ImageConditioningContract,
-        vae: ImageVaeContract,
-        graph: ImageGraphContract,
-        defaults: ImageGenerationDefaults,
-        capabilities: ImageGenerationCapabilities,
-        task: ImageTask = ImageTask.TEXT_TO_IMAGE,
-        profileRevision: Int = 1
-    ): ImageExecutionProfile = ImageExecutionProfile(
-        profileId = profileId,
-        profileRevision = profileRevision,
-        modelFingerprint = fingerprint,
-        runtime = runtime,
-        family = family,
-        variant = variant,
-        task = task,
-        provenance = ImageProfileProvenance(ImageProfileSource.BUILT_IN, listOf(ImageProfileSource.BUILT_IN)),
-        tokenizer = tokenizer,
-        conditioning = conditioning,
-        scheduler = scheduler,
-        latent = ImageLatentContract(4, 8, ImageTensorLayout.NCHW, ImageTensorLayout.NCHW, listOf(1, 4, defaults.height / 8, defaults.width / 8)),
-        vae = vae,
-        graph = graph,
-        defaults = defaults,
-        capabilities = capabilities
-    )
-
-    private fun scheduler(
-        algorithm: ImageSchedulerAlgorithm,
-        prediction: ImagePredictionType,
-        defaultSteps: Int,
-        minSteps: Int,
-        maxSteps: Int,
-        stepsOffset: Int = 0,
-        timestepSpacing: ImageTimestepSpacing = when (algorithm) {
-            ImageSchedulerAlgorithm.EULER,
-            ImageSchedulerAlgorithm.DPMPP_2M -> ImageTimestepSpacing.LINSPACE
-            else -> ImageTimestepSpacing.LEADING
-        },
-        setAlphaToOne: Boolean = false,
-        scaleModelInput: Boolean = false,
-        skipPrk: Boolean = false,
-        clipSample: Boolean = false,
-        order: Int = 1
-    ) = ImageSchedulerContract(
-        algorithm = algorithm,
-        predictionType = prediction,
-        noiseSchedule = if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) ImageNoiseSchedule.SIGMA else ImageNoiseSchedule.SCALED_LINEAR,
-        betaStart = if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) null else 0.00085,
-        betaEnd = if (algorithm == ImageSchedulerAlgorithm.FLOW_MATCH) null else 0.012,
-        timestepSpacing = timestepSpacing,
-        stepsOffset = stepsOffset,
-        setAlphaToOne = setAlphaToOne,
-        skipPrkSteps = skipPrk,
-        clipSample = clipSample,
-        scaleModelInput = scaleModelInput,
-        order = order,
-        defaultSteps = defaultSteps,
-        minSteps = minSteps,
-        maxSteps = maxSteps
-    )
-
-    private fun clipTokenizer(
-        backend: ImageTokenizerBackend,
-        maxLength: Int = 77,
-        dualClip: Boolean = false,
-        padZero: Boolean = false,
-        supportsPromptWeighting: Boolean = backend != ImageTokenizerBackend.MNN_MTOK,
-        supportsTextualInversion: Boolean = false,
-        separateNegativePrompt: Boolean = true
-    ) = ImageTokenizerContract(
-        backend = backend,
-        bosId = 49_406,
-        eosId = 49_407,
-        padId = if (dualClip || padZero) 0 else 49_407,
-        maxLength = maxLength,
-        clip1PadRule = if (padZero) ImageClipPadRule.ZERO else ImageClipPadRule.EOS,
-        clip2PadRule = if (dualClip) ImageClipPadRule.ZERO else null,
-        supportsPromptWeighting = supportsPromptWeighting,
-        supportsTextualInversion = supportsTextualInversion,
-        separateNegativePrompt = separateNegativePrompt
-    )
-
-    private fun conditioning(
-        dataType: ImageEmbeddingDiskDataType,
-        conversion: ImageEmbeddingConversionStrategy,
-        width: Int,
-        maxLength: Int = 77,
-        dualEncoder: Boolean = false,
-        pooled: Boolean = false,
-        separateNegativePrompt: Boolean = true
-    ) = ImageConditioningContract(
-        diskDataType = dataType,
-        textEncoderInputShape = listOf(1, maxLength),
-        textEncoderOutputShapes = if (dualEncoder) {
-            listOf(listOf(1, maxLength, 768), listOf(1, maxLength, 1_280))
-        } else {
-            listOf(listOf(1, maxLength, width))
-        },
-        conversionStrategy = conversion,
-        dualEncoder = dualEncoder,
-        pooledOutput = pooled,
-        concatenationOrder = when {
-            dualEncoder -> listOf("clip1_hidden", "clip2_hidden", "clip2_pooled")
-            separateNegativePrompt -> listOf("negative", "positive")
-            else -> listOf("positive")
-        }
-    )
-
-    private fun vae(location: ImageVaeScalingLocation, factor: Double, size: Int) = ImageVaeContract(
-        scalingLocation = location,
-        scalingFactor = factor,
-        inputShape = listOf(1, 4, size / 8, size / 8),
-        outputShape = listOf(1, 3, size, size),
-        inputLayout = ImageTensorLayout.NCHW,
-        outputLayout = ImageTensorLayout.NCHW,
-        outputRange = ImagePixelRange.NEGATIVE_ONE_TO_ONE,
-        channelOrder = ImageChannelOrder.RGB
-    )
-
-    private fun qnnGraph(
-        textEncoder: String,
-        unet: String,
-        vae: String,
-        qnnSdk: String?,
-        htpArch: Int?,
-        strategy: ImageWorkerStrategy = ImageWorkerStrategy.SHARED_TEXT_UNET_VAE,
-        vaeEncoder: String? = null,
-        schedulerSidecar: String? = "scheduler/scheduler_config.json",
-        tokenizerSidecar: String? = "tokenizer/tokenizer_config.json",
-        runtimeAssets: List<String> = emptyList()
-    ) = ImageGraphContract(
-        textEncoder = ImageGraphArtifactContract(textEncoder),
-        unet = ImageGraphArtifactContract(unet),
-        vae = ImageGraphArtifactContract(vae),
-        vaeEncoder = vaeEncoder?.let(::ImageGraphArtifactContract),
-        schedulerSidecar = schedulerSidecar,
-        tokenizerSidecar = tokenizerSidecar,
-        configSidecars = runtimeAssets,
-        qnnSdk = qnnSdk,
-        htpArch = htpArch,
-        workerStrategy = strategy
-    )
-
-    private fun defaults(
-        size: Int,
-        steps: Int,
-        cfg: Double,
-        useCfg: Boolean,
-        defaultNegativePrompt: String? = null
-    ) = ImageGenerationDefaults(
-        width = size,
-        height = size,
-        steps = steps,
-        cfgScale = cfg,
-        seed = 42L,
-        useCfg = useCfg,
-        defaultNegativePrompt = defaultNegativePrompt
-    )
-
-    private fun capabilities(
-        size: Int,
-        schedulers: Set<ImageSchedulerAlgorithm>,
-        supportsPromptWeighting: Boolean = true,
-        supportsTextualInversion: Boolean = false,
-        supportsNegativePrompt: Boolean = true,
-        supportsLivePreview: Boolean = false
-    ) = ImageGenerationCapabilities(
-        supportedSchedulers = schedulers,
-        minWidth = size,
-        maxWidth = size,
-        minHeight = size,
-        maxHeight = size,
-        supportsNegativePrompt = supportsNegativePrompt,
-        supportsPromptWeighting = supportsPromptWeighting,
-        supportsTextualInversion = supportsTextualInversion,
-        supportsLivePreview = supportsLivePreview
-    )
-
-    private fun LocalImageModelFamily.supportsStableDiffusionCppTextualInversion(): Boolean =
-        this == LocalImageModelFamily.SD15 ||
-            this == LocalImageModelFamily.SD21 ||
-            this == LocalImageModelFamily.SDXL ||
-            this == LocalImageModelFamily.SD_TURBO
-
-    private fun LocalImageModelFamily.supportsStableDiffusionCppUltraFix(): Boolean =
-        this == LocalImageModelFamily.SD15 ||
-            this == LocalImageModelFamily.SD21 ||
-            this == LocalImageModelFamily.SDXL ||
-            this == LocalImageModelFamily.SD_TURBO
-
-    private fun stableDiffusionCapabilities(
-        schedulers: Set<ImageSchedulerAlgorithm>,
-        family: LocalImageModelFamily,
-        supportsNegativePrompt: Boolean = true,
-        fixedSize: Int? = null
-    ): ImageGenerationCapabilities {
-        val supportsUltraFix = family.supportsStableDiffusionCppUltraFix()
-        val ultraFixMultiple = if (family == LocalImageModelFamily.SDXL) 32 else 64
-        return ImageGenerationCapabilities(
-            supportedSchedulers = schedulers,
-            minWidth = fixedSize ?: 256,
-            maxWidth = fixedSize ?: 1_536,
-            minHeight = fixedSize ?: 256,
-            maxHeight = fixedSize ?: 1_536,
-            widthMultiple = 64,
-            heightMultiple = 64,
-            supportsNegativePrompt = supportsNegativePrompt,
-            supportsPromptWeighting = true,
-            supportsTextualInversion = family.supportsStableDiffusionCppTextualInversion(),
-            supportsClipSkip = family in setOf(
-                LocalImageModelFamily.SD15,
-                LocalImageModelFamily.SD21,
-                LocalImageModelFamily.SDXL,
-                LocalImageModelFamily.SD_TURBO
-            ),
-            supportsVaeTiling = true,
-            supportsUltraFix = supportsUltraFix,
-            ultraFixMinWidth = if (supportsUltraFix) 128 else 0,
-            ultraFixMaxWidth = if (supportsUltraFix) 8_192 else 0,
-            ultraFixMinHeight = if (supportsUltraFix) 128 else 0,
-            ultraFixMaxHeight = if (supportsUltraFix) 8_192 else 0,
-            ultraFixWidthMultiple = if (supportsUltraFix) ultraFixMultiple else 0,
-            ultraFixHeightMultiple = if (supportsUltraFix) ultraFixMultiple else 0,
-            supportsLivePreview = true,
-            supportsLora = true,
-            maxBatchCount = 8
         )
     }
 
