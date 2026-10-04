@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Job
 
 /**
@@ -35,8 +36,21 @@ internal class ChatRunOwnership(
 
     private val ownership = UiGenerationOwnership(sequence)
 
-    /** The run whose Job has been published to the rest of the ViewModel, if any. */
-    private var publishedJob: Job? = null
+    /**
+     * The run whose Job has been published to the rest of the ViewModel, if any.
+     *
+     * This is an [AtomicReference] rather than a plain `var` because the three writers/readers do not
+     * share a dispatcher: `publishJob` is called on the main dispatcher when a run starts,
+     * `retirePublishedJob` is called from `Job.invokeOnCompletion`, which runs on **whatever thread
+     * completes the job**, and `activePublishedJob` / `publishedJobUnless` are read from unrelated
+     * call sites (`schedulePersistentPrefixCacheClear`, the recovery wait in `startGeneration`).
+     * A plain field there is a data race with no happens-before edge.
+     *
+     * Retirement is a `compareAndSet` on identity, which is what makes "a finishing older run must
+     * not clear the job of a newer run" true by construction rather than by timing: if a newer run
+     * has already published, the reference no longer points at the old job and the CAS fails.
+     */
+    private val publishedJob = AtomicReference<Job?>(null)
 
     // ── identity ────────────────────────────────────────────────────────────────────────────
 
@@ -77,19 +91,22 @@ internal class ChatRunOwnership(
 
     /** Publishes [job] as the run the rest of the ViewModel may wait on. */
     fun publishJob(job: Job) {
-        publishedJob = job
+        publishedJob.set(job)
     }
 
-    /** Retires [job] if it is still the published one; a newer run's job is left alone. */
+    /**
+     * Retires [job] if it is still the published one; a newer run's job is left alone.
+     *
+     * Identity CAS, so a completion callback that fires late -- after a newer run has already
+     * published -- cannot clear the newer handle.
+     */
     fun retirePublishedJob(job: Job) {
-        if (publishedJob === job) {
-            publishedJob = null
-        }
+        publishedJob.compareAndSet(job, null)
     }
 
     /** The published job, if it is still active. */
-    fun activePublishedJob(): Job? = publishedJob?.takeIf { it.isActive }
+    fun activePublishedJob(): Job? = publishedJob.get()?.takeIf { it.isActive }
 
     /** The published job unless it is [other] -- used to avoid joining the run we are cancelling. */
-    fun publishedJobUnless(other: Job?): Job? = publishedJob?.takeUnless { it === other }
+    fun publishedJobUnless(other: Job?): Job? = publishedJob.get()?.takeUnless { it === other }
 }

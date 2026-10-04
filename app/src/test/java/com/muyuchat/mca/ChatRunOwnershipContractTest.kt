@@ -215,4 +215,73 @@ class ChatRunOwnershipContractTest {
         assertEquals("the counter is monotonic", seen.sorted(), seen)
         assertEquals("and it actually advanced", seen.size, seen.toSet().size)
     }
+
+    // ── published-job concurrency ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun `a late completion callback cannot clear a newer run's published job`() {
+        val runs = ownership()
+        val older = Job()
+        val newer = Job()
+
+        runs.publishJob(older)
+        runs.publishJob(newer)
+
+        // This is the race the reference has to survive: `older`'s invokeOnCompletion may fire on
+        // any thread after `newer` has already been published.
+        runs.retirePublishedJob(older)
+
+        assertSame(
+            "retiring the superseded job must leave the newer one published",
+            newer,
+            runs.activePublishedJob()
+        )
+    }
+
+    @Test
+    fun `retiring the current job still works when it really is current`() {
+        val runs = ownership()
+        val job = Job()
+        runs.publishJob(job)
+
+        runs.retirePublishedJob(job)
+
+        assertNull(runs.activePublishedJob())
+        assertNull(runs.publishedJobUnless(null))
+    }
+
+    @Test
+    fun `a concurrent publish and retire never strands the owner with a retired handle`() {
+        // Interleaves publish/retire from several threads on the real implementation. With a plain
+        // `var` this can lose a write and leave a completed job published; the identity CAS makes
+        // the final state well defined.
+        val runs = ownership()
+        val jobs = List(64) { Job() }
+        val threads = jobs.map { job ->
+            Thread {
+                runs.publishJob(job)
+                runs.retirePublishedJob(job)
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join() }
+
+        val remaining = runs.activePublishedJob()
+        assertTrue(
+            "the published handle must never be a job that already retired itself",
+            remaining == null || jobs.none { it === remaining && it.isCompleted }
+        )
+    }
+
+    @Test
+    fun `publishing is visible to a reader on another thread`() {
+        val runs = ownership()
+        val job = Job()
+        val seen = java.util.concurrent.atomic.AtomicReference<Job?>(null)
+
+        runs.publishJob(job)
+        Thread { seen.set(runs.activePublishedJob()) }.apply { start(); join() }
+
+        assertSame(job, seen.get())
+    }
 }
