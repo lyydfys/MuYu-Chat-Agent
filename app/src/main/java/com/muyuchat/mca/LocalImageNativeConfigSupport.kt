@@ -270,3 +270,70 @@ internal fun JSONObject.putQnnNativeMultilingualTextEncoderEvidence(
         .put("promptToEncoderClosureSha256", evidence.promptToEncoderClosureSha256())
         .put("languageProofSha256", proofSha256)
 }
+
+/**
+ * The token-ID conditioner is implemented by the MNN bridge even when the text encoder runs on
+ * QNN. The serializable fields below are checked only as diagnostics; authorization comes from
+ * the one-time native handoff that QNN consumes against the observed artifact and closure.
+ */
+internal data class QnnNativeMultilingualPromptHandoff(
+    val opaqueHandle: String
+)
+
+internal fun verifyQnnNativeMultilingualPromptHandoff(
+    bundleRoot: File,
+    evidence: ImageTextEncoderLanguageEvidence,
+    encoded: JSONObject
+): QnnNativeMultilingualPromptHandoff {
+    val tokenizerAsset = evidence.promptToEncoderAssets.singleOrNull { entry ->
+        entry.role == ImagePromptToEncoderAssetRole.TOKENIZER_JSON
+    }?.asset ?: error(
+        "Verified native-multilingual QNN execution requires exactly one TOKENIZER_JSON asset."
+    )
+    val expectedFile = qnnPinnedNativeMultilingualTokenizerJsonFile(bundleRoot, evidence)
+    val expectedPath = expectedFile.canonicalPath
+    val expectedSha256 = tokenizerAsset.fingerprint.lowercase()
+    val expectedSizeBytes = requireNotNull(tokenizerAsset.sizeBytes) {
+        "Verified native-multilingual QNN execution requires a size-pinned tokenizer JSON asset."
+    }
+    require(expectedFile.length() == expectedSizeBytes) {
+        "Pinned native-multilingual tokenizer asset size changed before native conditioning."
+    }
+    require(expectedFile.sha256Contents().equals(expectedSha256, ignoreCase = true)) {
+        "Pinned native-multilingual tokenizer asset digest changed before native conditioning."
+    }
+
+    val actualPath = (encoded.opt("tokenizerAssetPath") as? String)
+        ?.takeIf(String::isNotBlank)
+        ?: error("Native tokenizer receipt is missing tokenizerAssetPath.")
+    val actualSha256 = (encoded.opt("tokenizerAssetSha256") as? String)
+        ?.lowercase()
+        ?: error("Native tokenizer receipt is missing tokenizerAssetSha256.")
+    val actualSizeValue = encoded.opt("tokenizerAssetSizeBytes")
+    val actualSizeBytes = actualSizeValue
+        .takeIf { value ->
+            value is Byte || value is Short || value is Int || value is Long
+        }
+        ?.let { value -> (value as Number).toLong() }
+        ?: error("Native tokenizer receipt is missing an exact tokenizerAssetSizeBytes value.")
+    val bindingStage = (encoded.opt("tokenizerAssetBindingStage") as? String)
+        ?: error("Native tokenizer receipt is missing tokenizerAssetBindingStage.")
+    val receiptFile = runCatching { File(actualPath).canonicalFile }.getOrNull()
+        ?: error("Native tokenizer receipt path is invalid.")
+    require(
+        receiptFile.path == expectedPath &&
+            actualSha256 == expectedSha256 &&
+            actualSizeBytes == expectedSizeBytes &&
+            bindingStage == "tokenizer_consumed" &&
+            Regex("^[0-9a-f]{64}$").matches(actualSha256)
+    ) {
+        "Native tokenizer receipt differs from the signed QNN prompt-to-encoder closure."
+    }
+    val opaqueHandle = (encoded.opt("mnnPromptHandoff") as? String)
+        ?.lowercase()
+        ?: error("Native tokenizer receipt is missing its one-time MNN-to-QNN handoff.")
+    require(Regex("^[0-9a-f]{64}$").matches(opaqueHandle)) {
+        "Native tokenizer handoff must be a 256-bit lowercase opaque handle."
+    }
+    return QnnNativeMultilingualPromptHandoff(opaqueHandle = opaqueHandle)
+}
