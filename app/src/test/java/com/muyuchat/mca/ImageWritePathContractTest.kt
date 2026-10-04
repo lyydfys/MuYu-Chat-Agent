@@ -7,13 +7,16 @@ import org.junit.Test
 /**
  * Pins the image-persistence write path (P5 kickoff, ledger slice).
  *
- * The ledger records where `chatSessionStore` image writers are reachable from, when this test
- * was written:
+ * The ledger records where `chatSessionStore` image writers are reachable from, when this record
+ * was last re-derived:
  *
- *  - `ChatImageRetryAndCleanupOperations.kt` and `ImageUpscaleOwner.kt` already route through
- *    their ports (2 sites each);
- *  - `MainViewModel.kt` still carries seven direct sites (see {@link theViewModelDirectSitesKeepTheirExactShapes}),
- *    which are the known convergence debt recorded in `P5-00-image-domain-map.md`.
+ *  - `ChatImageRetryAndCleanupOperations.kt` and `ImageUpscaleOwner.kt` route through their ports
+ *    (2 sites each);
+ *  - `ImageLibraryCommitOperations.kt` holds the image-library commit transaction, which took the
+ *    atomic save, its gallery fallback and the cancelled-publish rollback (3 sites, P5 step 3);
+ *  - `MainViewModel.kt` still carries four direct sites (startup/generation placeholder, batch
+ *    delete, favourite, clear) -- the remaining convergence debt recorded in
+ *    `P5-00-image-domain-map.md`.
  *
  * Any new direct site fails here and forces a deliberate decision -- converge it into a named
  * owner, or extend this record with the reason it must stay.
@@ -24,9 +27,10 @@ class ImageWritePathContractTest {
         assertEquals(
             "A new direct chatSessionStore image-writer call needs a deliberate owner decision; update this record's KDoc.",
             mapOf(
-                "MainViewModel.kt" to 7,
+                "MainViewModel.kt" to 4,
                 "ChatImageRetryAndCleanupOperations.kt" to 2,
-                "ImageUpscaleOwner.kt" to 2
+                "ImageUpscaleOwner.kt" to 2,
+                "ImageLibraryCommitOperations.kt" to 3
             ),
             imageWriterSites()
         )
@@ -38,9 +42,6 @@ class ImageWritePathContractTest {
 
         listOf(
             "chatSessionStore.upsertImages(listOf(image))",
-            "chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)",
-            "chatSessionStore.upsertImages(generatedImages)",
-            "chatSessionStore.deleteImages(generatedIds)",
             "chatSessionStore.deleteImages(removedIds)",
             "chatSessionStore.setImageFavorite(imageId, favorite)",
             "chatSessionStore.clearImages()"
@@ -49,6 +50,19 @@ class ImageWritePathContractTest {
                 "Missing or duplicated direct site: $literal",
                 1,
                 Regex(Regex.escape(literal)).findAll(vm).count()
+            )
+        }
+
+        val commitOwner = sourceFile("ImageLibraryCommitOperations.kt")
+        listOf(
+            "chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)",
+            "chatSessionStore.upsertImages(generatedImages)",
+            "chatSessionStore.deleteImages(generatedIds)"
+        ).forEach { literal ->
+            assertEquals(
+                "Missing or duplicated owner site: $literal",
+                1,
+                Regex(Regex.escape(literal)).findAll(commitOwner).count()
             )
         }
     }

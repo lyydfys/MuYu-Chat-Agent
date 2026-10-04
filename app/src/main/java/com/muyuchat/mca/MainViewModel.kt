@@ -3503,166 +3503,9 @@ contextTraceJson: String?
                     }
                     return@launch
                 }
-                val commitError = runCatching {
-                    imageLibraryMutationMutex.withLock {
-                        currentCoroutineContext().ensureActive()
-                        // Serialize this multi-table commit with every full chat snapshot write.
-                        // A stale full snapshot must never land after the image/request transaction.
-                        chatSessionPersistenceSequence.incrementAndGet()
-                        chatSessionPersistenceMutex.withLock {
-                            try {
-                                val admittedJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
-                                if (activeImageGenerationJobId != jobId ||
-                                    admittedJob?.status != ImageGenerationStatusRecord.GENERATING
-                                ) {
-                                    throw CancellationException(
-                                        "Image generation lost ownership before library commit."
-                                    )
-                                }
-                                val chatSnapshot = buildChatImageCommitSnapshot(admittedJob, generatedImages)
-                                val journalRecords = if (chatSnapshot != null) {
-                                    val chatSessionId = requireNotNull(admittedJob.spec?.chatSessionId)
-                                    val requestId = requireNotNull(admittedJob.spec?.chatMessageId)
-                                    generatedImages.map { image ->
-                                        val journalJobId = chatImageCommitJournalJobId(jobId, image.id)
-                                        chatImageCommitJournal.stage(
-                                            ChatImageCommitJournal.Record(
-                                                jobId = journalJobId,
-                                                chatSessionId = chatSessionId,
-                                                requestId = requestId,
-                                                imageAssetMetadataJson = ChatImageCommitJournal
-                                                    .serializeImageAssetRecord(image)
-                                            )
-                                        )
-                                    }
-                                } else emptyList()
-                                val atomicallySaved = chatSnapshot?.let { snapshot ->
-                                    chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)
-                                } == true
-                                if (atomicallySaved) {
-                                    durableChatSessions = requireNotNull(chatSnapshot).sessions
-                                }
-                                if (!atomicallySaved) {
-                                    // Keep non-chat image jobs and deleted-chat results in the gallery.
-                                    chatSessionStore.upsertImages(generatedImages)
-                                }
-                                journalRecords.forEach { record ->
-                                    runCatching {
-                                        chatImageCommitJournal.removeAfterDurableCommit(
-                                            record.jobId,
-                                            record.requestId,
-                                            durableCommitConfirmed = true
-                                        )
-                                    }
-                                }
-                                _uiState.update { state ->
-                                    val job = state.imageJobs.firstOrNull { it.id == jobId }
-                                    if (activeImageGenerationJobId != jobId ||
-                                        job?.status != ImageGenerationStatusRecord.GENERATING
-                                    ) {
-                                        state
-                                    } else {
-                                        val committedImages = (
-                                            generatedImages + state.images.filterNot { existing ->
-                                                generatedImages.any { generated ->
-                                                    generated.id == existing.id
-                                                }
-                                            }
-                                        ).sortedImagesForLibrary()
-                                        state.copy(
-                                            images = committedImages,
-                                            chatSessions = if (atomicallySaved) {
-                                                requireNotNull(chatSnapshot).sessions
-                                            } else {
-                                                state.chatSessions
-                                            },
-                                            messages = if (atomicallySaved &&
-                                                state.activeChatSessionId == admittedJob.spec?.chatSessionId
-                                            ) {
-                                                requireNotNull(chatSnapshot).activeMessages ?: state.messages
-                                            } else {
-                                                state.messages
-                                            },
-                                            imageJobs = state.imageJobs.updateImageJob(
-                                                jobId = jobId,
-                                                status = ImageGenerationStatusRecord.DONE,
-                                                message = if (generatedImages.size == 1) {
-                                                    "已保存到图片库"
-                                                } else {
-                                                    "已保存 ${generatedImages.size} 张图片"
-                                                },
-                                                imageAssetId = generatedImages.first().id,
-                                                imageAssetIds = generatedImages.map(ImageAssetRecord::id)
-                                            ),
-                                            statusMessage = if (generatedImages.size == 1) {
-                                                "已生成图片并保存到图片库：${generatedImages.first().name}"
-                                            } else {
-                                                "已生成 ${generatedImages.size} 张图片并保存到图片库"
-                                            }
-                                        )
-                                    }
-                                }
-                                val published = _uiState.value.imageJobs.firstOrNull {
-                                    it.id == jobId
-                                }?.let { job ->
-                                    val generatedIds = generatedImages.map(ImageAssetRecord::id).toSet()
-                                    job.status == ImageGenerationStatusRecord.DONE &&
-                                        job.imageAssetId == generatedImages.first().id &&
-                                        job.imageAssetIds.toSet() == generatedIds
-                                } == true
-                                if (!published) {
-                                    val generatedIds = generatedImages.map(ImageAssetRecord::id)
-                                    val rolledBack = runCatching {
-                                        chatSessionStore.deleteImages(generatedIds)
-                                    }.isSuccess
-                                    if (rolledBack) {
-                                        throw CancellationException(
-                                            "Image generation was cancelled during library commit."
-                                        )
-                                    }
-                                    // If rollback fails, Room owns these files. Publish that durable state
-                                    // so memory and the database cannot silently diverge.
-                                    _uiState.update { state ->
-                                        val job = state.imageJobs.firstOrNull { it.id == jobId }
-                                        if (job == null) {
-                                            state
-                                        } else {
-                                            state.copy(
-                                                images = (
-                                                    generatedImages + state.images.filterNot { existing ->
-                                                        generatedImages.any { generated ->
-                                                            generated.id == existing.id
-                                                        }
-                                                    }
-                                                ).sortedImagesForLibrary(),
-                                                imageJobs = state.imageJobs.updateImageJob(
-                                                    jobId = jobId,
-                                                    status = ImageGenerationStatusRecord.DONE,
-                                                    message = if (generatedImages.size == 1) {
-                                                        "已保存到图片库"
-                                                    } else {
-                                                        "已保存 ${generatedImages.size} 张图片"
-                                                    },
-                                                    imageAssetId = generatedImages.first().id,
-                                                    imageAssetIds = generatedImages.map(ImageAssetRecord::id)
-                                                ),
-                                                statusMessage = if (generatedImages.size == 1) {
-                                                    "已生成图片并保存到图片库：${generatedImages.first().name}"
-                                                } else {
-                                                    "已生成 ${generatedImages.size} 张图片并保存到图片库"
-                                                }
-                                            )
-                                        }
-                                    }
-                                }
-                            } finally {
-                                // Invalidate snapshots captured before the in-memory state below
-                                // became the committed Room state. Later snapshots see the result.
-                                chatSessionPersistenceSequence.incrementAndGet()
-                            }
-                        }
-                    }
-                }.exceptionOrNull()
+                val commitError = commitImageLibraryTransaction(
+                    imageLibraryCommitPort, jobId, generatedImages
+                )
                 if (commitError != null) {
                     generatedImages.forEach { image ->
                         val rolledBack = image.deleteLocalCopy(imageAssetDirectory)
@@ -12244,6 +12087,45 @@ contextTraceJson: String?
 
             override fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
                 this@MainViewModel.cancelPendingWorldBookCleanup(scope, ownerIds)
+            }
+        }
+
+    private val imageLibraryCommitPort: ImageLibraryCommitPort =
+        object : ImageLibraryCommitPort {
+            override val uiState get() = this@MainViewModel._uiState
+            override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
+            override val chatSessionPersistenceMutex get() = this@MainViewModel.chatSessionPersistenceMutex
+            override val chatSessionPersistenceSequence get() = this@MainViewModel.chatSessionPersistenceSequence
+            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
+            override var durableChatSessions: List<ChatSessionRecord>
+                get() = this@MainViewModel.durableChatSessions
+                set(value) { this@MainViewModel.durableChatSessions = value }
+            override val activeImageGenerationJobId get() = this@MainViewModel.activeImageGenerationJobId
+            override val chatImageCommitJournal get() = this@MainViewModel.chatImageCommitJournal
+
+            override fun buildChatImageCommitSnapshot(job: ImageGenerationJobRecord, images: List<ImageAssetRecord>): ChatImageCommitSnapshot? =
+                this@MainViewModel.buildChatImageCommitSnapshot(job, images)
+
+            override fun chatImageCommitJournalJobId(jobId: String, imageId: String): String =
+                chatImageCommitJournalJobId(jobId, imageId)
+
+            override fun updateImageJob(
+                jobs: List<ImageGenerationJobRecord>,
+                jobId: String,
+                status: ImageGenerationStatusRecord,
+                message: String,
+                imageAssetId: String?,
+                preview: PublishedLocalImagePreview?,
+                imageAssetIds: List<String>
+            ): List<ImageGenerationJobRecord> = with(this@MainViewModel) {
+                jobs.updateImageJob(
+                    jobId = jobId,
+                    status = status,
+                    message = message,
+                    imageAssetId = imageAssetId,
+                    preview = preview,
+                    imageAssetIds = imageAssetIds
+                )
             }
         }
 

@@ -148,10 +148,14 @@ class ImageUpscaleProductClosureTest {
         assertTrue(previewPublish.contains("imageAssetWriteMutex.tryLock()"))
         assertTrue(previewPublish.contains("imageAssetWriteMutex.unlock()"))
         assertTrue(publish.contains("ImageUpscaleHistoryMetadata.fromNativeExecution("))
-        assertTrue(enqueueGeneration.contains("imageLibraryMutationMutex.withLock"))
-        assertTrue(enqueueGeneration.contains("chatSessionStore.upsertImages(generatedImages)"))
-        assertTrue(enqueueGeneration.contains("currentCoroutineContext().ensureActive()"))
-        assertTrue(enqueueGeneration.contains("activeImageGenerationJobId != jobId"))
+        // P5: the commit transaction moved to ImageLibraryCommitOperations; the assertions are
+        // unchanged -- they are read where the transaction now lives.
+        val commitTransaction = sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryCommitOperations.kt")
+            .substringAfter("fun commitImageLibraryTransaction(")
+        assertTrue(commitTransaction.contains("imageLibraryMutationMutex.withLock"))
+        assertTrue(commitTransaction.contains("chatSessionStore.upsertImages(generatedImages)"))
+        assertTrue(commitTransaction.contains("currentCoroutineContext().ensureActive()"))
+        assertTrue(commitTransaction.contains("activeImageGenerationJobId != jobId"))
         assertTrue(enqueueGeneration.contains("ImageGenerationStatusRecord.DONE"))
         assertTrue(enqueueGeneration.contains("image.deleteLocalCopy(imageAssetDirectory)"))
         assertTrue(attachFile.contains("imageLibraryMutationMutex.withLock"))

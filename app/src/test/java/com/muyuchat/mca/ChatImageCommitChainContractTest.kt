@@ -1,23 +1,26 @@
 package com.muyuchat.mca
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins the parts of the image-library commit chain in `enqueueImageGeneration` that
- * `ImageUpscaleProductClosureTest` does not already read: the serialization order against full
- * snapshot writes, the atomic chat commit plus its durable alignment, the journal confirmation,
- * and the rollback when a cancelled job must not become visible.
+ * Pins the image-library commit transaction's serialization order against full snapshot writes,
+ * its atomic chat commit plus durable alignment, the journal confirmation, and the rollback when
+ * a cancelled job must not become visible.
  *
- * Written as the behaviour net for the planned P5 extraction of this chain (converge the direct
- * `chatSessionStore` image writers into the named owners); the assertions move with the body when
- * it lands and must not be weakened.
+ * P5 extraction landed: the body moved verbatim to
+ * `ImageLibraryCommitOperations.commitImageLibraryTransaction`; the assertions were re-derived to
+ * read the moved source and must not be weakened.
  */
 class ChatImageCommitChainContractTest {
     @Test
     fun theCommitChainKeepsSerializationDurableAlignmentAndRollback() {
-        val body = functionBody(sourceFile("MainViewModel.kt"), "private fun enqueueImageGeneration(")
+        val body = functionBody(
+            sourceFile("ImageLibraryCommitOperations.kt"),
+            "fun commitImageLibraryTransaction("
+        )
 
         val sequenceBump = body.indexOf("chatSessionPersistenceSequence.incrementAndGet()")
         val persistenceLock = body.indexOf("chatSessionPersistenceMutex.withLock", sequenceBump)
@@ -34,6 +37,15 @@ class ChatImageCommitChainContractTest {
         assertTrue(body.contains("durableCommitConfirmed = true"))
         assertTrue(body.contains("chatSessionStore.deleteImages(generatedIds)"))
         assertTrue(body.contains("Image generation was cancelled during library commit."))
+    }
+
+    @Test
+    fun theViewModelNowDelegatesTheTransaction() {
+        val vm = sourceFile("MainViewModel.kt")
+        val body = functionBody(vm, "private fun enqueueImageGeneration(")
+
+        assertTrue(body.contains("val commitError = commitImageLibraryTransaction("))
+        assertFalse(body.contains("chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)"))
     }
 
     private fun functionBody(source: String, signature: String): String {
