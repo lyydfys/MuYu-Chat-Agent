@@ -1362,12 +1362,6 @@ contextTraceJson: String?
             )
         }
         installChatLocalApiProviders(chatLocalApiProviderPort)
-        LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
-            val token = engine.activeGenerationStopToken()
-                ?.takeIf { it.requestId == requestId }
-            engine.stopGenerationIfActive(token)
-        }
-        LocalApiRuntime.loadedModelJsonProvider = { loadedModelJson() }
         LocalApiRuntime.paramsJsonProvider = { apiGenerationParams().toJson() }
         LocalApiRuntime.generationParamsProvider = { apiGenerationParams() }
         LocalApiRuntime.modelsJsonProvider = { modelsJson() }
@@ -12221,6 +12215,8 @@ contextTraceJson: String?
 
             override fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
                 this@MainViewModel.cancelActiveLocalApiImageGeneration(reason)
+
+            override fun loadedModelJson(): String = this@MainViewModel.loadedModelJson()
         }
 
     private val chatExecutionPort: ChatGenerationExecutionPort =

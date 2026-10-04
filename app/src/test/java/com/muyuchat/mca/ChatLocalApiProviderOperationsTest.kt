@@ -38,6 +38,16 @@ class ChatLocalApiProviderOperationsTest {
     }
 
     @Test
+    fun installAlsoOwnsTheStopEntryPointAndTheLoadedModelProjection() {
+        val body = functionBody(installSource(), "internal fun installChatLocalApiProviders(")
+
+        assertTrue(body.contains("LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->"))
+        assertTrue(body.contains("engine.activeGenerationStopToken()"))
+        assertTrue(body.contains("engine.stopGenerationIfActive(token)"))
+        assertTrue(body.contains("LocalApiRuntime.loadedModelJsonProvider = { port.loadedModelJson() }"))
+    }
+
+    @Test
     fun installDoesNotReachIntoViewModelInternals() {
         val body = functionBody(installSource(), "internal fun installChatLocalApiProviders(")
 
@@ -55,6 +65,8 @@ class ChatLocalApiProviderOperationsTest {
             Regex("""installChatLocalApiProviders\(""").findAll(vm).count()
         )
         assertFalse(vm.contains("LocalApiRuntime.streamChatWithContextProvider = {"))
+        assertFalse(vm.contains("LocalApiRuntime.stopGenerationIfRequestActiveProvider ="))
+        assertFalse(vm.contains("LocalApiRuntime.loadedModelJsonProvider = {"))
         assertTrue(vm.contains("installChatLocalApiProviders(chatLocalApiProviderPort)"))
     }
 
