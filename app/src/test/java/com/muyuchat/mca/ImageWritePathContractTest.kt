@@ -14,9 +14,11 @@ import org.junit.Test
  *    (2 sites each);
  *  - `ImageLibraryCommitOperations.kt` holds the image-library commit transaction, which took the
  *    atomic save, its gallery fallback and the cancelled-publish rollback (3 sites, P5 step 3);
- *  - `MainViewModel.kt` still carries four direct sites (startup/generation placeholder, batch
- *    delete, favourite, clear) -- the remaining convergence debt recorded in
- *    `P5-00-image-domain-map.md`.
+ *  - `ImageAssetDeletionOperations.kt` now owns the whole delete/favourite/clear family
+ *    (deleteImages + setImageFavorite + clearImages, P5 steps 4-5);
+ *  - `MainViewModel.kt` keeps one direct site: the imported-attachment commit in `attachFile`
+ *    (`upsertImages(listOf(image))`), which is transactional with its local rollback and still
+ *    parked in `P5-00-image-domain-map.md`.
  *
  * Any new direct site fails here and forces a deliberate decision -- converge it into a named
  * owner, or extend this record with the reason it must stay.
@@ -27,11 +29,11 @@ class ImageWritePathContractTest {
         assertEquals(
             "A new direct chatSessionStore image-writer call needs a deliberate owner decision; update this record's KDoc.",
             mapOf(
-                "MainViewModel.kt" to 3,
+                "MainViewModel.kt" to 1,
                 "ChatImageRetryAndCleanupOperations.kt" to 2,
                 "ImageUpscaleOwner.kt" to 2,
                 "ImageLibraryCommitOperations.kt" to 3,
-                "ImageAssetDeletionOperations.kt" to 1
+                "ImageAssetDeletionOperations.kt" to 3
             ),
             imageWriterSites()
         )
@@ -41,13 +43,19 @@ class ImageWritePathContractTest {
     fun theViewModelDirectSitesKeepTheirExactShapes() {
         val vm = sourceFile("MainViewModel.kt")
 
+        assertEquals(
+            "Missing or duplicated direct site: chatSessionStore.upsertImages(listOf(image))",
+            1,
+            Regex(Regex.escape("chatSessionStore.upsertImages(listOf(image))")).findAll(vm).count()
+        )
+
         listOf(
-            "chatSessionStore.upsertImages(listOf(image))",
-            "chatSessionStore.setImageFavorite(imageId, favorite)",
-            "chatSessionStore.clearImages()"
+            "deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)",
+            "setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)",
+            "clearImageLibraryOperation(imageAssetDeletionPort)"
         ).forEach { literal ->
             assertEquals(
-                "Missing or duplicated direct site: $literal",
+                "Missing or duplicated deletion-family delegate: $literal",
                 1,
                 Regex(Regex.escape(literal)).findAll(vm).count()
             )
@@ -67,11 +75,17 @@ class ImageWritePathContractTest {
         }
 
         val deletionOwner = sourceFile("ImageAssetDeletionOperations.kt")
-        assertEquals(
-            "Missing or duplicated deletion-owner site: chatSessionStore.deleteImages(removedIds)",
-            1,
-            Regex(Regex.escape("chatSessionStore.deleteImages(removedIds)")).findAll(deletionOwner).count()
-        )
+        listOf(
+            "chatSessionStore.deleteImages(removedIds)",
+            "chatSessionStore.setImageFavorite(imageId, favorite)",
+            "chatSessionStore.clearImages()"
+        ).forEach { literal ->
+            assertEquals(
+                "Missing or duplicated deletion-owner site: $literal",
+                1,
+                Regex(Regex.escape(literal)).findAll(deletionOwner).count()
+            )
+        }
     }
 
     private fun imageWriterSites(): Map<String, Int> {

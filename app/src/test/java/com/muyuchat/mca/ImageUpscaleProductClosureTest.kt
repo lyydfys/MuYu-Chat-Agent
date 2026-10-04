@@ -73,13 +73,16 @@ class ImageUpscaleProductClosureTest {
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
-        // P5: deleteImageAssets moved to ImageAssetDeletionOperations; the assertions are
-        // unchanged -- the body is read where it now lives.
+        // P5: deleteImageAssets / clearImageLibrary moved to ImageAssetDeletionOperations; the
+        // assertions are unchanged -- the bodies are read where they now live.
         val deleteImages = functionBody(
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetDeletionOperations.kt"),
             "fun deleteImageAssetsOperation("
         )
-        val clearImages = functionBody(viewModel, "fun clearImageLibrary(")
+        val clearImages = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetDeletionOperations.kt"),
+            "fun clearImageLibraryOperation("
+        )
         val exportImages = functionBody(viewModel, "fun exportImageLibraryBackup(")
         val attachFile = functionBody(viewModel, "fun attachFile(")
         val importImage = functionBody(viewModel, "private suspend fun importImageAsset(")

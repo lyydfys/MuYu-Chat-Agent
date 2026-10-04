@@ -3861,136 +3861,11 @@ contextTraceJson: String?
     }
 
     fun setImageAssetFavorite(imageId: String, favorite: Boolean) {
-        val image = _uiState.value.images.firstOrNull { it.id == imageId }
-        if (image == null) {
-            showStatus("未找到要收藏的图片")
-            return
-        }
-        val mutation = imageFavoriteMutationSequence.incrementAndGet() to favorite
-        latestImageFavoriteMutations[imageId] = mutation
-        viewModelScope.launch(Dispatchers.IO) {
-            imageLibraryMutationMutex.withLock {
-                if (latestImageFavoriteMutations[imageId] != mutation) return@withLock
-                val updateResult = runCatching {
-                    chatSessionStore.setImageFavorite(imageId, favorite)
-                }
-                if (latestImageFavoriteMutations[imageId] != mutation) return@withLock
-                updateResult
-                    .onSuccess { updateCount ->
-                        if (updateCount == 1) {
-                            _uiState.update { state ->
-                                state.copy(
-                                    images = state.images.map { current ->
-                                        if (current.id == imageId) current.copy(favorite = favorite) else current
-                                    },
-                                    statusMessage = if (favorite) {
-                                        "已收藏：${image.name}"
-                                    } else {
-                                        "已取消收藏：${image.name}"
-                                    }
-                                )
-                            }
-                        } else {
-                            _uiState.update {
-                                it.copy(statusMessage = "收藏状态更新失败：图片记录已不存在")
-                            }
-                        }
-                    }
-                    .onFailure { error ->
-                        _uiState.update {
-                            it.copy(statusMessage = "收藏状态更新失败：${error.message ?: "数据库提交失败"}")
-                        }
-                    }
-                latestImageFavoriteMutations.remove(imageId, mutation)
-            }
-        }
+        setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)
     }
 
     fun clearImageLibrary() {
-        if (_uiState.value.images.isEmpty()) {
-            showStatus("图片库已为空")
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            awaitImageLibraryStartupReconciliation()
-            val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
-                imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
-                    if (imageUpscaleOwner.activeSourceImageId() != null) {
-                        _uiState.update {
-                            it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能清空图片库。")
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val currentImages = _uiState.value.images
-                    if (currentImages.isEmpty()) {
-                        showStatus("图片库已为空")
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val staging = stageImageAssetDeletionLeases(
-                        images = currentImages,
-                        retainedImages = emptyList(),
-                        imageAssetDirectory = imageAssetDirectory
-                    )
-                    val leases = staging.leases
-                    if (leases == null) {
-                        _uiState.update {
-                            it.copy(
-                                statusMessage = buildString {
-                                    append("图片库清空失败：无法安全暂存本地文件")
-                                    if (staging.rollbackFailures > 0) {
-                                        append("；")
-                                        append(staging.rollbackFailures)
-                                        append(" 个文件等待启动恢复")
-                                    }
-                                }
-                            )
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
-                    if (error != null) {
-                        val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
-                        _uiState.update {
-                            it.copy(
-                                statusMessage = buildString {
-                                    append("图片库清空失败：")
-                                    append(error.message ?: "数据库提交失败")
-                                    if (rollbackFailures > 0) {
-                                        append("；")
-                                        append(rollbackFailures)
-                                        append(" 个文件等待启动恢复")
-                                    }
-                                }
-                            )
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    latestImageFavoriteMutations.clear()
-                    _uiState.update {
-                        it.copy(
-                            images = emptyList(),
-                            imageJobs = it.imageJobs.filter { job -> !job.status.terminal }
-                        )
-                    }
-                    currentImages to commitImageAssetDeletionLeases(leases)
-                }
-            }
-            if (removed.isEmpty()) return@launch
-            _uiState.update {
-                it.copy(
-                    statusMessage = buildString {
-                        append("已清空图片库：")
-                        append(removed.size)
-                        append(" 张图片")
-                        if (cleanupFailures > 0) {
-                            append("；")
-                            append(cleanupFailures)
-                            append(" 个本地文件未能清理")
-                        }
-                    }
-                )
-            }
-        }
+        clearImageLibraryOperation(imageAssetDeletionPort)
     }
 
     fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) {
@@ -12016,6 +11891,7 @@ contextTraceJson: String?
             override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner
             override val chatSessionStore get() = this@MainViewModel.chatSessionStore
             override val latestImageFavoriteMutations get() = this@MainViewModel.latestImageFavoriteMutations
+            override val imageFavoriteMutationSequence get() = this@MainViewModel.imageFavoriteMutationSequence
             override val imageAssetDirectory get() = this@MainViewModel.imageAssetDirectory
 
             override suspend fun awaitImageLibraryStartupReconciliation() {
