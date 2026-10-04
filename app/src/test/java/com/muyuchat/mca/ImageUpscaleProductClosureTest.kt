@@ -166,7 +166,18 @@ class ImageUpscaleProductClosureTest {
         assertTrue(commitTransaction.contains("activeImageGenerationJobId != jobId"))
         assertTrue(enqueueGeneration.contains("ImageGenerationStatusRecord.DONE"))
         assertTrue(enqueueGeneration.contains("image.deleteLocalCopy(imageAssetDirectory)"))
-        assertTrue(attachFile.contains("imageLibraryMutationMutex.withLock"))
+        assertTrue(attachFile.contains("upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {"))
+        // P5 step 6: the attach/import commit (row upsert + composer publish under the mutation
+        // mutex) moved to ImageLibraryCommitOperations; the contract is read where it now lives.
+        // The caller-side rollback (deleteLocalCopy / CancellationException / fail) stays in
+        // attachFile and is pinned by the enqueue-style assertions above.
+        val importedCommit = sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryCommitOperations.kt")
+            .substringAfter("fun upsertImportedImageUnderMutationLock(")
+        assertTrue(importedCommit.contains("imageLibraryMutationMutex.withLock"))
+        assertTrue(importedCommit.contains("currentCoroutineContext().ensureActive()"))
+        val importedUpsert = importedCommit.indexOf("chatSessionStore.upsertImages(listOf(image))")
+        val importedPublish = importedCommit.indexOf("publish()")
+        assertTrue(importedUpsert >= 0 && importedPublish > importedUpsert)
         assertTrue(importImage.contains("copyImageAssetStreamAtomically("))
         assertTrue(importImage.contains("imageAssetWriteMutex.withLock"))
         assertTrue(atomicImport.contains("currentCoroutineContext().ensureActive()"))

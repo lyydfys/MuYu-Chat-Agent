@@ -15,6 +15,10 @@ import kotlinx.coroutines.sync.withLock
  * before the persistence mutex), the atomic chat commit with its durable alignment, the commit
  * journal handshake and the cancelled-publish rollback are unchanged. The only rewrites are
  * _uiState->uiState and port-qualified collaborator calls.
+ *
+ * P5 step 6 added [upsertImportedImageUnderMutationLock], the attach/import counterpart: the row
+ * upsert and the caller's composer publish run inside one image-library mutation mutex hold; the
+ * caller-side rollback (local-copy delete / CancellationException / fail) stays in attachFile.
  */
 internal interface ImageLibraryCommitPort {
     val uiState: MutableStateFlow<MainUiState>
@@ -215,3 +219,21 @@ internal suspend fun commitImageLibraryTransaction(
         }
     }.exceptionOrNull()
 }
+
+/**
+ * The imported-attachment commit (P5 step 6): the single chatSessionStore image write of the
+ * attach/import flow. The upsert and the caller's publish run inside one image-library mutation
+ * mutex hold so no concurrent mutation can interleave between the row write and the composer
+ * publish. The rollback (local-copy delete / CancellationException rethrow / fail) stays with
+ * the caller, unchanged.
+ */
+internal suspend fun upsertImportedImageUnderMutationLock(
+    port: ImageLibraryCommitPort,
+    image: ImageAssetRecord,
+    publish: () -> List<FileAssetRecord>?
+): List<FileAssetRecord>? =
+    port.imageLibraryMutationMutex.withLock {
+        currentCoroutineContext().ensureActive()
+        port.chatSessionStore.upsertImages(listOf(image))
+        publish()
+    }

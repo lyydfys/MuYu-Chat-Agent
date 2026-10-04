@@ -2402,9 +2402,7 @@ contextTraceJson: String?
 
                 val filesToPersist = imported.imageAsset?.let { image ->
                     val commit = runCatching {
-                        imageLibraryMutationMutex.withLock {
-                            currentCoroutineContext().ensureActive()
-                            chatSessionStore.upsertImages(listOf(image))
+                        upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {
                             publishImportedAttachment()
                         }
                     }

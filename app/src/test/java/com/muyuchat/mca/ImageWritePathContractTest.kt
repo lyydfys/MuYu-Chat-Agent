@@ -12,13 +12,14 @@ import org.junit.Test
  *
  *  - `ChatImageRetryAndCleanupOperations.kt` and `ImageUpscaleOwner.kt` route through their ports
  *    (2 sites each);
- *  - `ImageLibraryCommitOperations.kt` holds the image-library commit transaction, which took the
- *    atomic save, its gallery fallback and the cancelled-publish rollback (3 sites, P5 step 3);
- *  - `ImageAssetDeletionOperations.kt` now owns the whole delete/favourite/clear family
+ *  - `ImageLibraryCommitOperations.kt` holds the image-library commit transactions: the atomic
+ *    generation save with its gallery fallback and cancelled-publish rollback (3 sites, P5 step 3)
+ *    plus the attach/import upsert (1 site, P5 step 6);
+ *  - `ImageAssetDeletionOperations.kt` owns the whole delete/favourite/clear family
  *    (deleteImages + setImageFavorite + clearImages, P5 steps 4-5);
- *  - `MainViewModel.kt` keeps one direct site: the imported-attachment commit in `attachFile`
- *    (`upsertImages(listOf(image))`), which is transactional with its local rollback and still
- *    parked in `P5-00-image-domain-map.md`.
+ *  - `MainViewModel.kt` no longer holds any direct site: the last one (the imported-attachment
+ *    commit in `attachFile`) became `upsertImportedImageUnderMutationLock` while its caller-side
+ *    rollback (local-copy delete / fail) stayed in place.
  *
  * Any new direct site fails here and forces a deliberate decision -- converge it into a named
  * owner, or extend this record with the reason it must stay.
@@ -29,10 +30,9 @@ class ImageWritePathContractTest {
         assertEquals(
             "A new direct chatSessionStore image-writer call needs a deliberate owner decision; update this record's KDoc.",
             mapOf(
-                "MainViewModel.kt" to 1,
                 "ChatImageRetryAndCleanupOperations.kt" to 2,
                 "ImageUpscaleOwner.kt" to 2,
-                "ImageLibraryCommitOperations.kt" to 3,
+                "ImageLibraryCommitOperations.kt" to 4,
                 "ImageAssetDeletionOperations.kt" to 3
             ),
             imageWriterSites()
@@ -44,9 +44,9 @@ class ImageWritePathContractTest {
         val vm = sourceFile("MainViewModel.kt")
 
         assertEquals(
-            "Missing or duplicated direct site: chatSessionStore.upsertImages(listOf(image))",
+            "Missing or duplicated import-commit delegate: upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {",
             1,
-            Regex(Regex.escape("chatSessionStore.upsertImages(listOf(image))")).findAll(vm).count()
+            Regex(Regex.escape("upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {")).findAll(vm).count()
         )
 
         listOf(
@@ -65,7 +65,8 @@ class ImageWritePathContractTest {
         listOf(
             "chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)",
             "chatSessionStore.upsertImages(generatedImages)",
-            "chatSessionStore.deleteImages(generatedIds)"
+            "chatSessionStore.deleteImages(generatedIds)",
+            "chatSessionStore.upsertImages(listOf(image))"
         ).forEach { literal ->
             assertEquals(
                 "Missing or duplicated owner site: $literal",
