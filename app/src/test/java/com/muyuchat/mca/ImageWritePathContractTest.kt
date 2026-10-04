@@ -27,10 +27,11 @@ class ImageWritePathContractTest {
         assertEquals(
             "A new direct chatSessionStore image-writer call needs a deliberate owner decision; update this record's KDoc.",
             mapOf(
-                "MainViewModel.kt" to 4,
+                "MainViewModel.kt" to 3,
                 "ChatImageRetryAndCleanupOperations.kt" to 2,
                 "ImageUpscaleOwner.kt" to 2,
-                "ImageLibraryCommitOperations.kt" to 3
+                "ImageLibraryCommitOperations.kt" to 3,
+                "ImageAssetDeletionOperations.kt" to 1
             ),
             imageWriterSites()
         )
@@ -42,7 +43,6 @@ class ImageWritePathContractTest {
 
         listOf(
             "chatSessionStore.upsertImages(listOf(image))",
-            "chatSessionStore.deleteImages(removedIds)",
             "chatSessionStore.setImageFavorite(imageId, favorite)",
             "chatSessionStore.clearImages()"
         ).forEach { literal ->
@@ -65,6 +65,13 @@ class ImageWritePathContractTest {
                 Regex(Regex.escape(literal)).findAll(commitOwner).count()
             )
         }
+
+        val deletionOwner = sourceFile("ImageAssetDeletionOperations.kt")
+        assertEquals(
+            "Missing or duplicated deletion-owner site: chatSessionStore.deleteImages(removedIds)",
+            1,
+            Regex(Regex.escape("chatSessionStore.deleteImages(removedIds)")).findAll(deletionOwner).count()
+        )
     }
 
     private fun imageWriterSites(): Map<String, Int> {

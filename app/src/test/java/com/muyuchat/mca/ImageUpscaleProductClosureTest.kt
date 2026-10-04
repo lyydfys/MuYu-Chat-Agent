@@ -73,7 +73,12 @@ class ImageUpscaleProductClosureTest {
         val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
-        val deleteImages = functionBody(viewModel, "fun deleteImageAssets(")
+        // P5: deleteImageAssets moved to ImageAssetDeletionOperations; the assertions are
+        // unchanged -- the body is read where it now lives.
+        val deleteImages = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetDeletionOperations.kt"),
+            "fun deleteImageAssetsOperation("
+        )
         val clearImages = functionBody(viewModel, "fun clearImageLibrary(")
         val exportImages = functionBody(viewModel, "fun exportImageLibraryBackup(")
         val attachFile = functionBody(viewModel, "fun attachFile(")
@@ -129,7 +134,7 @@ class ImageUpscaleProductClosureTest {
         assertTrue(deleteImages.contains("imageLibraryMutationMutex.withLock"))
         assertTrue(deleteImages.contains("imageUpscaleOwner.withUpscaleLifecycleLock {"))
         assertTrue(deleteImages.contains("stageImageAssetDeletionLeases("))
-        assertTrue(deleteImages.contains("retainedImages = _uiState.value.images.filterNot"))
+        assertTrue(deleteImages.contains("retainedImages = uiState.value.images.filterNot"))
         assertTrue(deleteImages.contains("commitImageAssetDeletionLeases(leases)"))
         assertTrue(clearImages.contains("imageUpscaleOwner.activeSourceImageId()"))
         assertTrue(clearImages.contains("imageLibraryMutationMutex.withLock"))

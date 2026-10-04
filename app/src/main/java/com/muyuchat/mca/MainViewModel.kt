@@ -3856,130 +3856,8 @@ contextTraceJson: String?
         deleteImageAssets(listOf(imageId))
     }
 
-    private data class ImageAssetDeletionStaging(
-        val leases: List<ImageAssetDeletionLease>?,
-        val rollbackFailures: Int = 0
-    )
-
-    private fun stageImageAssetDeletionLeases(
-        images: List<ImageAssetRecord>,
-        retainedImages: List<ImageAssetRecord>
-    ): ImageAssetDeletionStaging {
-        val retainedPaths = retainedImages.mapNotNullTo(mutableSetOf()) { image ->
-            image.ownedLocalImageFileOrNull(imageAssetDirectory)?.path
-        }
-        val leases = ArrayList<ImageAssetDeletionLease>(images.size)
-        for (image in images) {
-            val ownedPath = image.ownedLocalImageFileOrNull(imageAssetDirectory)?.path
-            val lease = if (ownedPath != null && ownedPath in retainedPaths) {
-                ImageAssetDeletionLease(original = null, staged = null)
-            } else {
-                image.stageLocalCopyDeletion(imageAssetDirectory)
-            }
-            if (lease == null) {
-                val rollbackFailures = leases.asReversed().count { staged -> !staged.rollback() }
-                return ImageAssetDeletionStaging(leases = null, rollbackFailures = rollbackFailures)
-            }
-            leases += lease
-        }
-        return ImageAssetDeletionStaging(leases = leases)
-    }
-
-    private fun rollbackImageAssetDeletionLeases(
-        leases: List<ImageAssetDeletionLease>
-    ): Int = leases.asReversed().count { lease -> !lease.rollback() }
-
-    private fun commitImageAssetDeletionLeases(
-        leases: List<ImageAssetDeletionLease>
-    ): Int = leases.count { lease -> !lease.commit() }
-
     fun deleteImageAssets(imageIds: List<String>) {
-        val requestedIds = imageIds.asSequence()
-            .map { it.trim() }
-            .filter(String::isNotEmpty)
-            .distinct()
-            .toSet()
-        if (requestedIds.isEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
-            awaitImageLibraryStartupReconciliation()
-            val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
-                imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
-                    val activeSourceId = imageUpscaleOwner.activeSourceImageId()
-                    if (activeSourceId != null && activeSourceId in requestedIds) {
-                        _uiState.update {
-                            it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能删除。")
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val candidates = _uiState.value.images.filter { it.id in requestedIds }
-                    if (candidates.isEmpty()) {
-                        showStatus("未找到要删除的图片")
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val staging = stageImageAssetDeletionLeases(
-                        images = candidates,
-                        retainedImages = _uiState.value.images.filterNot { image ->
-                            image.id in requestedIds
-                        }
-                    )
-                    val leases = staging.leases
-                    if (leases == null) {
-                        _uiState.update {
-                            it.copy(
-                                statusMessage = buildString {
-                                    append("图片删除失败：无法安全暂存本地文件")
-                                    if (staging.rollbackFailures > 0) {
-                                        append("；")
-                                        append(staging.rollbackFailures)
-                                        append(" 个文件等待启动恢复")
-                                    }
-                                }
-                            )
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    val removedIds = candidates.map(ImageAssetRecord::id)
-                    val error = runCatching { chatSessionStore.deleteImages(removedIds) }.exceptionOrNull()
-                    if (error != null) {
-                        val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
-                        _uiState.update {
-                            it.copy(
-                                statusMessage = buildString {
-                                    append("图片删除失败：")
-                                    append(error.message ?: "数据库提交失败")
-                                    if (rollbackFailures > 0) {
-                                        append("；")
-                                        append(rollbackFailures)
-                                        append(" 个文件等待启动恢复")
-                                    }
-                                }
-                            )
-                        }
-                        return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
-                    }
-                    removedIds.forEach(latestImageFavoriteMutations::remove)
-                    _uiState.update { state ->
-                        state.copy(images = state.images.filterNot { it.id in removedIds })
-                    }
-                    candidates to commitImageAssetDeletionLeases(leases)
-                }
-            }
-            if (removed.isEmpty()) return@launch
-            _uiState.update { state ->
-                val successMessage = if (removed.size == 1) {
-                    "已从图片库移除：${removed.single().name}"
-                } else {
-                    "已从图片库移除 ${removed.size} 张图片"
-                }
-                state.copy(
-                    statusMessage = if (cleanupFailures == 0) {
-                        successMessage
-                    } else {
-                        "$successMessage；$cleanupFailures 个本地文件未能清理"
-                    }
-                )
-            }
-        }
+        deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
     }
 
     fun setImageAssetFavorite(imageId: String, favorite: Boolean) {
@@ -4050,7 +3928,8 @@ contextTraceJson: String?
                     }
                     val staging = stageImageAssetDeletionLeases(
                         images = currentImages,
-                        retainedImages = emptyList()
+                        retainedImages = emptyList(),
+                        imageAssetDirectory = imageAssetDirectory
                     )
                     val leases = staging.leases
                     if (leases == null) {
@@ -12126,6 +12005,25 @@ contextTraceJson: String?
                     preview = preview,
                     imageAssetIds = imageAssetIds
                 )
+            }
+        }
+
+    private val imageAssetDeletionPort: ImageAssetDeletionPort =
+        object : ImageAssetDeletionPort {
+            override val uiState get() = this@MainViewModel._uiState
+            override val scope get() = this@MainViewModel.viewModelScope
+            override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
+            override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner
+            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
+            override val latestImageFavoriteMutations get() = this@MainViewModel.latestImageFavoriteMutations
+            override val imageAssetDirectory get() = this@MainViewModel.imageAssetDirectory
+
+            override suspend fun awaitImageLibraryStartupReconciliation() {
+                this@MainViewModel.awaitImageLibraryStartupReconciliation()
+            }
+
+            override fun showStatus(message: String?) {
+                this@MainViewModel.showStatus(message)
             }
         }
 
