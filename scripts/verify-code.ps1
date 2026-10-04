@@ -35,7 +35,9 @@ param(
     [switch] $FullTests,
     [switch] $SkipTests,
     [switch] $FeatureTests,
-    [switch] $Rerun
+    [switch] $Rerun,
+    [switch] $Changed,
+    [string] $Since = 'HEAD'
 )
 
 # Native tools write progress to stderr; with 'Stop' a PowerShell host turns that into a terminating
@@ -149,6 +151,47 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         Write-Host ('   filter: ' + ($Tests -join ', '))
     } else {
         Write-Host '   filter: (whole module)'
+    }
+    # `-Changed` narrows the *selection* to the modules touched since `-Since`; it never narrows the
+    # assertions. `--tests` filters are invocation-global, so combining it with any filter flag is
+    # rejected the same way `-FullTests` rejects `-Tests` above: fail loudly, never run silently empty.
+    if ($Changed -and ($FullTests -or $FeatureTests -or $Tests.Count -gt 0)) {
+        Write-Host '   ERROR: -Changed/-Since cannot be combined with -Tests/-FullTests/-FeatureTests (Gradle --tests is invocation-global).' -ForegroundColor Red
+        Write-Host '          Use -Changed alone for the affected-module lane, or the filter flags for the gate.' -ForegroundColor Red
+        exit 2
+    }
+    if ($Changed) {
+        # Native-command call shape note, PowerShell 5.1: this block must NOT name any local
+        # `$changed` -- parameter variables are case-insensitive AND type-constrained, so
+        # `$changed = @(...)` collides with the [switch] $Changed parameter and the assignment
+        # is cast to SwitchParameter (Object[] -> SwitchParameter throws, a one-element array
+        # silently becomes `True`). That collision, not `git`, was the original
+        # ConvertToFinalInvalidCastException. Plain loops are also used instead of pipelines so
+        # no filter can collapse the path list.
+        $changedFiles = @()
+        $changedLines = & git -C $repo diff --name-only $Since
+        foreach ($line in @($changedLines)) {
+            $text = "$line"
+            if ($text.Trim().Length -gt 0) { $changedFiles += $text }
+        }
+        $map = [ordered]@{
+            '^app/'              = ':app:testDebugUnitTest'
+            '^core/engine/'      = ':core:engine:testDebugUnitTest'
+            '^api/local/'        = ':api:local:testDebugUnitTest'
+            '^feature/chat/'     = ':feature:chat:testDebugUnitTest'
+            '^feature/agent/'    = ':feature:agent:testDebugUnitTest'
+            '^feature/modelhub/' = ':feature:modelhub:testDebugUnitTest'
+            '^feature/settings/' = ':feature:settings:testDebugUnitTest'
+        }
+        $sel = @()
+        foreach ($k in $map.Keys) {
+            foreach ($p in $changedFiles) {
+                if ($p -match $k) { $sel += $map[$k]; break }
+            }
+        }
+        if ($sel.Count -eq 0) { $sel = @(':app:testDebugUnitTest') }
+        $testArgs = @($sel | Select-Object -Unique)
+        Write-Host ('   -Changed vs ' + $Since + ': ' + ($testArgs -join ', '))
     }
     if ($FullTests) {
         # The feature modules ship their own test source sets, and three of the tests in
