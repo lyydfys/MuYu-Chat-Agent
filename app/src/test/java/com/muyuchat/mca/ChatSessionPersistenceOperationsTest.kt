@@ -51,6 +51,31 @@ class ChatSessionPersistenceOperationsTest {
         assertFalse(vm.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
     }
 
+    @Test
+    fun mutationKeepsTheCommitThenKvBoundaryAndTheRollbackPath() {
+        val owner = ownerSource().substringAfter("fun runPersistConversationMutation(")
+
+        assertTrue(owner.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)"))
+        assertTrue(owner.contains("port.durableChatSessions = snapshot"))
+        assertTrue(
+            owner.indexOf("chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)") <
+                owner.indexOf("engine.invalidateConversationContext()")
+        )
+        assertTrue(owner.contains("port.cancelPendingWorldBookCleanup(WorldBookScope.CHAT, removedChatOwners)"))
+        assertTrue(owner.contains("restoreAfterConversationMutationFailure("))
+        assertTrue(owner.contains("port.conversationMutationBarrier = mutation"))
+        assertTrue(owner.contains("port.localConversationContextInvalidationJob = mutation"))
+        assertTrue(owner.contains("port.localConversationContextNeedsInvalidation = !preserveReusableNativePrefix"))
+    }
+
+    @Test
+    fun theViewModelKeepsOnlyTheMutationDelegate() {
+        val vm = sourceFile("MainViewModel.kt")
+
+        assertEquals(1, Regex("""private fun persistConversationMutation\(""").findAll(vm).count())
+        assertTrue(vm.contains("runPersistConversationMutation("))
+    }
+
     private fun functionBody(source: String, signature: String): String {
         val start = source.indexOf(signature)
         require(start >= 0) { "Missing source signature: $signature" }

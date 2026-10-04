@@ -11,7 +11,10 @@ class ConversationTailPruneNativeCacheContractTest {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val deleteAt = functionBody(source, "fun deleteMessageAt(index: Int)", "fun deleteLastConversationTurn()")
         val deleteTail = functionBody(source, "fun deleteLastConversationTurn()", "private fun cancelGenerationJob()")
-        val persistence = functionBody(source, "private fun persistConversationMutation(", "private fun persistKnowledgeBaseBindings(")
+        // P4: the durable boundary moved to ChatSessionPersistenceOperations; the assertions are
+        // unchanged -- it is read there now.
+        val persistence = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt")
+            .substringAfter("fun runPersistConversationMutation(")
 
         assertFalse(deleteAt.contains("preserveReusableNativePrefix = true"))
         assertTrue(deleteTail.contains("preserveReusableNativePrefix = true"))

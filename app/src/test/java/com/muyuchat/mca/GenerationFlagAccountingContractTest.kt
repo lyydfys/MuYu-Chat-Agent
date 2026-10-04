@@ -80,6 +80,13 @@ import org.junit.Test
  * together with `settleGenerationUi(…)`. No raw `isGenerating = …` write moved with the body:
  * the counts above are unchanged, and the guard's rule (`chatRuns.matches(generationRunId)`) is
  * unchanged -- only the file each read points at.
+ *
+ * ## Re-derivation recorded (P4 step 2)
+ *
+ * `persistConversationMutation` moved to `ChatSessionPersistenceOperations.kt`
+ * (`runPersistConversationMutation`); its failure-path rollback carries exactly one raw
+ * `isGenerating = false` reset, so that write left `MainViewModel` (4 -> 3) and the accounting
+ * now scans the persistence owner file (1 reset). The write itself is unchanged.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -98,6 +105,9 @@ class GenerationFlagAccountingContractTest {
     private val chatExecution: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt")
     }
+    private val chatSessionPersistence: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt")
+    }
 
     /**
      * Measured baseline across the four files that own the flag's transitions.
@@ -105,13 +115,14 @@ class GenerationFlagAccountingContractTest {
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
     private val expectedTrueInViewModel = 3
-    private val expectedFalseInViewModel = 4
+    private val expectedFalseInViewModel = 3
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
     private val expectedTrueInPublisher = 0
     private val expectedFalseInPublisher = 1
     private val expectedTrueInStopOperations = 0
     private val expectedFalseInStopOperations = 1
+    private val expectedFalseInChatSessionPersistence = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -213,6 +224,7 @@ class GenerationFlagAccountingContractTest {
         val falseInPublisher = assignments(publisher).count { it.second == "false" }
         val trueInStopOperations = assignments(stopOperations).count { it.second == "true" }
         val falseInStopOperations = assignments(stopOperations).count { it.second == "false" }
+        val falseInChatSessionPersistence = assignments(chatSessionPersistence).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -220,6 +232,11 @@ class GenerationFlagAccountingContractTest {
         assertEquals("ChatGenerationUiPublisher resets changed", expectedFalseInPublisher, falseInPublisher)
         assertEquals("ChatStopGenerationOperations starts changed", expectedTrueInStopOperations, trueInStopOperations)
         assertEquals("ChatStopGenerationOperations resets changed", expectedFalseInStopOperations, falseInStopOperations)
+        assertEquals(
+            "ChatSessionPersistenceOperations resets changed",
+            expectedFalseInChatSessionPersistence,
+            falseInChatSessionPersistence
+        )
     }
 
     @Test

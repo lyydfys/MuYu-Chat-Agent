@@ -12229,6 +12229,22 @@ contextTraceJson: String?
             override fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) {
                 this@MainViewModel.cleanupPendingWorldBooksAfterOwnerCommit(scope, retainedOwnerIds)
             }
+
+            override val engine get() = this@MainViewModel.engine
+            override var localConversationContextNeedsInvalidation: Boolean
+                get() = this@MainViewModel.localConversationContextNeedsInvalidation
+                set(value) { this@MainViewModel.localConversationContextNeedsInvalidation = value }
+            override val localConversationContextInvalidationSequence get() = this@MainViewModel.localConversationContextInvalidationSequence
+            override var conversationMutationBarrier: Job?
+                get() = this@MainViewModel.conversationMutationBarrier
+                set(value) { this@MainViewModel.conversationMutationBarrier = value }
+            override var localConversationContextInvalidationJob: Job?
+                get() = this@MainViewModel.localConversationContextInvalidationJob
+                set(value) { this@MainViewModel.localConversationContextInvalidationJob = value }
+
+            override fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
+                this@MainViewModel.cancelPendingWorldBookCleanup(scope, ownerIds)
+            }
         }
 
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
@@ -12765,133 +12781,16 @@ contextTraceJson: String?
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
     ): Job? = runChatSessionPersistence(chatSessionPersistencePort, sessions, knowledgeBinding, generationRunId)
-    /**
-     * Durable destructive-edit boundary.  Room is committed before any native
-     * cache is invalidated: after a process death the next runtime starts with
-     * an empty KV, while after a normal return the next generation waits for
-     * both the durable message state and the native invalidation barrier.
-     */
+    /** Delegates to [runPersistConversationMutation]. Signature kept verbatim. */
     private fun persistConversationMutation(
         sessions: List<ChatSessionRecord>,
         rollback: ConversationMutationRollbackState,
         preserveReusableNativePrefix: Boolean = false,
         onCommitted: (() -> Unit)? = null,
         onCommitFailed: (() -> Unit)? = null
-    ): Job {
-        val snapshot = sessions.map { session ->
-            session.copy(messages = session.messages.toList())
-        }
-        val removedChatOwners = rollback.chatSessions
-            .mapTo(linkedSetOf()) { it.id }
-            .minus(snapshot.mapTo(hashSetOf()) { it.id })
-        localConversationContextNeedsInvalidation = !preserveReusableNativePrefix
-        val invalidationSequence = localConversationContextInvalidationSequence.incrementAndGet()
-        chatSessionPersistenceSequence.incrementAndGet()
-        val mutation = viewModelScope.launch(Dispatchers.IO) {
-            chatSessionPersistenceMutex.withLock {
-                val liveSessionIds = snapshot.mapTo(hashSetOf()) { it.id }
-                val knowledgeBindingsForSave = synchronized(chatSessionPersistenceStateLock) {
-                    pendingKnowledgeBindings
-                        .filterKeys { it in liveSessionIds }
-                        .mapValues { (_, ids) -> ids.toSet() }
-                }
-                // Purge deleted conversations before the Room commit. If the process exits
-                // immediately after commit, no full-session KV file is left behind.
-                val sessionCachesCleared = removedChatOwners.isEmpty() ||
-                    engine.clearPersistentSessionStates(removedChatOwners)
-                runCatching {
-                    // replaceAllWithKnowledgeBindings is a Room @Transaction.
-                    // User/assistant tail removal cannot persist half a turn.
-                    chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)
-                }.onSuccess {
-                    val persisted = reconciledChatSessionsAfterSave(snapshot)
-                    if (persisted == snapshot) {
-                        durableChatSessions = snapshot
-                    } else {
-                        durableChatSessions = persisted
-                    }
-                    publishReconciledChatSessions(snapshot, persisted)
-                    if (!sessionCachesCleared) {
-                        _uiState.update {
-                            it.copy(statusMessage = "聊天已删除，但磁盘会话缓存清理失败；请在设置中清空缓存。")
-                        }
-                    }
-                    synchronized(chatSessionPersistenceStateLock) {
-                        knowledgeBindingsForSave.forEach { (sessionId, persistedIds) ->
-                            if (pendingKnowledgeBindings[sessionId] == persistedIds) {
-                                pendingKnowledgeBindings.remove(sessionId)
-                            }
-                        }
-                        pendingKnowledgeBindings.keys
-                            .filterNot { it in liveSessionIds }
-                            .forEach(pendingKnowledgeBindings::remove)
-                    }
-                    cleanupPendingWorldBooksAfterOwnerCommit(
-                        scope = WorldBookScope.CHAT,
-                        retainedOwnerIds = liveSessionIds
-                    )
-                    if (preserveReusableNativePrefix) {
-                        // Tail pruning keeps the prior request's token/KV checkpoint. The next
-                        // begin performs an exact token-prefix comparison and trims the native
-                        // suffix to that proven boundary. A mismatch still falls back to a full
-                        // prefill inside the runtime, so preservation cannot change semantics.
-                        if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                            localConversationContextNeedsInvalidation = false
-                        }
-                    } else {
-                        runCatching { engine.invalidateConversationContext() }
-                            .onSuccess {
-                                if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                                    localConversationContextNeedsInvalidation = false
-                                }
-                            }
-                            .onFailure { error ->
-                                if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                                    _uiState.update {
-                                        it.copy(
-                                            statusMessage = "聊天已保存；上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}"
-                                        )
-                                    }
-                                }
-                            }
-                    }
-                    if (persisted == snapshot) onCommitted?.invoke() else onCommitFailed?.invoke()
-                }.onFailure { error ->
-                    onCommitFailed?.invoke()
-                    // Do not invalidate KV after a failed durable write. Room
-                    // rolls the transaction back; restore managed state to the
-                    // last snapshot known to have committed to that database.
-                    cancelPendingWorldBookCleanup(WorldBookScope.CHAT, removedChatOwners)
-                    _uiState.update { current ->
-                        val mutationStillVisible = current.chatSessions == sessions
-                        if (!mutationStillVisible) {
-                            current.copy(
-                                isGenerating = false,
-                                generationPhase = null,
-                                generationTokenProgress = null,
-                    generationPersistProgress = null,
-                                statusMessage = "对话修改未保存，内存状态已发生后续变化；请重新打开该会话：${error.message ?: "Room transaction failed"}"
-                            )
-                        } else {
-                            current.restoreAfterConversationMutationFailure(
-                                durableSessions = durableChatSessions,
-                                rollback = rollback,
-                                statusMessage = "对话修改保存失败，已恢复原状态：${error.message ?: "Room transaction failed"}"
-                            )
-                        }
-                    }
-                    // Room rolled back and managed state now matches its last
-                    // commit, so the previous native KV remains the checkpoint.
-                    if (localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                        localConversationContextNeedsInvalidation = false
-                    }
-                }
-            }
-        }
-        conversationMutationBarrier = mutation
-        localConversationContextInvalidationJob = mutation
-        return mutation
-    }
+    ): Job = runPersistConversationMutation(
+        chatSessionPersistencePort, sessions, rollback, preserveReusableNativePrefix, onCommitted, onCommitFailed
+    )
 
     private fun persistKnowledgeBaseBindings(sessionId: String, knowledgeBaseIds: Set<String>) {
         persistChatSessions(

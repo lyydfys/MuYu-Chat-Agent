@@ -27,7 +27,12 @@ class ConversationMutationAtomicityContractTest {
 
         // The stop-port object now carries an override with the same name; the durable boundary
         // itself lives in the private function, so it is located by its full declaration.
-        val persist = functionBodyOf(source, "private fun persistConversationMutation(")
+        // P4: the boundary moved to ChatSessionPersistenceOperations; the assertions are unchanged
+        // -- the body is read where it now lives.
+        val persist = functionBodyOf(
+            chatSessionPersistenceSource(),
+            "fun runPersistConversationMutation("
+        )
         assertInOrder(
             persist,
             "chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)",
@@ -137,5 +142,15 @@ class ConversationMutationAtomicityContractTest {
         )
         return candidates.firstOrNull(File::isFile)?.readText()
             ?: error("MainViewModel.kt not found from $root")
+    }
+
+    private fun chatSessionPersistenceSource(): String {
+        val root = File(System.getProperty("user.dir"))
+        val candidates = listOf(
+            File(root, "src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt"),
+            File(root, "app/src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt")
+        )
+        return candidates.firstOrNull(File::isFile)?.readText()
+            ?: error("ChatSessionPersistenceOperations.kt not found from $root")
     }
 }
