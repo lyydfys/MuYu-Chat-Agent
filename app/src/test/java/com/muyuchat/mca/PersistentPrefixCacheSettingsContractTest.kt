@@ -29,8 +29,10 @@ class PersistentPrefixCacheSettingsContractTest {
 
     @Test
     fun chatRequestOnlyOptsIntoDiskPrefixWhenTheUserSettingIsEnabled() {
-        val source = sourceFile("MainViewModel.kt")
-        val startGeneration = functionBody(source, "startGeneration")
+        // P3 step 1 moved the startGeneration execution body to ChatExecutionOperations; the
+        // assertions are unchanged -- they are read where they now live.
+        val source = sourceFile("ChatExecutionOperations.kt")
+        val startGeneration = functionBody(source, "ChatGenerationExecutionPort.runChatGeneration")
 
         assertTrue(startGeneration.contains("initialState.persistentPrefixCacheEnabled"))
         assertTrue(startGeneration.contains("persistentPrefixSystemPrompt = persistentLlamaPrefix"))

@@ -252,8 +252,10 @@ class KnowledgeBaseRoomContractTest {
 
     @Test
     fun localUiKeepsSearchEvidenceRequestScopedAndOptsInStablePersonaOnly() {
-        val source = sourceFile("MainViewModel.kt")
-        val body = functionBody(source, "startGeneration")
+        // P3 step 1 moved the startGeneration execution body to ChatExecutionOperations; the
+        // assertions are unchanged -- the request composition is read where it now lives.
+        val source = sourceFile("ChatExecutionOperations.kt")
+        val body = functionBody(source, "ChatGenerationExecutionPort.runChatGeneration")
 
         assertFalse(body.contains("systemPrompt = listOf(requestParams.systemPrompt, webSearchTurn.promptContext)"))
         assertTrue(body.contains("runtimeSystemContextForTurn"))

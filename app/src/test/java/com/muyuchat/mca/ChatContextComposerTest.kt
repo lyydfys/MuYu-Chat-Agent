@@ -123,10 +123,15 @@ class ChatContextComposerTest {
 
     @Test
     fun assistantFileContextSettingIsPassedToPreflightAndGenerationComposition() {
+        // P3 step 1 moved the generation composition to ChatExecutionOperations.runChatGeneration;
+        // the assertions are unchanged -- the generation half is read where it now lives.
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val execution = sourceFile("app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt")
 
-        listOf("sendPreparedMessageAsync", "startGeneration").forEach { function ->
-            val body = functionBody(source, "fun $function")
+        listOf(
+            functionBody(source, "fun sendPreparedMessageAsync"),
+            functionBody(execution, "fun ChatGenerationExecutionPort.runChatGeneration")
+        ).forEach { body ->
             assertTrue(body.contains("fileContextEnabled = assistantSnapshot?.fileContextEnabled"))
         }
     }

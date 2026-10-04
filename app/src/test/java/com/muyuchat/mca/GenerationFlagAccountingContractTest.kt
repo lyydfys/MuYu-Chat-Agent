@@ -72,6 +72,14 @@ import org.junit.Test
  * The user-facing stop path moved to `ChatStopGenerationOperations.kt`; its settlement write
  * (`isGenerating = false`) moved with it. `MainViewModel` keeps four raw resets, and the stop
  * operations file owns exactly one.
+ *
+ * ## Re-derivation recorded (P3 step 1)
+ *
+ * The `startGeneration` execution body moved verbatim to `ChatExecutionOperations.kt`
+ * (`runChatGeneration`), so the ownership guard `generationStillOwnsUi()` is read there now,
+ * together with `settleGenerationUi(…)`. No raw `isGenerating = …` write moved with the body:
+ * the counts above are unchanged, and the guard's rule (`chatRuns.matches(generationRunId)`) is
+ * unchanged -- only the file each read points at.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -86,6 +94,9 @@ class GenerationFlagAccountingContractTest {
     }
     private val stopOperations: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt")
+    }
+    private val chatExecution: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt")
     }
 
     /**
@@ -163,10 +174,12 @@ class GenerationFlagAccountingContractTest {
     fun `the run id guard is still what keeps a stale generation from clearing a newer flag`() {
         // The guard is the same rule expressed through the ownership seam: matches() is the strict
         // "an id was given and the epoch equals it" form the old raw comparison spelled out.
+        // P3 step 1 moved the guard into the execution owner; the rule and the assertion are
+        // unchanged -- only the file it reads.
         val guard = Regex("""fun generationStillOwnsUi\(\): Boolean\s*=\s*chatRuns\.matches\(generationRunId\)""")
         assertTrue(
             "the ownership guard is the reason a superseded generation cannot clear a newer flag",
-            guard.containsMatchIn(mainViewModel)
+            guard.containsMatchIn(chatExecution)
         )
         assertTrue(
             "the guarded update wrapper should still exist where the gated writes live",

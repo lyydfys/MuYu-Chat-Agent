@@ -85,6 +85,8 @@ import com.muyuchat.core.engine.ContextCompressionSettings
 import com.muyuchat.core.engine.ContextCompressionThreshold
 import com.muyuchat.core.engine.ContextCompressionTrigger
 import com.muyuchat.core.engine.ContextSummarizationService
+import com.muyuchat.core.engine.ContextWindowAdmission
+import com.muyuchat.mca.presentation.ChatContextSnapshot
 import com.muyuchat.core.engine.ContextSummaryModel
 import com.muyuchat.core.engine.ContextSummarySource
 import com.muyuchat.core.engine.compressChatRequestContext
@@ -265,15 +267,6 @@ private data class PendingAssistantImageToolTurn(
     val primaryToolCallId: String,
     val initialToolOutputs: Map<String, String>
 )
-
-private data class AssistantImageModelBinding(
-    val backend: ImageBackend,
-    val modelId: String,
-    val modelName: String,
-    val options: LocalImageGenerationOptions,
-    val fingerprint: String
-)
-
 
 private fun chatImageCommitJournalJobId(jobId: String, imageId: String): String {
     val safeImageId = imageId.filter { it.isLetterOrDigit() || it in "._:-" }
@@ -10271,767 +10264,17 @@ contextTraceJson: String?
         val generationRunId = admittedReservation.runId
         val replyMetrics = ReplyGenerationMetrics(generationRunId)
         val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
-            // This coroutine's own Job handle, taken from its own scope receiver. The body used to
-            // close over the `lateinit var` that was still being assigned while the lambda was
-            // built; removing that self-reference is what lets the body be handed to a future
-            // execution owner instead of reaching back into its own launcher.
-            val selfJob = requireNotNull(coroutineContext[Job]) {
-                "startGeneration body must run as a launched coroutine"
-            }
-            var terminalEventSeen = false
-            var continuationCompleted = false
-            var continuationFailureMessage = "角色回复未完成，可点击继续角色回复重试。"
-            val preparedUiVisionFiles = mutableListOf<File>()
-            fun generationStillOwnsUi(): Boolean =
-                chatRuns.matches(generationRunId)
-
-            fun settleGenerationUi(
-                stats: RuntimeStats,
-                statusMessage: String? = null
-            ) {
-                if (!generationStillOwnsUi()) return
-                _uiState.update { state ->
-                    if (!generationStillOwnsUi()) {
-                        state
-                    } else {
-                        state.afterGenerationTerminated(stats, statusMessage)
-                            .withReplyGenerationMetrics(replyMetrics.finish())
-                    }
-                }
-            }
-
-            val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, _uiState)
-
-            try {
-            if (!generationStillOwnsUi()) return@launch
-            val initialState = _uiState.value
-            if (!initialState.canWriteToActiveAssistantSession()) {
-                terminalEventSeen = true
-                settleGenerationUi(engine.stats.value, "此对话的角色归属不明确，无法继续生成；请先手动分支。")
-                return@launch
-            }
-            val frozenSession = initialState.chatSessions.first { it.id == initialState.activeChatSessionId }
-            val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)
-            val frozenAssistantId = frozenAssistantSnapshot.assistantId
-            val effectiveChatBackend = if (chatModelIdOverride != null) {
-                ChatBackend.CLOUD
-            } else {
-                initialState.selectedChatBackend
-            }
-            if (effectiveChatBackend == ChatBackend.LOCAL) {
-                // Foreground reconciliation probes the isolated worker on IO. A send issued
-                // immediately after returning to the app must not overtake that probe and
-                // observe the transient unloaded projection before worker-loss recovery is armed.
-                chatRuns.publishedJobUnless(foregroundRecoveryJob)?.join()
-                if (!generationStillOwnsUi()) return@launch
-            }
-            val assistantSnapshot = frozenAssistantSnapshot
-            val characterMemoryEnabled = initialState.assistants.any {
-                it.id == frozenAssistantId &&
-                    it.memoryEnabled
-            }
-            if (effectiveChatBackend == ChatBackend.LOCAL &&
-                !ensureLocalConversationContextInvalidated()
-            ) {
-                return@launch
-            }
-            val baseParams = (paramsOverride ?: initialState.params).let { current ->
-                val backendParams = if (effectiveChatBackend == ChatBackend.CLOUD) {
-                    current.copy(
-                        reasoningMode = ReasoningMode.STANDARD,
-                        hideReasoning = false
-                    )
-                } else {
-                    current
-                }
-                backendParams.copy(nPredict = backendParams.effectiveNPredict())
-            }
-            if (effectiveChatBackend == ChatBackend.LOCAL && baseParams != initialState.params) {
-                persistGenerationParams(baseParams)
-                generationUiPublisher.publishNormalizedTurnParams(baseParams)
-            }
-            val requestParams = assistantSnapshot?.applyTo(baseParams) ?: baseParams
-            val memoryForTurn = if (characterMemoryEnabled) {
-                withContext(Dispatchers.IO) {
-                    chatSessionStore.loadMemories(frozenAssistantId) to
-                        chatSessionStore.loadMemoryTurns(frozenAssistantId)
-                }
-            } else emptyList<MemoryRecord>() to emptyList<AssistantMemoryTurnRecord>()
-            val characterMemoryContextForTurn = if (characterMemoryEnabled) {
-                buildCharacterMemoryContext(
-                    assistantId = frozenAssistantId,
-                    memories = memoryForTurn.first,
-                    pendingTurns = memoryForTurn.second,
-                    currentSessionId = frozenSession.id
-                )
-            } else ""
-            val frozenRoleCardVersion = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
-                frozenAssistantSnapshot.toJsonString()
+            chatExecutionPort.runChatGeneration(
+                requestMessages = requestMessages,
+                reservation = admittedReservation,
+                replyMetrics = replyMetrics,
+                toolExchanges = toolExchanges,
+                paramsOverride = paramsOverride,
+                offerAssistantImageTool = offerAssistantImageTool,
+                chatModelIdOverride = chatModelIdOverride,
+                continuationRequestId = continuationRequestId,
+                preflightCompression = preflightCompression
             )
-            val frozenMemoryRevision = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
-                buildString {
-                    append(frozenAssistantId).append('\n')
-                    memoryForTurn.first.sortedBy { it.id }.forEach { memory ->
-                        append(memory.id).append('\u001f').append(memory.scope).append('\u001f')
-                            .append(memory.content).append('\n')
-                    }
-                    memoryForTurn.second.sortedBy { it.id }.forEach { turn ->
-                        append(turn.id).append('\u001f').append(turn.sessionId).append('\u001f')
-                            .append(turn.userText).append('\u001f').append(turn.assistantText).append('\n')
-                    }
-                }
-            )
-            // A private summary request completes before the normal chat request takes
-            // the runtime lease. Original messages remain the revision source.
-            val manualCompression = manualContextCompressionRequests.consume(initialState.activeChatSessionId)
-            val compressionThreshold = loadContextCompressionThreshold()
-            if (manualCompression) {
-                generationUiPublisher.publishManualCompressionConsumed()
-            }
-            val summaryRecords = frozenSession.contextSummaries
-            val allowSummaryCandidate = manualCompression || summaryRecords.isEmpty() || summaryRecords.any { it.active }
-            val compression = summarizeContextForGeneration(
-                request = ChatRequest(
-                    messages = requestMessages,
-                    params = requestParams,
-                    runtimeSystemContext = preflightCompression?.request?.runtimeSystemContext
-                        ?.takeIf(String::isNotBlank) ?: characterMemoryContextForTurn,
-                    protectedMessageIds = requestMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id }
-                ),
-                settings = ContextCompressionSettings(
-                    threshold = compressionThreshold,
-                    keepRecentMessages = 8
-                ),
-                trigger = if (manualCompression || preflightCompression?.didCompress == true) {
-                    ContextCompressionTrigger.MANUAL
-                } else {
-                    ContextCompressionTrigger.AUTOMATIC
-                },
-                initialState = initialState,
-                effectiveBackend = effectiveChatBackend,
-                cloudModelIdOverride = chatModelIdOverride,
-                generationRunId = generationRunId,
-                useModel = allowSummaryCandidate
-            )
-            if (effectiveChatBackend == ChatBackend.LOCAL && !ensureLocalConversationContextInvalidated()) return@launch
-            if (!generationStillOwnsUi()) return@launch
-            val summaryScope = requestParams.systemPrompt + "\n" +
-                assistantSnapshot?.toJsonString().orEmpty()
-            val preparedSummary = if (allowSummaryCandidate) {
-                contextSummaryCandidate(
-                    originals = requestMessages, result = compression,
-                    previous = summaryRecords, scope = summaryScope
-                )
-            } else null
-            val reusableSummary = summaryRecords.lastOrNull { it.appliesTo(requestMessages, summaryScope) }
-            val summaryCandidate = preparedSummary?.takeUnless {
-                it.sourceFingerprint == reusableSummary?.sourceFingerprint &&
-                    it.scopeFingerprint == reusableSummary?.scopeFingerprint && it.text == reusableSummary?.text
-            }
-            val effectiveRequestMessages = summaryCandidate?.projectCandidate(requestMessages, summaryScope)
-                ?: reusableSummary?.project(requestMessages, summaryScope)
-                ?: requestMessages
-            if (effectiveRequestMessages !== requestMessages) {
-                generationUiPublisher.publishContextCompressedStatus(compression.compressedMessageCount)
-            }
-            val imageModelBindingForToolTurn = initialState.chatImageModelBinding()
-            val configuredPersonaForTurn = assistantSnapshot
-                ?.systemPrompt
-                ?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: requestParams.systemPrompt.trim().takeIf { it.isNotBlank() }
-            val persistentLlamaPrefix = configuredPersonaForTurn.takeIf {
-                initialState.persistentPrefixCacheEnabled &&
-                    activeRuntimeIdentity?.runtime == LocalChatRuntime.LLAMA_CPP
-            }
-            val runtimeContextPlan = withContext(Dispatchers.IO) {
-                chatContextComposer.compose(
-                    messages = effectiveRequestMessages,
-                    params = requestParams,
-                    assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId,
-                    chatSessionId = initialState.activeChatSessionId,
-                    knowledgeBaseIds = initialState.selectedKnowledgeBaseIds,
-                    fileContextEnabled = assistantSnapshot?.fileContextEnabled
-                        ?: initialState.selectedAssistant()?.fileContextEnabled
-                        ?: true
-                )
-            }
-            // The wording decision now lives in ChatContextOperations.turnContextStatus, pinned by tests.
-            val contextSnapshot = initialState.chatContextSnapshot(
-                assistantId = assistantSnapshot?.assistantId ?: initialState.selectedAssistantId,
-                // Same fallback chain the composer call above uses, resolved at the same moment.
-                fileContextEnabled = assistantSnapshot?.fileContextEnabled
-                    ?: initialState.selectedAssistant()?.fileContextEnabled
-                    ?: true
-            )
-            val contextStatus = ChatContextOperations.turnContextStatus(contextSnapshot, runtimeContextPlan)
-            if (contextStatus != null) {
-                generationUiPublisher.publishContextStatusMessage(contextStatus)
-            }
-            val webSearchTurnMode = if (initialState.webSearchOneShotEnabled) {
-                WebSearchTurnMode.ON
-            } else {
-                initialState.webSearchTurnMode
-            }
-            val webSearchConfigForTurn = initialState.webSearchResearchModeOverride?.let { researchMode ->
-                initialState.webSearchConfig.copy(researchMode = researchMode)
-            } ?: initialState.webSearchConfig
-            if (
-                initialState.webSearchOneShotEnabled ||
-                initialState.webSearchTurnMode != WebSearchTurnMode.FOLLOW ||
-                initialState.webSearchResearchModeOverride != null
-            ) {
-                generationUiPublisher.publishWebSearchTurnReset()
-            }
-            var browserSearchTaskId: String? = null
-            val rawWebSearchTurn = executeWebSearchForChatTurn(
-                messages = effectiveRequestMessages,
-                config = webSearchConfigForTurn,
-                oneShotEnabled = webSearchTurnMode == WebSearchTurnMode.ON,
-                assistantWebSearchEnabled = assistantSnapshot?.webSearchEnabled
-                    ?: (initialState.selectedAssistant()?.webSearchEnabled == true),
-                turnMode = webSearchTurnMode,
-                search = { plan, config ->
-                    supervisorScope {
-                        val taskId = browserSearchTaskId
-                        if (taskId != null && _uiState.value.browserTask?.let { task ->
-                                task.taskId == taskId && task.phase ==
-                                    com.muyuchat.feature.chat.BrowserTaskPhase.CANCELLED
-                            } == true
-                        ) throw CancellationException("Browser search task cancelled")
-                        val deferred = async(Dispatchers.IO) { webSearchProvider.search(plan, config) }
-                        activeWebSearchDeferred = deferred
-                        activeWebSearchTaskId = taskId
-                        try {
-                            deferred.await()
-                        } finally {
-                            if (activeWebSearchDeferred === deferred) {
-                                activeWebSearchDeferred = null
-                                activeWebSearchTaskId = null
-                            }
-                        }
-                    }
-                },
-                beforeSearch = { plan, triggerReasons ->
-                    val task = com.muyuchat.feature.chat.BrowserTaskStateMachine.beginBackgroundSearch(
-                        owner = "chat-web-search",
-                        sessionId = initialState.activeChatSessionId,
-                        messageId = initialState.messages.lastOrNull()
-                            ?.takeIf { it.role == Role.ASSISTANT && it.content.isBlank() }?.id
-                            ?: requestMessages.lastOrNull { it.role == Role.USER }?.id,
-                        query = plan.displayQuery
-                    )
-                    if (generationUiPublisher.publishBrowserSearchTaskStart(task)) {
-                        browserSearchTaskId = task.taskId
-                    }
-                    attachWebSearchEvidenceToPendingAssistant(
-                        sources = emptyList(),
-                        trace = plan.toPendingChatWebSearchTrace(
-                            config = webSearchConfigForTurn,
-                            triggerReasons = triggerReasons
-                        ),
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.publishWebSearchStartStatus(plan.displayQuery)
-                }
-            )
-            val searchTaskCancelled = browserSearchTaskId?.let { taskId ->
-                _uiState.value.browserTask?.let { task ->
-                    task.taskId == taskId &&
-                        task.phase == com.muyuchat.feature.chat.BrowserTaskPhase.CANCELLED
-                }
-            } == true
-            val webSearchTurn = if (searchTaskCancelled) rawWebSearchTurn.copy(
-                success = false,
-                promptContext = "",
-                sourceReferences = emptyList(),
-                webSearchStatusMessage = "联网检索已取消",
-                statusMessage = "联网检索已取消，本轮继续聊天。"
-            ) else rawWebSearchTurn
-            browserSearchTaskId?.let { taskId ->
-                generationUiPublisher.publishBrowserSearchResults(
-                    taskId = taskId,
-                    urls = webSearchTurn.sourceReferences.map(ChatSourceReference::url),
-                    message = webSearchTurn.webSearchStatusMessage
-                )
-            }
-            val runtimeSystemContextForTurn = listOf(
-                runtimeContextPlan.runtimeSystemContext,
-                characterMemoryContextForTurn,
-                webSearchTurn.promptContext
-            )
-                .filter { it.isNotBlank() }
-                .distinct()
-                .joinToString("\n\n")
-            attachWebSearchEvidenceToPendingAssistant(
-                sources = webSearchTurn.sourceReferences,
-                trace = webSearchTurn.diagnostic?.toChatWebSearchTrace(),
-                generationRunId = generationRunId
-            )
-            if (webSearchTurn.requested) {
-                val diagnostics = webSearchTurn.diagnostic?.let(::appendWebSearchDiagnostic)
-                generationUiPublisher.publishWebSearchOutcome(
-                    webSearchStatusMessage = webSearchTurn.webSearchStatusMessage,
-                    diagnostics = diagnostics,
-                    statusMessage = webSearchTurn.statusMessage
-                )
-            }
-            val contextAdmission = localContextWindowAdmission(
-                ChatRequest(
-                    messages = effectiveRequestMessages,
-                    params = requestParams,
-                    protectedMessageIds = requestMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                    runtimeSystemContext = runtimeSystemContextForTurn
-                )
-            )
-            if (!contextAdmission.isAccepted) {
-                appendAssistant(
-                    "\n${contextAdmission.userMessage ?: "当前请求超过模型上下文窗口，请压缩历史对话或缩短输入后重试。"}",
-                    generationRunId = generationRunId
-                )
-                generationUiPublisher.refuseGenerationBeforeStream(
-                    contextAdmission.userMessage ?: "当前请求超过模型上下文窗口"
-                )
-                persistChatSessions(generationRunId = generationRunId)
-                return@launch
-            }
-            generationUiPublisher.publishPromptContextUsage(
-                promptContextUsageFor(
-                    plan = runtimeContextPlan,
-                    admission = contextAdmission,
-                    params = requestParams
-                )
-            )
-            // Admission may deterministically trim older turns after the
-            // compression pass.  Use that exact list for every provider; the
-            // full list remains in the persisted session for future summaries.
-            val admittedRequestMessages = contextAdmission.request.messages
-            // Live KV invalidation changes on every role switch. Keep the disk identity
-            // stable for a return visit; native token-prefix validation rejects edited history.
-            val frozenContextRevision = com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(
-                buildString {
-                    append(frozenSession.id).append('\n')
-                    summaryRecords.forEach { append(it.toString()).append('\n') }
-                    summaryCandidate?.let { append(it.toString()) }
-                }
-            )
-            attachContextAssemblyTrace(
-                withContext(Dispatchers.IO) { runtimeContextPlan.trace?.toJsonString() },
-                generationRunId,
-                initialState.activeChatSessionId,
-                initialState.messages.lastOrNull { it.role == Role.ASSISTANT }?.id
-            )
-            val state = _uiState.value
-            val hasImageAttachments = admittedRequestMessages.any { it.imageAttachments.isNotEmpty() }
-            var localUiRequestId: String? = null
-            var cloudModelIdForToolTurn: String? = chatModelIdOverride
-            var chatModelIdentityForToolTurn: String? = null
-            var chatConfigForToolTurn: CloudApiConfig? = null
-            val stream = if (effectiveChatBackend == ChatBackend.CLOUD) {
-                val cloudConfig = (chatModelIdOverride?.let { modelId ->
-                    state.cloudModels.firstOrNull {
-                        it.id == modelId && it.kind == CloudModelKind.CHAT && it.configured
-                    }?.toChatConfig()
-                } ?: state.selectedChatCloudConfig())?.normalized()
-                if (cloudConfig == null) {
-                    appendAssistant(
-                        "\n请先在模型管理 > 云端 加载一个对话推理模型。",
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.refuseGenerationBeforeStream("未加载云端推理模型")
-                    persistChatSessions(generationRunId = generationRunId)
-                    return@launch
-                }
-                chatConfigForToolTurn = cloudConfig
-                cloudModelIdForToolTurn = chatModelIdOverride ?: initialState.currentChatModelId()
-                chatModelIdentityForToolTurn = chatImageToolChatModelIdentity(
-                    cloudModelIdForToolTurn,
-                    cloudConfig
-                )
-                if (hasImageAttachments && !cloudConfig.supportsVision) {
-                    appendAssistant(
-                        "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.refuseGenerationBeforeStream("云端识图未启用")
-                    persistChatSessions(generationRunId = generationRunId)
-                    return@launch
-                }
-                val cloudMessages = runCatching {
-                    admittedRequestMessages.withInlineImageDataForCloud()
-                }.getOrElse { error ->
-                    appendAssistant(
-                        "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.refuseGenerationBeforeStream("图片读取失败")
-                    persistChatSessions(generationRunId = generationRunId)
-                    return@launch
-                }
-                cloudChatProvider.streamChat(
-                    cloudConfig,
-                    ChatRequest(
-                        messages = cloudMessages,
-                        params = requestParams,
-                        runtimeSystemContext = runtimeSystemContextForTurn,
-                        tools = if (offerAssistantImageTool && toolExchanges.isEmpty() &&
-                            cloudConfig.apiFormat == CloudApiFormat.OPENAI_RESPONSES &&
-                            cloudConfig.supportsTools &&
-                            imageModelBindingForToolTurn != null
-                        ) {
-                            listOf(chatImageToolDefinition())
-                        } else {
-                            emptyList()
-                        },
-                        toolExchanges = toolExchanges
-                    )
-                )
-            } else {
-                if (hasImageAttachments && !localVisionRunnerAvailable()) {
-                    appendAssistant(
-                        "\n${state.localVisionUnavailableMessage()}",
-                        generationRunId = generationRunId
-                    )
-                    generationUiPublisher.refuseGenerationBeforeStream("本地视觉 runner 未启用")
-                    persistChatSessions(generationRunId = generationRunId)
-                    return@launch
-                }
-                val localMessages = if (hasImageAttachments) {
-                    runCatching { admittedRequestMessages.withLocalImageFilesForVision(preparedUiVisionFiles) }
-                        .getOrElse { error ->
-                            appendAssistant(
-                                "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
-                                generationRunId = generationRunId
-                            )
-                            generationUiPublisher.refuseGenerationBeforeStream("本地图片预处理失败")
-                            persistChatSessions(generationRunId = generationRunId)
-                            return@launch
-                        }
-                } else {
-                    admittedRequestMessages
-                }
-                val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
-                localUiRequestId = uiRequestId
-                val executionContext = LocalChatExecutionContext(requestId = uiRequestId)
-                // The editor may contain a not-yet-applied load-bound value.
-                // Ordinary chat must continue with the committed profile until
-                // the explicit reload transaction succeeds.
-                val activeRequestParams = engine.activeExecutionProfile()
-                    ?.let { profile -> mergeExecutionProfile(requestParams, profile) }
-                    ?: requestParams
-                LocalApiRuntime.streamChat(
-                    ChatRequest(
-                        messages = localMessages,
-                        params = activeRequestParams,
-                        runtimeSystemContext = runtimeSystemContextForTurn,
-                        persistentPrefixSystemPrompt = persistentLlamaPrefix,
-                        persistentSessionId = frozenSession.id,
-                        persistentRoleId = frozenAssistantId,
-                        persistentRoleCardVersion = frozenRoleCardVersion,
-                        persistentMemoryVersion = frozenMemoryRevision,
-                        protectedMessageIds = localMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                        conversationContextRevision = frozenContextRevision
-                    ),
-                    executionContext
-                ) ?: engine.streamChat(
-                    ChatRequest(
-                        messages = localMessages,
-                        params = activeRequestParams,
-                        runtimeSystemContext = runtimeSystemContextForTurn,
-                        persistentPrefixSystemPrompt = persistentLlamaPrefix,
-                        persistentSessionId = frozenSession.id,
-                        persistentRoleId = frozenAssistantId,
-                        persistentRoleCardVersion = frozenRoleCardVersion,
-                        persistentMemoryVersion = frozenMemoryRevision,
-                        protectedMessageIds = localMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                        conversationContextRevision = frozenContextRevision
-                    ),
-                    executionContext
-                )
-            }
-            val runtimePhase = if (effectiveChatBackend == ChatBackend.LOCAL) {
-                UiGenerationRuntimePhase.LOCAL_ACTIVE
-            } else {
-                UiGenerationRuntimePhase.CLOUD_ACTIVE
-            }
-            if (!chatRuns.markPhase(
-                    generationRunId,
-                    selfJob,
-                    runtimePhase
-                )
-            ) {
-                return@launch
-            }
-            stream.collect { event ->
-                // Flow cancellation is cooperative. A transport can therefore
-                // deliver a late event after a newer generation has claimed the
-                // UI; never let that event overwrite the newer projection.
-                if (!generationStillOwnsUi()) return@collect
-                if (terminalEventSeen) return@collect
-                when (event) {
-                    is GenerateEvent.Phase -> {
-                        if (!generationStillOwnsUi()) return@collect
-                        generationUiPublisher.publishStreamPhase(
-                            event.stats,
-                            event.phase,
-                            event.tokenProgress
-                        )
-                    }
-                    is GenerateEvent.Chunk -> {
-                        if (!generationStillOwnsUi()) return@collect
-                        replyMetrics.record(event.stats)
-                        appendAssistant(
-                            delta = event.text,
-                            reasoningDelta = event.reasoning,
-                            reasoningDurationMs = event.reasoningDurationMs,
-                            generationRunId = generationRunId
-                        )
-                        generationUiPublisher.publishStreamChunkStats(event.stats)
-                    }
-                    is GenerateEvent.Persist -> {
-                        if (!generationStillOwnsUi() || !event.progress.isActive) return@collect
-                        generationUiPublisher.publishPersistProgress(event.progress)
-                    }
-                    is GenerateEvent.Done -> {
-                        if (!generationStillOwnsUi()) return@collect
-                        replyMetrics.record(event.stats)
-                        chatRuns.markPhase(
-                            generationRunId,
-                            selfJob,
-                            UiGenerationRuntimePhase.TERMINAL
-                        )
-                        terminalEventSeen = true
-                        // This must happen before diagnostics, persistence, or
-                        // any Binder-backed reads. Those operations can be slow
-                        // or fail after native generation has already completed.
-                        settleGenerationUi(event.stats)
-                        if (!generationStillOwnsUi()) return@collect
-                        try {
-                            flushPendingAssistantOutput(generationRunId)
-                            if (!generationStillOwnsUi()) return@collect
-                            if (event.toolCalls.isNotEmpty()) {
-                                val handled = handleAssistantImageToolCalls(
-                                    calls = event.toolCalls,
-                                    originalRequestMessages = requestMessages,
-                                    paramsBeforeAssistant = requestParams,
-                                    chatSessionId = initialState.activeChatSessionId,
-                                    cloudModelId = cloudModelIdForToolTurn,
-                                    chatModelIdentity = chatModelIdentityForToolTurn,
-                                    imageModelBinding = imageModelBindingForToolTurn,
-                                    chatConfig = chatConfigForToolTurn
-                                )
-                                if (handled) {
-                                    persistChatSessions(generationRunId = generationRunId)
-                                    return@collect
-                                }
-                            }
-                            val requestId = localUiRequestId
-                            val sequence = if (requestId == null) {
-                                null
-                            } else {
-                                withContext(Dispatchers.IO) {
-                                    LocalApiRuntime.generationSequence()
-                                }
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            if (requestId != null && sequence != null) {
-                                // Pair the UI-owned request id with the native
-                                // sequence for the redacted acceptance trace.
-                                // The context id is also the one registered by
-                                // LocalApiRuntime.streamChat above.
-                                LocalApiRuntime.recordGenerationSequence(requestId, sequence)
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            val citationAudit = applyWebSearchAnswerGuardsToLastAssistant(generationRunId)
-                            if (citationAudit != null) {
-                                recordWebSearchCitationAudit(
-                                    webSearchTurn.diagnostic?.id,
-                                    citationAudit,
-                                    generationRunId
-                                )
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            ensureVisibleAssistantReplyAfterCompletion(generationRunId)
-                            if (summaryCandidate != null && generationStillOwnsUi() &&
-                                admittedRequestMessages.any { it.id == "summary-${summaryCandidate.id}" }
-                            ) {
-                                val activated = generationUiPublisher.publishContextSummaryActivation(
-                                    candidate = summaryCandidate,
-                                    scope = summaryScope,
-                                    expectedSessionId = initialState.activeChatSessionId,
-                                    frozenSessionId = frozenSession.id,
-                                    frozenAssistantId = frozenAssistantId,
-                                    frozenAssistantSnapshot = frozenAssistantSnapshot
-                                )
-                                if (activated) {
-                                    localConversationContextNeedsInvalidation = true
-                                    localConversationContextInvalidationSequence.incrementAndGet()
-                                }
-                            }
-                            val logs = if (state.selectedChatBackend == ChatBackend.LOCAL) {
-                                withContext(Dispatchers.IO) { engine.recentLogs() }
-                            } else {
-                                null
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            if (logs != null && generationStillOwnsUi()) {
-                                generationUiPublisher.publishRuntimeLogs(logs)
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            val conversationPersistJob = persistChatSessions(generationRunId = generationRunId)
-                            if (event.toolCalls.isEmpty() && characterMemoryEnabled && assistantSnapshot != null) {
-                                val completedState = _uiState.value
-                                val expectedReplyId = initialState.messages.lastOrNull {
-                                    it.role == Role.ASSISTANT
-                                }?.id
-                                val reply = completedState.messages.lastOrNull {
-                                    it.role == Role.ASSISTANT && it.id == expectedReplyId
-                                }
-                                val user = requestMessages.lastOrNull { it.role == Role.USER }
-                                val sessionId = initialState.activeChatSessionId
-                                if (reply != null && user != null && sessionId != null &&
-                                    completedState.activeChatSessionId == sessionId
-                                ) {
-                                    recordCompletedCharacterMemoryTurn(
-                                        assistantId = assistantSnapshot.assistantId,
-                                        sessionId = sessionId,
-                                        assistantSnapshot = assistantSnapshot,
-                                        user = user,
-                                        assistant = reply,
-                                        conversationPersistJob = conversationPersistJob,
-                                        backend = effectiveChatBackend,
-                                        params = requestParams,
-                                        cloudConfig = chatConfigForToolTurn,
-                                        localIdentity = activeRuntimeIdentity?.identityHash
-                                    )
-                                }
-                            }
-                            continuationCompleted = true
-                        } catch (error: CancellationException) {
-                            throw error
-                        } catch (error: Throwable) {
-                            continuationFailureMessage = "角色回复收尾失败：${error.message ?: "未知错误"}"
-                            settleGenerationUi(
-                                event.stats,
-                                "生成已完成，但收尾处理失败：${error.message ?: "未知错误"}"
-                            )
-                        }
-                    }
-                    is GenerateEvent.Error -> {
-                        if (!generationStillOwnsUi()) return@collect
-                        chatRuns.markPhase(
-                            generationRunId,
-                            selfJob,
-                            UiGenerationRuntimePhase.TERMINAL
-                        )
-                        terminalEventSeen = true
-                        settleGenerationUi(event.stats, event.message)
-                        continuationFailureMessage = event.message.ifBlank { continuationFailureMessage }
-                        if (!generationStillOwnsUi()) return@collect
-                        try {
-                            flushPendingAssistantOutput(generationRunId)
-                            if (!generationStillOwnsUi()) return@collect
-                            val requestId = localUiRequestId
-                            val sequence = if (requestId == null) {
-                                null
-                            } else {
-                                withContext(Dispatchers.IO) {
-                                    LocalApiRuntime.generationSequence()
-                                }
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            if (requestId != null && sequence != null) {
-                                LocalApiRuntime.recordGenerationSequence(requestId, sequence)
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            if (event.isConfigurationActionError()) {
-                                removePendingAssistantPlaceholder(generationRunId)
-                            } else {
-                                appendAssistant(
-                                    "\n${event.message}",
-                                    generationRunId = generationRunId
-                                )
-                            }
-                            if (!generationStillOwnsUi()) return@collect
-                            persistChatSessions(generationRunId = generationRunId)
-                        } catch (error: CancellationException) {
-                            throw error
-                        } catch (error: Throwable) {
-                            continuationFailureMessage = "角色回复收尾失败：${error.message ?: "未知错误"}"
-                            settleGenerationUi(
-                                event.stats,
-                                "${event.message}；生成收尾失败：${error.message ?: "未知错误"}"
-                            )
-                        }
-                    }
-                }
-            }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Throwable) {
-                chatRuns.markPhase(
-                    generationRunId,
-                    selfJob,
-                    UiGenerationRuntimePhase.TERMINAL
-                )
-                terminalEventSeen = true
-                val message = error.message?.takeIf { it.isNotBlank() }
-                    ?: error::class.java.simpleName
-                continuationFailureMessage = "角色回复失败：$message"
-                val stats = engine.stats.value.copy(lastError = message)
-                settleGenerationUi(stats, "生成失败：$message")
-                if (!generationStillOwnsUi()) return@launch
-                try {
-                    flushPendingAssistantOutput(generationRunId)
-                    if (!generationStillOwnsUi()) return@launch
-                    appendAssistant(
-                        "\n生成失败：$message",
-                        forcePublish = true,
-                        generationRunId = generationRunId
-                    )
-                    if (!generationStillOwnsUi()) return@launch
-                    persistChatSessions(generationRunId = generationRunId)
-                } catch (finalizationError: CancellationException) {
-                    throw finalizationError
-                } catch (_: Throwable) {
-                    // The UI has already been released; do not let a secondary
-                    // persistence failure leave the generation lock behind.
-                }
-            } finally {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    preparedUiVisionFiles.forEach { file -> runCatching { file.delete() } }
-                    preparedUiVisionFiles.clear()
-                }
-                chatRuns.markPhase(
-                    generationRunId,
-                    selfJob,
-                    UiGenerationRuntimePhase.TERMINAL
-                )
-                if (!terminalEventSeen && generationStillOwnsUi()) {
-                    val fallbackStats = engine.stats.value
-                    generationUiPublisher.publishFallbackTermination(
-                        fallbackStats,
-                        "生成流已结束，但运行时未返回完成状态，请重试。",
-                        { replyMetrics.finish() }
-                    )
-                    try {
-                        flushPendingAssistantOutput(generationRunId)
-                        if (generationStillOwnsUi()) {
-                            persistChatSessions(generationRunId = generationRunId)
-                        }
-                    } catch (_: Throwable) {
-                        // The terminal UI state above is intentionally independent
-                        // from best-effort output persistence.
-                    }
-                }
-                continuationRequestId?.let { requestId ->
-                    finishAssistantImageContinuation(
-                        requestId = requestId,
-                        completed = continuationCompleted,
-                        failureMessage = continuationFailureMessage
-                    )
-                }
-            }
         }
         if (!chatRuns.activate(admittedReservation, ownedGenerationJob)) {
             ownedGenerationJob.cancel()
@@ -13011,6 +12254,94 @@ contextTraceJson: String?
         cancelActiveLocalApiImageGeneration("Local API server stopped.")
         LocalApiForegroundService.stopListener()
     }
+
+    /** The ViewModel side of [ChatGenerationExecutionPort]. */
+    private val chatExecutionPort: ChatGenerationExecutionPort =
+        object : ChatGenerationExecutionPort {
+            override val uiState: MutableStateFlow<MainUiState> = this@MainViewModel._uiState
+            override val engine: McaInferenceService = this@MainViewModel.engine
+            override val chatRuns: ChatRunOwnership = this@MainViewModel.chatRuns
+            override val chatSessionStore: ChatSessionStore = this@MainViewModel.chatSessionStore
+            override val chatContextComposer: ChatContextComposer = this@MainViewModel.chatContextComposer
+            override val cloudChatProvider: OpenAiCompatibleChatProvider = this@MainViewModel.cloudChatProvider
+            override val webSearchProvider: WebSearchProvider = this@MainViewModel.webSearchProvider
+            override val manualContextCompressionRequests: ContextCompressionRequestStore = this@MainViewModel.manualContextCompressionRequests
+            override val localConversationContextInvalidationSequence: AtomicLong = this@MainViewModel.localConversationContextInvalidationSequence
+            override var activeWebSearchDeferred:  Deferred<WebSearchResult>?
+                get() = this@MainViewModel.activeWebSearchDeferred
+                set(value) { this@MainViewModel.activeWebSearchDeferred = value }
+            override var activeWebSearchTaskId:  String?
+                get() = this@MainViewModel.activeWebSearchTaskId
+                set(value) { this@MainViewModel.activeWebSearchTaskId = value }
+            override var localConversationContextNeedsInvalidation:  Boolean
+                get() = this@MainViewModel.localConversationContextNeedsInvalidation
+                set(value) { this@MainViewModel.localConversationContextNeedsInvalidation = value }
+            override val foregroundRecoveryJob: Job? = this@MainViewModel.foregroundRecoveryJob
+
+            override fun persistChatSessions(sessions: List<ChatSessionRecord>?, knowledgeBinding: Pair<String, Set<String>>?, generationRunId: Long?) = this@MainViewModel.persistChatSessions(sessions, knowledgeBinding, generationRunId)
+
+            override fun appendAssistant(delta: String, reasoningDelta: String, reasoningDurationMs: Long, forcePublish: Boolean, generationRunId: Long?) = this@MainViewModel.appendAssistant(delta, reasoningDelta, reasoningDurationMs, forcePublish, generationRunId)
+
+            override fun flushPendingAssistantOutput(generationRunId: Long?) = this@MainViewModel.flushPendingAssistantOutput(generationRunId)
+
+            override fun removePendingAssistantPlaceholder(generationRunId: Long?) = this@MainViewModel.removePendingAssistantPlaceholder(generationRunId)
+
+            override fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long?) = this@MainViewModel.ensureVisibleAssistantReplyAfterCompletion(generationRunId)
+
+            override fun applyWebSearchAnswerGuardsToLastAssistant(generationRunId: Long?) = this@MainViewModel.applyWebSearchAnswerGuardsToLastAssistant(generationRunId)
+
+            override fun recordWebSearchCitationAudit(recordId: String?, audit: WebSearchCitationAudit, generationRunId: Long?) = this@MainViewModel.recordWebSearchCitationAudit(recordId, audit, generationRunId)
+
+            override fun attachWebSearchEvidenceToPendingAssistant(sources: List<ChatSourceReference>, trace: ChatWebSearchTrace?, generationRunId: Long?) = this@MainViewModel.attachWebSearchEvidenceToPendingAssistant(sources, trace, generationRunId)
+
+            override fun attachContextAssemblyTrace(traceJson: String?, generationRunId: Long, sessionId: String?, assistantMessageId: String?) = this@MainViewModel.attachContextAssemblyTrace(traceJson, generationRunId, sessionId, assistantMessageId)
+
+            override fun promptContextUsageFor(plan: ChatRuntimeContextPlan, admission: ContextWindowAdmission, params: GenerationParams) = this@MainViewModel.promptContextUsageFor(plan, admission, params)
+
+            override fun appendWebSearchDiagnostic(record: WebSearchDiagnosticRecord) = this@MainViewModel.appendWebSearchDiagnostic(record)
+
+            override fun recordCompletedCharacterMemoryTurn(assistantId: String, sessionId: String, assistantSnapshot: AssistantConversationSnapshot, user: ChatMessage, assistant: ChatMessage, conversationPersistJob: Job?, backend: ChatBackend, params: GenerationParams, cloudConfig: CloudApiConfig?, localIdentity: String?) = this@MainViewModel.recordCompletedCharacterMemoryTurn(assistantId, sessionId, assistantSnapshot, user, assistant, conversationPersistJob, backend, params, cloudConfig, localIdentity)
+
+            override suspend fun summarizeContextForGeneration(request: ChatRequest, settings: ContextCompressionSettings, trigger: ContextCompressionTrigger, initialState: MainUiState, effectiveBackend: ChatBackend, cloudModelIdOverride: String?, generationRunId: Long, useModel: Boolean) = this@MainViewModel.summarizeContextForGeneration(request, settings, trigger, initialState, effectiveBackend, cloudModelIdOverride, generationRunId, useModel)
+
+            override suspend fun ensureLocalConversationContextInvalidated() = this@MainViewModel.ensureLocalConversationContextInvalidated()
+
+            override fun loadContextCompressionThreshold() = this@MainViewModel.loadContextCompressionThreshold()
+
+            override suspend fun handleAssistantImageToolCalls(calls: List<ChatToolCall>, originalRequestMessages: List<ChatMessage>, paramsBeforeAssistant: GenerationParams, chatSessionId: String?, cloudModelId: String?, chatModelIdentity: String?, imageModelBinding: AssistantImageModelBinding?, chatConfig: CloudApiConfig?) = this@MainViewModel.handleAssistantImageToolCalls(calls, originalRequestMessages, paramsBeforeAssistant, chatSessionId, cloudModelId, chatModelIdentity, imageModelBinding, chatConfig)
+
+            override fun finishAssistantImageContinuation(requestId: String, completed: Boolean, failureMessage: String) = this@MainViewModel.finishAssistantImageContinuation(requestId, completed, failureMessage)
+
+            override fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?) = this@MainViewModel.chatImageToolChatModelIdentity(modelId, config)
+
+            override suspend fun localVisionRunnerAvailable() = this@MainViewModel.localVisionRunnerAvailable()
+
+            override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = this@MainViewModel.mergeExecutionProfile(generation, profile)
+
+            override fun persistGenerationParams(params: GenerationParams) = this@MainViewModel.persistGenerationParams(params)
+
+            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean = state.canWriteToActiveAssistantSession()
+
+            override fun selectedAssistant(state: MainUiState): AssistantRecord? = state.selectedAssistant()
+
+            override fun selectedChatCloudConfig(state: MainUiState): CloudApiConfig? = state.selectedChatCloudConfig()
+
+            override fun currentChatModelId(state: MainUiState): String? = state.currentChatModelId()
+
+            override fun chatImageModelBinding(state: MainUiState): AssistantImageModelBinding? = state.chatImageModelBinding()
+
+            override val activeRuntimeIdentity: ModelRuntimeIdentity? = this@MainViewModel.activeRuntimeIdentity
+
+            override fun localVisionUnavailableMessage(state: MainUiState): String = state.localVisionUnavailableMessage()
+
+            override fun chatContextSnapshot(state: MainUiState, assistantId: String, fileContextEnabled: Boolean): ChatContextSnapshot = state.chatContextSnapshot(assistantId, fileContextEnabled)
+
+            override fun isConfigurationActionError(event: GenerateEvent.Error): Boolean = event.isConfigurationActionError()
+
+            override suspend fun withInlineImageDataForCloud(messages: List<ChatMessage>): List<ChatMessage> = messages.withInlineImageDataForCloud()
+
+            override suspend fun withLocalImageFilesForVision(messages: List<ChatMessage>, createdFiles: MutableList<File>): List<ChatMessage> = messages.withLocalImageFilesForVision(createdFiles)
+        }
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
     private val chatImagePromptBridgePort: ChatImagePromptBridgePort =

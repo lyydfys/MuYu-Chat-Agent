@@ -124,7 +124,9 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun terminalEventsReleaseUiBeforeBinderAndPersistenceWorkAndHaveFallback() {
-        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        // P3 step 1 moved the execution body to ChatExecutionOperations.runChatGeneration; the
+        // assertions are unchanged -- the terminal-event sequence is read where it now lives.
+        val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")
         val doneStart = body.indexOf("is GenerateEvent.Done ->")
         val errorStart = body.indexOf("is GenerateEvent.Error ->")
         val done = body.substring(doneStart, errorStart)
@@ -151,8 +153,11 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun staleGenerationEventsCannotWriteIntoANewerUiRun() {
+        // P3 step 1 moved the execution body to ChatExecutionOperations.runChatGeneration; the
+        // assertions are unchanged -- the event-order contract is read where it now lives.
         val source = mainViewModelSource()
-        val body = functionBody(source, "private fun startGeneration(")
+        val execution = chatExecutionOperationsSource()
+        val body = functionBody(execution, "fun ChatGenerationExecutionPort.runChatGeneration(")
         val collect = body.indexOf("stream.collect { event ->")
         val phase = body.indexOf("is GenerateEvent.Phase ->", collect)
         val chunk = body.indexOf("is GenerateEvent.Chunk ->", phase)
@@ -194,7 +199,7 @@ class MainViewModelCompletionFallbackTest {
             source.indexOf("LocalApiRuntime.stopGenerationProvider =")
         )
         assertTrue(provider.contains("substringBefore('-')"))
-        assertTrue(source.contains("ui-\$generationRunId-"))
+        assertTrue(execution.contains("ui-\$generationRunId-"))
     }
 
     @Test
@@ -319,12 +324,15 @@ class MainViewModelCompletionFallbackTest {
     fun startGenerationBodyTakesItsOwnJobFromItsCoroutineScope() {
         // The launch body used to close over the `lateinit var ownedGenerationJob` that was still
         // being assigned while the lambda was built. Resolving the handle from the body's own scope
-        // receiver removes that self-reference -- the documented blocker for ever moving this
-        // execution body to its own owner -- so this shape is pinned until that move happens.
-        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
-        assertTrue(body.contains("val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY)"))
+        // receiver removed that self-reference, which was the documented blocker for moving the
+        // execution body to its own owner. P3 step 1 has now moved it: the launcher shape is pinned
+        // on MainViewModel, the body's own handle and its five markPhase calls on the execution
+        // owner. The assertions are otherwise unchanged.
+        val launcher = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        assertTrue(launcher.contains("val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY)"))
+        assertFalse(launcher.contains("lateinit var ownedGenerationJob"))
+        val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")
         assertTrue(body.contains("val selfJob = requireNotNull(coroutineContext[Job])"))
-        assertFalse(body.contains("lateinit var ownedGenerationJob"))
         val selfOwnedMarkPhases = Regex("""markPhase\(\s*\n\s*generationRunId,\s*\n\s*selfJob,""").findAll(body).count()
         assertEquals("all in-body markPhase calls must pass the body's own handle", 5, selfOwnedMarkPhases)
     }
@@ -540,7 +548,9 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun localSendWaitsForForegroundWorkerReconciliation() {
-        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        // P3 step 1 moved the execution body to ChatExecutionOperations.runChatGeneration; the
+        // wait and its ordering are unchanged -- they are read where they now live.
+        val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")
         // The published-job handle moved behind ChatRunOwnership; the wait itself is unchanged.
         val wait = body.indexOf("chatRuns.publishedJobUnless(foregroundRecoveryJob)")
         val invalidate = body.indexOf("ensureLocalConversationContextInvalidated()")
@@ -577,6 +587,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("ChatStreamAccumulator.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** The owner that runs the chat generation execution body (P3 step 1). */
+    private fun chatExecutionOperationsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("ChatExecutionOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     /** The owner that orchestrates the user-facing stop path. */
