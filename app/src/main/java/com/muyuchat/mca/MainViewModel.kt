@@ -11441,16 +11441,11 @@ contextTraceJson: String?
                 )
                 if (!terminalEventSeen && generationStillOwnsUi()) {
                     val fallbackStats = engine.stats.value
-                    _uiState.update { state ->
-                        if (generationStillOwnsUi() && state.isGenerating) {
-                            state.afterGenerationTerminated(
-                                fallbackStats,
-                                "生成流已结束，但运行时未返回完成状态，请重试。"
-                            ).withReplyGenerationMetrics(replyMetrics.finish())
-                        } else {
-                            state
-                        }
-                    }
+                    generationUiPublisher.publishFallbackTermination(
+                        fallbackStats,
+                        "生成流已结束，但运行时未返回完成状态，请重试。",
+                        { replyMetrics.finish() }
+                    )
                     try {
                         flushPendingAssistantOutput(generationRunId)
                         if (generationStillOwnsUi()) {

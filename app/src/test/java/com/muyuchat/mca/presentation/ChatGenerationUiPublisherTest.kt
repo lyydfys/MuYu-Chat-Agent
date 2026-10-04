@@ -1,16 +1,20 @@
 package com.muyuchat.mca.presentation
 
+import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.PersistStage
 import com.muyuchat.core.engine.PromptContextUsage
+import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.ReplyGenerationMetrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Test
@@ -155,6 +159,39 @@ class ChatGenerationUiPublisherTest {
     }
 
     @Test
+    fun fallbackTerminationSettlesOnlyAGeneratingStateAndFinishesMetricsLazily() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val stats = RuntimeStats(loaded = true, completionTokens = 3)
+        val assistant = ChatMessage(Role.ASSISTANT, "answer")
+        val uiState = MutableStateFlow(MainUiState(messages = listOf(assistant)))
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+        var metricsCalls = 0
+
+        // An idle state is left untouched, and the metrics are never finished.
+        publisher.publishFallbackTermination(stats, "生成流已结束", { metricsCalls += 1; null })
+        assertEquals(0, metricsCalls)
+        assertNull(uiState.value.statusMessage)
+
+        // A running state is settled, with the lazily finished metrics attached.
+        val replyMetrics = ReplyGenerationMetrics(7L).apply { record(stats) }
+        uiState.value = MainUiState(
+            isGenerating = true,
+            generationPhase = GenerationPhase.DECODE,
+            messages = listOf(assistant),
+            engineLifecycle = AgentEngineLifecycle.GENERATING
+        )
+        publisher.publishFallbackTermination(stats, "生成流已结束", { replyMetrics.finish() })
+
+        val after = uiState.value
+        assertEquals(false, after.isGenerating)
+        assertEquals("生成流已结束", after.statusMessage)
+        assertNull(after.generationPhase)
+        assertEquals(AgentEngineLifecycle.READY, after.engineLifecycle)
+        assertNotNull(after.messages.last().generationMetrics)
+    }
+
+    @Test
     fun supersededRunCannotPublishAnything() {
         val chatRuns = ChatRunOwnership()
         val firstRunId = ownershipWithFreshRun(chatRuns)
@@ -173,6 +210,7 @@ class ChatGenerationUiPublisherTest {
         stalePublisher.publishPersistProgress(PersistProgress(PersistStage.WRITING, 1, 2))
         stalePublisher.publishRuntimeLogs(emptyList())
         stalePublisher.refuseGenerationBeforeStream("stale refusal")
+        stalePublisher.publishFallbackTermination(RuntimeStats(loaded = true), "stale", { null })
 
         assertEquals(MainUiState(), uiState.value)
 

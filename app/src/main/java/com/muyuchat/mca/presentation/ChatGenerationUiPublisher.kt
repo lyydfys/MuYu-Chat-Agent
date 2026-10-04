@@ -1,5 +1,6 @@
 package com.muyuchat.mca.presentation
 
+import com.muyuchat.core.engine.ChatGenerationMetrics
 import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.PromptContextUsage
@@ -8,6 +9,7 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.withReplyGenerationMetrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 
@@ -122,6 +124,27 @@ internal class ChatGenerationUiPublisher(
                 generationPersistProgress = null,
                 statusMessage = statusMessage
             )
+        }
+    }
+
+    /**
+     * The stream ended without a terminal event: release the lock only while the UI still reports a
+     * running generation, and attach the reply metrics under the same gate. The metrics are finished
+     * lazily -- [finishMetrics] runs only when the state is actually settled -- so a superseded or
+     * already-settled generation does not consume the metrics snapshot.
+     */
+    fun publishFallbackTermination(
+        stats: RuntimeStats,
+        statusMessage: String,
+        finishMetrics: () -> ChatGenerationMetrics?
+    ) {
+        updateGenerationUi { state ->
+            if (state.isGenerating) {
+                state.afterGenerationTerminated(stats, statusMessage)
+                    .withReplyGenerationMetrics(finishMetrics())
+            } else {
+                state
+            }
         }
     }
 }
