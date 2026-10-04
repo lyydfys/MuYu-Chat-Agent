@@ -106,65 +106,18 @@ class ModelScopeClient(
         }
     }
 
-    private fun listModelScopeFiles(repoId: String, revision: String, extensions: Set<String>): List<RemoteModelFile> {
-        val errors = mutableListOf<String>()
-        for (endpoint in endpoints) {
-            val url = "$endpoint/api/v1/models/$repoId/repo/files?Revision=${revision.urlEncode()}&Recursive=true"
-            val request = request(url)
-            val files = runCatching {
-                client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val body = response.body?.string().orEmpty()
-                    val files = collectGgufFiles(
-                        repoId = repoId,
-                        revision = revision,
-                        endpoint = endpoint,
-                        body = body,
-                        provider = ModelRepositoryProvider.MODELSCOPE,
-                        extensions = extensions,
-                        huggingFaceEndpoints = huggingFaceEndpoints
-                    )
-                    require(files.isNotEmpty()) { "未在该仓库找到可下载模型组件。" }
-                    files
-                }
-            }.onFailure { error ->
-                errors += "${endpoint.removePrefix("https://")}: ${error.message}"
-            }.getOrNull()
-            if (!files.isNullOrEmpty()) return files
+    private val modelScopeNetworkPort: ModelScopeNetworkPort =
+        object : ModelScopeNetworkPort {
+            override val client get() = this@ModelScopeClient.client
+            override val endpoints get() = this@ModelScopeClient.endpoints
+            override val huggingFaceEndpoints get() = this@ModelScopeClient.huggingFaceEndpoints
         }
-        error(
-            "ModelScope 文件列表请求失败：repoId=$repoId, revision=$revision。请确认输入的是模型页或 owner/name，" +
-                "不要包含 /summary、/files、/resolve 等页面路径。详情：${errors.joinToString("；")}"
-        )
-    }
 
-    private fun listHuggingFaceFiles(repoId: String, revision: String, extensions: Set<String>): List<RemoteModelFile> {
-        val safeRevision = revision.ifBlank { "main" }
-        val errors = mutableListOf<String>()
-        for (endpoint in huggingFaceEndpoints) {
-            val url = "$endpoint/api/models/${repoId.urlEncodePath()}/tree/${safeRevision.urlEncode()}?recursive=true"
-            val files = runCatching {
-                client.newCall(request(url)).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val files = collectGgufFiles(
-                        repoId = repoId,
-                        revision = safeRevision,
-                        endpoint = endpoint,
-                        body = response.body?.string().orEmpty(),
-                        provider = ModelRepositoryProvider.HUGGING_FACE,
-                        extensions = extensions,
-                        huggingFaceEndpoints = huggingFaceEndpoints
-                    )
-                    require(files.isNotEmpty()) { "未在该 Hugging Face 仓库找到可下载模型组件。" }
-                    files
-                }
-            }.onFailure { error ->
-                errors += "${endpoint.removePrefix("https://")}: ${error.message}"
-            }.getOrNull()
-            if (!files.isNullOrEmpty()) return files
-        }
-        error("Hugging Face 文件列表请求失败：repoId=$repoId, revision=$safeRevision。详情：${errors.joinToString("；")}")
-    }
+    private fun listModelScopeFiles(repoId: String, revision: String, extensions: Set<String>): List<RemoteModelFile> =
+        listModelScopeFilesVia(modelScopeNetworkPort, repoId, revision, extensions)
+
+    private fun listHuggingFaceFiles(repoId: String, revision: String, extensions: Set<String>): List<RemoteModelFile> =
+        listHuggingFaceFilesVia(modelScopeNetworkPort, repoId, revision, extensions)
 
     fun recommendedModels(): List<ModelScopeRecommendedModel> = DEFAULT_RECOMMENDED_MODELS
 
@@ -454,33 +407,9 @@ class ModelScopeClient(
         query: String = "Qwen3.5 MNN",
         pageNumber: Int = 1,
         pageSize: Int = 20
-    ): ModelScopeModelSearchResult {
-        val safeQuery = query.ifBlank { "Qwen3.5 MNN" }
-        val safePage = pageNumber.coerceAtLeast(1)
-        val safeSize = pageSize.coerceIn(5, 50)
-        val errors = mutableListOf<String>()
-        for (endpoint in endpoints) {
-            val url = "$endpoint/openapi/v1/models?page_number=$safePage&page_size=$safeSize&search=${safeQuery.urlEncode()}"
-            val result = runCatching {
-                client.newCall(request(url)).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    parseModelSearchResult(safeQuery, response.body?.string().orEmpty())
-                }
-            }.onFailure { error ->
-                errors += "${endpoint.removePrefix("https://")}: ${error.message}"
-            }.getOrNull()
-            if (result != null) return result
-        }
-        error("ModelScope 模型搜索失败：query=$safeQuery。详情：${errors.joinToString("；")}")
-    }
-
-    private fun request(url: String): Request =
-        Request.Builder()
-            .url(url)
-            .get()
-            .header("User-Agent", "MCA/0.1 ModelScopeClient")
-            .header("Accept", "application/json,*/*")
-            .build()
+    ): ModelScopeModelSearchResult =
+        searchModelsVia(modelScopeNetworkPort, query, pageNumber, pageSize)
+    private fun request(url: String): Request = modelScopeRequest(url)
 
     internal fun parseGgufFilesForTest(
         repoId: String,
