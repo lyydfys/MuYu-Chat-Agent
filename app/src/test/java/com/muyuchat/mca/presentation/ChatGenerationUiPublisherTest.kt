@@ -6,6 +6,7 @@ import com.muyuchat.core.engine.PersistStage
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.TokenProgress
+import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -127,6 +128,33 @@ class ChatGenerationUiPublisherTest {
     }
 
     @Test
+    fun refusalReleasesTheLockAndCarriesTheExactMessage() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(
+            MainUiState(
+                isGenerating = true,
+                generationPhase = GenerationPhase.TOKENIZE,
+                generationTokenProgress = TokenProgress(1, 2),
+                generationPersistProgress = PersistProgress(PersistStage.WRITING, 1, 2),
+                engineLifecycle = AgentEngineLifecycle.GENERATING
+            )
+        )
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+
+        publisher.refuseGenerationBeforeStream("未加载云端推理模型")
+
+        val state = uiState.value
+        assertEquals(false, state.isGenerating)
+        assertNull(state.generationPhase)
+        assertNull(state.generationTokenProgress)
+        assertNull(state.generationPersistProgress)
+        assertEquals("未加载云端推理模型", state.statusMessage)
+        // The refusal predates the stream entirely, so the lifecycle projection stays untouched.
+        assertEquals(AgentEngineLifecycle.GENERATING, state.engineLifecycle)
+    }
+
+    @Test
     fun supersededRunCannotPublishAnything() {
         val chatRuns = ChatRunOwnership()
         val firstRunId = ownershipWithFreshRun(chatRuns)
@@ -144,6 +172,7 @@ class ChatGenerationUiPublisherTest {
         stalePublisher.publishStreamChunkStats(RuntimeStats(loaded = true))
         stalePublisher.publishPersistProgress(PersistProgress(PersistStage.WRITING, 1, 2))
         stalePublisher.publishRuntimeLogs(emptyList())
+        stalePublisher.refuseGenerationBeforeStream("stale refusal")
 
         assertEquals(MainUiState(), uiState.value)
 

@@ -10707,13 +10707,6 @@ contextTraceJson: String?
                 }
             }
 
-            fun updateGenerationUi(transform: (MainUiState) -> MainUiState) {
-                if (!generationStillOwnsUi()) return
-                _uiState.update { state ->
-                    if (generationStillOwnsUi()) transform(state) else state
-                }
-            }
-
             val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, _uiState)
 
             try {
@@ -11020,16 +11013,9 @@ contextTraceJson: String?
                     "\n${contextAdmission.userMessage ?: "当前请求超过模型上下文窗口，请压缩历史对话或缩短输入后重试。"}",
                     generationRunId = generationRunId
                 )
-                updateGenerationUi {
-                    it.copy(
-                        isGenerating = false,
-                        generationPhase = null,
-                        generationTokenProgress = null,
-                        generationPersistProgress = null,
-                        statusMessage = contextAdmission.userMessage
-                            ?: "当前请求超过模型上下文窗口"
-                    )
-                }
+                generationUiPublisher.refuseGenerationBeforeStream(
+                    contextAdmission.userMessage ?: "当前请求超过模型上下文窗口"
+                )
                 persistChatSessions(generationRunId = generationRunId)
                 return@launch
             }
@@ -11076,15 +11062,7 @@ contextTraceJson: String?
                         "\n请先在模型管理 > 云端 加载一个对话推理模型。",
                         generationRunId = generationRunId
                     )
-                    updateGenerationUi {
-                        it.copy(
-                            isGenerating = false,
-                            generationPhase = null,
-                            generationTokenProgress = null,
-                    generationPersistProgress = null,
-                            statusMessage = "未加载云端推理模型"
-                        )
-                    }
+                    generationUiPublisher.refuseGenerationBeforeStream("未加载云端推理模型")
                     persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
@@ -11099,15 +11077,7 @@ contextTraceJson: String?
                         "\n当前云端推理引擎未开启图片输入。请在模型管理中编辑该云端推理引擎，打开“支持图片输入”后再发送图片。",
                         generationRunId = generationRunId
                     )
-                    updateGenerationUi {
-                        it.copy(
-                            isGenerating = false,
-                            generationPhase = null,
-                            generationTokenProgress = null,
-                    generationPersistProgress = null,
-                            statusMessage = "云端识图未启用"
-                        )
-                    }
+                    generationUiPublisher.refuseGenerationBeforeStream("云端识图未启用")
                     persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
@@ -11118,15 +11088,7 @@ contextTraceJson: String?
                         "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
                         generationRunId = generationRunId
                     )
-                    updateGenerationUi {
-                        it.copy(
-                            isGenerating = false,
-                            generationPhase = null,
-                            generationTokenProgress = null,
-                    generationPersistProgress = null,
-                            statusMessage = "图片读取失败"
-                        )
-                    }
+                    generationUiPublisher.refuseGenerationBeforeStream("图片读取失败")
                     persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
@@ -11154,15 +11116,7 @@ contextTraceJson: String?
                         "\n${state.localVisionUnavailableMessage()}",
                         generationRunId = generationRunId
                     )
-                    updateGenerationUi {
-                        it.copy(
-                            isGenerating = false,
-                            generationPhase = null,
-                            generationTokenProgress = null,
-                    generationPersistProgress = null,
-                            statusMessage = "本地视觉 runner 未启用"
-                        )
-                    }
+                    generationUiPublisher.refuseGenerationBeforeStream("本地视觉 runner 未启用")
                     persistChatSessions(generationRunId = generationRunId)
                     return@launch
                 }
@@ -11173,15 +11127,7 @@ contextTraceJson: String?
                                 "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
                                 generationRunId = generationRunId
                             )
-                            updateGenerationUi {
-                                it.copy(
-                                    isGenerating = false,
-                                    generationPhase = null,
-                                    generationTokenProgress = null,
-                    generationPersistProgress = null,
-                                    statusMessage = "本地图片预处理失败"
-                                )
-                            }
+                            generationUiPublisher.refuseGenerationBeforeStream("本地图片预处理失败")
                             persistChatSessions(generationRunId = generationRunId)
                             return@launch
                         }

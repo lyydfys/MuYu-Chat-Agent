@@ -29,7 +29,8 @@ import org.junit.Test
  *   `GenerationStateTransitions.kt`. A test that pins an incomplete accounting is worse than no
  *   test, because it claims coverage it does not have.
  *
- * The two files scanned below are the ones that write `MainUiState.isGenerating`. The other
+ * The three files scanned below are the ones that write `MainUiState.isGenerating` (the third,
+ * `ChatGenerationUiPublisher`, is where the gated writes moved during R1). The other
  * `isGenerating = …` occurrences in the repository are not this field: they are Compose parameters
  * (for example `AnimatedMcaAssistantMark(isGenerating = true, …)` in `ChatChromeScreens.kt`) or
  * pass-throughs inside `copy(...)` of some other state type.
@@ -38,11 +39,11 @@ import org.junit.Test
  *
  * Writes fall into two groups:
  *
- * 1. **through a named transition or the run-id guard** — the `afterGeneration*` functions in
- *    `GenerationStateTransitions.kt`, or `updateGenerationUi { … }` / `settleGenerationUi(…)` in
- *    `MainViewModel`, both of which check `generationRunSequence.get() == generationRunId` first.
- *    This is the designed path, and it is what keeps a superseded generation from clearing a newer
- *    one's flag.
+ * 1. **through a named transition, a named gated publisher, or the run-id guard** — the
+ *    `afterGeneration*` functions in `GenerationStateTransitions.kt`, the named publications of
+ *    `ChatGenerationUiPublisher` (the gated writes moved there during R1), or
+ *    `settleGenerationUi(…)` in `MainViewModel`; all of them check the run id first. This is the
+ *    designed path, and it is what keeps a superseded generation from clearing a newer one's flag.
  * 2. **raw assignments** — the handful that write the field directly. These are the ones worth
  *    auditing, because they bypass both the named transitions and the run-id guard.
  *
@@ -55,6 +56,15 @@ import org.junit.Test
  * Deriving the flag from `UiGenerationOwnership`, or funnelling every raw write through a named
  * transition, is a change to a concurrency guard and needs real-device verification of the
  * start/stop/cancel/error paths. It is deliberately not attempted here.
+ *
+ * ## Re-derivation recorded (R1, second group)
+ *
+ * `startGeneration`'s six pre-stream refusal sites wrote the same transform by hand
+ * (`isGenerating = false` + the three progress resets + a refusal message) and were folded into
+ * `ChatGenerationUiPublisher.refuseGenerationBeforeStream(statusMessage)`; the ViewModel-local
+ * `updateGenerationUi` wrapper retired with them because nothing else called it. Per the rule
+ * above, the accounting below was re-derived rather than adjusted: `MainViewModel` keeps five
+ * raw resets, and the publisher has exactly one gated reset standing in for the six copies.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -64,16 +74,21 @@ class GenerationFlagAccountingContractTest {
     private val transitions: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/presentation/GenerationStateTransitions.kt")
     }
+    private val publisher: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ChatGenerationUiPublisher.kt")
+    }
 
     /**
-     * Measured baseline across the two files that own the flag's transitions.
+     * Measured baseline across the three files that own the flag's transitions.
      *
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
     private val expectedTrueInViewModel = 3
-    private val expectedFalseInViewModel = 11
+    private val expectedFalseInViewModel = 5
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
+    private val expectedTrueInPublisher = 0
+    private val expectedFalseInPublisher = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -142,8 +157,13 @@ class GenerationFlagAccountingContractTest {
             guard.containsMatchIn(mainViewModel)
         )
         assertTrue(
-            "the guarded update wrapper should still exist",
-            mainViewModel.contains("fun updateGenerationUi(transform:")
+            "the guarded update wrapper should still exist where the gated writes live",
+            publisher.contains("fun updateGenerationUi(transform:")
+        )
+        assertTrue(
+            "the publisher wrapper must check the run id before and inside the update",
+            publisher.contains("if (!chatRuns.matches(generationRunId)) return") &&
+                publisher.contains("if (chatRuns.matches(generationRunId)) transform(state) else state")
         )
     }
 
@@ -164,9 +184,13 @@ class GenerationFlagAccountingContractTest {
         val falseInViewModel = assignments(mainViewModel).count { it.second == "false" }
         val trueInTransitions = assignments(transitions).count { it.second == "true" }
         val falseInTransitions = assignments(transitions).count { it.second == "false" }
+        val trueInPublisher = assignments(publisher).count { it.second == "true" }
+        val falseInPublisher = assignments(publisher).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
+        assertEquals("ChatGenerationUiPublisher starts changed", expectedTrueInPublisher, trueInPublisher)
+        assertEquals("ChatGenerationUiPublisher resets changed", expectedFalseInPublisher, falseInPublisher)
     }
 
     @Test
@@ -193,6 +217,7 @@ class GenerationFlagAccountingContractTest {
         // `finally` would be an improvement worth recording, losing one would be a regression.
         assertEquals("MainViewModel", 0, exceptionSafeResets(mainViewModel))
         assertEquals("GenerationStateTransitions", 0, exceptionSafeResets(transitions))
+        assertEquals("ChatGenerationUiPublisher", 0, exceptionSafeResets(publisher))
     }
 
     // ── Positive controls ───────────────────────────────────────────────────────────────

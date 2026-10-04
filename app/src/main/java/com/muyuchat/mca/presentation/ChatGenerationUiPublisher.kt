@@ -105,4 +105,23 @@ internal class ChatGenerationUiPublisher(
     fun publishRuntimeLogs(logs: List<RuntimeMetrics>) {
         updateGenerationUi { it.copy(logs = logs) }
     }
+
+    /**
+     * A pre-stream refusal: no generation started, so the generation lock is released and the
+     * exact reason is shown. This is the shared shape of the six refusal sites in
+     * startGeneration (context overrun, missing cloud model, cloud vision not enabled, cloud
+     * image read failure, local vision runner missing, local image preprocess failure). The six
+     * copies differed only in [statusMessage]; they are folded into this one named write.
+     */
+    fun refuseGenerationBeforeStream(statusMessage: String?) {
+        updateGenerationUi {
+            it.copy(
+                isGenerating = false,
+                generationPhase = null,
+                generationTokenProgress = null,
+                generationPersistProgress = null,
+                statusMessage = statusMessage
+            )
+        }
+    }
 }
