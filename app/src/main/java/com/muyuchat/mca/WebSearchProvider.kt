@@ -593,7 +593,7 @@ data class WebSearchDiagnosticRecord(
                 elapsedMs = json.optLong("elapsedMs", 0L),
                 success = json.optBoolean("success", false),
                 message = json.optString("message"),
-                topSources = json.optJSONArray("topSources").toSourceReferences(),
+                topSources = json.optJSONArray("topSources").toWebSearchSourceReferences(),
                 healthScore = health.score,
                 healthLabel = health.label,
                 healthReasons = health.reasons,

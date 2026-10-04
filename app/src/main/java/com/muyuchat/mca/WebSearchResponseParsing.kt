@@ -214,7 +214,7 @@ internal fun JSONArray.toStringList(): List<String> = buildList {
         if (value.isNotBlank()) add(value)
     }
 }
-internal fun JSONArray?.toSourceReferences(): List<ChatSourceReference> {
+internal fun JSONArray?.toWebSearchSourceReferences(): List<ChatSourceReference> {
     if (this == null) return emptyList()
     return buildList {
         for (index in 0 until length()) {
