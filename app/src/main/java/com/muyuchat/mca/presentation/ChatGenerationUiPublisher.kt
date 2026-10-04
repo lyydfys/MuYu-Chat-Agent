@@ -8,10 +8,16 @@ import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.telemetry.RuntimeMetrics
+import com.muyuchat.feature.chat.BrowserTask
+import com.muyuchat.feature.chat.BrowserTaskPhase
+import com.muyuchat.feature.chat.BrowserTaskStateMachine
+import com.muyuchat.mca.AssistantConversationSnapshot
 import com.muyuchat.mca.ChatRunOwnership
+import com.muyuchat.mca.ContextSummaryRecord
 import com.muyuchat.mca.MainUiState
 import com.muyuchat.mca.WebSearchDiagnosticRecord
 import com.muyuchat.mca.WebSearchTurnMode
+import com.muyuchat.mca.activateContextSummaryCandidate
 import com.muyuchat.mca.withReplyGenerationMetrics
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
@@ -38,6 +44,12 @@ import kotlinx.coroutines.flow.update
 //    own `initialState`/`baseParams` before the write, so adding a gate would change behaviour
 //    rather than fix a race. They are named for the execution-owner seam and their un-gated
 //    semantics are pinned by ChatGenerationUiPublisherTest.
+// 3. Turn-boundary task and summary transitions (`publishBrowserSearchTaskStart`,
+//    `publishBrowserSearchResults`, `publishContextSummaryActivation`). Each keeps the exact
+//    guard its inline site carried: the run gate where the site had one, and the task-id /
+//    phase / session-identity checks verbatim where it did not, so a task or session the UI no
+//    longer owns is left untouched. The two methods that report a change (`...Start` published,
+//    `...Activation` activated) return it so the caller keeps its local bookkeeping faithful.
 //
 // Guard semantics: both checks read `ChatRunOwnership.matches(generationRunId)`, the strict
 // "an id was given and it matches" form. The publisher is constructed per run, bound to the same
@@ -200,5 +212,75 @@ internal class ChatGenerationUiPublisher(
                 statusMessage = statusMessage ?: it.statusMessage
             )
         }
+    }
+
+    /**
+     * The background browser-search task becomes visible for this turn. Run-gated (the inline
+     * site checked `generationStillOwnsUi()` inside its update) and guarded by "no visible search
+     * window is replaced" verbatim. Returns whether the task was actually published so the caller
+     * can retain its task id for the cancellation path.
+     */
+    fun publishBrowserSearchTaskStart(task: BrowserTask): Boolean {
+        var published = false
+        updateGenerationUi { current ->
+            if (current.browserTask?.windowVisible != true) {
+                published = true
+                current.copy(browserTask = task)
+            } else {
+                current
+            }
+        }
+        return published
+    }
+
+    /**
+     * The search task receives its results. Identity-guarded by task id + SEARCHING phase,
+     * verbatim from the inline site, which carried no run gate: a task the UI no longer owns is
+     * left untouched rather than overwritten with another turn's results.
+     */
+    fun publishBrowserSearchResults(taskId: String, urls: List<String>, message: String?) {
+        uiState.update { current ->
+            val task = current.browserTask
+            if (task?.taskId != taskId || task.phase != BrowserTaskPhase.SEARCHING) {
+                current
+            } else {
+                current.copy(browserTask = BrowserTaskStateMachine.publishSearchResults(task, urls, message))
+            }
+        }
+    }
+
+    /**
+     * Activates the completed turn's summary candidate inside the frozen session. Run-gated and
+     * session-identity-guarded verbatim from the inline site; returns whether the session's
+     * summary records actually changed so the caller can bump local-context invalidation.
+     */
+    fun publishContextSummaryActivation(
+        candidate: ContextSummaryRecord,
+        scope: String,
+        expectedSessionId: String?,
+        frozenSessionId: String,
+        frozenAssistantId: String,
+        frozenAssistantSnapshot: AssistantConversationSnapshot
+    ): Boolean {
+        var activated = false
+        updateGenerationUi { current ->
+            if (current.activeChatSessionId != expectedSessionId) {
+                current
+            } else {
+                current.copy(chatSessions = current.chatSessions.map { session ->
+                    if (session.id != frozenSessionId || session.mixedAssistantHistory ||
+                        session.assistantId != frozenAssistantId ||
+                        session.assistantSnapshot != frozenAssistantSnapshot
+                    ) session else {
+                        val records = activateContextSummaryCandidate(
+                            session.contextSummaries, candidate, current.messages, scope
+                        )
+                        activated = records !== session.contextSummaries
+                        session.copy(contextSummaries = records)
+                    }
+                })
+            }
+        }
+        return activated
     }
 }

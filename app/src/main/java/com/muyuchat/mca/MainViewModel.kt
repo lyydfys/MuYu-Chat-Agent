@@ -10521,11 +10521,8 @@ contextTraceJson: String?
                             ?: requestMessages.lastOrNull { it.role == Role.USER }?.id,
                         query = plan.displayQuery
                     )
-                    _uiState.update { current ->
-                        if (generationStillOwnsUi() && current.browserTask?.windowVisible != true) {
-                            browserSearchTaskId = task.taskId
-                            current.copy(browserTask = task)
-                        } else current
+                    if (generationUiPublisher.publishBrowserSearchTaskStart(task)) {
+                        browserSearchTaskId = task.taskId
                     }
                     attachWebSearchEvidenceToPendingAssistant(
                         sources = emptyList(),
@@ -10552,17 +10549,11 @@ contextTraceJson: String?
                 statusMessage = "联网检索已取消，本轮继续聊天。"
             ) else rawWebSearchTurn
             browserSearchTaskId?.let { taskId ->
-                _uiState.update { current ->
-                    val task = current.browserTask
-                    if (task?.taskId != taskId || task.phase !=
-                        com.muyuchat.feature.chat.BrowserTaskPhase.SEARCHING
-                    ) current else current.copy(browserTask =
-                        com.muyuchat.feature.chat.BrowserTaskStateMachine.publishSearchResults(
-                            task,
-                            webSearchTurn.sourceReferences.map(ChatSourceReference::url),
-                            webSearchTurn.webSearchStatusMessage
-                        ))
-                }
+                generationUiPublisher.publishBrowserSearchResults(
+                    taskId = taskId,
+                    urls = webSearchTurn.sourceReferences.map(ChatSourceReference::url),
+                    message = webSearchTurn.webSearchStatusMessage
+                )
             }
             val runtimeSystemContextForTurn = listOf(
                 runtimeContextPlan.runtimeSystemContext,
@@ -10864,22 +10855,14 @@ contextTraceJson: String?
                             if (summaryCandidate != null && generationStillOwnsUi() &&
                                 admittedRequestMessages.any { it.id == "summary-${summaryCandidate.id}" }
                             ) {
-                                var activated = false
-                                _uiState.update { current ->
-                                    if (!generationStillOwnsUi() ||
-                                        current.activeChatSessionId != initialState.activeChatSessionId) current
-                                    else current.copy(chatSessions = current.chatSessions.map { session ->
-                                        if (session.id != frozenSession.id || session.mixedAssistantHistory ||
-                                            session.assistantId != frozenAssistantId ||
-                                            session.assistantSnapshot != frozenAssistantSnapshot) session else {
-                                            val records = activateContextSummaryCandidate(
-                                                session.contextSummaries, summaryCandidate, current.messages, summaryScope
-                                            )
-                                            activated = records !== session.contextSummaries
-                                            session.copy(contextSummaries = records)
-                                        }
-                                    })
-                                }
+                                val activated = generationUiPublisher.publishContextSummaryActivation(
+                                    candidate = summaryCandidate,
+                                    scope = summaryScope,
+                                    expectedSessionId = initialState.activeChatSessionId,
+                                    frozenSessionId = frozenSession.id,
+                                    frozenAssistantId = frozenAssistantId,
+                                    frozenAssistantSnapshot = frozenAssistantSnapshot
+                                )
                                 if (activated) {
                                     localConversationContextNeedsInvalidation = true
                                     localConversationContextInvalidationSequence.incrementAndGet()

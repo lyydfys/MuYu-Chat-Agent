@@ -1,6 +1,15 @@
 package com.muyuchat.mca.presentation
 
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.ContextCompressionSettings
+import com.muyuchat.core.engine.ContextCompressionTrigger
+import com.muyuchat.core.engine.compressChatRequestContext
+import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.feature.chat.BrowserTaskPhase
+import com.muyuchat.feature.chat.BrowserTaskStateMachine
+import com.muyuchat.mca.AssistantConversationSnapshot
+import com.muyuchat.mca.contextSummaryCandidate
 import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.PersistStage
@@ -17,9 +26,11 @@ import com.muyuchat.mca.WebSearchResearchMode
 import com.muyuchat.mca.WebSearchTurnMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -310,5 +321,132 @@ class ChatGenerationUiPublisherTest {
         assertEquals("fresh search", uiState.value.webSearchStatusMessage)
         assertEquals(0, uiState.value.webSearchDiagnostics.size)
         assertEquals("fresh status", uiState.value.statusMessage)
+    }
+
+    @Test
+    fun browserSearchTaskStartIsGatedAndReportsPublication() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState())
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+        val task = BrowserTaskStateMachine.beginBackgroundSearch(
+            owner = "test", sessionId = null, messageId = null, query = "q"
+        )
+
+        assertTrue(publisher.publishBrowserSearchTaskStart(task))
+        assertEquals(task, uiState.value.browserTask)
+
+        // A visible search window is never replaced (verbatim inline guard).
+        val visible = task.copy(windowVisible = true)
+        uiState.value = uiState.value.copy(browserTask = visible)
+        assertFalse(publisher.publishBrowserSearchTaskStart(task))
+        assertEquals(visible, uiState.value.browserTask)
+    }
+
+    @Test
+    fun browserSearchTaskStartIsNotPublishedByASupersededRun() {
+        val chatRuns = ChatRunOwnership()
+        val firstRunId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState())
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState)
+        ownershipWithFreshRun(chatRuns)
+
+        val task = BrowserTaskStateMachine.beginBackgroundSearch(
+            owner = "test", sessionId = null, messageId = null, query = "q"
+        )
+        assertFalse(stalePublisher.publishBrowserSearchTaskStart(task))
+        assertNull(uiState.value.browserTask)
+    }
+
+    @Test
+    fun browserSearchResultsTransitionOnlyTheOwnedSearchingTask() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val task = BrowserTaskStateMachine.beginBackgroundSearch(
+            owner = "test", sessionId = null, messageId = null, query = "q"
+        )
+        val uiState = MutableStateFlow(MainUiState(browserTask = task))
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+
+        // A task id the UI no longer owns is left untouched.
+        publisher.publishBrowserSearchResults("browser-other", listOf("https://a.example/x"), "done")
+        assertEquals(task, uiState.value.browserTask)
+
+        publisher.publishBrowserSearchResults(task.taskId, listOf("https://a.example/x"), "done")
+        val after = requireNotNull(uiState.value.browserTask)
+        assertEquals(BrowserTaskPhase.AWAITING_CONFIRMATION, after.phase)
+        assertEquals(listOf("https://a.example/x"), after.candidateUrls)
+    }
+
+    @Test
+    fun contextSummaryActivationLeavesForeignSessionsAndSupersededRunsUntouched() {
+        val messages = listOf(
+            ChatMessage(Role.USER, "I prefer tea.", id = "first", createdAt = 1L),
+            ChatMessage(Role.ASSISTANT, "Meeting is on 2026-09-27.", id = "second", createdAt = 2L),
+            ChatMessage(Role.USER, "latest question", id = "latest", createdAt = 3L)
+        )
+        val summaryResult = compressChatRequestContext(
+            ChatRequest(messages, GenerationParams(nCtx = 4_096)),
+            ContextCompressionSettings(keepRecentMessages = 1, minimumMessagesToCompress = 1),
+            ContextCompressionTrigger.MANUAL
+        )
+        val candidate = requireNotNull(
+            contextSummaryCandidate(messages, summaryResult, emptyList(), "persona", 100L)
+        )
+        val snapshot = AssistantConversationSnapshot(
+            assistantId = "assistant-1",
+            name = "Assistant",
+            systemPrompt = "persona",
+            memoryEnabled = false,
+            webSearchEnabled = false,
+            fileContextEnabled = false,
+            capturedAt = 1L
+        )
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState(messages = messages, activeChatSessionId = "session-1"))
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+
+        // Foreign frozen session: the run owns the UI but the session identity does not match, so
+        // nothing is activated and the (empty) session list is left unchanged.
+        assertFalse(
+            publisher.publishContextSummaryActivation(
+                candidate = candidate,
+                scope = "persona",
+                expectedSessionId = "session-1",
+                frozenSessionId = "session-other",
+                frozenAssistantId = "assistant-1",
+                frozenAssistantSnapshot = snapshot
+            )
+        )
+
+        // Session drift in live state: left untouched even when the frozen ids match.
+        uiState.value = uiState.value.copy(activeChatSessionId = "session-2")
+        assertFalse(
+            publisher.publishContextSummaryActivation(
+                candidate = candidate,
+                scope = "persona",
+                expectedSessionId = "session-1",
+                frozenSessionId = "session-1",
+                frozenAssistantId = "assistant-1",
+                frozenAssistantSnapshot = snapshot
+            )
+        )
+
+        // Superseded run: the gate refuses before the transform runs.
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, runId, uiState)
+        ownershipWithFreshRun(chatRuns)
+        val before = uiState.value
+        assertFalse(
+            stalePublisher.publishContextSummaryActivation(
+                candidate = candidate,
+                scope = "persona",
+                expectedSessionId = before.activeChatSessionId,
+                frozenSessionId = "session-1",
+                frozenAssistantId = "assistant-1",
+                frozenAssistantSnapshot = snapshot
+            )
+        )
+        assertSame(before, uiState.value)
     }
 }
