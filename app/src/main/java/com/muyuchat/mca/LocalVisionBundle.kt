@@ -107,7 +107,7 @@ private fun JSONArray.toVisionComponents(root: File): List<LocalVisionBundleComp
     }
 }
 
-private fun File.safeDescendantOrNull(relativePath: String): File? {
+internal fun File.safeDescendantOrNull(relativePath: String): File? {
     val normalized = relativePath.replace('\\', '/').trim().trimStart('/')
     if (normalized.isBlank()) return null
     val rootCanonical = canonicalFile

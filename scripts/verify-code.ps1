@@ -129,8 +129,18 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         Write-Host '   filter: (whole module)'
     }
     if ($FullTests) {
-        $testArgs += @(':core:engine:testDebugUnitTest', ':api:local:testDebugUnitTest')
-        Write-Host '   plus :core:engine:test and :api:local:test'
+        # The feature modules ship their own test source sets, and three of the tests in
+        # :feature:chat read ChatScreen.kt as source text. Running only :app would silently skip
+        # 351 tests -- including exactly the anchors a presentation refactor can break.
+        $testArgs += @(
+            ':core:engine:testDebugUnitTest',
+            ':api:local:testDebugUnitTest',
+            ':feature:chat:testDebugUnitTest',
+            ':feature:agent:testDebugUnitTest',
+            ':feature:modelhub:testDebugUnitTest',
+            ':feature:settings:testDebugUnitTest'
+        )
+        Write-Host '   plus :core:engine, :api:local and the four :feature:* test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
     $testCode = Invoke-Gradle -Arguments $testArgs -LogPath $testLog
@@ -146,6 +156,14 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     }
 
     $dir = Join-Path $repo 'app\build\test-results\testDebugUnitTest'
+    # When -FullTests runs the feature/library modules too, their reports live beside app's.
+    $extraResultDirs = @()
+    if ($FullTests) {
+        $extraResultDirs = @('core\engine', 'api\local', 'feature\chat', 'feature\agent',
+            'feature\modelhub', 'feature\settings') |
+            ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
+            Where-Object { Test-Path $_ }
+    }
     if (Test-Path $dir) {
         # Each JUnit XML nests <testsuite> elements; read only the outermost one per file so counts
         # are not double-counted.

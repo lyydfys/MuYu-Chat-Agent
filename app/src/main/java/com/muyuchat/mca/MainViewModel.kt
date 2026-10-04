@@ -13600,126 +13600,90 @@ contextTraceJson: String?
         LocalApiForegroundService.stopListener()
     }
 
-    private fun applyWebSearchAnswerGuardsToLastAssistant(
+    /** The ViewModel side of [ChatTerminalSettlementPort]. */
+    private val chatTerminalSettlementPort: ChatTerminalSettlementPort =
+        object : ChatTerminalSettlementPort {
+            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                this@MainViewModel._uiState.update(transform)
+            }
+
+            override fun currentChatModelId(state: MainUiState): String? =
+                this@MainViewModel.run { state.currentChatModelId() }
+
+            override fun upsertSession(
+                sessions: List<ChatSessionRecord>,
+                sessionId: String,
+                messages: List<ChatMessage>,
+                assistantId: String?,
+                modelMode: String?,
+                modelId: String?
+            ): List<ChatSessionRecord> =
+                this@MainViewModel.run {
+                    with(sessions) {
+                        upsertSession(
+                            sessionId = sessionId,
+                            messages = messages,
+                            assistantId = assistantId,
+                            modelMode = modelMode,
+                            modelId = modelId
+                        )
+                    }
+                }
+
+
+            override val webSearchDiagnosticStore: WebSearchDiagnosticStore
+                get() = this@MainViewModel.webSearchDiagnosticStore
+
+            override fun isRunCurrent(runId: Long?): Boolean = this@MainViewModel.chatRuns.isCurrent(runId)
+
+            override fun discardPendingOutput(runId: Long?) {
+                this@MainViewModel.discardPendingAssistantOutput(runId)
+            }
+        }
+
+/** Delegates to [settleWebSearchAnswerGuards]. Signature kept verbatim. */
+    fun applyWebSearchAnswerGuardsToLastAssistant(
         generationRunId: Long? = null
     ): WebSearchCitationAudit? {
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return null
-        var citationAudit: WebSearchCitationAudit? = null
-        _uiState.update { state ->
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                return@update state
-            }
-            val updated = state.messages.toMutableList()
-            val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-            if (index < 0) return@update state
-            val guardResult = updated[index].withWebSearchAnswerGuards()
-            citationAudit = guardResult.citationAudit
-            if (guardResult.message == updated[index]) return@update state
-            updated[index] = guardResult.message
-            val sessionId = state.activeChatSessionId
-            state.copy(
-                messages = updated,
-                chatSessions = if (sessionId == null) {
-                    state.chatSessions
-                } else {
-                    state.chatSessions.upsertSession(
-                        sessionId = sessionId,
-                        messages = updated,
-                        assistantId = state.selectedAssistantId,
-                        modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = state.currentChatModelId()
-                    )
-                }
-            )
-        }
-        return citationAudit
+        return settleWebSearchAnswerGuards(port = chatTerminalSettlementPort, generationRunId = generationRunId)
     }
 
-    private fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long? = null) {
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
-        _uiState.update { state ->
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                return@update state
-            }
-            val updated = state.messages.withVisibleAssistantCompletionFallback()
-            if (updated === state.messages) return@update state
-            val sessionId = state.activeChatSessionId
-            state.copy(
-                messages = updated,
-                chatSessions = if (sessionId == null) {
-                    state.chatSessions
-                } else {
-                    state.chatSessions.upsertSession(
-                        sessionId = sessionId,
-                        messages = updated,
-                        assistantId = state.selectedAssistantId,
-                        modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = state.currentChatModelId()
-                    )
-                }
-            )
-        }
+/** Delegates to [settleVisibleAssistantReply]. Signature kept verbatim. */
+    fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long? = null) {
+        settleVisibleAssistantReply(port = chatTerminalSettlementPort, generationRunId = generationRunId)
     }
 
-    private fun recordWebSearchCitationAudit(
+/** Delegates to [settleWebSearchCitationAudit]. Signature kept verbatim. */
+    fun recordWebSearchCitationAudit(
         recordId: String?,
         audit: WebSearchCitationAudit,
         generationRunId: Long? = null
     ) {
-        if (recordId.isNullOrBlank()) return
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
-        val current = _uiState.value.webSearchDiagnostics.firstOrNull { it.id == recordId } ?: return
-        val updatedRecord = current.copy(
-            message = current.message + if (audit.repaired) " · 引用已修正" else " · 引用已审计",
-            warnings = (current.warnings + audit.warnings).distinct(),
-            closedLoopChecks = (current.closedLoopChecks + audit.closedLoopChecks).distinct()
-        )
-        val records = webSearchDiagnosticStore.replace(updatedRecord)
-        _uiState.update {
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                it
-            } else {
-                it.copy(
-                    webSearchDiagnostics = records,
-                    webSearchStatusMessage = audit.statusMessage,
-                    statusMessage = audit.statusMessage
-                )
-            }
-        }
+        settleWebSearchCitationAudit(port = chatTerminalSettlementPort, recordId = recordId, audit = audit, generationRunId = generationRunId)
     }
+
+/** Delegates to [settlePendingAssistantPlaceholder]. Signature kept verbatim. */
+    fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
+        settlePendingAssistantPlaceholder(port = chatTerminalSettlementPort, generationRunId = generationRunId)
+    }
+
+/** Delegates to [settleWebSearchEvidenceAttachment]. Signature kept verbatim. */
+    fun attachWebSearchEvidenceToPendingAssistant(
+        sources: List<ChatSourceReference>,
+        trace: ChatWebSearchTrace?,
+        generationRunId: Long? = null
+    ) {
+        settleWebSearchEvidenceAttachment(port = chatTerminalSettlementPort, sources = sources, trace = trace, generationRunId = generationRunId)
+    }
+
+
 
     /**
      * Drains only the output owned by the UI run that process backgrounding invalidated. A newer
      * foreground request advances the sequence and leaves its buffer untouched.
      */
-    private fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
-        discardPendingAssistantOutput(generationRunId)
-        _uiState.update { state ->
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                return@update state
-            }
-            val index = state.messages.indexOfLast { it.role == Role.ASSISTANT }
-            if (index < 0) return@update state
-            val pending = state.messages[index]
-            if (pending.content.isNotBlank() || pending.reasoningContent.isNotBlank()) return@update state
-            val updated = state.messages.filterIndexed { messageIndex, _ -> messageIndex != index }
-            val sessionId = state.activeChatSessionId
-            state.copy(
-                messages = updated,
-                chatSessions = if (sessionId == null) {
-                    state.chatSessions
-                } else {
-                    state.chatSessions.upsertSession(
-                        sessionId = sessionId,
-                        messages = updated,
-                        assistantId = state.selectedAssistantId,
-                        modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = state.currentChatModelId()
-                    )
-                }
-            )
-        }
-    }
 
     private fun GenerateEvent.Error.isConfigurationActionError(): Boolean = code in setOf(
         "model_reload_required",
@@ -13730,47 +13694,6 @@ contextTraceJson: String?
         "model_mismatch"
     )
 
-    private fun attachWebSearchEvidenceToPendingAssistant(
-        sources: List<ChatSourceReference>,
-        trace: ChatWebSearchTrace?,
-        generationRunId: Long? = null
-    ) {
-        if (sources.isEmpty() && trace?.hasContent != true) return
-        if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) return
-        _uiState.update { state ->
-            if (generationRunId != null && !chatRuns.isCurrent(generationRunId)) {
-                return@update state
-            }
-            val updated = state.messages.toMutableList()
-            val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-            if (index >= 0) {
-                val current = updated[index]
-                updated[index] = current.copy(
-                    sourceReferences = sources.ifEmpty { current.sourceReferences },
-                    webSearchTrace = trace ?: current.webSearchTrace
-                )
-            } else {
-                updated += ChatMessage(
-                    role = Role.ASSISTANT,
-                    content = "",
-                    sourceReferences = sources,
-                    webSearchTrace = trace
-                )
-            }
-            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-            state.copy(
-                messages = updated,
-                activeChatSessionId = sessionId,
-                chatSessions = state.chatSessions.upsertSession(
-                    sessionId = sessionId,
-                    messages = updated,
-                    assistantId = state.selectedAssistantId,
-                    modelMode = state.selectedChatBackend.bindingValue(),
-                    modelId = state.currentChatModelId()
-                )
-            )
-        }
-    }
 
     private fun refreshPersistentPrefixCacheSummary() {
         viewModelScope.launch(Dispatchers.IO) {
