@@ -8,7 +8,11 @@ import org.junit.Test
 class ChatSessionAssistantSnapshotContractTest {
     @Test
     fun snapshotIsReadFromLegacyAndRoomPathsAndWrittenBackToRoom() {
-        val source = sourceFile("ChatSessionStore.kt")
+        // The write-back assertion below moved to ChatSessionPersistenceMapping when the chat store
+        // was split; the other four are still in ChatSessionStore. Reading both keeps the same
+        // contract under test -- the assertions themselves are unchanged.
+        val source = sourceFile("ChatSessionStore.kt") +
+            sourceFile("ChatSessionPersistenceMapping.kt")
 
         assertTrue(source.contains("optString(\"assistantSnapshotJson\")"))
         assertTrue(source.contains("optJSONObject(\"assistantSnapshot\")?.toString()"))
