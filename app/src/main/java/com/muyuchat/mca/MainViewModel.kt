@@ -10683,8 +10683,14 @@ contextTraceJson: String?
         val admittedReservation = reservation ?: reserveUiGenerationStart() ?: return false
         val generationRunId = admittedReservation.runId
         val replyMetrics = ReplyGenerationMetrics(generationRunId)
-        lateinit var ownedGenerationJob: Job
-        ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+        val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            // This coroutine's own Job handle, taken from its own scope receiver. The body used to
+            // close over the `lateinit var` that was still being assigned while the lambda was
+            // built; removing that self-reference is what lets the body be handed to a future
+            // execution owner instead of reaching back into its own launcher.
+            val selfJob = requireNotNull(coroutineContext[Job]) {
+                "startGeneration body must run as a launched coroutine"
+            }
             var terminalEventSeen = false
             var continuationCompleted = false
             var continuationFailureMessage = "角色回复未完成，可点击继续角色回复重试。"
@@ -11180,7 +11186,7 @@ contextTraceJson: String?
             }
             if (!chatRuns.markPhase(
                     generationRunId,
-                    ownedGenerationJob,
+                    selfJob,
                     runtimePhase
                 )
             ) {
@@ -11221,7 +11227,7 @@ contextTraceJson: String?
                         replyMetrics.record(event.stats)
                         chatRuns.markPhase(
                             generationRunId,
-                            ownedGenerationJob,
+                            selfJob,
                             UiGenerationRuntimePhase.TERMINAL
                         )
                         terminalEventSeen = true
@@ -11353,7 +11359,7 @@ contextTraceJson: String?
                         if (!generationStillOwnsUi()) return@collect
                         chatRuns.markPhase(
                             generationRunId,
-                            ownedGenerationJob,
+                            selfJob,
                             UiGenerationRuntimePhase.TERMINAL
                         )
                         terminalEventSeen = true
@@ -11403,7 +11409,7 @@ contextTraceJson: String?
             } catch (error: Throwable) {
                 chatRuns.markPhase(
                     generationRunId,
-                    ownedGenerationJob,
+                    selfJob,
                     UiGenerationRuntimePhase.TERMINAL
                 )
                 terminalEventSeen = true
@@ -11436,7 +11442,7 @@ contextTraceJson: String?
                 }
                 chatRuns.markPhase(
                     generationRunId,
-                    ownedGenerationJob,
+                    selfJob,
                     UiGenerationRuntimePhase.TERMINAL
                 )
                 if (!terminalEventSeen && generationStillOwnsUi()) {

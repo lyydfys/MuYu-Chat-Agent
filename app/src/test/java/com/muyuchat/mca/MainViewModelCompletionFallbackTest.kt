@@ -314,6 +314,20 @@ class MainViewModelCompletionFallbackTest {
     }
 
     @Test
+    fun startGenerationBodyTakesItsOwnJobFromItsCoroutineScope() {
+        // The launch body used to close over the `lateinit var ownedGenerationJob` that was still
+        // being assigned while the lambda was built. Resolving the handle from the body's own scope
+        // receiver removes that self-reference -- the documented blocker for ever moving this
+        // execution body to its own owner -- so this shape is pinned until that move happens.
+        val body = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        assertTrue(body.contains("val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY)"))
+        assertTrue(body.contains("val selfJob = requireNotNull(coroutineContext[Job])"))
+        assertFalse(body.contains("lateinit var ownedGenerationJob"))
+        val selfOwnedMarkPhases = Regex("""markPhase\(\s*\n\s*generationRunId,\s*\n\s*selfJob,""").findAll(body).count()
+        assertEquals("all in-body markPhase calls must pass the body's own handle", 5, selfOwnedMarkPhases)
+    }
+
+    @Test
     fun localApiProviderOwnsSharedGenerationLifecycle() {
         val source = mainViewModelSource()
         val provider = source.substring(
