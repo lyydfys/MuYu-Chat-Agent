@@ -210,7 +210,7 @@ import java.util.UUID
 import java.util.zip.ZipInputStream
 import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
-import com.muyuchat.mca.presentation.withGenerationProgress
+import com.muyuchat.mca.presentation.ChatGenerationUiPublisher
 import com.muyuchat.mca.presentation.withGenerationProgressCleared
 // Three P2 extractions are intentionally NOT imported here: afterBackgroundGenerationStopped,
 // withBackgroundCancellationFinalized and BackgroundCancelledAssistantOutput have no call site in
@@ -10714,6 +10714,8 @@ contextTraceJson: String?
                 }
             }
 
+            val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, _uiState)
+
             try {
             if (!generationStillOwnsUi()) return@launch
             val initialState = _uiState.value
@@ -10844,9 +10846,7 @@ contextTraceJson: String?
                 ?: reusableSummary?.project(requestMessages, summaryScope)
                 ?: requestMessages
             if (effectiveRequestMessages !== requestMessages) {
-                updateGenerationUi {
-                    it.copy(statusMessage = "已压缩 ${compression.compressedMessageCount} 条较早对话，保留角色设定和最近消息")
-                }
+                generationUiPublisher.publishContextCompressedStatus(compression.compressedMessageCount)
             }
             val imageModelBindingForToolTurn = initialState.chatImageModelBinding()
             val configuredPersonaForTurn = assistantSnapshot
@@ -10880,7 +10880,7 @@ contextTraceJson: String?
             )
             val contextStatus = ChatContextOperations.turnContextStatus(contextSnapshot, runtimeContextPlan)
             if (contextStatus != null) {
-                updateGenerationUi { it.copy(statusMessage = contextStatus) }
+                generationUiPublisher.publishContextStatusMessage(contextStatus)
             }
             val webSearchTurnMode = if (initialState.webSearchOneShotEnabled) {
                 WebSearchTurnMode.ON
@@ -10955,12 +10955,7 @@ contextTraceJson: String?
                         ),
                         generationRunId = generationRunId
                     )
-                    updateGenerationUi {
-                        it.copy(
-                            webSearchStatusMessage = "正在联网检索：${plan.displayQuery.take(42)}",
-                            statusMessage = "正在联网检索..."
-                        )
-                    }
+                    generationUiPublisher.publishWebSearchStartStatus(plan.displayQuery)
                 }
             )
             val searchTaskCancelled = browserSearchTaskId?.let { taskId ->
@@ -11038,15 +11033,13 @@ contextTraceJson: String?
                 persistChatSessions(generationRunId = generationRunId)
                 return@launch
             }
-            updateGenerationUi {
-                it.copy(
-                    promptContextUsage = promptContextUsageFor(
-                        plan = runtimeContextPlan,
-                        admission = contextAdmission,
-                        params = requestParams
-                    )
+            generationUiPublisher.publishPromptContextUsage(
+                promptContextUsageFor(
+                    plan = runtimeContextPlan,
+                    admission = contextAdmission,
+                    params = requestParams
                 )
-            }
+            )
             // Admission may deterministically trim older turns after the
             // compression pass.  Use that exact list for every provider; the
             // full list remains in the persisted session for future summaries.
@@ -11255,18 +11248,12 @@ contextTraceJson: String?
                 if (terminalEventSeen) return@collect
                 when (event) {
                     is GenerateEvent.Phase -> {
-                        _uiState.update {
-                            if (!generationStillOwnsUi()) {
-                                it
-                            } else {
-                                it.copy(
-                                    stats = event.stats,
-                                    generationPhase = event.phase,
-                                    generationTokenProgress = event.tokenProgress,
-                                    generationStats = event.stats
-                                )
-                            }
-                        }
+                        if (!generationStillOwnsUi()) return@collect
+                        generationUiPublisher.publishStreamPhase(
+                            event.stats,
+                            event.phase,
+                            event.tokenProgress
+                        )
                     }
                     is GenerateEvent.Chunk -> {
                         if (!generationStillOwnsUi()) return@collect
@@ -11277,30 +11264,11 @@ contextTraceJson: String?
                             reasoningDurationMs = event.reasoningDurationMs,
                             generationRunId = generationRunId
                         )
-                        _uiState.update {
-                            if (!generationStillOwnsUi()) {
-                                it
-                            } else {
-                                it.copy(
-                                    stats = event.stats
-                                ).withGenerationProgress(
-                                    phase = GenerationPhase.DECODE,
-                                    tokenProgress = null,
-                                    persistProgress = null,
-                                    stats = event.stats
-                                )
-                            }
-                        }
+                        generationUiPublisher.publishStreamChunkStats(event.stats)
                     }
                     is GenerateEvent.Persist -> {
                         if (!generationStillOwnsUi() || !event.progress.isActive) return@collect
-                        _uiState.update { current ->
-                            if (!generationStillOwnsUi()) {
-                                current
-                            } else {
-                                current.copy(generationPersistProgress = event.progress)
-                            }
-                        }
+                        generationUiPublisher.publishPersistProgress(event.progress)
                     }
                     is GenerateEvent.Done -> {
                         if (!generationStillOwnsUi()) return@collect
@@ -11393,9 +11361,7 @@ contextTraceJson: String?
                             }
                             if (!generationStillOwnsUi()) return@collect
                             if (logs != null && generationStillOwnsUi()) {
-                                _uiState.update { current ->
-                                    if (generationStillOwnsUi()) current.copy(logs = logs) else current
-                                }
+                                generationUiPublisher.publishRuntimeLogs(logs)
                             }
                             if (!generationStillOwnsUi()) return@collect
                             val conversationPersistJob = persistChatSessions(generationRunId = generationRunId)
