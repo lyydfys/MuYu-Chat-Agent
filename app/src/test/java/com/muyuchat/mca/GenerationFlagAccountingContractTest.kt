@@ -29,8 +29,9 @@ import org.junit.Test
  *   `GenerationStateTransitions.kt`. A test that pins an incomplete accounting is worse than no
  *   test, because it claims coverage it does not have.
  *
- * The three files scanned below are the ones that write `MainUiState.isGenerating` (the third,
- * `ChatGenerationUiPublisher`, is where the gated writes moved during R1). The other
+ * The four files scanned below are the ones that write `MainUiState.isGenerating` (the third,
+ * `ChatGenerationUiPublisher`, is where the gated writes moved during R1; the fourth,
+ * `ChatStopGenerationOperations`, is where the stop-path settlement moved). The other
  * `isGenerating = …` occurrences in the repository are not this field: they are Compose parameters
  * (for example `AnimatedMcaAssistantMark(isGenerating = true, …)` in `ChatChromeScreens.kt`) or
  * pass-throughs inside `copy(...)` of some other state type.
@@ -63,8 +64,14 @@ import org.junit.Test
  * (`isGenerating = false` + the three progress resets + a refusal message) and were folded into
  * `ChatGenerationUiPublisher.refuseGenerationBeforeStream(statusMessage)`; the ViewModel-local
  * `updateGenerationUi` wrapper retired with them because nothing else called it. Per the rule
- * above, the accounting below was re-derived rather than adjusted: `MainViewModel` keeps five
- * raw resets, and the publisher has exactly one gated reset standing in for the six copies.
+ * above, the accounting below was re-derived rather than adjusted: the publisher has exactly one
+ * gated reset standing in for the six copies.
+ *
+ * ## Re-derivation recorded (R1, stop path)
+ *
+ * The user-facing stop path moved to `ChatStopGenerationOperations.kt`; its settlement write
+ * (`isGenerating = false`) moved with it. `MainViewModel` keeps four raw resets, and the stop
+ * operations file owns exactly one.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -77,18 +84,23 @@ class GenerationFlagAccountingContractTest {
     private val publisher: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ChatGenerationUiPublisher.kt")
     }
+    private val stopOperations: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt")
+    }
 
     /**
-     * Measured baseline across the three files that own the flag's transitions.
+     * Measured baseline across the four files that own the flag's transitions.
      *
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
     private val expectedTrueInViewModel = 3
-    private val expectedFalseInViewModel = 5
+    private val expectedFalseInViewModel = 4
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
     private val expectedTrueInPublisher = 0
     private val expectedFalseInPublisher = 1
+    private val expectedTrueInStopOperations = 0
+    private val expectedFalseInStopOperations = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -186,11 +198,15 @@ class GenerationFlagAccountingContractTest {
         val falseInTransitions = assignments(transitions).count { it.second == "false" }
         val trueInPublisher = assignments(publisher).count { it.second == "true" }
         val falseInPublisher = assignments(publisher).count { it.second == "false" }
+        val trueInStopOperations = assignments(stopOperations).count { it.second == "true" }
+        val falseInStopOperations = assignments(stopOperations).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
         assertEquals("ChatGenerationUiPublisher starts changed", expectedTrueInPublisher, trueInPublisher)
         assertEquals("ChatGenerationUiPublisher resets changed", expectedFalseInPublisher, falseInPublisher)
+        assertEquals("ChatStopGenerationOperations starts changed", expectedTrueInStopOperations, trueInStopOperations)
+        assertEquals("ChatStopGenerationOperations resets changed", expectedFalseInStopOperations, falseInStopOperations)
     }
 
     @Test
@@ -218,6 +234,7 @@ class GenerationFlagAccountingContractTest {
         assertEquals("MainViewModel", 0, exceptionSafeResets(mainViewModel))
         assertEquals("GenerationStateTransitions", 0, exceptionSafeResets(transitions))
         assertEquals("ChatGenerationUiPublisher", 0, exceptionSafeResets(publisher))
+        assertEquals("ChatStopGenerationOperations", 0, exceptionSafeResets(stopOperations))
     }
 
     // ── Positive controls ───────────────────────────────────────────────────────────────

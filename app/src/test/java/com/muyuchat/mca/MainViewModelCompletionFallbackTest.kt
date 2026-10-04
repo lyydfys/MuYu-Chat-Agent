@@ -281,16 +281,18 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun userStopBoundsTheNativeStopRequestBeforeJoiningTheUiJob() {
-        val source = mainViewModelSource()
-        val body = functionBody(source, "fun stopGeneration()")
-        val stop = body.indexOf("engine.stopGeneration()")
+        // The stop path moved to its own operations file during R1 (item 2); the bounded-request
+        // invariant is read where the orchestration now lives.
+        val source = stopOperationsSource()
+        val body = functionBody(source, "internal fun stopActiveGeneration(")
+        val stop = body.indexOf("port.requestRuntimeStop()")
         val requestTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS)")
         val joinTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS)")
 
         assertTrue(stop >= 0)
         assertTrue(requestTimeout >= 0)
         assertTrue(joinTimeout > requestTimeout)
-        assertTrue(source.contains("private const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L"))
+        assertTrue(source.contains("internal const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L"))
         assertTrue(body.contains("已请求停止，正在恢复本地推理进程"))
         assertTrue(body.contains("rejectWhileConversationMutationInProgress()"))
     }
@@ -575,6 +577,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("ChatStreamAccumulator.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** The owner that orchestrates the user-facing stop path. */
+    private fun stopOperationsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("ChatStopGenerationOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     private fun functionBody(source: String, signature: String): String {

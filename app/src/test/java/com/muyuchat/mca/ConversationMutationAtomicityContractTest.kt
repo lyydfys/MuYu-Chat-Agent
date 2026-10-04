@@ -18,12 +18,16 @@ class ConversationMutationAtomicityContractTest {
             "deleteChatSession",
             "clearChatHistory"
         ).forEach { functionName ->
-            val body = functionBody(source, functionName)
+            // `stopGeneration` now delegates: its orchestration moved to its own operations file
+            // during R1 (item 2), so the durable-boundary contract is read there as well.
+            val body = functionBody(source, functionName) + movedOperationSource(functionName)
             assertTrue("$functionName must use the durable mutation boundary", body.contains("persistConversationMutation("))
             assertFalse("$functionName must not independently invalidate KV", body.contains("markLocalConversationContextInvalid()"))
         }
 
-        val persist = functionBody(source, "persistConversationMutation")
+        // The stop-port object now carries an override with the same name; the durable boundary
+        // itself lives in the private function, so it is located by its full declaration.
+        val persist = functionBodyOf(source, "private fun persistConversationMutation(")
         assertInOrder(
             persist,
             "chatSessionStore.save(snapshot, knowledgeBindingsForSave, removedChatOwners)",
@@ -66,26 +70,32 @@ class ConversationMutationAtomicityContractTest {
             "deleteChatSession",
             "clearChatHistory"
         ).forEach { functionName ->
-            // `selectChatSession` now delegates: the wrapper it leaves behind only forwards, while
-            // the guard lives in the moved body. Both sources are searched so the contract is still
-            // checked, without weakening the assertion.
-            val body = functionBody(source, functionName) +
-                if (functionName == "selectChatSession") {
-                    // The unit-test working directory is the app module, so the moved file is
-                    // addressed module-relatively. Both forms are tried so a repo-root working
-                    // directory keeps working too.
-                    sequenceOf(
-                        File("src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"),
-                        File("app/src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt")
-                    ).firstOrNull(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
-                } else {
-                    ""
-                }
+            // `selectChatSession` and `stopGeneration` now delegate: the wrappers they leave behind
+            // only forward, while the guard lives in the moved bodies. Both sources are searched so
+            // the contract is still checked, without weakening the assertion.
+            val body = functionBody(source, functionName) + movedOperationSource(functionName)
             assertTrue(
                 "$functionName must reject interleaving with an active Room mutation",
                 body.contains("rejectWhileConversationMutationInProgress()")
             )
         }
+    }
+
+    /**
+     * Source of a function body that was moved out of the ViewModel during R1, keyed by the
+     * delegating wrapper's name.
+     *
+     * The unit-test working directory is the app module, so the moved file is addressed
+     * module-relatively. Both forms are tried so a repo-root working directory keeps working too.
+     */
+    private fun movedOperationSource(functionName: String): String {
+        val relative = when (functionName) {
+            "selectChatSession" -> "src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"
+            "stopGeneration" -> "src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt"
+            else -> return ""
+        }
+        return listOf(File(relative), File("app/$relative"))
+            .firstOrNull(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
     }
 
     private fun assertInOrder(source: String, vararg fragments: String) {
@@ -98,11 +108,14 @@ class ConversationMutationAtomicityContractTest {
         }
     }
 
-    private fun functionBody(source: String, functionName: String): String {
-        val declaration = source.indexOf("fun $functionName(")
-        assertTrue("Missing function $functionName", declaration >= 0)
-        val opening = source.indexOf('{', declaration)
-        assertTrue("Missing body for $functionName", opening >= 0)
+    private fun functionBody(source: String, functionName: String): String =
+        functionBodyOf(source, "fun $functionName(")
+
+    private fun functionBodyOf(source: String, declaration: String): String {
+        val declarationIndex = source.indexOf(declaration)
+        assertTrue("Missing declaration $declaration", declarationIndex >= 0)
+        val opening = source.indexOf('{', declarationIndex)
+        assertTrue("Missing body for $declaration", opening >= 0)
         var depth = 0
         for (index in opening until source.length) {
             when (source[index]) {
@@ -113,7 +126,7 @@ class ConversationMutationAtomicityContractTest {
                 }
             }
         }
-        error("Unterminated function $functionName")
+        error("Unterminated function $declaration")
     }
 
     private fun mainViewModelSource(): String {

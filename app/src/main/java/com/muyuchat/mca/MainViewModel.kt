@@ -413,12 +413,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val LOCAL_API_FOREGROUND_READY_ATTEMPTS = 2
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
-        // A stop tap must never wait behind a wedged Binder/JNI call.  The
-        // isolated worker owns the longer cancellation grace period and can
-        // reclaim itself independently; the UI only waits long enough to
-        // enqueue the request before releasing its generation state.
-        private const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L
-        private const val STOP_GENERATION_JOIN_TIMEOUT_MS = 2_000L
         private const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
         private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
@@ -11504,63 +11498,7 @@ contextTraceJson: String?
     }
 
     fun stopGeneration() {
-        if (rejectWhileConversationMutationInProgress()) return
-        // Regeneration reserves the UI turn before its Room/KV mutation finishes.
-        // Stop must invalidate that reservation even while the mutation barrier
-        // is active; its eventual onCommitted callback cannot reactivate it.
-        if (!stopGenerationInProgress.compareAndSet(false, true)) return
-        viewModelScope.launch {
-            try {
-                if (!_uiState.value.isGenerating) return@launch
-                val metrics = replyGenerationMetrics?.takeIf { chatRuns.isCurrent(it.runId) }
-                    ?.finish()
-                val cancellation = cancelGenerationJob()
-                val stoppedJob = cancellation.owner as? Job
-                val stopLocalRuntime = cancellation.stopLocalRuntime ||
-                    (cancellation.pendingCancelled &&
-                        engine.activeGenerationStopToken()?.requestId?.startsWith("ui-") == true)
-                val cancelledEpoch = chatRuns.currentRunId()
-                _uiState.update { state ->
-                    val task = state.browserTask
-                    if (task?.phase != com.muyuchat.feature.chat.BrowserTaskPhase.SEARCHING) state
-                    else state.copy(browserTask =
-                        com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Generation stopped"))
-                }
-                // The worker stop request is one-way and must not wait behind a
-                // native decode mutex. A wedged Binder decode is bounded here so
-                // the UI can recover even before the isolated worker watchdog
-                // finishes reclaiming its process.
-                val stopRequested = !stopLocalRuntime ||
-                    withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS) {
-                        engine.stopGeneration()
-                        true
-                    } == true
-                val joined = withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS) {
-                    stoppedJob?.join()
-                    true
-                } == true
-                if (!chatRuns.isCurrent(cancelledEpoch)) return@launch
-                flushPendingAssistantOutput()
-                val rollback = _uiState.value.conversationMutationRollbackState()
-                var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-                _uiState.update {
-                    val updated = it.withReplyGenerationMetrics(metrics)
-                    sessionsToPersist = updated.chatSessions
-                    updated.copy(
-                        isGenerating = false,
-                        engineLifecycle = engine.stats.value.lifecycleAfterGeneration(),
-                        statusMessage = if (stopRequested && joined) {
-                            "已停止生成"
-                        } else {
-                            "已请求停止，正在恢复本地推理进程…"
-                        }
-                    ).withGenerationProgressCleared()
-                }
-                persistConversationMutation(sessionsToPersist, rollback)
-            } finally {
-                stopGenerationInProgress.set(false)
-            }
-        }
+        stopActiveGeneration(chatStopGenerationPort)
     }
 
     fun newChat() {
@@ -13510,6 +13448,59 @@ contextTraceJson: String?
         cancelActiveLocalApiImageGeneration("Local API server stopped.")
         LocalApiForegroundService.stopListener()
     }
+
+    /** The ViewModel side of [ChatStopGenerationPort]. */
+    private val chatStopGenerationPort: ChatStopGenerationPort =
+        object : ChatStopGenerationPort {
+            override fun currentState(): MainUiState = _uiState.value
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                _uiState.update(transform)
+            }
+
+            override fun stopScope() = viewModelScope
+
+            override fun rejectWhileConversationMutationInProgress(): Boolean =
+                this@MainViewModel.rejectWhileConversationMutationInProgress()
+
+            override fun tryEnterStop(): Boolean = stopGenerationInProgress.compareAndSet(false, true)
+
+            override fun exitStop() {
+                stopGenerationInProgress.set(false)
+            }
+
+            override fun currentReplyMetrics(): ReplyGenerationMetrics? = replyGenerationMetrics
+
+            override fun isRunCurrent(runId: Long?): Boolean = chatRuns.isCurrent(runId)
+
+            override fun currentRunId(): Long = chatRuns.currentRunId()
+
+            override fun cancelCurrentGeneration(): UiGenerationCancellation = cancelGenerationJob()
+
+            override fun activeUiStopRequestId(): String? =
+                engine.activeGenerationStopToken()?.requestId
+
+            override suspend fun requestRuntimeStop() {
+                engine.stopGeneration()
+            }
+
+            override fun runtimeLifecycle(): AgentEngineLifecycle =
+                engine.stats.value.lifecycleAfterGeneration()
+
+            override fun rollbackState(): ConversationMutationRollbackState =
+                _uiState.value.conversationMutationRollbackState()
+
+            override fun flushPendingAssistantOutput() {
+                this@MainViewModel.flushPendingAssistantOutput()
+            }
+
+            override fun persistConversationMutation(
+                sessions: List<ChatSessionRecord>,
+                rollback: ConversationMutationRollbackState
+            ) {
+                this@MainViewModel.persistConversationMutation(sessions, rollback)
+            }
+        }
 
     /** The ViewModel side of [ChatTerminalSettlementPort]. */
     private val chatTerminalSettlementPort: ChatTerminalSettlementPort =
