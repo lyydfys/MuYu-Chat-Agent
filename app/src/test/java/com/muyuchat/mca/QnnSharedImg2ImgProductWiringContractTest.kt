@@ -8,7 +8,9 @@ import org.junit.Test
 class QnnSharedImg2ImgProductWiringContractTest {
     @Test
     fun `shared qnn img2img provider uses generic schedule tensor verifier and commit cancellation gate`() {
-        val provider = source("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+        // P5/L8: the shared-QNN product wiring lives in the generate() body, now owned by
+        // LocalImageGenerationOperations.kt; read it where it now lives.
+        val provider = source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
 
         listOf(
             ".withQnnProductSchedule(effectiveOptions)",

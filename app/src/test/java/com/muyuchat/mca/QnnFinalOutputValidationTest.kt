@@ -413,7 +413,8 @@ class QnnFinalOutputValidationTest {
                 qnnDeclaredTextEncoderContextPath(root, artifact)
             )).canonicalFile)
 
-            val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+            // P5/L8: this call site lives in the generate() body (generation-operations owner).
+            val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
             val strategy = provider.indexOf("ImageWorkerStrategy.SHARED_TEXT_UNET_VAE ->")
             val declaredResolver = provider.indexOf(
                 "qnnDeclaredTextEncoderContextPath(bundleRoot, profile.graph.textEncoder)",
@@ -424,7 +425,8 @@ class QnnFinalOutputValidationTest {
 
     @Test
     fun `qnn final result rechecks cancellation around completed progress before transfer`() {
-        val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+        // P5/L8: the QNN final-result cancellation ordering lives in the generate() body.
+        val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
         val result = provider.indexOf("val result = LocalImageResult(")
         val preProgressGate = provider.indexOf("coroutineContext.ensureActive()", result)
         val preProgressFlag = provider.indexOf("if (cancellationRequested.get())", preProgressGate)

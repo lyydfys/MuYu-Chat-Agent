@@ -655,6 +655,8 @@ class LocalImageWorkerClientLifecycleTest {
     fun splitSdxlProviderCleanupRetainsGlobalGateUntilPersistentRequestBarrier() {
         val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
         val provider = localImageWorkerSource("LocalImageProvider.kt")
+        // P5/L8: the provider-side SPLIT request lease tail lives in the generate() body.
+        val generation = localImageWorkerSource("LocalImageGenerationOperations.kt")
         val phaseService = localImageWorkerSource("SdxlImagePhaseWorkerService.kt")
         val workerService = localImageWorkerServiceSource()
         val awaitFinish = functionBody(
@@ -667,8 +669,8 @@ class LocalImageWorkerClientLifecycleTest {
         )
         val phaseExecute = functionBody(phaseService, "override fun execute(")
 
-        assertTrue(provider.contains("splitRequestLease?.awaitFinishAfterProviderCleanup("))
-        assertFalse(provider.contains("splitRequestLease?.finishAfterProviderCleanup("))
+        assertTrue(generation.contains("splitRequestLease?.awaitFinishAfterProviderCleanup("))
+        assertFalse(generation.contains("splitRequestLease?.finishAfterProviderCleanup("))
         assertTrue(awaitFinish.contains("withContext(NonCancellable)"))
         assertTrue(awaitFinish.contains("while (admission == null)"))
         assertTrue(awaitFinish.contains("while (exclusive == null)"))
@@ -692,7 +694,7 @@ class LocalImageWorkerClientLifecycleTest {
         assertTrue(workerService.contains("coordinationRoot = File("))
         assertTrue(workerService.contains("noBackupFilesDir"))
         assertTrue(provider.contains("appContext.cacheDir"))
-        assertTrue(provider.contains("SDXL_TWO_PHASE_DIRECTORY"))
+        assertTrue(generation.contains("SDXL_TWO_PHASE_DIRECTORY"))
     }
 
     private fun localImageWorkerClientSource(): String {

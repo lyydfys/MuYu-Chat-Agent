@@ -139,6 +139,9 @@ class LocalImageProductClosureTest {
         // that one assertion reads the body where it now lives (everything else stays in provider).
         val nativeConfigSupport =
             sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageNativeConfigSupport.kt")
+        // P5/L8: the sdxlQnnConditioningGraphSha256 call moved with the generate() body.
+        val generation =
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
         val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt")
         val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
@@ -165,7 +168,7 @@ class LocalImageProductClosureTest {
         )
         assertTrue(mnn.contains("external_mnn_sdxl_embeddings"))
         assertTrue(mnn.contains("clip.mnn+clip_2.mnn"))
-        assertTrue(provider.contains("sdxlQnnConditioningGraphSha256(conditioningRoot)"))
+        assertTrue(generation.contains("sdxlQnnConditioningGraphSha256(conditioningRoot)"))
         assertTrue(nativeConfigSupport.contains("put(\"vaeEncoderContextSha256\", encoderContext.sha256Contents())"))
         assertTrue(source.contains("context_binary_sha256 = mca::qnn::controlnet::sha256_hex_bytes("))
         assertTrue(isolatedSdxl.contains("expected_encoder_context_sha256"))
@@ -239,6 +242,9 @@ class LocalImageProductClosureTest {
     @Test
     fun `shared external MNN evidence is artifact bound while legacy bundles stay discoverable`() {
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+        // P5/L8: the shared-MNN evidence assembly moved with the generate() body.
+        val generation =
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
         val integration = sourceFile(
             "app/src/main/java/com/muyuchat/mca/LocalImageExecutionProfileIntegration.kt"
         )
@@ -261,9 +267,9 @@ class LocalImageProductClosureTest {
             "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings("
         )
 
-        assertTrue(provider.contains("conditioningContractMode\", \"shared_unet_vae"))
-        assertTrue(provider.contains("embeddingJson.optString(\"promptWeightFingerprint\")"))
-        assertTrue(provider.contains("bundleRoot.safeDescendantOrNull(conditioningGraphPath)"))
+        assertTrue(generation.contains("conditioningContractMode\", \"shared_unet_vae"))
+        assertTrue(generation.contains("embeddingJson.optString(\"promptWeightFingerprint\")"))
+        assertTrue(generation.contains("bundleRoot.safeDescendantOrNull(conditioningGraphPath)"))
         assertTrue(readinessProfile.contains("persisted.modelFingerprint"))
         assertFalse(readinessProfile.contains("sha256ForProfile"))
         assertTrue(encoder.contains("if (useCfg)"))

@@ -74,6 +74,11 @@ class SdxlUltraFixPhaseContractTest {
         val provider = repositoryFile(
             "app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt"
         ).readText()
+        // P5/L8: the provider-side UltraFix guard lives in the generate() body, moved to the
+        // generation-operations owner; read it where it now lives.
+        val generation = repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt"
+        ).readText()
 
         listOf(
             "parse_qnn_ultrafix_request",
@@ -132,9 +137,9 @@ class SdxlUltraFixPhaseContractTest {
         assertTrue(protocol.contains("SDXL_ISOLATED_ULTRAFIX_MODE"))
         assertTrue(protocol.contains("Split-SDXL UltraFix inversion/refinement evidence is incomplete."))
         assertTrue(
-            provider.contains("usesSplitQnnWorkers && effectiveOptions.ultraFix == null")
+            generation.contains("usesSplitQnnWorkers && effectiveOptions.ultraFix == null")
         )
-        assertTrue(provider.contains("QnnInputImageArtifact.prepare("))
+        assertTrue(generation.contains("QnnInputImageArtifact.prepare("))
 
         val forbiddenAdmission = listOf(
             "supportedDeviceIds",

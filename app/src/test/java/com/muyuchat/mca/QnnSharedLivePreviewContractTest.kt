@@ -12,7 +12,9 @@ class QnnSharedLivePreviewContractTest {
         val contract = source("core/native/src/main/cpp/qnn_shared_preview.hpp")
         val bridge = source("core/native/src/main/cpp/qnn_native_bridge.cpp")
         val isolated = source("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
-        val workerBridge = source("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
+        // P5/L8: the generate() body moved to LocalImageGenerationOperations.kt; the worker-bridge
+        // fragments below are read where they now live (native C++ sources unchanged).
+        val workerBridge = source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
 
         assertTrue(contract.contains("worker_strategy != \"shared_unet_vae\""))
         assertTrue(contract.contains("worker_strategy != \"shared_text_unet_vae\""))
