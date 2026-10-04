@@ -70,6 +70,36 @@ internal class ChatRunOwnership(
 
     fun reserveStart(): UiGenerationReservation? = ownership.reserveStart()
 
+    /**
+     * Reserves the next run and cancels the Job of the run it superseded.
+     *
+     * The order is load-bearing and must not be inverted: `reserveStart()` clears the previous
+     * ownership **and advances the epoch** first, so a cancellation handler that runs as a result of
+     * the `cancel()` below already observes the new epoch and cannot claim the replacement request.
+     * When the reservation is refused (the app is backgrounded) nothing is cancelled -- the
+     * short-circuit is the behaviour, not an optimisation.
+     */
+    fun reserveStartAndCancelSuperseded(): UiGenerationReservation? =
+        ownership.reserveStart()?.also { reservation ->
+            (reservation.supersededOwner as? Job)?.cancel()
+        }
+
+    /**
+     * Cancels the run that currently owns the UI and cancels its Job.
+     *
+     * Returns the cancellation exactly as the ownership gate produced it -- in particular
+     * [UiGenerationCancellation.owner] stays the (now cancelled) owner rather than becoming null,
+     * because callers read it after this returns to decide whether the local runtime still needs a
+     * stop. Replacing it with null would silently change that decision.
+     */
+    fun cancelCurrentAndCancelOwner(): UiGenerationCancellation {
+        // A cancelled flow still runs finally blocks. The ownership gate advances the epoch before
+        // exposing the captured Job, so late cleanup cannot claim a replacement request.
+        val cancellation = ownership.cancelCurrent()
+        (cancellation.owner as? Job)?.cancel()
+        return cancellation
+    }
+
     fun activate(reservation: UiGenerationReservation, owner: Any): Boolean =
         ownership.activate(reservation, owner)
 

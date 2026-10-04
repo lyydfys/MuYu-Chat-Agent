@@ -284,4 +284,83 @@ class ChatRunOwnershipContractTest {
 
         assertSame(job, seen.get())
     }
+
+    // ── superseded / cancelled job cancellation policy ────────────────────────────────────────
+
+    @Test
+    fun `reserving cancels the job of the run it superseded and returns the new reservation`() {
+        val runs = ownership()
+        val first = runs.reserveStart()!!
+        val firstJob = Job()
+        assertTrue(runs.activate(first, firstJob))
+
+        val second = runs.reserveStartAndCancelSuperseded()!!
+
+        assertTrue("the superseded run's job must be cancelled", firstJob.isCancelled)
+        assertNotEquals(first.runId, second.runId)
+        assertTrue("the new reservation is the current one", runs.isCurrent(second.runId))
+    }
+
+    @Test
+    fun `reserving while backgrounded cancels nothing and returns null`() {
+        val runs = ownership()
+        val first = runs.reserveStart()!!
+        val firstJob = Job()
+        assertTrue(runs.activate(first, firstJob))
+        runs.background()
+
+        assertNull("a refused reservation must be null", runs.reserveStartAndCancelSuperseded())
+        assertFalse(
+            "the short-circuit is the behaviour: nothing may be cancelled when no run is admitted",
+            firstJob.isCancelled
+        )
+    }
+
+    @Test
+    fun `the epoch is advanced before the superseded job is cancelled`() {
+        // The order matters: a cancellation handler that runs because of the cancel() must already
+        // observe the new epoch, otherwise late cleanup could claim the replacement request.
+        val runs = ownership()
+        val first = runs.reserveStart()!!
+        val seenEpochWhenCancelled = java.util.concurrent.atomic.AtomicLong(-1L)
+        val firstJob = Job().apply {
+            invokeOnCompletion { seenEpochWhenCancelled.set(runs.currentRunId()) }
+        }
+        assertTrue(runs.activate(first, firstJob))
+
+        val second = runs.reserveStartAndCancelSuperseded()!!
+
+        assertEquals(
+            "the completion callback must observe the new run, not the one it just left",
+            second.runId,
+            seenEpochWhenCancelled.get()
+        )
+    }
+
+    @Test
+    fun `cancelling returns the original owner, not null, and cancels it`() {
+        val runs = ownership()
+        val reservation = runs.reserveStart()!!
+        val job = Job()
+        assertTrue(runs.activate(reservation, job))
+
+        val cancellation = runs.cancelCurrentAndCancelOwner()
+
+        assertSame(
+            "callers read this afterwards to decide whether the local runtime needs a stop",
+            job,
+            cancellation.owner
+        )
+        assertTrue("and the owner's job must actually be cancelled", job.isCancelled)
+    }
+
+    @Test
+    fun `cancelling an idle owner is harmless and reports no owner`() {
+        val runs = ownership()
+
+        val cancellation = runs.cancelCurrentAndCancelOwner()
+
+        assertNull(cancellation.owner)
+        assertFalse(cancellation.pendingCancelled)
+    }
 }

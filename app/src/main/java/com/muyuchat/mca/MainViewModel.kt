@@ -10665,17 +10665,10 @@ contextTraceJson: String?
     }
 
     private fun reserveUiGenerationStart(): UiGenerationReservation? =
-        chatRuns.reserveStart()?.also { reservation ->
-            (reservation.supersededOwner as? Job)?.cancel()
-        }
+        chatRuns.reserveStartAndCancelSuperseded()
 
-    private fun cancelGenerationJob(): UiGenerationCancellation {
-        // A cancelled flow still runs finally blocks. The ownership gate advances the epoch
-        // before exposing the captured Job, so late cleanup cannot claim a replacement request.
-        val cancellation = chatRuns.cancelCurrent()
-        (cancellation.owner as? Job)?.cancel()
-        return cancellation
-    }
+    private fun cancelGenerationJob(): UiGenerationCancellation =
+        chatRuns.cancelCurrentAndCancelOwner()
 
     private fun startGeneration(
         requestMessages: List<ChatMessage>,
