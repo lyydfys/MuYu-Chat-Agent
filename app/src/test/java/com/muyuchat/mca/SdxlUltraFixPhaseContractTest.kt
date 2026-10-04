@@ -65,6 +65,8 @@ class SdxlUltraFixPhaseContractTest {
             .readText()
         val coordinator = repositoryFile(
             "app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt"
         ).readText()
         val protocol = repositoryFile(
             "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt"

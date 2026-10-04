@@ -135,7 +135,8 @@ class LocalImageProductClosureTest {
         val isolatedSdxl = sourceFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
         val mnn = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
-        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt")
         val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
         val normalizedSource = source.replace("\r\n", "\n")
         val normalizedIsolatedSdxl = isolatedSdxl.replace("\r\n", "\n")
