@@ -3,7 +3,9 @@ package com.muyuchat.mca
 import com.muyuchat.core.engine.ChatSourceReference
 import java.net.ConnectException
 import java.net.SocketTimeoutException
+import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.nio.charset.StandardCharsets
 import java.util.Calendar
 import java.util.Locale
 import javax.net.ssl.SSLException
@@ -283,3 +285,27 @@ internal fun String.searchTerms(): List<String> {
         .filter { it.length >= 2 }
         .distinct()
 }
+
+// P7/S11: moved from the WebSearchProvider class body (class-only callers).
+internal fun String.hasCustomJsonPlaceholder(): Boolean {
+        val lower = lowercase(Locale.ROOT)
+        return lower.contains("{query}") ||
+            lower.contains("{q}") ||
+            lower.contains("{max_results}") ||
+            lower.contains("{maxresults}") ||
+            lower.contains("{limit}")
+    }
+
+internal fun String.replaceCustomJsonPlaceholders(query: String, maxResults: String): String {
+        if (!hasCustomJsonPlaceholder()) return this
+        val encodedQuery = query.urlEncodeForTemplate()
+        val encodedMaxResults = maxResults.urlEncodeForTemplate()
+        return replace("{query}", encodedQuery, ignoreCase = true)
+            .replace("{q}", encodedQuery, ignoreCase = true)
+            .replace("{max_results}", encodedMaxResults, ignoreCase = true)
+            .replace("{maxResults}", encodedMaxResults, ignoreCase = true)
+            .replace("{limit}", encodedMaxResults, ignoreCase = true)
+    }
+
+internal fun String.urlEncodeForTemplate(): String =
+        URLEncoder.encode(this, StandardCharsets.UTF_8.name()).replace("+", "%20")

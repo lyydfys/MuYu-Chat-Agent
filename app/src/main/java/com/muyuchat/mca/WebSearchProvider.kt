@@ -1332,29 +1332,6 @@ class WebSearchProvider(
         }.distinct()
     }
 
-    private fun String.hasCustomJsonPlaceholder(): Boolean {
-        val lower = lowercase(Locale.ROOT)
-        return lower.contains("{query}") ||
-            lower.contains("{q}") ||
-            lower.contains("{max_results}") ||
-            lower.contains("{maxresults}") ||
-            lower.contains("{limit}")
-    }
-
-    private fun String.replaceCustomJsonPlaceholders(query: String, maxResults: String): String {
-        if (!hasCustomJsonPlaceholder()) return this
-        val encodedQuery = query.urlEncodeForTemplate()
-        val encodedMaxResults = maxResults.urlEncodeForTemplate()
-        return replace("{query}", encodedQuery, ignoreCase = true)
-            .replace("{q}", encodedQuery, ignoreCase = true)
-            .replace("{max_results}", encodedMaxResults, ignoreCase = true)
-            .replace("{maxResults}", encodedMaxResults, ignoreCase = true)
-            .replace("{limit}", encodedMaxResults, ignoreCase = true)
-    }
-
-    private fun String.urlEncodeForTemplate(): String =
-        URLEncoder.encode(this, StandardCharsets.UTF_8.name()).replace("+", "%20")
-
     private fun fetchReadableDocument(url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument {
         val httpUrl = url.toHttpUrlOrNull()
         if (httpUrl == null || (httpUrl.scheme != "http" && httpUrl.scheme != "https")) {
