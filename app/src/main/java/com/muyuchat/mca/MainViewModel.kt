@@ -353,7 +353,8 @@ internal data class LocalImagePromptTokenizerDescriptor(
 )
 
 /** Keeps UI-only tokenizer results bounded without ever caching an unavailable backend. */
-private class ImagePromptTokenMeasurementCache(
+// R3/C3-S3: private → internal：随端口具名化迁入容器。
+internal class ImagePromptTokenMeasurementCache(
     private val maximumEntries: Int = 96
 ) {
     private val entries = object : LinkedHashMap<String, ImagePromptTokenMeasurement>(
@@ -620,9 +621,6 @@ class MainViewModel @JvmOverloads constructor(
     private val localImageLoraStore = container.localImageLoraStore
     private val localImageTextualInversionStore = container.localImageTextualInversionStore
     private val localImageUpscalerStore = container.localImageUpscalerStore
-    private val imagePromptTokenizerDescriptors =
-        java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>()
-    private val imagePromptTokenMeasurementCache = ImagePromptTokenMeasurementCache()
     private val imageUpscalerPreferences = application.getSharedPreferences(
         IMAGE_UPSCALER_PREFERENCES,
         Context.MODE_PRIVATE
@@ -1298,6 +1296,8 @@ contextTraceJson: String?
             appUpdate = initialAppUpdateState
         )
     )
+    // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
+    private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
     // R3/C3-S1（插队裁定 2）：三个小端口具名化为容器工厂构造（真实依赖注入），匿名实现已删除。
     private val localImageAdapterPort = container.createLocalImageAdapterPort(uiStateStore)
     private val webSearchConfigPort = container.createWebSearchConfigPort(uiStateStore)
@@ -2252,24 +2252,6 @@ contextTraceJson: String?
         prompt = prompt
     )
 
-    private val imagePromptTokenMeasurementHost = object : ImagePromptTokenMeasurementHost {
-        override val models: List<LocalImageModelRecord>
-            get() = _uiState.value.localImageModels
-
-        override fun cachedMeasurement(cacheKey: String): ImagePromptTokenMeasurement? =
-            imagePromptTokenMeasurementCache.get(cacheKey)
-
-        override fun cacheMeasurement(cacheKey: String, measurement: ImagePromptTokenMeasurement) {
-            imagePromptTokenMeasurementCache.put(cacheKey, measurement)
-        }
-
-        override fun cachedDescriptor(modelKey: String): LocalImagePromptTokenizerDescriptor? =
-            imagePromptTokenizerDescriptors[modelKey]
-
-        override fun cacheDescriptor(modelKey: String, descriptor: LocalImagePromptTokenizerDescriptor) {
-            imagePromptTokenizerDescriptors.putIfAbsent(modelKey, descriptor)
-        }
-    }
 
     fun useFileAsset(fileId: String) {
         val file = _uiState.value.files.firstOrNull { it.id == fileId } ?: return

@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.app.Application
 import android.content.Context
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
 /**
@@ -117,4 +118,27 @@ internal class LocalApiPayloadPortAdapter(
         modelIds: Collection<String>
     ): List<PersistedModelRuntimeSummary> =
         runtimeProfileStoreRef.modelRuntimeSummaries(modelIds)
+}
+
+internal class ImagePromptTokenMeasurementHostAdapter(
+    private val store: UiStateStore,
+    private val measurementCacheRef: ImagePromptTokenMeasurementCache,
+    private val tokenizerDescriptorsRef: java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>
+) : ImagePromptTokenMeasurementHost {
+    override val models: List<LocalImageModelRecord>
+        get() = store.current.localImageModels
+
+    override fun cachedMeasurement(cacheKey: String): ImagePromptTokenMeasurement? =
+        measurementCacheRef.get(cacheKey)
+
+    override fun cacheMeasurement(cacheKey: String, measurement: ImagePromptTokenMeasurement) {
+        measurementCacheRef.put(cacheKey, measurement)
+    }
+
+    override fun cachedDescriptor(modelKey: String): LocalImagePromptTokenizerDescriptor? =
+        tokenizerDescriptorsRef[modelKey]
+
+    override fun cacheDescriptor(modelKey: String, descriptor: LocalImagePromptTokenizerDescriptor) {
+        tokenizerDescriptorsRef.putIfAbsent(modelKey, descriptor)
+    }
 }

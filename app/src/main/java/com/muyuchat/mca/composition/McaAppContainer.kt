@@ -1,6 +1,10 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
+import com.muyuchat.mca.ImagePromptTokenMeasurementHostAdapter
+import com.muyuchat.mca.ImagePromptTokenMeasurementHost
+import com.muyuchat.mca.ImagePromptTokenMeasurementCache
 import com.muyuchat.mca.LocalApiPayloadPort
 import com.muyuchat.mca.LocalApiPayloadPortAdapter
 import com.muyuchat.mca.VisionAttachmentPort
@@ -89,6 +93,11 @@ internal class McaAppContainer(private val application: Application) {
 
     val webSearchProvider = WebSearchProvider()
 
+    // R3/C3-S3：随端口迁入的 token 测量缓存（仅该端口使用，生命周期与容器一致）。
+    val imagePromptTokenMeasurementCache = ImagePromptTokenMeasurementCache()
+
+    val imagePromptTokenizerDescriptors = java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>()
+
     val localImageTextualInversionStore = TextualInversionStore(application)
 
     val localImageUpscalerStore = LocalImageUpscalerStore(application)
@@ -156,6 +165,14 @@ internal class McaAppContainer(private val application: Application) {
             runtimeProfileStoreRef = runtimeProfileStore,
             tuningRef = tuningOwner,
             admissionRef = runtimeAdmission
+        )
+
+    /** R3/C3-S3：token 测量 host 的具名适配器工厂。 */
+    fun createImagePromptTokenMeasurementHost(store: UiStateStore): ImagePromptTokenMeasurementHost =
+        ImagePromptTokenMeasurementHostAdapter(
+            store = store,
+            measurementCacheRef = imagePromptTokenMeasurementCache,
+            tokenizerDescriptorsRef = imagePromptTokenizerDescriptors
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
