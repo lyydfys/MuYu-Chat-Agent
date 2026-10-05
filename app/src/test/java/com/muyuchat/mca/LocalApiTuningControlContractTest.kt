@@ -80,6 +80,20 @@ class LocalApiTuningControlContractTest {
         assertTrue(wrapper.contains("createTuningJob(request, idempotency.key)"))
     }
 
+    @Test
+    fun controlPlaneProjectionsAndTuningControlOverloadsStayPinned() {
+        // S40-2B-2/2B-3 precondition: the one-line projection delegates and every tuning-control
+        // method's String/IdempotencyContext overload pair. Extracting any of these must keep both
+        // surfaces accounted for.
+        val source = mainViewModelSource()
+        assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJson()"))
+        assertTrue(source.contains("override fun tuningJson(): String = tuningStateJson()"))
+        for (method in listOf("pauseTuningJob", "resumeTuningJob", "cancelTuningJob")) {
+            val count = Regex("override fun $method\\(").findAll(source).count()
+            assertEquals("$method must keep exactly its two overloads", 2, count)
+        }
+    }
+
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
 
     private fun sourceFile(fileName: String): String {
