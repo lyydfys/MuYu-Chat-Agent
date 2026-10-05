@@ -1363,7 +1363,7 @@ contextTraceJson: String?
         installLocalApiAuxProviders(localApiAuxProviderPort)
         LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
             override fun busyState(): LocalApiBusyState =
-                localApiBusyStateFor(_uiState.value, tuningJson = { tuningStateJson() })
+                localApiBusyStateFor(_uiState.value, tuningJson = { localApiTuningStateJson(localApiPayloadPort) })
 
             override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult =
                 localApiPreflightFor(
@@ -1376,7 +1376,7 @@ contextTraceJson: String?
 
             override fun profileJson(): String = runtimeProfileJson()
 
-            override fun tuningJson(): String = tuningStateJson()
+            override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)
 
             override fun tuningJob(jobId: String?): com.muyuchat.api.local.LocalApiControlResult =
                 localApiTuningJobFor(
@@ -1385,7 +1385,7 @@ contextTraceJson: String?
                     currentActiveTuningJobId = { activeTuningJobId },
                     lookupJob = { id -> runtimeProfileStore.tuningJob(id) },
                     lookupActiveJob = { key -> runtimeProfileStore.activeTuningJob(key) },
-                    tuningJson = { tuningStateJson() },
+                    tuningJson = { localApiTuningStateJson(localApiPayloadPort) },
                     publicJobJson = { job -> tuningJobPublicJson(job) }
                 )
 
@@ -1884,7 +1884,7 @@ contextTraceJson: String?
             local && localIdentity != null && engine.stats.value.loaded -> ContextSummaryModel(
                 modelId = initialState.loadedModelId ?: localIdentity.identityHash,
                 runtimeIdentity = localIdentity.identityHash,
-                params = engine.activeExecutionProfile()?.let { mergeExecutionProfile(request.params, it) }
+                params = engine.activeExecutionProfile()?.let { mergedExecutionProfile(request.params, it) }
                     ?: request.params
             )
             !local && cloudConfig != null && cloudId != null -> ContextSummaryModel(
@@ -7058,7 +7058,7 @@ contextTraceJson: String?
         defaults = params
     )
     GenerationPreferences.persistGenerationParams(getApplication(), modelParams)
-    val effectiveParams = mergeExecutionProfile(modelParams, formalProfile)
+    val effectiveParams = mergedExecutionProfile(modelParams, formalProfile)
     _uiState.update { state ->
         state.copy(
             params = effectiveParams,
@@ -7355,7 +7355,7 @@ contextTraceJson: String?
                 selectedChatBackend = snapshot.uiState.selectedChatBackend,
                 busy = false,
                 isGenerating = false,
-                params = mergeExecutionProfile(snapshot.uiState.params, activeProfile),
+                params = mergedExecutionProfile(snapshot.uiState.params, activeProfile),
                 stats = engine.stats.value,
                 autoTuningInProgress = false,
                 rollbackParams = null,
@@ -10412,7 +10412,7 @@ contextTraceJson: String?
                 val restoredProfile = engine.activeExecutionProfile()
                     ?: runtimeProfileStore.currentRuntimeState(identity.identityHash)?.activeExecutionProfile
                     ?: error("稳定运行配置恢复记录缺失")
-                val restored = mergeExecutionProfile(_uiState.value.params, restoredProfile)
+                val restored = mergedExecutionProfile(_uiState.value.params, restoredProfile)
                 GenerationPreferences.persistGenerationParams(getApplication(), restored)
                 _uiState.update {
                     it.copy(
@@ -10707,7 +10707,7 @@ contextTraceJson: String?
                             }
                         }
                         measuredStage += candidate to result
-                        if (tuningCandidateScore(result).eligible) {
+                        if (canaryScore(port = tuningCanaryPort, result).eligible) {
                             eligibleCandidates++
                         } else {
                             rejectedCandidates++
@@ -10729,7 +10729,7 @@ contextTraceJson: String?
                     val selectedStageCandidate = StagedCandidateSelectionPolicy.selectBestEligible(
                         stage = stage,
                         candidates = measuredStage,
-                        scoreOf = { (_, result) -> tuningCandidateScore(result) },
+                        scoreOf = { (_, result) -> canaryScore(port = tuningCanaryPort, result) },
                         contextTokensOf = { (candidate, _) -> candidate.profile.loadBound.nCtx ?: 0 }
                     ) ?: error("${stage.label}没有候选同时通过正确性、安全、签名和稳定性门槛")
                     currentBest = selectedStageCandidate.first.profile
@@ -10868,7 +10868,7 @@ contextTraceJson: String?
                 if (adaptiveTuningCancelRequested.get()) {
                     error("用户取消调优")
                 }
-                val commitScore = tuningCandidateScore(result)
+                val commitScore = canaryScore(port = tuningCanaryPort, result)
                 if (!commitScore.eligible) {
                     error(commitScore.reason ?: result.detail)
                 }
@@ -10902,7 +10902,7 @@ contextTraceJson: String?
                     bestThreadCount = selectedThreads,
                     stable = true
                 )
-                appendBenchmarkHistory(device, benchmark, mergeExecutionProfile(_uiState.value.params, candidateProfile.engineProfile))
+                appendBenchmarkHistory(device, benchmark, mergedExecutionProfile(_uiState.value.params, candidateProfile.engineProfile))
                 modelStore.markLoaded(model.id)
                 val refreshedModels = modelStore.listModels()
                 managedRuntimeReadinessRefreshGate.invalidate()
@@ -10910,7 +10910,7 @@ contextTraceJson: String?
                 _uiState.update { state ->
                     state.copy(
                         models = refreshedModels,
-                        params = mergeExecutionProfile(state.params, candidateProfile.engineProfile),
+                        params = mergedExecutionProfile(state.params, candidateProfile.engineProfile),
                         benchmark = benchmark,
                         benchmarkHistory = benchmarkHistoryLogger.recent(),
                         profileId = candidateProfile.profileId,
@@ -11060,12 +11060,12 @@ contextTraceJson: String?
                 this@MainViewModel.candidateMeasurement(profileId, jobId, phase, result)
 
             override fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
-                this@MainViewModel.tuningCandidateScore(result)
+                canaryScore(port = tuningCanaryPort, result)
 
             override fun mergeExecutionProfile(
                 generation: GenerationParams,
                 profile: ModelExecutionProfile
-            ): GenerationParams = this@MainViewModel.mergeExecutionProfile(generation, profile)
+            ): GenerationParams = mergedExecutionProfile(generation, profile)
 
             override suspend fun restoreExactRuntimeProfile(
                 model: ModelManifest,
@@ -11485,7 +11485,7 @@ contextTraceJson: String?
 
             override fun analysisGenerationParams(): GenerationParams = apiGenerationParams()
 
-            override fun modelsJsonText(): String = modelsJson()
+            override fun modelsJsonText(): String = localApiModelsJson(localApiPayloadPort)
 
             override fun textualInversionsJsonText(): String = JSONArray().apply {
                 _uiState.value.localImageTextualInversions.forEach { artifact ->
@@ -11653,12 +11653,12 @@ contextTraceJson: String?
             override fun mergeExecutionProfile(
                 generation: GenerationParams,
                 profile: ModelExecutionProfile
-            ): GenerationParams = this@MainViewModel.mergeExecutionProfile(generation, profile)
+            ): GenerationParams = mergedExecutionProfile(generation, profile)
 
             override fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
                 this@MainViewModel.cancelActiveLocalApiImageGeneration(reason)
 
-            override fun loadedModelJson(): String = this@MainViewModel.loadedModelJson()
+            override fun loadedModelJson(): String = localApiLoadedModelJson(localApiPayloadPort)
         }
 
     private val chatExecutionPort: ChatGenerationExecutionPort =
@@ -11721,7 +11721,7 @@ contextTraceJson: String?
 
             override suspend fun localVisionRunnerAvailable() = isLocalVisionRunnerAvailable(visionAttachmentPort)
 
-            override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = this@MainViewModel.mergeExecutionProfile(generation, profile)
+            override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = mergedExecutionProfile(generation, profile)
 
             override fun persistGenerationParams(params: GenerationParams) = GenerationPreferences.persistGenerationParams(getApplication(), params)
 
@@ -13091,16 +13091,6 @@ contextTraceJson: String?
         while (hasMoreElements()) yield(nextElement())
     }
 
-    /**
-     * Four forwarders to [ExecutionProfileMerging]. These functions are pure -- they read no ViewModel
-     * state, no field and no coroutine -- so the extraction needed no port at all; only the
-     * declarations moved. The names differ from the top-level ones on purpose: a same-named member
-     * would shadow the top-level function inside this class and the forwarder would call itself.
-     */
-    private fun mergeExecutionProfile(
-        generation: GenerationParams,
-        profile: ModelExecutionProfile
-    ): GenerationParams = mergedExecutionProfile(generation, profile)
 
     private fun mergeUserRequestedExecutionProfile(
         base: ModelExecutionProfile,
@@ -13606,7 +13596,7 @@ contextTraceJson: String?
         failure?.let { error ->
             return failedIsolatedTuningCandidateResult(candidate, probeStart, error)
         }
-        return requireNotNull(workerResult).toCandidateCanaryResult(candidate)
+        return requireNotNull(workerResult).canaryResultFrom(port = tuningCanaryPort, candidate = candidate)
     }
 
     /**
@@ -13641,10 +13631,6 @@ contextTraceJson: String?
         return failedIsolatedCanaryResult(port = tuningCanaryPort, candidate = candidate, start = start, error = error)
     }
 
-/** Delegates to [canaryResultFrom]. Signature kept verbatim. */
-    private fun TuningProbeWorkerProtocol.Result.toCandidateCanaryResult(
-        candidate: TuningExecutionProfile
-    ): CandidateCanaryResult = canaryResultFrom(port = tuningCanaryPort, candidate = candidate)
 
 /** Delegates to [jsonOptionalFiniteDouble]. Signature kept verbatim. */
     private fun JSONObject.optionalFiniteDouble(field: String): Double {
@@ -13664,8 +13650,6 @@ contextTraceJson: String?
     }
 
 
-/** Delegates to [canaryScore]. Signature kept verbatim. */
-    private fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore = canaryScore(port = tuningCanaryPort, result = result)
 
 /** Delegates to [canaryMeasurement]. Signature kept verbatim. */
     private fun candidateMeasurement(
@@ -13761,7 +13745,7 @@ contextTraceJson: String?
         val state = _uiState.value
         val active = engine.activeExecutionProfile()
             .takeIf { state.loadedModelId != null && engine.stats.value.loaded }
-        return if (active == null) state.params else mergeExecutionProfile(state.params, active)
+        return if (active == null) state.params else mergedExecutionProfile(state.params, active)
     }
 
     private fun localApiModelMatches(
@@ -14067,14 +14051,8 @@ contextTraceJson: String?
                 this@MainViewModel.runtimeProfileStore.modelRuntimeSummaries(modelIds)
         }
 
-    /** Delegates to [localApiTuningStateJson]. */
-    private fun tuningStateJson(): String = localApiTuningStateJson(localApiPayloadPort)
 
-    /** Delegates to [localApiLoadedModelJson]. */
-    private fun loadedModelJson(): String = localApiLoadedModelJson(localApiPayloadPort)
 
-    /** Delegates to [localApiModelsJson]. */
-    private fun modelsJson(): String = localApiModelsJson(localApiPayloadPort)
 
     /**
      * Delegates to [localApiModelRuntimeStatesJson]. The blocking hop stays here: the projection is a
@@ -14097,7 +14075,7 @@ contextTraceJson: String?
                 statusMessage = "Local API 已请求调优任务 ${action}。"
             )
         }
-        com.muyuchat.api.local.LocalApiControlResult.Success(tuningStateJson())
+        com.muyuchat.api.local.LocalApiControlResult.Success(localApiTuningStateJson(localApiPayloadPort))
     }.getOrElse { error ->
         com.muyuchat.api.local.LocalApiControlResult.Rejected(
             httpStatus = 409,

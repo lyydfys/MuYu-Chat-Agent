@@ -91,7 +91,9 @@ class LocalApiTuningControlContractTest {
         // surfaces accounted for.
         val source = mainViewModelSource()
         assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJson()"))
-        assertTrue(source.contains("override fun tuningJson(): String = tuningStateJson()"))
+        // R1/S9: tuningJson 的转发目标随 VM 私有委托坍塌改为 payload 投影 owner；
+        // "投影 surface 是一行委托"的合同保持，仅更新代理目标。
+        assertTrue(source.contains("override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)"))
         for (method in listOf("pauseTuningJob", "resumeTuningJob", "cancelTuningJob", "applyTuningJob", "rollbackTuning")) {
             val count = Regex("override fun $method\\(").findAll(source).count()
             assertEquals("$method must keep exactly its two overloads", 2, count)
