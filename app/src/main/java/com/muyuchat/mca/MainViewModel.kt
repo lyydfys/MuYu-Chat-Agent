@@ -300,7 +300,8 @@ internal data class CandidateCanaryResult(
     val evidenceJson: String = "{}"
 )
 
-private data class LoadedRuntimeSnapshot(
+// R3/C1: private → internal：随 captureLoadedRuntimeSnapshotFor 移入运行时缝（C1 裁定 B）。
+internal data class LoadedRuntimeSnapshot(
     val model: ModelManifest,
     val profile: ModelExecutionProfile,
     val uiState: MainUiState,
@@ -635,6 +636,16 @@ class MainViewModel @JvmOverloads constructor(
     private val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
     private val agentLogger = AgentDecisionLogger(application)
     private val benchmarkHistoryLogger = BenchmarkHistoryLogger(application)
+    // R3/C1: 诊断族读写随 C1 裁定 B 移入 DiagnosticsOperations（体逐字、评测点不变）。
+    private val diagnosticsOperations = DiagnosticsOperations(
+        engine = engine,
+        currentState = { _uiState.value },
+        updateUiState = { transform -> uiStateStore.update(transform) },
+        recentAgentLogs = { agentLogger.recent() },
+        recentBenchmarkHistory = { benchmarkHistoryLogger.recent() },
+        currentDeviceProfile = { currentDeviceProfile() },
+        application = application
+    )
     private val initialDeviceProfile = deviceProfileReader.read()
     private val initialParams = loadGenerationParams(application)
     private val initialPersistentPrefixCacheEnabled = loadPersistentPrefixCacheEnabled(application)
@@ -6639,7 +6650,12 @@ contextTraceJson: String?
      * CoroutineScope, and the two `return@launchModelOperation` early exits became `return`.
      */
     private suspend fun CoroutineScope.loadModelBody(requestedModel: ModelManifest) {
-    val runtimeBeforeLoad = captureLoadedRuntimeSnapshot()
+    val runtimeBeforeLoad = captureLoadedRuntimeSnapshotFor(
+        engine = engine,
+        state = _uiState.value,
+        activeModelForRuntimeProfile = activeModelForRuntimeProfile,
+        activeAdaptiveRecommendation = activeAdaptiveRecommendation
+    )
     fun failBeforeNativeReplacement(message: String) {
         // Release the input lock before diagnostics. Native/Binder reads can
         // be slow or fail, and a preflight failure must not leave a cancelled
@@ -7281,21 +7297,6 @@ contextTraceJson: String?
                 )
             }
         }
-    }
-
-    private fun captureLoadedRuntimeSnapshot(): LoadedRuntimeSnapshot? {
-        if (!engine.stats.value.loaded) return null
-        val state = _uiState.value
-        val model = activeModelForRuntimeProfile
-            ?: state.models.firstOrNull { it.id == state.loadedModelId }
-            ?: return null
-        val profile = engine.activeExecutionProfile() ?: return null
-        return LoadedRuntimeSnapshot(
-            model = model,
-            profile = profile,
-            uiState = state,
-            adaptiveRecommendation = activeAdaptiveRecommendation
-        )
     }
 
     private fun clearNativeRuntimeSessionState(
@@ -9996,34 +9997,19 @@ contextTraceJson: String?
     }
 
     fun refreshLogs() {
-        // R3/S16: 诊断族写入统一经 UiStateStore（同一底层流，CAS 语义不变）。
-        uiStateStore.update {
-            it.copy(
-                logs = engine.recentLogs(),
-                agentLogs = agentLogger.recent(),
-                benchmarkHistory = benchmarkHistoryLogger.recent(),
-                nativeStatsJson = engine.nativeStatsJson(),
-                diagnosticReport = buildDiagnosticReport()
-            )
-        }
+        // R3/C1: 读写体移入 DiagnosticsOperations（零行为：同一 store 流与 CAS 语义）。
+        diagnosticsOperations.refreshLogs()
     }
 
     fun refreshDiagnostics() {
-        // R3/S16: 诊断族写入统一经 UiStateStore。
-        uiStateStore.update {
-            it.copy(
-                nativeStatsJson = engine.nativeStatsJson(),
-                benchmarkHistory = benchmarkHistoryLogger.recent(),
-                diagnosticReport = buildDiagnosticReport(),
-                statusMessage = "诊断报告已刷新"
-            )
-        }
+        // R3/C1: 读写体移入 DiagnosticsOperations（零行为：同一 store 流与 CAS 语义）。
+        diagnosticsOperations.refreshDiagnostics()
     }
 
     fun exportDiagnosticReport(uri: Uri) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
-                val report = buildDiagnosticReport()
+                val report = diagnosticsOperations.buildDiagnosticReport()
                 getApplication<Application>().contentResolver.openOutputStream(uri)?.use { stream ->
                     stream.write(report.toByteArray(Charsets.UTF_8))
                 } ?: error("无法写入所选位置。")
@@ -10249,7 +10235,7 @@ contextTraceJson: String?
                         nativeStatsJson = nativeStats,
                         logs = engine.recentLogs(),
                         localStabilitySmokeSummary = summary,
-                        diagnosticReport = buildDiagnosticReport(),
+                        diagnosticReport = diagnosticsOperations.buildDiagnosticReport(),
                         statusMessage = "稳定性自检通过：$summary"
                     )
                 }
@@ -10260,7 +10246,7 @@ contextTraceJson: String?
                         busy = false,
                         nativeStatsJson = engine.nativeStatsJson(),
                         localStabilitySmokeSummary = message,
-                        diagnosticReport = buildDiagnosticReport(),
+                        diagnosticReport = diagnosticsOperations.buildDiagnosticReport(),
                         statusMessage = message
                     )
                 }
@@ -13313,45 +13299,6 @@ contextTraceJson: String?
             socket.shutdownOutput()
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
-
-    private fun buildDiagnosticReport(): String {
-        val state = _uiState.value
-        val loadedModel = state.models.firstOrNull { it.id == state.loadedModelId }
-        val device = currentDeviceProfile()
-        val nativeStats = runCatching { JSONObject(engine.nativeStatsJson()) }.getOrElse { JSONObject() }
-        return JSONObject()
-            .put("time", System.currentTimeMillis())
-            .put("startup", StartupDiagnostics.read(getApplication()))
-            .put("loadedModelId", state.loadedModelId)
-            .put("loadedModelName", state.loadedModelName)
-            .put("modelPath", loadedModel?.path ?: state.stats.modelPath)
-            .put("modelSizeBytes", loadedModel?.sizeBytes ?: 0L)
-            .put("modelSha256", loadedModel?.sha256)
-            .put("modelQuant", loadedModel?.quant)
-            .put("modelArchitecture", loadedModel?.architecture)
-            .put("backendReady", nativeStats.optBoolean("backendReady"))
-            .put("backendDeviceCount", nativeStats.optInt("backendDeviceCount"))
-            .put("nativeLibDir", nativeStats.optString("nativeLibDir"))
-            .put("nativeLastError", nativeStats.optString("lastError"))
-            .put("runtimeStats", nativeStats)
-            .put(
-                "androidMemory",
-                JSONObject()
-                    .put("processPssKb", state.stats.nativePssKb)
-                    .put("processRssKb", state.stats.processRssKb)
-                    .put("nativeHeapKb", state.stats.nativeHeapKb)
-                    .put("nativeHeapSizeKb", state.stats.nativeHeapSizeKb)
-                    .put("javaHeapKb", state.stats.javaHeapKb)
-                    .put("availMemKb", state.stats.availMemKb)
-            )
-            .put("deviceProfile", device.toJson())
-            .put("params", JSONObject(state.params.toJson()))
-            .put("lastBenchmark", state.benchmark?.toJson())
-            .put("benchmarkHistory", JSONArray(state.benchmarkHistory.take(10).map { it.toJson() }))
-            .put("lastAutoTuningSummary", state.lastAutoTuningSummary)
-            .put("localStabilitySmokeSummary", state.localStabilitySmokeSummary)
-            .toString(2)
-    }
 
     private fun appendBenchmarkHistory(
         device: DeviceProfile,
