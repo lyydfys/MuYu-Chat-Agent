@@ -189,6 +189,10 @@ internal interface LocalApiTuningControlPort {
     fun setTuningPauseRequested(value: Boolean)
 
     fun launchTuningApply(pending: PendingRuntimeProfileTransaction)
+
+    suspend fun currentRuntimeState(identityKey: String): CurrentRuntimeProfileState?
+
+    fun launchTuningRollback(identity: ModelRuntimeIdentity, model: ModelManifest)
 }
 
 /**
@@ -415,6 +419,62 @@ internal fun localApiApplyTuningJobFor(
             .put("accepted", true)
             .put("action", "apply")
             .put("job", tuningJobPublicJson(job))
+            .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
+            .toString(),
+        httpStatus = 202
+    )
+}
+
+
+/**
+ * P8/S40-2B-3: the Local API control-plane rollback overload, moved verbatim out of
+ * MainViewModel's `LocalApiRuntime.controlPlane` object. Validation chain, gated state writes
+ * and the 202 accept payload are unchanged; the rollback job launch and its lifecycle
+ * ownership stay on the VM behind [LocalApiTuningControlPort.launchTuningRollback].
+ */
+internal fun localApiRollbackTuningFor(
+    idempotencyKey: String,
+    port: LocalApiTuningControlPort
+): LocalApiControlResult = with(port) {
+    val identity = activeRuntimeIdentity()
+        ?: return localApiTuningRejected(409, "model_not_loaded", "当前没有已加载的本地模型。")
+    val model = activeModelForRuntimeProfile()
+        ?: return localApiTuningRejected(409, "model_not_loaded", "当前模型没有可回滚的运行配置。")
+    val runtimeState = runCatching {
+        runBlocking(Dispatchers.IO) { currentRuntimeState(identity.identityHash) }
+    }.getOrElse { error ->
+        return localApiTuningRejected(409, "rollback_state_unavailable", error.message ?: "无法读取回滚状态。")
+    } ?: return localApiTuningRejected(409, "rollback_not_available", "当前运行配置尚未持久化。")
+    runtimeState.activeJob?.let { activeJob ->
+        return localApiTuningConflict(
+            action = "rollback",
+            activeJobId = activeJob.jobId,
+            message = "存在未结束的调优任务，不能并发回滚。"
+        )
+    }
+    localApiExclusiveLifecycleConflict("rollback")?.let { return it }
+    val active = runtimeState.activeProfile
+        ?: return localApiTuningRejected(409, "rollback_not_available", "当前没有 committed profile。")
+    val rollbackTarget = active.parentCommittedProfileId
+        ?: runtimeState.pointers?.lastKnownGoodProfileId?.takeIf { it != active.profileId }
+    if (rollbackTarget == null) {
+        return localApiTuningRejected(409, "rollback_not_available", "当前 profile 没有更早的稳定版本可回滚。")
+    }
+    updateUiState {
+        it.copy(
+            busy = true,
+            engineLifecycle = AgentEngineLifecycle.ROLLING_BACK,
+            tuningJobState = AgentTuningJobState.RECOVERING,
+            tuningPhase = "等待回滚生命周期",
+            statusMessage = "Local API 已接受 rollback，正在取得运行时生命周期。"
+        )
+    }
+    launchTuningRollback(identity, model)
+    return com.muyuchat.api.local.LocalApiControlResult.Success(
+        json = JSONObject()
+            .put("accepted", true)
+            .put("action", "rollback")
+            .put("targetProfileId", rollbackTarget)
             .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
             .toString(),
         httpStatus = 202

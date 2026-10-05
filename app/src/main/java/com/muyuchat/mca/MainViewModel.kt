@@ -1472,57 +1472,10 @@ contextTraceJson: String?
 
             override fun rollbackTuning(
                 idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult {
-                val identity = activeRuntimeIdentity
-                    ?: return localApiTuningRejected(409, "model_not_loaded", "当前没有已加载的本地模型。")
-                val model = activeModelForRuntimeProfile
-                    ?: return localApiTuningRejected(409, "model_not_loaded", "当前模型没有可回滚的运行配置。")
-                val runtimeState = runCatching {
-                    runBlocking(Dispatchers.IO) { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
-                }.getOrElse { error ->
-                    return localApiTuningRejected(409, "rollback_state_unavailable", error.message ?: "无法读取回滚状态。")
-                } ?: return localApiTuningRejected(409, "rollback_not_available", "当前运行配置尚未持久化。")
-                runtimeState.activeJob?.let { activeJob ->
-                    return localApiTuningConflict(
-                        action = "rollback",
-                        activeJobId = activeJob.jobId,
-                        message = "存在未结束的调优任务，不能并发回滚。"
-                    )
-                }
-                localApiExclusiveLifecycleConflict("rollback")?.let { return it }
-                val active = runtimeState.activeProfile
-                    ?: return localApiTuningRejected(409, "rollback_not_available", "当前没有 committed profile。")
-                val rollbackTarget = active.parentCommittedProfileId
-                    ?: runtimeState.pointers?.lastKnownGoodProfileId?.takeIf { it != active.profileId }
-                if (rollbackTarget == null) {
-                    return localApiTuningRejected(409, "rollback_not_available", "当前 profile 没有更早的稳定版本可回滚。")
-                }
-                _uiState.update {
-                    it.copy(
-                        busy = true,
-                        engineLifecycle = AgentEngineLifecycle.ROLLING_BACK,
-                        tuningJobState = AgentTuningJobState.RECOVERING,
-                        tuningPhase = "等待回滚生命周期",
-                        statusMessage = "Local API 已接受 rollback，正在取得运行时生命周期。"
-                    )
-                }
-                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
-                    try {
-                        rollbackCommittedRuntimeProfile(identity, model)
-                    } finally {
-                        adaptiveTuningJob = null
-                    }
-                }
-                return com.muyuchat.api.local.LocalApiControlResult.Success(
-                    json = JSONObject()
-                        .put("accepted", true)
-                        .put("action", "rollback")
-                        .put("targetProfileId", rollbackTarget)
-                        .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
-                        .toString(),
-                    httpStatus = 202
-                )
-            }
+            ): com.muyuchat.api.local.LocalApiControlResult = localApiRollbackTuningFor(
+                idempotencyKey = idempotencyKey,
+                port = localApiTuningControlPort
+            )
 
             override fun rollbackTuning(
                 idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
@@ -11740,6 +11693,19 @@ contextTraceJson: String?
                         adaptiveTuningJob = null
                         adaptiveTuningCancelRequested.set(false)
                         adaptiveTuningPauseRequested.set(false)
+                    }
+                }
+            }
+
+            override suspend fun currentRuntimeState(identityKey: String): CurrentRuntimeProfileState? =
+                runtimeProfileStore.currentRuntimeState(identityKey)
+
+            override fun launchTuningRollback(identity: ModelRuntimeIdentity, model: ModelManifest) {
+                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        rollbackCommittedRuntimeProfile(identity, model)
+                    } finally {
+                        adaptiveTuningJob = null
                     }
                 }
             }

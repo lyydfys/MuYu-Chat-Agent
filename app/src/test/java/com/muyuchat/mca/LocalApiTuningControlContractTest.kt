@@ -101,6 +101,53 @@ class LocalApiTuningControlContractTest {
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
 
     @Test
+    fun rollbackTuningKeepsItsValidationChainAndAcceptPayload() {
+        // P8/S40-2B-3: the rollback overload's validation chain, the gated state writes and the
+        // 202 accept payload moved to LocalApiControlPlaneOperations unchanged; the rollback job
+        // launch and its lifecycle ownership stay on MainViewModel behind the control port.
+        val body = functionBody(
+            localApiControlPlaneOperationsSource(),
+            "internal fun localApiRollbackTuningFor("
+        )
+
+        val ordered = listOf(
+            "val identity = activeRuntimeIdentity()",
+            "\"model_not_loaded\"",
+            "val model = activeModelForRuntimeProfile()",
+            "currentRuntimeState(identity.identityHash)",
+            "\"rollback_state_unavailable\"",
+            "\"rollback_not_available\"",
+            "runtimeState.activeJob?.let { activeJob ->",
+            "localApiTuningConflict(",
+            "localApiExclusiveLifecycleConflict(\"rollback\")",
+            "val active = runtimeState.activeProfile",
+            "\"rollback_not_available\"",
+            "val rollbackTarget = active.parentCommittedProfileId",
+            "runtimeState.pointers?.lastKnownGoodProfileId?.takeIf { it != active.profileId }",
+            "\"rollback_not_available\"",
+            "updateUiState {",
+            "tuningPhase = \"等待回滚生命周期\"",
+            "statusMessage = \"Local API 已接受 rollback，正在取得运行时生命周期。\"",
+            "launchTuningRollback(identity, model)",
+            ".put(\"action\", \"rollback\")",
+            ".put(\"targetProfileId\", rollbackTarget)",
+            "httpStatus = 202"
+        )
+        var cursor = 0
+        for (fact in ordered) {
+            val at = body.indexOf(fact, cursor)
+            assertTrue("expected [$fact] after offset $cursor", at >= 0)
+            cursor = at + fact.length
+        }
+        assertTrue(body.contains("engineLifecycle = AgentEngineLifecycle.ROLLING_BACK"))
+        assertTrue(body.contains("tuningJobState = AgentTuningJobState.RECOVERING"))
+        assertTrue(body.contains(".put(\"accepted\", true)"))
+        assertTrue(body.contains(".put(\"idempotencyKeyAccepted\", idempotencyKey.isNotBlank())"))
+        assertEquals(6, Regex("localApiTuningRejected\\(").findAll(body).count())
+        assertEquals(1, Regex("localApiTuningConflict\\(").findAll(body).count())
+    }
+
+    @Test
     fun applyTuningJobKeepsItsValidationMatrixAndAcceptPayload() {
         // P8/S40-2B-2: the apply overload's validation chain, the gated state writes and the
         // 202 accept payload moved to LocalApiControlPlaneOperations unchanged; the apply job
