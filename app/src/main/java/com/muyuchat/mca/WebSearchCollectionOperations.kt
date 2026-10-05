@@ -129,17 +129,6 @@ internal suspend fun runProviderQueries(
         }.awaitAll()
     }
 
-internal fun List<WebSearchQueryAttempt>.toProviderWarnings(): List<String> {
-    val failures = mapNotNull { it.failure }
-    val emptyQueries = filter { it.documents.isEmpty() && it.failure == null }.map { it.query }
-    return buildList {
-        addAll(failures.take(5))
-        emptyQueries.take(3).forEach { query ->
-            add("${query.take(36)}：搜索服务返回空结果")
-        }
-    }
-}
-
 internal suspend fun hydrateReadableContentVia(
     port: WebSearchCollectionPort,
     documents: List<WebSearchDocument>,
