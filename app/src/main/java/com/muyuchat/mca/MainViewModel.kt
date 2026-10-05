@@ -773,6 +773,8 @@ class MainViewModel @JvmOverloads constructor(
                 runCatching { chatSessionStore.save(snapshots) }
             }
         }
+    // R3/C3-S4：持久化状态 holder 的容器初始化（紧随初值装配完成之后）。
+    private val chatSessionPersistenceStateInit = container.initializeChatSessionPersistenceState(initialChatSessions)
     private val initialWorldBooks = worldBookStore.load()
     private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
     private val initialStartupSession = initialChatSessions
@@ -927,12 +929,19 @@ class MainViewModel @JvmOverloads constructor(
      * a process/power interruption cannot make a new turn race the old KV.
     */
     private var conversationMutationBarrier: Job? = null
-    @Volatile
-    private var durableChatSessions: List<ChatSessionRecord> = initialChatSessions
-    private val chatSessionPersistenceMutex = Mutex()
-    private val chatSessionPersistenceSequence = AtomicLong(0L)
-    private val chatSessionPersistenceStateLock = Any()
-    private val pendingKnowledgeBindings = linkedMapOf<String, Set<String>>()
+    private var durableChatSessions: List<ChatSessionRecord>
+        get() = container.chatSessionPersistenceState.durableChatSessions
+        set(value) {
+            container.chatSessionPersistenceState.durableChatSessions = value
+        }
+    private val chatSessionPersistenceMutex: Mutex
+        get() = container.chatSessionPersistenceState.persistenceMutex
+    private val chatSessionPersistenceSequence: AtomicLong
+        get() = container.chatSessionPersistenceState.persistenceSequence
+    private val chatSessionPersistenceStateLock: Any
+        get() = container.chatSessionPersistenceState.stateLock
+    private val pendingKnowledgeBindings: MutableMap<String, Set<String>>
+        get() = container.chatSessionPersistenceState.pendingKnowledgeBindings
     private val pendingWorldBookCleanupOwners =
         linkedMapOf<WorldBookScope, MutableSet<String>>()
     private var directParameterStageJob: Job? = null
@@ -10990,6 +10999,7 @@ contextTraceJson: String?
     }
 
 
+
     private fun List<ChatSessionRecord>.upsertSession(
         sessionId: String,
         messages: List<ChatMessage>,
@@ -10998,40 +11008,16 @@ contextTraceJson: String?
         replaceAssistantSnapshot: Boolean = false,
         modelMode: String? = null,
         modelId: String? = null
-    ): List<ChatSessionRecord> {
-        if (messages.isEmpty()) return this
-        val existing = firstOrNull { it.id == sessionId }
-        val existingOwner = existing?.assistantSnapshot?.assistantId ?: existing?.assistantId
-        if (existing != null && (existing.mixedAssistantHistory ||
-                (assistantId != null && existingOwner != assistantId) ||
-                (assistantSnapshot != null && assistantSnapshot.assistantId != existingOwner))) return this
-        val capturedSnapshot = existing?.assistantSnapshot ?: assistantSnapshot
-            ?: assistantId?.let { owner ->
-                _uiState.value.assistants.firstOrNull { it.id == owner }?.toConversationSnapshot()
-            }
-        val record = ChatSessionRecord(
-            id = sessionId,
-            title = if (existing?.manualTitle == true) existing.title else messages.chatTitle(),
-            messages = messages,
-            pinned = existing?.pinned ?: false,
-            manualTitle = existing?.manualTitle ?: false,
-            updatedAt = System.currentTimeMillis(),
-            projectId = existing?.projectId,
-            assistantId = existing?.assistantId ?: assistantId,
-            assistantSnapshot = if (replaceAssistantSnapshot) {
-                assistantSnapshot ?: capturedSnapshot
-            } else {
-                capturedSnapshot
-            },
-            mixedAssistantHistory = existing?.mixedAssistantHistory ?: false,
-            modelMode = modelMode ?: existing?.modelMode,
-            modelId = if (modelMode != null) modelId else existing?.modelId,
-            appearanceOverride = existing?.appearanceOverride,
-            contextSummaries = existing?.contextSummaries.orEmpty()
-        )
-        return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
-    }
-
+    ): List<ChatSessionRecord> = upsertSessionFor(
+        state = _uiState.value,
+        sessionId = sessionId,
+        messages = messages,
+        assistantId = assistantId,
+        assistantSnapshot = assistantSnapshot,
+        replaceAssistantSnapshot = replaceAssistantSnapshot,
+        modelMode = modelMode,
+        modelId = modelId
+    )
 
     private fun MainUiState.currentChatModelId(): String? =
         when (selectedChatBackend) {

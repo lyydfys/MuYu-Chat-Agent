@@ -1,6 +1,8 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.ChatSessionRecord
+import com.muyuchat.mca.ChatSessionPersistenceState
 import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
 import com.muyuchat.mca.ImagePromptTokenMeasurementHostAdapter
 import com.muyuchat.mca.ImagePromptTokenMeasurementHost
@@ -174,6 +176,13 @@ internal class McaAppContainer(private val application: Application) {
             measurementCacheRef = imagePromptTokenMeasurementCache,
             tokenizerDescriptorsRef = imagePromptTokenizerDescriptors
         )
+
+    // R3/C3-S4：会话持久化状态（两段式初始化——初值来自 VM 首段装配的 initialChatSessions）。
+    lateinit var chatSessionPersistenceState: ChatSessionPersistenceState
+        private set
+
+    fun initializeChatSessionPersistenceState(initialDurableSessions: List<ChatSessionRecord>): ChatSessionPersistenceState =
+        ChatSessionPersistenceState(initialDurableSessions).also { chatSessionPersistenceState = it }
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()
