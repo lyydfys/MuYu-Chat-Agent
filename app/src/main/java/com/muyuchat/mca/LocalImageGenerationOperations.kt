@@ -31,53 +31,6 @@ import org.json.JSONObject
  * activeRuntime stays a live volatile read through the port on purpose (begin() updates it mid-call).
  */
 
-internal interface LocalImageGenerationPort {
-    val appContext: Context
-    val textualInversionStore: TextualInversionStore
-    val bridge: NativeStableDiffusionBridge
-    val mnnDiffusionBridge: NativeMnnDiffusionBridge
-    val qnnBridge: NativeQnnBridge
-    val qwenImage21Worker: QwenImage21WorkerClient
-    val qwenImage21RuntimeResident: AtomicBoolean
-    val sdxlCoordinator: SdxlTwoPhaseCoordinator
-    val cancellationRequested: AtomicBoolean
-    val activeSplitSdxlTerminal: AtomicReference<SplitSdxlRequestTerminalArbiter?>
-    var activeRuntime: LocalImageRuntime?
-
-    fun begin(runtime: LocalImageRuntime)
-
-    fun logLocalImageNativeFailure(result: JSONObject, fallbackMessage: String)
-
-    suspend fun generateQwenImage21(
-        model: LocalImageModelRecord,
-        prompt: String,
-        options: LocalImageGenerationOptions,
-        onProgress: (LocalImageProgress) -> Unit
-    ): LocalImageResult
-}
-
-internal enum class SplitSdxlRequestTerminalState {
-    PENDING,
-    CANCELLED,
-    TRANSFERRED
-}
-
-internal class SplitSdxlRequestTerminalArbiter {
-    private val state = AtomicReference(SplitSdxlRequestTerminalState.PENDING)
-
-    fun cancel(): Boolean = state.compareAndSet(
-        SplitSdxlRequestTerminalState.PENDING,
-        SplitSdxlRequestTerminalState.CANCELLED
-    )
-
-    fun transfer(): Boolean = state.compareAndSet(
-        SplitSdxlRequestTerminalState.PENDING,
-        SplitSdxlRequestTerminalState.TRANSFERRED
-    )
-
-    fun current(): SplitSdxlRequestTerminalState = state.get()
-}
-
 internal suspend fun runLocalImageGeneration(
     port: LocalImageGenerationPort,
     model: LocalImageModelRecord,
