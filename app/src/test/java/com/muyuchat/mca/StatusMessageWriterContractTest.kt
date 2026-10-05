@@ -32,7 +32,8 @@ class StatusMessageWriterContractTest {
 
     /** The shape that must no longer appear: a one-line status-only update. */
     private val singleFieldUpdate =
-        Regex("""_uiState\.update\s*\{\s*(?:it|state)\.copy\(statusMessage\s*=""")
+        // R1/S11: 状态漏斗改走 UiStateStore；扫描同时覆盖 store 与过渡访问器两种拼写。
+        Regex("""(?:uiStateStore|_uiState)\.update\s*\{\s*(?:it|state)\.copy\(statusMessage\s*=""")
 
     /**
      * The funnel's own body.
@@ -42,7 +43,7 @@ class StatusMessageWriterContractTest {
      * implementation that satisfies it. Only this one line is exempt: any other one-line
      * status-only update is a bypass.
      */
-    private val funnelBody = "_uiState.update { it.copy(statusMessage = message) }"
+    private val funnelBody = "uiStateStore.update { it.copy(statusMessage = message) }"
 
     /**
      * Scans [source] for one-line status-only updates that bypass the funnel.
@@ -61,7 +62,7 @@ class StatusMessageWriterContractTest {
     @Test
     fun `no status-only update bypasses the funnel`() {
         assertEquals(
-            "A one-line `_uiState.update { it.copy(statusMessage = …) }` must go through showStatus(...) instead.",
+            "A one-line `uiStateStore.update { it.copy(statusMessage = …) }` must go through showStatus(...) instead.",
             0,
             countSingleFieldStatusUpdates(viewModelSource)
         )
@@ -86,8 +87,9 @@ class StatusMessageWriterContractTest {
         val declarations = Regex("""private fun showStatus\(message: String\?\)""").findAll(viewModelSource).count()
         assertEquals("showStatus must have a single definition", 1, declarations)
         assertTrue(
+            // R1/S11: 漏斗体随迁至 UiStateStore.update（同一底层流，语义不变）。
             "the funnel must be the plain status-only update it replaced",
-            viewModelSource.contains("_uiState.update { it.copy(statusMessage = message) }")
+            viewModelSource.contains("uiStateStore.update { it.copy(statusMessage = message) }")
         )
     }
 

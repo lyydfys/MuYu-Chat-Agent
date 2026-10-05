@@ -1185,7 +1185,8 @@ contextTraceJson: String?
      * `StatusMessageWriterContractTest` fails if a new single-field assignment appears.
      */
     private fun showStatus(message: String?) {
-        _uiState.update { it.copy(statusMessage = message) }
+        // R1/S11: 首个接入 UiStateStore 的生产写路径（同一底层流，CAS 语义不变）。
+        uiStateStore.update { it.copy(statusMessage = message) }
     }
 
     /**
