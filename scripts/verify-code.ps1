@@ -105,8 +105,12 @@ function Invoke-Gradle {
         $all = @('-p', $repo) + $Arguments + @('--console=plain')
     # No --rerun-tasks and no clean on purpose: Kotlin/Gradle incrementality and the build cache are
     # what make this the fast loop. The strict path lives in build.ps1.
+        $started = Get-Date
         & $gradlew @all > $LogPath 2>&1
-        return $LASTEXITCODE
+        $code = $LASTEXITCODE
+        $elapsed = [int]((Get-Date) - $started).TotalSeconds
+        Write-Host ("   gradle elapsed: {0}s" -f $elapsed) -ForegroundColor DarkGray
+        return $code
     } finally {
         if ($held) { $script:buildMutex.ReleaseMutex() }
     }
