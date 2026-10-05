@@ -600,7 +600,11 @@ class MainViewModel @JvmOverloads constructor(
     private val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
     private var offlineTranslationInstallJob: Job? = null
     private var offlineTranslationDownloadJob: Job? = null
-    private var pendingImageTranslation: PendingImageTranslation? = null
+    private var pendingImageTranslation: PendingImageTranslation?
+        get() = container.runtimeAdmission.pendingImageTranslation
+        set(value) {
+            container.runtimeAdmission.pendingImageTranslation = value
+        }
     private data class PendingChatImageAction(
         val id: String,
         val kind: com.muyuchat.feature.chat.ChatImageActionKind,
@@ -883,17 +887,29 @@ class MainViewModel @JvmOverloads constructor(
     private fun discardPendingAssistantOutput(generationRunId: Long? = null) =
         chatStreamAccumulator.discard(generationRunId)
 
-    @Volatile
-    private var localConversationContextNeedsInvalidation = false
-    private val localConversationContextInvalidationSequence = AtomicLong(0L)
-    private var localConversationContextInvalidationJob: Job? = null
+    private var localConversationContextNeedsInvalidation: Boolean
+        get() = container.runtimeAdmission.localConversationContextNeedsInvalidation
+        set(value) {
+            container.runtimeAdmission.localConversationContextNeedsInvalidation = value
+        }
+    private val localConversationContextInvalidationSequence: AtomicLong
+        get() = container.runtimeAdmission.localConversationContextInvalidationSequence
+    private var localConversationContextInvalidationJob: Job?
+        get() = container.runtimeAdmission.localConversationContextInvalidationJob
+        set(value) {
+            container.runtimeAdmission.localConversationContextInvalidationJob = value
+        }
     private val persistentPrefixCacheOperationSequence = AtomicLong(0L)
     /**
      * A destructive conversation edit is published to Room before native KV
      * state is invalidated.  The barrier is joined by the next generation, so
      * a process/power interruption cannot make a new turn race the old KV.
     */
-    private var conversationMutationBarrier: Job? = null
+    private var conversationMutationBarrier: Job?
+        get() = container.runtimeAdmission.conversationMutationBarrier
+        set(value) {
+            container.runtimeAdmission.conversationMutationBarrier = value
+        }
     private var durableChatSessions: List<ChatSessionRecord>
         get() = container.chatSessionPersistenceState.durableChatSessions
         set(value) {
@@ -961,9 +977,14 @@ class MainViewModel @JvmOverloads constructor(
             container.runtimeAdmission.imageGenerationJob = value
         }
     /** Serializes the optional chat-model prompt bridge used by chat-page image requests. */
-    private var chatImagePromptBridgeJob: Job? = null
+    private var chatImagePromptBridgeJob: Job?
+        get() = container.runtimeAdmission.chatImagePromptBridgeJob
+        set(value) {
+            container.runtimeAdmission.chatImagePromptBridgeJob = value
+        }
     /** Invalidates a cancelled bridge before a slow provider can enqueue its stale result. */
-    private val chatImagePromptBridgeGeneration = AtomicLong(0L)
+    private val chatImagePromptBridgeGeneration: AtomicLong
+        get() = container.runtimeAdmission.chatImagePromptBridgeGeneration
     private val contentImportPreviewStore = ContentImportPreviewStore(application)
     private val contentImportCommitMutex = Mutex()
     private val contentImportSelectionRevision: AtomicLong
@@ -8503,23 +8524,8 @@ contextTraceJson: String?
         }
     }
 
-    private fun hasActiveAssistantImageExecution(chatSessionId: String?): Boolean {
-        if (chatSessionId.isNullOrBlank()) return false
-        val state = _uiState.value
-        val session = state.chatSessions.firstOrNull { it.id == chatSessionId }
-        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session?.messages.orEmpty()
-        return messages.any { message ->
-            message.generatedImageRequest?.let { request ->
-                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
-                    (request.status in setOf(
-                        ChatGeneratedImageStatus.AWAITING_APPROVAL,
-                        ChatGeneratedImageStatus.QUEUED,
-                        ChatGeneratedImageStatus.GENERATING
-                    ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING)
-            } == true
-        }
-    }
-
+    private fun hasActiveAssistantImageExecution(chatSessionId: String?): Boolean =
+        hasActiveAssistantImageExecutionIn(_uiState.value, chatSessionId)
     private fun isChatImageRequestActive(request: ChatGeneratedImageRequest): Boolean =
         request.status in setOf(
             ChatGeneratedImageStatus.AWAITING_APPROVAL,
@@ -10745,44 +10751,10 @@ contextTraceJson: String?
         }
     }
 
-    /**
-     * Edits invalidate native history immediately when possible, and always
-     * leave a pending barrier for the next local request. The barrier is
-     * joined by [startGeneration], so an edit cannot race a new begin call.
-     */
-    private fun markLocalConversationContextInvalid() {
-        localConversationContextNeedsInvalidation = true
-        val sequence = localConversationContextInvalidationSequence.incrementAndGet()
-        // A durable deletion owns its own Room-then-KV barrier and must not be
-        // cancelled by a later ordinary invalidation request.
-        localConversationContextInvalidationJob
-            ?.takeUnless { it === conversationMutationBarrier }
-            ?.cancel()
-        localConversationContextInvalidationJob = viewModelScope.launch(Dispatchers.IO) {
-            runCatching { engine.invalidateConversationContext() }
-                .onSuccess {
-                    if (localConversationContextInvalidationSequence.get() == sequence) {
-                        localConversationContextNeedsInvalidation = false
-                    }
-                }
-                .onFailure { error ->
-                    if (localConversationContextInvalidationSequence.get() == sequence) {
-                        uiStateStore.update {
-                            it.copy(statusMessage = "上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}")
-                        }
-                    }
-                }
-        }
-    }
-
-    private fun rejectWhileConversationMutationInProgress(): Boolean {
-        if (conversationMutationBarrier?.isActive != true) return false
-        uiStateStore.update {
-            it.copy(statusMessage = "正在保存上一项对话修改，请稍候。")
-        }
-        return true
-    }
-
+    private fun markLocalConversationContextInvalid() =
+        markLocalConversationContextInvalidInto(container.runtimeAdmission, uiStateStore, viewModelScope, engine)
+    private fun rejectWhileConversationMutationInProgress(): Boolean =
+        rejectWhileConversationMutationInProgressInto(uiStateStore, container.runtimeAdmission)
     private fun MainUiState.conversationMutationRollbackState() =
         ConversationMutationRollbackState(
             messages = messages,
@@ -11564,13 +11536,7 @@ contextTraceJson: String?
         backend: ChatBackend,
         modelId: String?,
         defaults: GenerationParams
-    ): GenerationParams = GenerationPreferences.loadModelGenerationParams(
-        profileStore = modelGenerationProfileStore,
-        backend = backend,
-        modelId = modelId,
-        defaults = defaults
-    )
-
+    ): GenerationParams = loadModelGenerationParamsFor(modelGenerationProfileStore, backend, modelId, defaults)
     private fun persistModelGenerationParams(state: MainUiState, params: GenerationParams) {
         persistModelGenerationParams(
             backend = state.selectedChatBackend,
