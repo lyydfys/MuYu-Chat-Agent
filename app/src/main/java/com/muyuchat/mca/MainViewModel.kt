@@ -6657,8 +6657,8 @@ contextTraceJson: String?
                 }
             )
         }
-        val nativeStats = currentNativeStatsJson()
-        val recentLogs = currentEngineLogs()
+        val nativeStats = engine.nativeStatsJsonOrEmpty()
+        val recentLogs = engine.recentEngineLogsOrEmpty()
         _uiState.update {
             it.copy(
                 nativeStatsJson = nativeStats,
@@ -6984,7 +6984,7 @@ contextTraceJson: String?
     }
     nativeLoad.getOrThrow()
     nativeReplacementOccurred = true
-    val nativeVisionLoadStats = currentNativeStatsJson()
+    val nativeVisionLoadStats = engine.nativeStatsJsonOrEmpty()
     val baseRunnerLoaded = runCatching {
         JSONObject(nativeVisionLoadStats).optBoolean("loaded", false)
     }.getOrDefault(false)
@@ -7096,11 +7096,11 @@ contextTraceJson: String?
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
         val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
-        val nativeStatsAfterLoad = currentNativeStatsJson()
+        val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()
         val visionReadyAfterLoad = runCatching {
             JSONObject(nativeStatsAfterLoad).optBoolean("visionReady", false)
         }.getOrDefault(false)
-        val logsAfterLoad = currentEngineLogs()
+        val logsAfterLoad = engine.recentEngineLogsOrEmpty()
         managedRuntimeReadinessRefreshGate.invalidate()
         _uiState.update { state ->
             cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
@@ -7203,7 +7203,7 @@ contextTraceJson: String?
         ) {
             nativeReplacementOccurred = true
         }
-        val nativeStats = currentNativeStatsJson()
+        val nativeStats = engine.nativeStatsJsonOrEmpty()
         val failure = LocalModelLoadFailureClassifier.classify(error.message, nativeStats)
         val bootstrapRecovery = runCatching {
             rejectStagedBootstrap(error, "BOOTSTRAP_LOAD")
@@ -7297,15 +7297,9 @@ contextTraceJson: String?
         )
     }
 
-    private fun currentNativeStatsJson(): String =
-        runCatching { engine.nativeStatsJson() }.getOrDefault("{}")
-
-    private fun currentEngineLogs(): List<com.muyuchat.core.telemetry.RuntimeMetrics> =
-        runCatching { engine.recentLogs() }.getOrDefault(emptyList())
-
     private fun nativeRuntimeReleaseObservedNow(): Boolean = nativeRuntimeReleaseObserved(
         engineLoaded = engine.stats.value.loaded,
-        nativeStatsJson = currentNativeStatsJson()
+        nativeStatsJson = engine.nativeStatsJsonOrEmpty()
     )
 
     private fun clearNativeRuntimeSessionState(
@@ -7322,8 +7316,8 @@ contextTraceJson: String?
         pendingAdaptiveRecommendation = null
         pendingProfileTransactionId = null
         activeProfileTransactionId = null
-        val nativeStats = currentNativeStatsJson()
-        val recentLogs = currentEngineLogs()
+        val nativeStats = engine.nativeStatsJsonOrEmpty()
+        val recentLogs = engine.recentEngineLogsOrEmpty()
         _uiState.update { state ->
             state.afterNativeRuntimeReleased(
                 lifecycle = lifecycle,
@@ -7351,8 +7345,8 @@ contextTraceJson: String?
         pendingAdaptiveRecommendation = null
         pendingProfileTransactionId = null
         activeProfileTransactionId = null
-        val nativeStats = currentNativeStatsJson()
-        val recentLogs = currentEngineLogs()
+        val nativeStats = engine.nativeStatsJsonOrEmpty()
+        val recentLogs = engine.recentEngineLogsOrEmpty()
         managedRuntimeReadinessRefreshGate.invalidate()
         _uiState.update { state ->
             state.copy(

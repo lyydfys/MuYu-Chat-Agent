@@ -8,7 +8,8 @@ class MainViewModelLoadLifecycleContractTest {
     @Test
     fun successfulFormalLoadPublishesTheModelAndReadyLifecycleTogether() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val publicationStart = source.indexOf("val nativeStatsAfterLoad = currentNativeStatsJson()")
+        // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；发布区段锚点随迁。
+        val publicationStart = source.indexOf("val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()")
         val publicationEnd = source.indexOf("persistChatSessions(sessionsToPersist)", publicationStart)
 
         assertTrue("Missing formal-load publication start", publicationStart >= 0)

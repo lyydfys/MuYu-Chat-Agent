@@ -475,7 +475,8 @@ class MainViewModelCompletionFallbackTest {
         val fail = body.substring(failStart, cancel)
         val release = fail.indexOf("afterGenerationTerminated(")
         val uiUpdate = fail.indexOf("_uiState.update")
-        val nativeStats = fail.indexOf("currentNativeStatsJson()")
+        // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；顺序合同不变，锚点随迁。
+        val nativeStats = fail.indexOf("engine.nativeStatsJsonOrEmpty()")
 
         assertTrue(failStart >= 0)
         assertTrue(release >= 0)
