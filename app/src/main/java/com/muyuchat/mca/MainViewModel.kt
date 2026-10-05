@@ -9844,7 +9844,8 @@ contextTraceJson: String?
             engine.stopGeneration()
             discardPendingAssistantOutput()
             markLocalConversationContextInvalid()
-            _uiState.update {
+            // R3/S22: 清会话写入经 UiStateStore。
+            uiStateStore.update {
                 it.afterClearChatGenerationStopped(engine.stats.value).copy(contextCompressionPending = false)
             }
             persistChatSessions()
@@ -9882,7 +9883,8 @@ contextTraceJson: String?
         // A file removed or replaced while backgrounded must restore the download action.
         viewModelScope.launch { verifiedOfflineTranslationBundle() }
         chatRuns.foreground()
-        _uiState.update { state ->
+        // R3/S22: 前后台写入经 UiStateStore。
+        uiStateStore.update { state ->
             if (state.statusMessage != BACKGROUND_TASK_STATUS) {
                 state
             } else {
