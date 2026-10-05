@@ -550,7 +550,9 @@ class WorldBookStoreTest {
         ).firstOrNull(File::isFile)
             ?: error("Unable to locate ChatScreen.kt")
         val directory = chatScreen.parentFile
-        val source = listOf("ChatScreen.kt", "ChatChromeScreens.kt").joinToString("\n") { name ->
+        // P9/S15: the phase-label helpers moved to ChatReasoningPerformanceScreens.kt, so the
+        // reader concatenates it as well; the PERSIST label contract it pins is unchanged.
+        val source = listOf("ChatScreen.kt", "ChatChromeScreens.kt", "ChatReasoningPerformanceScreens.kt").joinToString("\n") { name ->
             File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
         }
         val persistLabel = Regex("""GenerationPhase\.PERSIST\s*->\s*\"([^\"]+)\"""")
