@@ -12539,40 +12539,14 @@ contextTraceJson: String?
         FileAssetRecord(
             id = UUID.randomUUID().toString(),
             name = displayName.ifBlank { "文件" },
-            mimeType = mimeTypeForTextAttachment(uri, displayName),
+            mimeType = mimeTypeForTextAttachment(getApplication<Application>().contentResolver, uri, displayName),
             text = text.trim(),
             preview = text.toFilePreview(),
             truncated = truncated,
             source = source,
-            sizeBytes = sizeForUri(uri).takeIf { it > 0L } ?: text.toByteArray(Charsets.UTF_8).size.toLong(),
+            sizeBytes = sizeForUri(getApplication<Application>().contentResolver, uri).takeIf { it > 0L } ?: text.toByteArray(Charsets.UTF_8).size.toLong(),
             chatSessionId = chatSessionId
         )
-
-    private fun mimeTypeForTextAttachment(uri: Uri, name: String): String {
-        val resolver = getApplication<Application>().contentResolver
-        resolver.getType(uri)?.takeIf { it.isNotBlank() }?.let { return it }
-        return when (name.substringAfterLast('.', "").lowercase()) {
-            "md", "markdown" -> "text/markdown"
-            "json", "jsonl" -> "application/json"
-            "xml" -> "application/xml"
-            "csv" -> "text/csv"
-            "kt", "java", "py", "js", "ts" -> "text/x-code"
-            else -> "text/plain"
-        }
-    }
-
-    private fun sizeForUri(uri: Uri): Long {
-        val app = getApplication<Application>()
-        if (uri.scheme.equals("file", ignoreCase = true)) {
-            return uri.path?.let { File(it).length() } ?: 0L
-        }
-        return runCatching {
-            app.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
-                if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index) else 0L
-            } ?: 0L
-        }.getOrDefault(0L)
-    }
 
     private suspend fun importImageAsset(
         uri: Uri,
