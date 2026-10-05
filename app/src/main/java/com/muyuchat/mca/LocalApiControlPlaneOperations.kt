@@ -13,7 +13,7 @@ import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentTuningJobState
-import com.muyuchat.mca.MainViewModel.AgentDebugMode
+// R1/S4: AgentDebugMode 已移至同包 AgentDebugModeSupport.kt，无需限定导入。
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking

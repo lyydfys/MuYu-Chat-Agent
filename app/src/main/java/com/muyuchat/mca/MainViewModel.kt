@@ -147,7 +147,6 @@ import com.muyuchat.core.tuning.SafetyEnvelope
 import com.muyuchat.core.tuning.TuningExecutionProfile
 import com.muyuchat.core.tuning.TuningCandidatePolicy
 import com.muyuchat.core.tuning.TuningCandidateCanaryPlanner
-import com.muyuchat.core.tuning.TuningSearchDepth
 import com.muyuchat.feature.agent.AgentCandidateProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentPendingProfile
@@ -13414,21 +13413,6 @@ contextTraceJson: String?
             .put("lastAutoTuningSummary", state.lastAutoTuningSummary)
             .put("localStabilitySmokeSummary", state.localStabilitySmokeSummary)
             .toString(2)
-    }
-
-    // P8/S40-2B-1: Local API tuning-control create port needs to name this label-only enum.
-    internal enum class AgentDebugMode(val label: String) {
-        Quick("快速调试"),
-        Standard("标准调试"),
-        Deep("深度调试"),
-        PowerSave("省电调试")
-    }
-
-    private fun AgentDebugMode.searchDepth(): TuningSearchDepth = when (this) {
-        AgentDebugMode.Quick -> TuningSearchDepth.QUICK
-        AgentDebugMode.Standard -> TuningSearchDepth.STANDARD
-        AgentDebugMode.Deep -> TuningSearchDepth.DEEP
-        AgentDebugMode.PowerSave -> TuningSearchDepth.POWER_SAVE
     }
 
     private fun appendBenchmarkHistory(
