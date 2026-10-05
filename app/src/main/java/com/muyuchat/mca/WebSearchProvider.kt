@@ -1283,40 +1283,6 @@ class WebSearchProvider(
         error("自定义搜索全部失败：${errors.distinct().joinToString("；").limitForPrompt(280)}")
     }
 
-    private fun customJsonCandidateUrls(query: String, config: WebSearchConfig): List<String> {
-        val maxResults = config.sanitizedMaxResults().toString()
-        val rawEndpoint = config.endpointForRequest().trim()
-        val endpoint = rawEndpoint.replaceCustomJsonPlaceholders(query, maxResults)
-        val base = endpoint.toHttpUrlOrNull() ?: error("自定义搜索地址无效")
-        val hasTemplate = rawEndpoint.hasCustomJsonPlaceholder()
-        val hasQueryLikeParam = base.queryParameterNames.any { it.equals("q", true) || it.equals("query", true) }
-        return buildList {
-            if (hasTemplate || hasQueryLikeParam) {
-                add(base.toString())
-            }
-            add(
-                base.newBuilder()
-                    .addQueryParameter("q", query)
-                    .addQueryParameter("query", query)
-                    .addQueryParameter("max_results", maxResults)
-                    .build()
-                    .toString()
-            )
-            add(
-                base.newBuilder()
-                    .addQueryParameter("query", query)
-                    .build()
-                    .toString()
-            )
-            add(
-                base.newBuilder()
-                    .addQueryParameter("q", query)
-                    .build()
-                    .toString()
-            )
-        }.distinct()
-    }
-
     private fun fetchReadableDocument(url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument {
         val httpUrl = url.toHttpUrlOrNull()
         if (httpUrl == null || (httpUrl.scheme != "http" && httpUrl.scheme != "https")) {

@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import com.muyuchat.core.engine.ChatSourceReference
 import java.net.ConnectException
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import java.net.SocketTimeoutException
 import java.net.URLEncoder
@@ -357,3 +358,38 @@ internal fun WebSearchConfig.publicCheckSourceWarnings(): List<String> =
         .takeIf { it.isNotEmpty() }
         ?.let { listOf(WEB_SEARCH_PUBLIC_CHECK_WARNING) }
         .orEmpty()
+
+// P7/S14: moved from the WebSearchProvider class body (class-only caller).
+internal fun customJsonCandidateUrls(query: String, config: WebSearchConfig): List<String> {
+    val maxResults = config.sanitizedMaxResults().toString()
+    val rawEndpoint = config.endpointForRequest().trim()
+    val endpoint = rawEndpoint.replaceCustomJsonPlaceholders(query, maxResults)
+    val base = endpoint.toHttpUrlOrNull() ?: error("自定义搜索地址无效")
+    val hasTemplate = rawEndpoint.hasCustomJsonPlaceholder()
+    val hasQueryLikeParam = base.queryParameterNames.any { it.equals("q", true) || it.equals("query", true) }
+    return buildList {
+        if (hasTemplate || hasQueryLikeParam) {
+            add(base.toString())
+        }
+        add(
+            base.newBuilder()
+                .addQueryParameter("q", query)
+                .addQueryParameter("query", query)
+                .addQueryParameter("max_results", maxResults)
+                .build()
+                .toString()
+        )
+        add(
+            base.newBuilder()
+                .addQueryParameter("query", query)
+                .build()
+                .toString()
+        )
+        add(
+            base.newBuilder()
+                .addQueryParameter("q", query)
+                .build()
+                .toString()
+        )
+    }.distinct()
+}
