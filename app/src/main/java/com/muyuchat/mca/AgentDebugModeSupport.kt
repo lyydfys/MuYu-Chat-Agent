@@ -17,3 +17,15 @@ internal fun AgentDebugMode.searchDepth(): TuningSearchDepth = when (this) {
     AgentDebugMode.Deep -> TuningSearchDepth.DEEP
     AgentDebugMode.PowerSave -> TuningSearchDepth.POWER_SAVE
 }
+
+// R1/S5: 从 MainViewModel 抽出的调优 ETA 纯公式（历史读取留在 VM，判定逻辑收敛于此，逐字等价）。
+internal fun tuningEtaSecondsFromPreviousLoad(previousLoadMs: Long?, mode: AgentDebugMode): Long {
+    val previous = previousLoadMs?.takeIf { it > 0 }
+    val multiplier = when (mode) {
+        AgentDebugMode.Quick -> 1.5
+        AgentDebugMode.Standard -> 2.0
+        AgentDebugMode.Deep -> 2.5
+        AgentDebugMode.PowerSave -> 1.8
+    }
+    return ((previous ?: 30_000L) * multiplier / 1000.0).toLong().coerceAtLeast(15L)
+}

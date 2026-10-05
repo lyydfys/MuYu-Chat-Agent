@@ -24,4 +24,20 @@ class AgentDebugModeSupportTest {
         assertEquals(TuningSearchDepth.POWER_SAVE, AgentDebugMode.PowerSave.searchDepth())
         assertTrue(AgentDebugMode.Standard.searchDepth() != TuningSearchDepth.QUICK)
     }
+
+    @Test
+    fun `tuning eta multiplies previous load per mode and floors at fifteen seconds`() {
+        assertEquals(45L, tuningEtaSecondsFromPreviousLoad(30_000L, AgentDebugMode.Quick))
+        assertEquals(60L, tuningEtaSecondsFromPreviousLoad(30_000L, AgentDebugMode.Standard))
+        assertEquals(75L, tuningEtaSecondsFromPreviousLoad(30_000L, AgentDebugMode.Deep))
+        assertEquals(54L, tuningEtaSecondsFromPreviousLoad(30_000L, AgentDebugMode.PowerSave))
+        assertEquals(15L, tuningEtaSecondsFromPreviousLoad(1_000L, AgentDebugMode.Quick))
+    }
+
+    @Test
+    fun `tuning eta falls back to thirty second default when history is missing or nonpositive`() {
+        assertEquals(45L, tuningEtaSecondsFromPreviousLoad(null, AgentDebugMode.Quick))
+        assertEquals(45L, tuningEtaSecondsFromPreviousLoad(0L, AgentDebugMode.Quick))
+        assertEquals(45L, tuningEtaSecondsFromPreviousLoad(-5L, AgentDebugMode.Quick))
+    }
 }

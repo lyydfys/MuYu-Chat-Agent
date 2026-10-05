@@ -489,7 +489,7 @@ class MainViewModel @JvmOverloads constructor(
         runners = isolatedLocalChatRunners.runners,
         installationScopeId = installationScopeId
     )
-    private val apiKey = loadOrCreateApiKey(application)
+    private val apiKey = GenerationPreferences.loadOrCreateApiKey(application)
     private val localApiRuntimeOwner = Any()
     private val initialApiPreferences = loadApiPreferences(application)
     /** Listener, notification, persisted intent, and UI state share this single lifecycle gate. */
@@ -5784,7 +5784,7 @@ contextTraceJson: String?
     }
 
     fun applyCloudProviderPreset(value: String) {
-        val preset = cloudProviderPreset(value) ?: return
+        val preset = findCloudProviderPreset(value) ?: return
         _uiState.update { state ->
             state.copy(
                 cloudApiConfig = state.cloudApiConfig.copy(
@@ -11047,14 +11047,7 @@ contextTraceJson: String?
     private fun estimateTuningEtaSeconds(model: ModelManifest, mode: AgentDebugMode): Long {
         val history = _uiState.value.benchmarkHistory
             .filter { it.modelId == model.id }
-        val previous = history.firstOrNull()?.result?.loadMs?.takeIf { it > 0 }
-        val multiplier = when (mode) {
-            AgentDebugMode.Quick -> 1.5
-            AgentDebugMode.Standard -> 2.0
-            AgentDebugMode.Deep -> 2.5
-            AgentDebugMode.PowerSave -> 1.8
-        }
-        return ((previous ?: 30_000L) * multiplier / 1000.0).toLong().coerceAtLeast(15L)
+        return tuningEtaSecondsFromPreviousLoad(history.firstOrNull()?.result?.loadMs, mode)
     }
 
     /**
@@ -12917,11 +12910,6 @@ contextTraceJson: String?
      * stateless object, so nothing here holds state or a scope: each call passes what the operation
      * needs.
      */
-    private fun cloudProviderPreset(key: String): CloudProviderPreset? = findCloudProviderPreset(key)
-
-
-    private fun loadOrCreateApiKey(application: Application): String =
-        GenerationPreferences.loadOrCreateApiKey(application)
 
     private fun loadApiPreferences(application: Application): LocalApiPreferences =
         GenerationPreferences.loadApiPreferences(application)
