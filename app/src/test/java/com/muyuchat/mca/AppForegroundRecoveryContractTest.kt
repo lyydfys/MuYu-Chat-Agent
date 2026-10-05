@@ -145,9 +145,14 @@ class AppForegroundRecoveryContractTest {
         // launching, release it only after completion, and keep the release inside a `finally`;
         // only the two spellings follow the extraction.
         val callers = listOf(
-            functionBody(viewModel, "private fun enqueueImageGeneration(") to
-                ("val executionJob = viewModelScope.launch" to
-                    "McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)"),
+            // R3/C2: the admission body moved to ImageGenerationOwner.kt and reaches its scope and
+        // context through the host; the ordering contract is unchanged.
+        functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
+            "fun submit("
+        ) to
+            ("val executionJob = host.scope.launch" to
+                "McaGenerationForegroundService.release(host.application, foregroundLease)"),
             functionBody(
                 sourceFile("app/src/main/java/com/muyuchat/mca/ImageUpscaleOwner.kt"),
                 "fun upscaleImageAsset(imageId: String, targetScale: Int, scope: CoroutineScope)"

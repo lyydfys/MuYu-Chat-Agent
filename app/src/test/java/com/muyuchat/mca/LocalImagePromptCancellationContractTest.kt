@@ -317,7 +317,7 @@ class LocalImagePromptCancellationContractTest {
 
     @Test
     fun `UI prompt admission never truncates at six hundred and rejects only the explicit hard limit`() {
-        val enqueue = functionBody(mainViewModelSource(), "private fun enqueueImageGeneration(")
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(")
         val normalization = enqueue.indexOf(".trim()")
         val hardLimit = enqueue.indexOf("LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS")
 
@@ -393,7 +393,7 @@ class LocalImagePromptCancellationContractTest {
             prepareSource(),
             "internal suspend fun prepareLocalImagePromptExecution("
         )
-        val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(")
         val api = functionBody(localApiSource(), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(prepare.contains("effectivePrompt = translation.translatedPrompt"))
@@ -414,7 +414,7 @@ class LocalImagePromptCancellationContractTest {
 
     @Test
     fun `successful prompt translation remains visible after the image worker starts`() {
-        val enqueue = functionBody(mainViewModelSource(), "private fun enqueueImageGeneration(")
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(")
         val workerStart = enqueue.indexOf("localImageWorkerClient.begin(model.runtime)")
         val translatedStatus = enqueue.indexOf("val translationStatusMessage = if (", workerStart)
         val jobMessage = enqueue.indexOf("message = translationStatusMessage ?: job.message", workerStart)
@@ -429,7 +429,7 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `UI prepares prompt before worker admission and cancellation remains coroutine owned`() {
         val source = mainViewModelSource()
-        val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(")
         val promptPreparation = enqueue.indexOf(
             "prepareLocalImagePromptExecution("
         )
@@ -443,7 +443,7 @@ class LocalImagePromptCancellationContractTest {
             nonFatalCatch
         )
         val activeOwnership = enqueue.indexOf(
-            "activeJobId = activeImageGenerationJobId",
+            "activeJobId = host.activeImageGenerationJobId",
             guardedFailure
         )
         val ignoredTransition = enqueue.indexOf(
@@ -505,7 +505,7 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `local image enqueue and api reject structurally incomplete bundles before worker admission`() {
         val source = mainViewModelSource()
-        val enqueue = functionBody(source, "private fun enqueueImageGeneration(")
+        val enqueue = functionBody(imageGenerationOwnerSource(), "fun submit(")
         val preflight = enqueue.indexOf("localImageStructuralReadinessMessage()")
         val generationLease = enqueue.indexOf("tryAcquireObservedImageGenerationLease(jobId)")
         val workerBegin = enqueue.indexOf("localImageWorkerClient.begin(")
@@ -523,7 +523,7 @@ class LocalImagePromptCancellationContractTest {
     @Test
     fun `worker disconnect and remote failures expose an actionable next step`() {
         // The failure message mapping moved to LocalImageFailureMessages.kt during P2; the call
-        // site that consumes it is still in the ViewModel, at the end of this test. Two sources,
+        // site that consumes it now lives in ImageGenerationOwner.kt, at the end of this test. Two sources,
         // because the four assertions above the last one are about the mapping and the last one
         // is about its caller. No assertion changed -- only the file each one reads.
         val source = mainViewModelSource()
@@ -532,7 +532,7 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(failureMessages.contains("可用内存不足"))
         assertTrue(failureMessages.contains("校验模型包后重试"))
         assertTrue(failureMessages.contains("请等待 1 秒后重试"))
-        assertTrue(source.contains("val nativeMessage = localImageGenerationFailureMessage(error)"))
+        assertTrue(imageGenerationOwnerSource().contains("val nativeMessage = localImageGenerationFailureMessage(error)"))
     }
 
     @Test
@@ -558,6 +558,9 @@ class LocalImagePromptCancellationContractTest {
     }
 
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+
+    /** R3/C2: the admission body moved to ImageGenerationOwner.kt (`fun submit`); read it where it now lives. */
+    private fun imageGenerationOwnerSource(): String = sourceFile("ImageGenerationOwner.kt")
 
     /**
      * The prompt-preparation body now lives in its own file. The assertions below are unchanged --

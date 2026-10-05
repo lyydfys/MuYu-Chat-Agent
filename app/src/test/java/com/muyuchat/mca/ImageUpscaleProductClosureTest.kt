@@ -72,7 +72,12 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageUpscaleOwner.kt"),
             "fun upscaleImageAsset(imageId: String, targetScale: Int, scope: CoroutineScope)"
         )
-        val enqueueGeneration = functionBody(viewModel, "private fun enqueueImageGeneration(")
+        // R3/C2: the admission body moved to ImageGenerationOwner.kt; the assertions are unchanged
+        // -- read where the body now lives.
+        val enqueueGeneration = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
+            "fun submit("
+        )
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
         // P5: deleteImageAssets / clearImageLibrary moved to ImageAssetDeletionOperations; the
@@ -167,7 +172,7 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         assertTrue(commitTransaction.contains("currentCoroutineContext().ensureActive()"))
         assertTrue(commitTransaction.contains("activeImageGenerationJobId != jobId"))
         assertTrue(enqueueGeneration.contains("ImageGenerationStatusRecord.DONE"))
-        assertTrue(enqueueGeneration.contains("image.deleteLocalCopy(imageAssetDirectory)"))
+        assertTrue(enqueueGeneration.contains("image.deleteLocalCopy(host.imageAssetDirectory)"))
         assertTrue(attachFile.contains("upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {"))
         // P5 step 6: the attach/import commit (row upsert + composer publish under the mutation
         // mutex) moved to ImageLibraryCommitOperations; the contract is read where it now lives.

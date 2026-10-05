@@ -14,7 +14,7 @@ class LocalImageProductClosureTest {
     @Test
     fun `UI request identity reaches coordinator and worker while API keeps its own identity`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val ui = functionBody(source, "private fun enqueueImageGeneration(")
+        val ui = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
         // The publish half moved to its own file. Reading it through `source` used to pass for the
         // wrong reason: the wrapper left behind is an expression body, so the extractor walked past it
         // into an unrelated declaration and the assertions below never saw the real code.
@@ -37,7 +37,7 @@ class LocalImageProductClosureTest {
     @Test
     fun `requested image model is snapshotted and API model never falls through to selection`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val ui = functionBody(source, "private fun enqueueImageGeneration(")
+        val ui = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
         val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val explicitModelBranch = api.substring(
             api.indexOf("if (requestedModel.isNotBlank())"),
@@ -91,7 +91,7 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
         // the ViewModel, an expression in MainActivity and one in ChatScreen. No assertion
         // changed -- only the file the first one reads.
         val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
-        val generate = functionBody(viewModel, "private fun enqueueImageGeneration(")
+        val generate = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
 
         assertTrue(persistedRecords.contains("CANCELLED(\"已取消\", terminal = true)"))
         assertTrue(generate.contains("error is LocalImageWorkerCancelledException"))

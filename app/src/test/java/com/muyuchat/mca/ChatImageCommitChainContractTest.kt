@@ -41,8 +41,8 @@ class ChatImageCommitChainContractTest {
 
     @Test
     fun theViewModelNowDelegatesTheTransaction() {
-        val vm = sourceFile("MainViewModel.kt")
-        val body = functionBody(vm, "private fun enqueueImageGeneration(")
+        // R3/C2: the admission body moved to ImageGenerationOwner.kt; read where it now lives.
+        val body = functionBody(sourceFile("ImageGenerationOwner.kt"), "fun submit(")
 
         assertTrue(body.contains("val commitError = commitImageLibraryTransaction("))
         assertFalse(body.contains("chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)"))
