@@ -8360,7 +8360,7 @@ contextTraceJson: String?
                 requestId: String,
                 request: ChatGeneratedImageRequest
             ) {
-                this@MainViewModel.updateChatGeneratedImageRequest(chatSessionId, requestId, request)
+                applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
             }
 
             override fun updateChatImageRequestFromJob(
@@ -8368,7 +8368,7 @@ contextTraceJson: String?
                 requestId: String,
                 jobId: String
             ) {
-                this@MainViewModel.updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+                applyChatImageRequestFromJob(chatImageRequestPort, chatSessionId, requestId, jobId)
             }
         }
         SendChatImageRequestOperations.sendChatImageRequest(
@@ -8767,7 +8767,7 @@ contextTraceJson: String?
             val pending = pendingAssistantImageToolTurns[requestId]
                 ?: restorePendingAssistantImageToolTurn(sessionId, request)
                 ?: run {
-                    updateChatGeneratedImageRequest(
+                    applyChatGeneratedImageRequest(chatImageRequestPort,
                         sessionId,
                         requestId,
                         request.copy(
@@ -8781,7 +8781,7 @@ contextTraceJson: String?
                     return
                 }
             val latest = findChatGeneratedImageRequest(requestId)?.second ?: request
-            updateChatGeneratedImageRequest(
+            applyChatGeneratedImageRequest(chatImageRequestPort,
                 sessionId,
                 requestId,
                 latest.copy(toolOutputJson = outputJson)
@@ -8817,7 +8817,7 @@ contextTraceJson: String?
             }
             val call = pending.toolCalls.firstOrNull { it.id == pending.primaryToolCallId }
             if (call == null) {
-                updateChatGeneratedImageRequest(
+                applyChatGeneratedImageRequest(chatImageRequestPort,
                     sessionId,
                     requestId,
                     latest.copy(
@@ -8829,7 +8829,7 @@ contextTraceJson: String?
                 )
                 return
             }
-            updateChatGeneratedImageRequest(
+            applyChatGeneratedImageRequest(chatImageRequestPort,
                 pending.chatSessionId,
                 requestId,
                 latest.copy(
@@ -8871,7 +8871,7 @@ contextTraceJson: String?
                 continuationRequestId = requestId
             )
             if (!started) {
-                updateChatGeneratedImageRequest(
+                applyChatGeneratedImageRequest(chatImageRequestPort,
                     pending.chatSessionId,
                     requestId,
                     latest.copy(
@@ -8908,7 +8908,7 @@ contextTraceJson: String?
             toolContinuationStarted = completed,
             message = if (completed) request.assistantTranscriptText() else failureMessage
         )
-        updateChatGeneratedImageRequest(sessionId, requestId, updated)
+        applyChatGeneratedImageRequest(chatImageRequestPort, sessionId, requestId, updated)
         if (completed) {
             pendingAssistantImageToolTurns.remove(requestId)
         }
@@ -8997,7 +8997,7 @@ contextTraceJson: String?
             ChatGeneratedImageStatus.QUEUED,
             ChatGeneratedImageStatus.GENERATING -> return
         }
-        updateChatGeneratedImageRequest(sessionId, requestId, request.copy(toolOutputJson = output))
+        applyChatGeneratedImageRequest(chatImageRequestPort, sessionId, requestId, request.copy(toolOutputJson = output))
         continueAssistantImageToolTurn(requestId, output)
     }
 
@@ -9061,7 +9061,7 @@ contextTraceJson: String?
                 requestId: String,
                 request: ChatGeneratedImageRequest
             ) {
-                this@MainViewModel.updateChatGeneratedImageRequest(chatSessionId, requestId, request)
+                applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
             }
 
             override fun updateChatImageRequestFromJob(
@@ -9069,7 +9069,7 @@ contextTraceJson: String?
                 requestId: String,
                 jobId: String
             ) {
-                this@MainViewModel.updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
+                applyChatImageRequestFromJob(chatImageRequestPort, chatSessionId, requestId, jobId)
             }
 
             override fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
@@ -9208,23 +9208,6 @@ contextTraceJson: String?
             }
         }
 
-    /** Delegates to [applyChatImageRequestFromJob]. */
-    private fun updateChatImageRequestFromJob(
-        chatSessionId: String,
-        requestId: String,
-        jobId: String
-    ) {
-        applyChatImageRequestFromJob(chatImageRequestPort, chatSessionId, requestId, jobId)
-    }
-
-    /** Delegates to [applyChatGeneratedImageRequest]. */
-    private fun updateChatGeneratedImageRequest(
-        chatSessionId: String,
-        requestId: String,
-        request: ChatGeneratedImageRequest
-    ) {
-        applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
-    }
 
 
 
