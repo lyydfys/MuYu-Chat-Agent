@@ -1380,40 +1380,16 @@ contextTraceJson: String?
 
             override fun tuningJson(): String = tuningStateJson()
 
-            override fun tuningJob(jobId: String?): com.muyuchat.api.local.LocalApiControlResult {
-                val requested = jobId?.takeIf { it.isNotBlank() && !it.equals("current", ignoreCase = true) }
-                val job = if (requested == null) {
-                    val identityKey = activeRuntimeIdentity?.identityHash
-                    runBlocking(Dispatchers.IO) {
-                        activeTuningJobId?.let { runtimeProfileStore.tuningJob(it) }
-                            ?: identityKey?.let { runtimeProfileStore.activeTuningJob(it) }
-                    }
-                } else {
-                    runBlocking(Dispatchers.IO) { runtimeProfileStore.tuningJob(requested) }
-                }
-                if (requested == null) {
-                    val payload = JSONObject(tuningStateJson())
-                    if (job != null) {
-                        payload
-                            .put("jobId", job.jobId)
-                            .put("state", job.state.lowercase(Locale.ROOT))
-                            .put("phase", job.phase)
-                            .put("job", tuningJobPublicJson(job))
-                    }
-                    return com.muyuchat.api.local.LocalApiControlResult.Success(payload.toString())
-                }
-                job
-                    ?: return com.muyuchat.api.local.LocalApiControlResult.Rejected(
-                        httpStatus = 404,
-                        code = "tuning_job_not_found",
-                        message = "未找到调优任务：$requested"
-                    )
-                return com.muyuchat.api.local.LocalApiControlResult.Success(
-                    JSONObject(tuningStateJson())
-                        .put("job", tuningJobPublicJson(job))
-                        .toString()
+            override fun tuningJob(jobId: String?): com.muyuchat.api.local.LocalApiControlResult =
+                localApiTuningJobFor(
+                    requestedJobId = jobId,
+                    currentIdentityKey = { activeRuntimeIdentity?.identityHash },
+                    currentActiveTuningJobId = { activeTuningJobId },
+                    lookupJob = { id -> runtimeProfileStore.tuningJob(id) },
+                    lookupActiveJob = { key -> runtimeProfileStore.activeTuningJob(key) },
+                    tuningJson = { tuningStateJson() },
+                    publicJobJson = { job -> tuningJobPublicJson(job) }
                 )
-            }
 
             override fun createTuningJob(
                 request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,

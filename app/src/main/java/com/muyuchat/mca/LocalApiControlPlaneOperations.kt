@@ -1,12 +1,14 @@
 package com.muyuchat.mca
 
 import com.muyuchat.api.local.LocalApiBusyState
+import com.muyuchat.api.local.LocalApiControlResult
 import com.muyuchat.api.local.LocalApiPreflightRequest
 import com.muyuchat.api.local.LocalApiPreflightResult
 import com.muyuchat.core.engine.CompletionPreflight
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentTuningJobState
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -89,4 +91,47 @@ internal fun localApiPreflightFor(
                 .toString()
         )
     }
+}
+
+internal fun localApiTuningJobFor(
+    requestedJobId: String?,
+    currentIdentityKey: () -> String?,
+    currentActiveTuningJobId: () -> String?,
+    lookupJob: suspend (String) -> TuningJobEntity?,
+    lookupActiveJob: suspend (String) -> TuningJobEntity?,
+    tuningJson: () -> String,
+    publicJobJson: (TuningJobEntity) -> JSONObject
+): LocalApiControlResult {
+    val requested = requestedJobId?.takeIf { it.isNotBlank() && !it.equals("current", ignoreCase = true) }
+    val job = if (requested == null) {
+        val identityKey = currentIdentityKey()
+        runBlocking(Dispatchers.IO) {
+            currentActiveTuningJobId()?.let { lookupJob(it) }
+                ?: identityKey?.let { lookupActiveJob(it) }
+        }
+    } else {
+        runBlocking(Dispatchers.IO) { lookupJob(requested) }
+    }
+    if (requested == null) {
+        val payload = JSONObject(tuningJson())
+        if (job != null) {
+            payload
+                .put("jobId", job.jobId)
+                .put("state", job.state.lowercase(Locale.ROOT))
+                .put("phase", job.phase)
+                .put("job", publicJobJson(job))
+        }
+        return LocalApiControlResult.Success(payload.toString())
+    }
+    job
+        ?: return LocalApiControlResult.Rejected(
+            httpStatus = 404,
+            code = "tuning_job_not_found",
+            message = "未找到调优任务：$requested"
+        )
+    return LocalApiControlResult.Success(
+        JSONObject(tuningJson())
+            .put("job", publicJobJson(job))
+            .toString()
+    )
 }
