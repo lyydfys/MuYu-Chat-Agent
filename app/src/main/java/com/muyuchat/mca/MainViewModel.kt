@@ -11660,7 +11660,10 @@ contextTraceJson: String?
         object : ChatLocalApiProviderPort {
             override val engine get() = this@MainViewModel.engine
             override val chatRuns get() = this@MainViewModel.chatRuns
-            override val uiState get() = this@MainViewModel._uiState
+            override val uiState get() = this@MainViewModel.uiState
+            // R3/S26: 写入经 store 具名方法（端口不再暴露可变流）。
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
+                this@MainViewModel.uiStateStore.update(transform)
 
             override fun mergeExecutionProfile(
                 generation: GenerationParams,

@@ -6,10 +6,9 @@ import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.mca.presentation.afterGenerationCompleted
 import com.muyuchat.mca.presentation.afterGenerationStarted
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
-import kotlinx.coroutines.flow.update
 
 /**
  * The Local API side of the chat execution owner: installs the runtime providers that route HTTP /
@@ -20,7 +19,9 @@ import kotlinx.coroutines.flow.update
 internal interface ChatLocalApiProviderPort {
     val engine: McaInferenceService
     val chatRuns: ChatRunOwnership
-    val uiState: MutableStateFlow<MainUiState>
+    // R3/S26: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
+    val uiState: StateFlow<MainUiState>
+    fun updateUiState(transform: (MainUiState) -> MainUiState)
 
     fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile): GenerationParams
 
@@ -61,14 +62,14 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
         engine.streamChat(effectiveRequest, executionContext)
             .onStart {
                 if (ownsUiLifecycle()) {
-                    uiState.update { state ->
+                    port.updateUiState { state ->
                         if (ownsUiLifecycle()) state.afterGenerationStarted() else state
                     }
                 }
             }
             .onCompletion {
                 if (ownsUiLifecycle()) {
-                    uiState.update { state ->
+                    port.updateUiState { state ->
                         if (ownsUiLifecycle()) {
                             state.afterGenerationCompleted(engine.stats.value)
                         } else {
