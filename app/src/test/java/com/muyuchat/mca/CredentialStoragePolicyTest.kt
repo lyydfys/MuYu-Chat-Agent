@@ -117,7 +117,9 @@ class CredentialStoragePolicyTest {
 
     @Test
     fun `web search never writes the plaintext slot`() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/WebSearchProvider.kt")
+        // P7/S3: the web-search credential store moved to WebSearchStores.kt; this pin reads the
+        // owner file with the same assertions.
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/WebSearchStores.kt")
 
         assertTrue(
             "web search must route credential writes through the shared policy",
@@ -135,9 +137,10 @@ class CredentialStoragePolicyTest {
 
     @Test
     fun `the plaintext slot is retired only after the stored value is verified`() {
+        // P7/S3: web search's entry now points at WebSearchStores.kt (the store moved); assertions unchanged.
         listOf(
             "app/src/main/java/com/muyuchat/mca/CloudChatProvider.kt",
-            "app/src/main/java/com/muyuchat/mca/WebSearchProvider.kt"
+            "app/src/main/java/com/muyuchat/mca/WebSearchStores.kt"
         ).forEach { path ->
             val source = sourceFile(path)
             val verifyIndex = source.indexOf("if (readable != apiKey)")
@@ -164,9 +167,10 @@ class CredentialStoragePolicyTest {
 
     @Test
     fun `legacy plaintext credentials are migrated on read without losing the working value`() {
+        // P7/S3: web search's entry now points at WebSearchStores.kt (the store moved); assertions unchanged.
         listOf(
             "app/src/main/java/com/muyuchat/mca/CloudChatProvider.kt",
-            "app/src/main/java/com/muyuchat/mca/WebSearchProvider.kt"
+            "app/src/main/java/com/muyuchat/mca/WebSearchStores.kt"
         ).forEach { path ->
             val source = sourceFile(path)
             assertTrue(
