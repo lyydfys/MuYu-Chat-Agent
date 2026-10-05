@@ -9996,7 +9996,8 @@ contextTraceJson: String?
     }
 
     fun refreshLogs() {
-        _uiState.update {
+        // R3/S16: 诊断族写入统一经 UiStateStore（同一底层流，CAS 语义不变）。
+        uiStateStore.update {
             it.copy(
                 logs = engine.recentLogs(),
                 agentLogs = agentLogger.recent(),
@@ -10008,7 +10009,8 @@ contextTraceJson: String?
     }
 
     fun refreshDiagnostics() {
-        _uiState.update {
+        // R3/S16: 诊断族写入统一经 UiStateStore。
+        uiStateStore.update {
             it.copy(
                 nativeStatsJson = engine.nativeStatsJson(),
                 benchmarkHistory = benchmarkHistoryLogger.recent(),
@@ -10027,7 +10029,7 @@ contextTraceJson: String?
                 } ?: error("无法写入所选位置。")
                 report
             }.onSuccess { report ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         diagnosticReport = report,
                         statusMessage = "诊断报告已导出"
