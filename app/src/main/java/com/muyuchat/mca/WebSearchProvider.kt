@@ -55,7 +55,8 @@ enum class WebSearchProviderType(val label: String, val defaultEndpoint: String,
 
 internal const val WEB_SEARCH_PUBLIC_CHECK_ENDPOINT = "https://hn.algolia.com/api/v1/search"
 private const val WEB_SEARCH_PUBLIC_CHECK_LABEL = "公开 JSON 自检源"
-private const val WEB_SEARCH_DIRECT_READ_LABEL = "网页直读"
+// P7/S2: shared with WebSearchDiagnosticConversion.kt.
+internal const val WEB_SEARCH_DIRECT_READ_LABEL = "网页直读"
 private const val WEB_SEARCH_PUBLIC_CHECK_WARNING =
     "当前使用的是公开 JSON 协议自检源，只适合验证联网链路、上下文注入和来源卡片；它不是通用搜索服务，正式使用请配置 SearxNG、Brave、Tavily、Jina 或可信自建搜索源。"
 
@@ -633,137 +634,6 @@ data class WebSearchPreflightReport(
     val message: String
 )
 
-
-internal fun WebSearchResult.toDiagnosticRecord(
-    config: WebSearchConfig,
-    success: Boolean,
-    message: String,
-    triggerReasons: List<String> = emptyList(),
-    closedLoopChecks: List<String> = emptyList()
-): WebSearchDiagnosticRecord =
-    qualityReport.let { quality ->
-        val health = healthReport
-        val research = researchReport
-        WebSearchDiagnosticRecord(
-            providerLabel = providerLabel,
-            triggerModeLabel = config.triggerMode.label,
-            query = query,
-            searchedQueries = searchedQueries,
-            directUrls = directUrls,
-            sourceCount = documents.size,
-            elapsedMs = elapsedMs,
-            success = success,
-            message = message,
-            topSources = sourceReferences.take(3),
-            healthScore = health.score,
-            healthLabel = health.label,
-            healthReasons = health.reasons,
-            qualityScore = quality.score,
-            qualityLabel = quality.label,
-            qualityReasons = quality.reasons,
-            sourceTrustSummary = documents.toWebSearchSourceTrustSummary(),
-            researchConfidenceScore = research.confidenceScore,
-            researchConfidenceLabel = research.confidenceLabel,
-            researchEvidenceGroups = research.evidenceGroups,
-            researchConflictWarnings = research.conflictWarnings,
-            researchSynthesisGuidance = research.synthesisGuidance,
-            triggerReasons = triggerReasons,
-            warnings = warnings,
-            cacheStatus = cacheStatus
-                .ifBlank { if (searchedQueries.isNotEmpty()) "实时检索" else "" },
-            closedLoopChecks = closedLoopChecks
-        )
-    }
-
-internal fun WebSearchDiagnosticRecord.toChatWebSearchTrace(): ChatWebSearchTrace =
-    ChatWebSearchTrace(
-        query = query,
-        providerLabel = providerLabel,
-        triggerModeLabel = triggerModeLabel,
-        running = false,
-        searchedQueries = searchedQueries,
-        directUrls = directUrls,
-        sourceCount = sourceCount,
-        elapsedMs = elapsedMs,
-        success = success,
-        message = message,
-        healthScore = healthScore,
-        healthLabel = healthLabel,
-        qualityScore = qualityScore,
-        qualityLabel = qualityLabel,
-        researchConfidenceScore = researchConfidenceScore,
-        researchConfidenceLabel = researchConfidenceLabel,
-        evidenceGroups = researchEvidenceGroups,
-        conflictWarnings = researchConflictWarnings,
-        synthesisGuidance = researchSynthesisGuidance,
-        triggerReasons = triggerReasons,
-        warnings = warnings,
-        cacheStatus = cacheStatus,
-        closedLoopChecks = closedLoopChecks
-    )
-
-internal fun WebSearchPlan.toPendingChatWebSearchTrace(
-    config: WebSearchConfig,
-    triggerReasons: List<String> = this.triggerReasons
-): ChatWebSearchTrace {
-    val shouldRunSearchProvider = shouldRunSearchProvider(config)
-    val plannedQueries = if (shouldRunSearchProvider) queries else emptyList()
-    val plannedTargets = (plannedQueries + directUrls).distinct()
-    val targetSummary = buildString {
-        if (plannedQueries.isNotEmpty()) append("${plannedQueries.size} 组检索词")
-        if (directUrls.isNotEmpty()) {
-            if (isNotBlank()) append(" · ")
-            append("${directUrls.size} 个网页")
-        }
-    }.ifBlank { "1 个检索目标" }
-    return ChatWebSearchTrace(
-        query = displayQuery,
-        providerLabel = when {
-            shouldRunSearchProvider && directUrls.isNotEmpty() -> "$WEB_SEARCH_DIRECT_READ_LABEL + ${config.providerLabel}"
-            shouldRunSearchProvider -> config.providerLabel
-            else -> WEB_SEARCH_DIRECT_READ_LABEL
-        },
-        triggerModeLabel = config.triggerMode.label,
-        running = true,
-        stageLabel = "检索中",
-        searchedQueries = if (shouldRunSearchProvider) {
-            queries.ifEmpty { listOf(displayQuery).filter { it.isNotBlank() } }
-        } else {
-            emptyList()
-        },
-        directUrls = directUrls,
-        success = false,
-        message = "正在联网检索：$targetSummary",
-        triggerReasons = triggerReasons.ifEmpty { this.triggerReasons },
-        closedLoopChecks = buildList {
-            add("已生成检索计划：$targetSummary")
-            if (config.fetchPageContent) add("将读取可用网页摘要并过滤网页指令")
-            if (plannedTargets.isNotEmpty()) add("待执行目标：${plannedTargets.take(4).joinToString("；")}")
-        }
-    )
-}
-
-internal fun WebSearchPlan.toFailedDiagnosticRecord(
-    config: WebSearchConfig,
-    elapsedMs: Long,
-    message: String,
-    closedLoopChecks: List<String> = emptyList()
-): WebSearchDiagnosticRecord =
-    WebSearchDiagnosticRecord(
-        providerLabel = config.providerLabel,
-        triggerModeLabel = config.triggerMode.label,
-        query = displayQuery,
-        searchedQueries = queries.ifEmpty { listOf(displayQuery).filter { it.isNotBlank() } },
-        directUrls = directUrls,
-        elapsedMs = elapsedMs,
-        success = false,
-        message = message,
-        healthScore = 0,
-        healthLabel = "失败",
-        healthReasons = message.toWebSearchFailureHealthReasons(),
-        triggerReasons = triggerReasons,
-        closedLoopChecks = closedLoopChecks
-    )
 
 internal suspend fun executeWebSearchForChatTurn(
     messages: List<ChatMessage>,
@@ -1906,7 +1776,8 @@ fun buildWebSearchPlan(
     )
 }
 
-private fun WebSearchPlan.shouldRunSearchProvider(config: WebSearchConfig): Boolean {
+// P7/S2: shared with WebSearchDiagnosticConversion.kt.
+internal fun WebSearchPlan.shouldRunSearchProvider(config: WebSearchConfig): Boolean {
     if (!config.configured) return false
     if (directUrls.isEmpty()) return true
     return explicitSearchRequested || queries.size >= 4
@@ -2316,7 +2187,8 @@ private fun webSearchSourceTrustClass(url: String, provider: String): WebSearchS
     }
 }
 
-private fun List<WebSearchDocument>.toWebSearchSourceTrustSummary(): List<String> =
+// P7/S2: shared with WebSearchDiagnosticConversion.kt.
+internal fun List<WebSearchDocument>.toWebSearchSourceTrustSummary(): List<String> =
     filterNot { it.provider == "安全拦截" }
         .groupingBy { it.webSearchSourceTrustClass().label }
         .eachCount()
@@ -2466,12 +2338,14 @@ private fun WebSearchResult.toWebSearchHealthReport(): WebSearchHealthReport {
     )
 }
 
-private data class WebSearchHealthSignal(
+// P7/S2: shared with WebSearchDiagnosticConversion.kt.
+internal data class WebSearchHealthSignal(
     val label: String,
     val penalty: Int
 )
 
-private fun String.toWebSearchHealthSignal(): WebSearchHealthSignal? {
+// P7/S2: shared with WebSearchDiagnosticConversion.kt.
+internal fun String.toWebSearchHealthSignal(): WebSearchHealthSignal? {
     val text = lowercase(Locale.ROOT)
     return when {
         "鉴权失败" in this || "401" in text || "403" in text ->
@@ -2502,14 +2376,6 @@ private fun String.toWebSearchHealthSignal(): WebSearchHealthSignal? {
         else -> null
     }
 }
-
-private fun String.toWebSearchFailureHealthReasons(): List<String> =
-    buildList {
-        add("搜索链路未完成")
-        toWebSearchHealthSignal()?.let { add(it.label) }
-        if (contains("配置", ignoreCase = true)) add("搜索服务配置不完整")
-        if (contains("搜索问题为空", ignoreCase = true)) add("搜索问题为空")
-    }.distinct()
 
 private fun List<WebSearchDocument>.toWebSearchQualityReport(): WebSearchQualityReport {
     if (isEmpty()) {
