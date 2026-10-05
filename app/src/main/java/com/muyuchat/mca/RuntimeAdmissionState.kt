@@ -2,6 +2,8 @@ package com.muyuchat.mca
 
 import com.muyuchat.core.modelstore.ModelManifest
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Deferred
+import java.util.concurrent.atomic.AtomicLong
 import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
@@ -34,4 +36,14 @@ internal class RuntimeAdmissionState(
 
     @Volatile
     var imageLibraryBackupJob: Job? = null
+
+    @Volatile
+    var activeWebSearchDeferred: Deferred<WebSearchResult>? = null
+
+    val imageFavoriteMutationSequence = AtomicLong(0L)
+
+    val latestImageFavoriteMutations =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
+
+    val contentImportSelectionRevision = AtomicLong(0L)
 }

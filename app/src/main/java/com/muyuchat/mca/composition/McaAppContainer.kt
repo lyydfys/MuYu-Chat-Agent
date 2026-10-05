@@ -1,6 +1,10 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.LocalImageGenerationCoordinator
+import com.muyuchat.mca.ContextCompressionRequestStore
+import com.muyuchat.mca.ImageLibraryBackup
+import android.content.Context
 import kotlinx.coroutines.sync.Mutex
 import com.muyuchat.mca.canonicalImageAssetDirectory
 import com.muyuchat.core.engine.Role
@@ -67,6 +71,8 @@ import com.muyuchat.mca.WorldBookStore
  * - S13：外观/背景/云 API/离线翻译/webSearch/图像模型资产族（+10 个）；
  * - 后续切片：带 port/scope 的 owner（如 AppUpdateOwner）待其 port 依赖先行解耦后再迁入。
  */
+private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
+
 internal class McaAppContainer(private val application: Application) {
 
     val runtimeProfileStore = ModelRuntimeProfileStore(application)
@@ -127,6 +133,20 @@ internal class McaAppContainer(private val application: Application) {
     val advisor = AgentAdvisor()
 
     val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
+
+    // R3/C3-S7：图像/内容/搜索家族小对象批（自 VM 迁出）。
+    val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
+
+    val manualContextCompressionRequests = ContextCompressionRequestStore()
+
+    val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
+
+    val localImageGenerationCoordinatorObservationLock = Any()
+
+    val imageUpscalerPreferences = application.getSharedPreferences(
+        IMAGE_UPSCALER_PREFERENCES,
+        Context.MODE_PRIVATE
+    )
 
     val imageLibraryMutationMutex = Mutex()
 

@@ -515,7 +515,8 @@ class MainViewModel @JvmOverloads constructor(
     private val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
     private val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
-    private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
+    private val imageLibraryBackup: ImageLibraryBackup
+        get() = container.imageLibraryBackup
     private val imageAssetDirectory: File
         get() = container.imageAssetDirectory
     private val chatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -616,21 +617,24 @@ class MainViewModel @JvmOverloads constructor(
     private val webSearchDiagnosticStore = container.webSearchDiagnosticStore
     private val webSearchProvider: WebSearchProvider
         get() = container.webSearchProvider
-    @Volatile private var activeWebSearchDeferred: Deferred<WebSearchResult>? = null
+    private var activeWebSearchDeferred: Deferred<WebSearchResult>?
+        get() = container.runtimeAdmission.activeWebSearchDeferred
+        set(value) {
+            container.runtimeAdmission.activeWebSearchDeferred = value
+        }
     @Volatile private var activeWebSearchTaskId: String? = null
     private val localImageModelStore = container.localImageModelStore
     private val localImageLoraStore = container.localImageLoraStore
     private val localImageTextualInversionStore = container.localImageTextualInversionStore
     private val localImageUpscalerStore = container.localImageUpscalerStore
-    private val imageUpscalerPreferences = application.getSharedPreferences(
-        IMAGE_UPSCALER_PREFERENCES,
-        Context.MODE_PRIVATE
-    )
+    private val imageUpscalerPreferences: android.content.SharedPreferences
+        get() = container.imageUpscalerPreferences
     private val contextCompressionPreferences = application.getSharedPreferences(
         CONTEXT_COMPRESSION_PREFERENCES,
         Context.MODE_PRIVATE
     )
-    private val manualContextCompressionRequests = ContextCompressionRequestStore()
+    private val manualContextCompressionRequests: ContextCompressionRequestStore
+        get() = container.manualContextCompressionRequests
     private val contextSummarizationService = ContextSummarizationService()
     private val localImageWorkerClient = LocalImageWorkerClient(application)
     private val deviceProfileReader = container.deviceProfileReader
@@ -945,9 +949,10 @@ class MainViewModel @JvmOverloads constructor(
             error
         }
     }
-    private val imageFavoriteMutationSequence = AtomicLong(0L)
-    private val latestImageFavoriteMutations =
-        java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
+    private val imageFavoriteMutationSequence: AtomicLong
+        get() = container.runtimeAdmission.imageFavoriteMutationSequence
+    private val latestImageFavoriteMutations: java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>
+        get() = container.runtimeAdmission.latestImageFavoriteMutations
     private var imageGenerationJob: Job?
         get() = container.runtimeAdmission.imageGenerationJob
         set(value) {
@@ -959,7 +964,8 @@ class MainViewModel @JvmOverloads constructor(
     private val chatImagePromptBridgeGeneration = AtomicLong(0L)
     private val contentImportPreviewStore = ContentImportPreviewStore(application)
     private val contentImportCommitMutex = Mutex()
-    private val contentImportSelectionRevision = AtomicLong(0L)
+    private val contentImportSelectionRevision: AtomicLong
+        get() = container.runtimeAdmission.contentImportSelectionRevision
     internal fun captureContentImportOwner(): ContentImportOwner = ContentImportOwner(
         sessionId = _uiState.value.activeChatSessionId,
         assistantId = _uiState.value.selectedAssistantId,
@@ -1091,8 +1097,10 @@ class MainViewModel @JvmOverloads constructor(
         }
     @Volatile private var activeLocalImageWorkerRequestId: String? = null
     @Volatile private var activeLocalApiImageModelId: String? = null
-    private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()
-    private val localImageGenerationCoordinatorObservationLock = Any()
+    private val localImageGenerationCoordinator: LocalImageGenerationCoordinator
+        get() = container.localImageGenerationCoordinator
+    private val localImageGenerationCoordinatorObservationLock: Any
+        get() = container.localImageGenerationCoordinatorObservationLock
     private val localApiImageGenerationLifecycleLock = Any()
     private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
     private val localImageLoraLifecycleLock: Any
