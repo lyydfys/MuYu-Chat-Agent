@@ -332,7 +332,9 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+        // P9/S23: the result card's retry label lives in ImageAssetScreens.kt now, so the reader
+        // concatenates it too; the immutable-input contract it pins is unchanged.
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
         // ImageGenerationJobRecord moved to PersistedRecords.kt during P2, so the one assertion
         // about its field reads from there. The other four read function bodies that stayed in
         // the ViewModel. No assertion changed -- only the file each one reads.
