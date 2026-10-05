@@ -21,7 +21,11 @@ class LongTextRenderPolicyTest {
     fun everyLongConversationTextSurfaceUsesTheSameBoundedPageSize() {
         val source = chatScreenSource()
 
-        assertTrue(source.contains("private const val MESSAGE_RENDER_PAGE_CHARS = 16_384"))
+        // P9/S3: MESSAGE_RENDER_PAGE_CHARS moved to ChatMarkdownRenderSupport.kt and had to widen
+        // from private to internal there (Kotlin has no package-private scope; ChatChromeScreens.kt
+        // still reads it). The assertion tracks the declaration, so it tracks the new modifier; the
+        // value it pins, 16_384, is unchanged.
+        assertTrue(source.contains("internal const val MESSAGE_RENDER_PAGE_CHARS = 16_384"))
         assertTrue(source.contains("private fun PagedPlainMessageText("))
         assertTrue(source.contains("private fun PagedAssistantRichText(content: String, modifier: Modifier = Modifier)"))
         assertTrue(source.contains("private fun ReasoningPanel("))
@@ -50,10 +54,11 @@ class LongTextRenderPolicyTest {
     }
 
     private fun invokeSafePrefix(value: String, maxCharacters: Int): String {
-        // safePrefix moved to ChatChromeScreens.kt with the chat chrome, so the file facade class
-        // that holds it is ChatChromeScreensKt now rather than ChatScreenKt. The method itself is
-        // unchanged, including its private visibility, which is why this still needs isAccessible.
-        val owner = Class.forName("com.muyuchat.feature.chat.ChatChromeScreensKt")
+        // safePrefix moved with the markdown/reasoning helpers to ChatMarkdownRenderSupport.kt
+        // (P9/S3), so the file facade class that holds it is ChatMarkdownRenderSupportKt now rather
+        // than ChatChromeScreensKt. The method itself is unchanged, including its private visibility,
+        // which is why this still needs isAccessible.
+        val owner = Class.forName("com.muyuchat.feature.chat.ChatMarkdownRenderSupportKt")
         val method = owner.getDeclaredMethod(
             "safePrefix",
             String::class.java,
@@ -75,7 +80,8 @@ class LongTextRenderPolicyTest {
             ).firstOrNull(File::isFile)
             if (chatScreen != null) {
                 val directory = chatScreen.parentFile
-                return listOf("ChatScreen.kt", "ChatChromeScreens.kt").joinToString("\n") { name ->
+                // P9/S3: markdown/推理/代码块渲染助手移入 ChatMarkdownRenderSupport.kt（多源拼接随迁）。
+                return listOf("ChatScreen.kt", "ChatChromeScreens.kt", "ChatMarkdownRenderSupport.kt").joinToString("\n") { name ->
                     File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
                 }
             }
