@@ -188,6 +188,12 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             '^app/'              = ':app:testDebugUnitTest'
             '^core/engine/'      = ':core:engine:testDebugUnitTest'
             '^core/download/'    = ':core:download:testDebugUnitTest'
+            '^core/advisor/'     = ':core:advisor:testDebugUnitTest'
+            '^core/benchmark/'   = ':core:benchmark:testDebugUnitTest'
+            '^core/deviceprofile/' = ':core:deviceprofile:testDebugUnitTest'
+            '^core/modelstore/'  = ':core:modelstore:testDebugUnitTest'
+            '^core/telemetry/'   = ':core:telemetry:testDebugUnitTest'
+            '^core/tuning/'      = ':core:tuning:testDebugUnitTest'
             '^api/local/'        = ':api:local:testDebugUnitTest'
             '^feature/chat/'     = ':feature:chat:testDebugUnitTest'
             '^feature/agent/'    = ':feature:agent:testDebugUnitTest'
@@ -225,6 +231,12 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $testArgs += @(
             ':core:engine:testDebugUnitTest',
             ':core:download:testDebugUnitTest',
+            ':core:advisor:testDebugUnitTest',
+            ':core:benchmark:testDebugUnitTest',
+            ':core:deviceprofile:testDebugUnitTest',
+            ':core:modelstore:testDebugUnitTest',
+            ':core:telemetry:testDebugUnitTest',
+            ':core:tuning:testDebugUnitTest',
             ':api:local:testDebugUnitTest',
             ':feature:chat:testDebugUnitTest',
             ':feature:agent:testDebugUnitTest',
@@ -239,7 +251,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             Write-Host '          Use -FeatureTests for chat-module anchors, or -Tests alone for :app.' -ForegroundColor Red
             exit 2
         }
-        Write-Host '   plus :core:engine, :core:download, :api:local and the four :feature:* test tasks'
+        Write-Host '   plus :core:engine, :core:download, :core:advisor, :core:benchmark, :core:deviceprofile, :core:modelstore, :core:telemetry, :core:tuning, :api:local and the four :feature:* test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
     if ($Rerun) {
@@ -288,7 +300,9 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     # When -FullTests runs the feature/library modules too, their reports live beside app's.
     $extraResultDirs = @()
     if ($FullTests) {
-        $extraResultDirs = @('core\engine', 'core\download', 'api\local', 'feature\chat', 'feature\agent',
+        $extraResultDirs = @('core\engine', 'core\download', 'core\advisor', 'core\benchmark',
+            'core\deviceprofile', 'core\modelstore', 'core\telemetry', 'core\tuning',
+            'api\local', 'feature\chat', 'feature\agent',
             'feature\modelhub', 'feature\settings') |
             ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
             Where-Object { Test-Path $_ }
