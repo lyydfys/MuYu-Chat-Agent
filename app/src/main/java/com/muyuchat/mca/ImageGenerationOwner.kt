@@ -18,6 +18,12 @@ import kotlinx.coroutines.Job
  * C2/C0-a：生图准入与执行的唯一 owner。enqueueImageGeneration 的 673 行体自 MainViewModel 移入
  * （体逐字；VM 私有面经本 host 注入：状态/写入/scope/application/运行态字段/锁/资产与 worker 协作）。
  * 三处端口实现与两个 VM 直连调用点收敛到同一 ImageGenerationOwner 实例。
+ *
+ * ⚠ 过渡 adapter（用户 2026-10-06 插队裁定）：本 host 的 VM 侧实现为匿名 `object : ImageGenerationHost`
+ * 反向捕获 `this@MainViewModel`，属方案 §五 禁止清单的过渡形态。退出条件 = ImageGenerationOwner 改为
+ * `McaAppContainer` 工厂创建、构造注入真实依赖（UiStateStore/scope/engine/资产与 worker 协作者），
+ * VM 仅从容器取出 owner 并保留 intent 委托；随之删除本 host 接口与 VM 内匿名装配。
+ * 期限 = C2 序列内、C3 开工前（蓝图样板为 C2-b TuningOwner，落地后即回改本片）。
  */
 internal interface ImageGenerationHost {
     val scope: CoroutineScope

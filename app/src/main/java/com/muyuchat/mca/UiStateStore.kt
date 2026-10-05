@@ -27,6 +27,14 @@ class UiStateStore(initial: MainUiState) {
         mutable.update(reducer)
     }
 
+    /**
+     * R3/C2：状态行唯一写入口（自 MainViewModel.showStatus 下移，体逐字等价）。
+     * 单字段写入必须经此漏斗（StatusMessageWriterContractTest 的规则不变，只换了漏斗的家）。
+     */
+    fun showStatus(message: String?) {
+        update { it.copy(statusMessage = message) }
+    }
+
     internal val ownerFlow: MutableStateFlow<MainUiState>
         get() = mutable
 }

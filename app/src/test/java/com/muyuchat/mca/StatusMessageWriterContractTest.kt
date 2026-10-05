@@ -87,9 +87,10 @@ class StatusMessageWriterContractTest {
         val declarations = Regex("""private fun showStatus\(message: String\?\)""").findAll(viewModelSource).count()
         assertEquals("showStatus must have a single definition", 1, declarations)
         assertTrue(
-            // R1/S11: 漏斗体随迁至 UiStateStore.update（同一底层流，语义不变）。
+            // R3/C2: 漏斗体下移至 UiStateStore.showStatus；断言读漏斗现在的家。
             "the funnel must be the plain status-only update it replaced",
-            viewModelSource.contains("uiStateStore.update { it.copy(statusMessage = message) }")
+            sourceFile("app/src/main/java/com/muyuchat/mca/UiStateStore.kt")
+                .contains("update { it.copy(statusMessage = message) }")
         )
     }
 

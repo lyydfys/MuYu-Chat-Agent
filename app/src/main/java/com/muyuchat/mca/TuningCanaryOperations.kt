@@ -135,8 +135,8 @@ internal fun TuningProbeWorkerProtocol.Result.canaryResultFrom(
      * [CandidateCanaryResultPort] rather than calling it directly.
      */
 
-internal fun JSONObject.jsonOptionalFiniteDouble(
-    port: TuningCanaryPort,field: String): Double {
+// R3/C2: port 为死参（函数体未使用），随端口具名化删除。
+internal fun JSONObject.jsonOptionalFiniteDouble(field: String): Double {
         if (!has(field) || isNull(field)) return 0.0
         return optDouble(field, 0.0).takeIf(Double::isFinite) ?: 0.0
     }
