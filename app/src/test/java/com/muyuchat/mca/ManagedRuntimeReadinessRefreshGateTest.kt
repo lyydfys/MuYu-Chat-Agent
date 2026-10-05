@@ -131,11 +131,12 @@ class ManagedRuntimeReadinessRefreshGateTest {
             "private val uiStateStore = UiStateStore("
         )
         assertTrue(
+            // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
             backupStarter.indexOf("imageLibraryBackupJob = launchedJob") <
-                backupStarter.indexOf("_uiState.update")
+                backupStarter.indexOf("uiStateStore.update")
         )
         assertTrue(
-            backupStarter.indexOf("_uiState.update") < backupStarter.indexOf("launchedJob.start()")
+            backupStarter.indexOf("uiStateStore.update") < backupStarter.indexOf("launchedJob.start()")
         )
     }
 

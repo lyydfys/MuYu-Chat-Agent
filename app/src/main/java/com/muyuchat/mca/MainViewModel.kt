@@ -447,7 +447,7 @@ class MainViewModel @JvmOverloads constructor(
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
         }
 
@@ -527,7 +527,7 @@ class MainViewModel @JvmOverloads constructor(
             assistantSaveMutex.withLock {
                 runCatching { assistantStore.saveAssistants(_uiState.value.assistants) }
                     .onFailure { error ->
-                        _uiState.update { it.copy(
+                        uiStateStore.update { it.copy(
                             statusMessage = "助手保存失败：${error.message ?: "请重试"}"
                         ) }
                     }
@@ -572,7 +572,7 @@ class MainViewModel @JvmOverloads constructor(
             }
             val bundle = (verification as? OfflinePromptTranslationBundleVerification.Verified)?.bundle
             offlinePromptTranslationBundle = bundle
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 val wasInstalled = cached != null || state.offlineTranslationInstalled
                 state.copy(
                     offlineTranslationInstalled = bundle?.identity?.translatorFamily == OfflineTranslatorFamily.HY_MT2,
@@ -746,7 +746,7 @@ class MainViewModel @JvmOverloads constructor(
         activeSessionId = { _uiState.value.activeChatSessionId },
         hasAssistantMessage = { _uiState.value.messages.any { it.role == Role.ASSISTANT } },
         commit = { batch, isStillCurrent ->
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (!isStillCurrent()) {
                     state
                 } else {
@@ -837,7 +837,7 @@ class MainViewModel @JvmOverloads constructor(
                 images = loadedImages
             )
             durableChatSessions = recoveredSessions
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 val activeMessages = recoveredSessions.firstOrNull { it.id == state.activeChatSessionId }?.messages
                 state.copy(
                     chatSessions = recoveredSessions,
@@ -854,7 +854,7 @@ class MainViewModel @JvmOverloads constructor(
             val counts = initialKnowledgeBases.associate { knowledgeBase ->
                 knowledgeBase.id to knowledgeBaseStore.documents(knowledgeBase.id).size
             }
-            _uiState.update { state -> state.copy(knowledgeDocumentCounts = counts) }
+            uiStateStore.update { state -> state.copy(knowledgeDocumentCounts = counts) }
             null
         } catch (error: CancellationException) {
             throw error
@@ -896,7 +896,7 @@ class MainViewModel @JvmOverloads constructor(
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val imageAssetDirectory: File
@@ -980,7 +980,7 @@ class MainViewModel @JvmOverloads constructor(
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
         if (imageLibraryStartupReconciliation.await() != null) {
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 state.copy(statusMessage = "图片库启动清理未完全完成，将在下次启动重试。")
             }
         }
@@ -992,7 +992,7 @@ class MainViewModel @JvmOverloads constructor(
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val cloudApiStore: CloudApiStore
@@ -1084,7 +1084,7 @@ contextTraceJson: String?
                 }
             }
             imageLibraryBackupJob = launchedJob
-            _uiState.update { state -> state.copy(imageLibraryBackup = reservation) }
+            uiStateStore.update { state -> state.copy(imageLibraryBackup = reservation) }
             launchedJob.start()
             true
         }
@@ -1166,8 +1166,9 @@ contextTraceJson: String?
     )
     val uiState = uiStateStore.state
 
-    // R1/S10 过渡访问器：与 UiStateStore.ownerFlow 同一实例，保留既有 CAS/读取语义；
-    // 删除条件见 UiStateStore KDoc（R2–R4 迁移完 update/value 站点后移除）。
+    // R1/S10 过渡访问器（R3/S23 更新：写入侧已全部迁经 uiStateStore.update，本访问器现只服务
+    // `.value` 读取与 5 处 inner port 的 MutableStateFlow 暴露）；删除条件：读取站点迁到 current/
+    // 只读投影、port 契约收敛到只读 state 之后（R2–R4）。
     private val _uiState: MutableStateFlow<MainUiState> get() = uiStateStore.ownerFlow
 
     /**
@@ -1288,7 +1289,7 @@ contextTraceJson: String?
 
 
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             if (state.deferGenerationImageGrantRelease == defer) {
                 state
             } else {
@@ -1312,7 +1313,7 @@ contextTraceJson: String?
         observeManagedImports()
         viewModelScope.launch {
             verifiedOfflineTranslationBundle()?.let { bundle ->
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
                     else state.copy(
                         offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
@@ -1346,7 +1347,7 @@ contextTraceJson: String?
         }
         viewModelScope.launch(Dispatchers.IO) {
             val loaded = loadInitialTextualInversionLibraryState(localImageTextualInversionStore)
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (!state.localImageTextualInversionLoading) {
                     state
                 } else {
@@ -1524,7 +1525,7 @@ contextTraceJson: String?
                     runCatching { engine.nativeStatsJson() }.getOrDefault("{}")
                 }
                 if (engine.stats.value != stats) return@collect
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     val lifecycle = when {
                         state.isGenerating -> AgentEngineLifecycle.GENERATING
                         stats.loaded -> AgentEngineLifecycle.READY
@@ -1558,7 +1559,7 @@ contextTraceJson: String?
                     onSuccess = { recovered ->
                         if (recovered.isNotEmpty()) {
                             refreshRuntimeReadiness(managedRuntimeReadinessPort)
-                            _uiState.update { state ->
+                            uiStateStore.update { state ->
                                 state.copy(statusMessage =
                                     "已恢复 ${recovered.size} 个现有 QAIRT NPU 模型；首次加载会自动隔离安全启动。")
                             }
@@ -1566,7 +1567,7 @@ contextTraceJson: String?
                     },
                     onFailure = { error ->
                         Log.e("McaModelOperation", "恢复模型目录失败", error)
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             state.copy(statusMessage =
                                 "恢复模型目录失败：${error.message.orEmpty()}。请检查模型文件和存储空间后重试。")
                         }
@@ -1579,7 +1580,7 @@ contextTraceJson: String?
     }
 
     fun selectTab(tab: AppTab) {
-        _uiState.update { it.copy(tab = tab) }
+        uiStateStore.update { it.copy(tab = tab) }
         if (tab == AppTab.MODELS) {
             viewModelScope.launch(Dispatchers.IO) {
                 refreshRuntimeReadiness(managedRuntimeReadinessPort)
@@ -1615,7 +1616,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun listLocalModels(): List<ModelManifest> =
@@ -1669,7 +1670,7 @@ contextTraceJson: String?
             (pendingImageTranslation != null || pendingChatImageAction != null)
         ) invalidatePendingChatImagePreparation()
         val bounded = value.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 input = bounded.text,
                 statusMessage = if (bounded.truncated) {
@@ -1691,7 +1692,7 @@ contextTraceJson: String?
         val ownerMessages = if (request.sessionId == state.activeChatSessionId) state.messages else session?.messages.orEmpty()
         if (request.sessionId != null && session == null && request.sessionId != state.activeChatSessionId) return
         if (request.messageId != null && ownerMessages.none { it.id == request.messageId }) return
-        _uiState.update {
+        uiStateStore.update {
             it.copy(browserTask = com.muyuchat.feature.chat.BrowserTaskStateMachine.create(request))
         }
     }
@@ -1701,7 +1702,7 @@ contextTraceJson: String?
         if (event.action == com.muyuchat.feature.chat.BrowserTaskAction.CANCEL &&
             activeTask?.taskId == event.taskId && activeWebSearchTaskId == event.taskId
         ) activeWebSearchDeferred?.cancel()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val task = state.browserTask ?: return@update state
             val currentOwner = task.sessionId == null || task.sessionId == state.activeChatSessionId
             val reduced = if (!currentOwner) {
@@ -1733,7 +1734,7 @@ contextTraceJson: String?
             return
         }
         manualContextCompressionRequests.request(sessionId)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 contextCompressionPending = true,
                 statusMessage = "已安排压缩；下一次发送时会保留角色设定和最近消息。"
@@ -1746,7 +1747,7 @@ contextTraceJson: String?
         val sessionId = owner.activeChatSessionId ?: return
         if (owner.isGenerating || !owner.canWriteToActiveAssistantSession()) return
         var changed = false
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             if (state.isGenerating || state.activeChatSessionId != sessionId ||
                 !state.canWriteToActiveAssistantSession() ||
                 state.messages.none { it.id == messageId }
@@ -1778,7 +1779,7 @@ contextTraceJson: String?
             ?: state.selectedAssistant()?.toConversationSnapshot()
         val summaryScope = (assistantSnapshot?.applyTo(state.params) ?: state.params).systemPrompt +
             "\n" + assistantSnapshot?.toJsonString().orEmpty()
-        _uiState.update { current ->
+        uiStateStore.update { current ->
             current.copy(
                 chatSessions = current.chatSessions.map { session ->
                     if (session.id != sessionId) session else session.copy(
@@ -1822,7 +1823,7 @@ contextTraceJson: String?
         contextCompressionPreferences.edit()
             .putInt(CONTEXT_COMPRESSION_THRESHOLD_KEY, threshold.percent)
             .apply()
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 contextCompressionThresholdPercent = threshold.percent,
                 statusMessage = "自动压缩阈值已设为 ${threshold.percent}%。"
@@ -1849,7 +1850,7 @@ contextTraceJson: String?
             }
         if (!valid) return
         contextCompressionPreferences.edit().putString(CONTEXT_SUMMARY_MODEL_KEY, selection).apply()
-        _uiState.update { it.copy(contextSummaryModelSelection = selection) }
+        uiStateStore.update { it.copy(contextSummaryModelSelection = selection) }
     }
 
     private suspend fun summarizeContextForGeneration(
@@ -1912,7 +1913,7 @@ contextTraceJson: String?
             isOwnerCurrent = ::ownerCurrent,
             infer = { summaryRequest ->
                 if (!ownerCurrent()) throw CancellationException("Summary owner changed.")
-                _uiState.update { current ->
+                uiStateStore.update { current ->
                     if (ownerCurrent()) current.copy(statusMessage = "正在整理上下文摘要...") else current
                 }
                 if (local) {
@@ -1993,7 +1994,7 @@ contextTraceJson: String?
             result.onSuccess { imported ->
                 fun publishImportedAttachment(): List<FileAssetRecord>? {
                     var filesToPersist: List<FileAssetRecord>? = null
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         val importedAttachment = imported.imageAsset?.toChatAttachment()
                         // The system picker can deliver the same selection more than once and
                         // every import is copied to a fresh private file.  Compare the actual
@@ -2070,7 +2071,7 @@ contextTraceJson: String?
 
     fun useImageAsset(imageId: String) {
         val image = _uiState.value.images.firstOrNull { it.id == imageId } ?: return
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val alreadyAttached = imageAttachmentRegex.findAll(state.input).any { match ->
                 match.groupValues.getOrNull(2)?.trim() == image.uriString.trim()
             }
@@ -2127,7 +2128,7 @@ contextTraceJson: String?
 
     fun useFileAsset(fileId: String) {
         val file = _uiState.value.files.firstOrNull { it.id == fileId } ?: return
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val separator = if (state.input.isBlank()) "" else "\n\n"
             state.copy(
                 input = state.input + separator + file.toInputAttachment(),
@@ -2139,7 +2140,7 @@ contextTraceJson: String?
     fun deleteFileAsset(fileId: String) {
         var removed: FileAssetRecord? = null
         var filesToPersist: List<FileAssetRecord> = emptyList()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             removed = state.files.firstOrNull { it.id == fileId }
             filesToPersist = state.files.filterNot { it.id == fileId }
             state.copy(files = filesToPersist, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
@@ -2153,7 +2154,7 @@ contextTraceJson: String?
             showStatus("文件库已经为空")
             return
         }
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 files = emptyList(),
                 statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
@@ -2171,7 +2172,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val loraStore: LocalImageLoraStore
@@ -2230,7 +2231,7 @@ contextTraceJson: String?
      * acceptance gate. */
     fun downloadOfficialViggleLora() {
         if (_uiState.value.localImageLoraImporting) return
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 localImageLoraImporting = true,
                 localImageLoraMessage = "正在下载 Viggle v0.2.1 LoRA…"
@@ -2243,7 +2244,7 @@ contextTraceJson: String?
                     val mb = bytes / (1024L * 1024L)
                     if (mb != lastReported) {
                         lastReported = mb
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(
                                 localImageLoraMessage =
                                     "正在下载 Viggle v0.2.1 LoRA… ${bytes * 100 / ViggleV021LoraDownloader.EXPECTED_SIZE_BYTES}%"
@@ -2252,7 +2253,7 @@ contextTraceJson: String?
                     }
                 }
             }.onSuccess { record ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         localImageLoras = localImageLoraStore.load(),
                         localImageLoraImporting = false,
@@ -2261,7 +2262,7 @@ contextTraceJson: String?
                 }
             }.onFailure { error ->
                 if (error is CancellationException) throw error
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         localImageLoraImporting = false,
                         localImageLoraMessage = "Viggle LoRA 下载失败：${error.message ?: "网络或文件校验错误"}"
@@ -2273,8 +2274,8 @@ contextTraceJson: String?
 
 
     fun reportMissingLocalImageLoraSelection() {
-        _uiState.update { it.copy(chatImageLoraSelections = null) }
-        _uiState.update {
+        uiStateStore.update { it.copy(chatImageLoraSelections = null) }
+        uiStateStore.update {
             it.copy(
                 localImageLoraMessage = "所选 LoRA 已删除，请重新选择。",
                 statusMessage = "所选 LoRA 已删除，请重新选择。"
@@ -2285,7 +2286,7 @@ contextTraceJson: String?
 
 
     fun reportMissingLocalImageTextualInversionSelection() {
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 localImageTextualInversionMessage =
                     "所选 Textual Inversion 已删除，请重新选择。",
@@ -2303,7 +2304,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val upscalerStore: LocalImageUpscalerStore
@@ -2437,7 +2438,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val context: Application
@@ -2552,7 +2553,7 @@ contextTraceJson: String?
         ): OfflinePromptTranslationResolution = offlinePromptTranslationService.translate(bundle, request)
 
         override fun publishTranslationStatus(status: String, taskMessage: String) {
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 val activeJobId = activeImageGenerationJobId
                 state.copy(
                     offlineTranslationStatus = status,
@@ -2611,7 +2612,7 @@ contextTraceJson: String?
             return false
         }
         if (cleanPrompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = "图片提示词超过 " +
                         "${LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS} 字符上限。"
@@ -2634,7 +2635,7 @@ contextTraceJson: String?
         if (enqueueState.isGenerating && requestedBackend == ImageBackend.LOCAL &&
             enqueueState.selectedChatBackend == ChatBackend.LOCAL
         ) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "本地聊天正在生成，请等本轮结束后再启动本地生图，避免设备内存冲突。")
             }
             return false
@@ -2649,7 +2650,7 @@ contextTraceJson: String?
             return false
         }
         requestedLocalModel?.localImageStructuralReadinessMessage()?.let { readiness ->
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "图片生成尚未启动：$readiness")
             }
             return false
@@ -2674,7 +2675,7 @@ contextTraceJson: String?
             baseOptions.textualInversionIds.isNotEmpty() &&
             enqueueState.localImageTextualInversionLoading
         ) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "Textual Inversion 库仍在加载，请稍后重试。")
             }
             return false
@@ -2697,7 +2698,7 @@ contextTraceJson: String?
                     )
                 }
             } catch (error: Exception) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "图片任务的本地扩展不可用：${error.message ?: "请重新选择"}")
                 }
                 return false
@@ -2728,7 +2729,7 @@ contextTraceJson: String?
                     sampleMethod = imageSchedulerProductName(resolvedSampler)
                 )
             } catch (error: Exception) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         statusMessage = "图片采样器不可用：${error.message ?: "请重新选择采样器"}"
                     )
@@ -2756,7 +2757,7 @@ contextTraceJson: String?
         )
         val generationLease = tryAcquireObservedImageGenerationLease(jobId)
         if (generationLease == null) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
             }
             return false
@@ -2772,7 +2773,7 @@ contextTraceJson: String?
                         state.localImageTextualInversions.none { it.id == requestedId }
                     } -> "所选 Textual Inversion 已删除，请重新选择。"
                     else -> {
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(activeLocalImageTextualInversionIds = ids)
                         }
                         null
@@ -2783,7 +2784,7 @@ contextTraceJson: String?
             check(releaseObservedImageGenerationLease(generationLease)) {
                 "UI image generation lease was replaced during Textual Inversion reservation."
             }
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     activeLocalImageTextualInversionIds = emptySet(),
                     localImageTextualInversionMessage = textualInversionReservationError,
@@ -2802,7 +2803,7 @@ contextTraceJson: String?
                     )
                 )
                 queuedJobSpec = queuedJobSpec.copy(options = queuedOptions)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         localImageLoras = currentLoras,
                         activeLocalImageLoraIds = queuedOptions.loras
@@ -2816,7 +2817,7 @@ contextTraceJson: String?
                 "UI image generation lease was replaced during LoRA refresh."
             }
             synchronized(localImageLoraLifecycleLock) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         activeLocalImageLoraIds = emptySet(),
                         activeLocalImageTextualInversionIds = emptySet(),
@@ -2838,7 +2839,7 @@ contextTraceJson: String?
                     "UI image generation lease was replaced during batch planning."
                 }
                 synchronized(localImageLoraLifecycleLock) {
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             activeLocalImageLoraIds = emptySet(),
                             activeLocalImageTextualInversionIds = emptySet(),
@@ -2856,7 +2857,7 @@ contextTraceJson: String?
         activeImageGenerationJobId = jobId
         activeImageGenerationBackend = requestedBackend
         activeImageGenerationModelId = requestedModelId
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 imageJobs = (
                     listOf(
@@ -2887,7 +2888,7 @@ contextTraceJson: String?
             var chatRuntimeLease: com.muyuchat.core.engine.EngineLifecycleLease? = null
             try {
                 awaitImageLibraryStartupReconciliation()
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     state.copy(
                         imageJobs = state.imageJobs.updateImageJob(
                             jobId,
@@ -2902,7 +2903,7 @@ contextTraceJson: String?
                     }
                     model.localImageStructuralReadinessMessage()?.let { readiness ->
                         val message = "图片生成尚未启动：$readiness"
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             val updatedJobs = state.imageJobs.withLocalImagePromptPreparationFailureIfActive(
                                 activeJobId = activeImageGenerationJobId,
                                 jobId = jobId,
@@ -2934,7 +2935,7 @@ contextTraceJson: String?
                         throw error
                     } catch (error: Exception) {
                         val message = localImagePromptPreparationFailureMessage(error)
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             val updatedJobs =
                                 state.imageJobs.withLocalImagePromptPreparationFailureIfActive(
                                     activeJobId = activeImageGenerationJobId,
@@ -2978,7 +2979,7 @@ contextTraceJson: String?
                     } else {
                         null
                     }
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         val currentJob = state.imageJobs.firstOrNull { it.id == jobId }
                         if (currentJob?.status != ImageGenerationStatusRecord.GENERATING) {
                             state
@@ -3030,7 +3031,7 @@ contextTraceJson: String?
                                             val progress = child.parentProgress(childProgress)
                                             val message = progress.toImageGenerationMessage()
                                             val publishedPreview = publishLocalImagePreview(jobId, progress)
-                                            _uiState.update { state ->
+                                            uiStateStore.update { state ->
                                                 val job = state.imageJobs.firstOrNull { it.id == jobId }
                                                 if (job?.status == ImageGenerationStatusRecord.GENERATING) {
                                                     state.copy(
@@ -3049,7 +3050,7 @@ contextTraceJson: String?
                                     )
                                 },
                                 onChildCompleted = { _, completedCount ->
-                                    _uiState.update { state -> state.copy(
+                                    uiStateStore.update { state -> state.copy(
                                         imageJobs = state.imageJobs.map { job ->
                                             if (job.id == jobId && job.status == ImageGenerationStatusRecord.GENERATING) {
                                                 job.copy(
@@ -3111,7 +3112,7 @@ contextTraceJson: String?
                             nativeMessage
                         }
                     }
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         state.copy(
                             imageJobs = state.imageJobs.updateImageJob(
                                 jobId,
@@ -3135,7 +3136,7 @@ contextTraceJson: String?
                 // result, which looked like an immediate app crash to the user.
                 if (generatedImages.isEmpty()) {
                     val message = "图像引擎未返回图片文件，请检查模型完整性后重试。"
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         state.copy(
                             imageJobs = state.imageJobs.updateImageJob(
                                 jobId,
@@ -3173,7 +3174,7 @@ contextTraceJson: String?
                     } else {
                         commitError.message ?: "图片库数据库提交失败"
                     }
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                         if (job?.status == ImageGenerationStatusRecord.DONE) {
                             state
@@ -3221,7 +3222,7 @@ contextTraceJson: String?
                         activeImageGenerationBackend = null
                         activeImageGenerationModelId = null
                     }
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                         val status = when {
                             job == null || job.status.terminal -> null
@@ -3269,7 +3270,7 @@ contextTraceJson: String?
     private fun startLocalImageGenerationWatchdog(jobId: String) {
         viewModelScope.launch(Dispatchers.IO) {
             delay(LOCAL_IMAGE_GENERATION_WATCHDOG_MS)
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 val job = state.imageJobs.firstOrNull { it.id == jobId }
                 if (job?.status == ImageGenerationStatusRecord.QUEUED || job?.status == ImageGenerationStatusRecord.GENERATING) {
                     val message = "本地生图耗时超过 8 分钟，native 后端仍在运行。可点击停止，当前图执行结束后会退出。"
@@ -3292,7 +3293,7 @@ contextTraceJson: String?
             if (expectedJobId != null && jobId != expectedJobId) return@launch
             val localGeneration = activeImageGenerationBackend == ImageBackend.LOCAL
             if (jobId != null) {
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     val job = state.imageJobs.firstOrNull { it.id == jobId }
                     if (job == null || job.status.terminal) return@update state
                     val message = if (localGeneration) {
@@ -3319,7 +3320,7 @@ contextTraceJson: String?
                     false
                 }
                 if (!(localGeneration && nativeCancelRequested)) {
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                         if (job?.status != ImageGenerationStatusRecord.CANCEL_REQUESTED) {
                             state
@@ -3340,7 +3341,7 @@ contextTraceJson: String?
                 }
             } else {
                 imageGenerationJob?.cancel()
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     val working = state.imageJobs.firstOrNull {
                         it.status == ImageGenerationStatusRecord.QUEUED ||
                             it.status == ImageGenerationStatusRecord.GENERATING ||
@@ -3517,7 +3518,7 @@ contextTraceJson: String?
             .getOrNull()
             ?.takeIf { !it.scheme.isNullOrBlank() }
         if (destination == null) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     imageLibraryBackup = ImageLibraryBackupState(
                         message = "备份目标无效",
@@ -3539,7 +3540,7 @@ contextTraceJson: String?
                 val result = imageLibraryMutationMutex.withLock {
                     val snapshot = _uiState.value.images
                     val total = snapshot.count { !favoritesOnly || it.favorite }
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         state.copy(
                             imageLibraryBackup = state.imageLibraryBackup.copy(total = total)
                         )
@@ -3549,7 +3550,7 @@ contextTraceJson: String?
                         images = snapshot,
                         favoritesOnly = favoritesOnly
                     ) { done, progressTotal ->
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             state.copy(
                                 imageLibraryBackup = state.imageLibraryBackup.copy(
                                     done = done,
@@ -3569,7 +3570,7 @@ contextTraceJson: String?
                         append(" 个缺失或无效文件")
                     }
                 }
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         imageLibraryBackup = ImageLibraryBackupState(message = message),
                         statusMessage = message
@@ -3579,7 +3580,7 @@ contextTraceJson: String?
                 val deleted = withContext(NonCancellable + Dispatchers.IO) {
                     deleteIncompleteImageLibraryBackup(destination)
                 }
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         imageLibraryBackup = ImageLibraryBackupState(
                             message = if (deleted) {
@@ -3600,7 +3601,7 @@ contextTraceJson: String?
                     append(error.imageLibraryBackupFailureMessage())
                     if (!deleted) append("；未能删除不完整的备份文件")
                 }
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
                         statusMessage = message
@@ -3626,7 +3627,7 @@ contextTraceJson: String?
             .getOrNull()
             ?.takeIf { !it.scheme.isNullOrBlank() }
         if (source == null) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     imageLibraryBackup = ImageLibraryBackupState(
                         message = "备份文件无效",
@@ -3659,7 +3660,7 @@ contextTraceJson: String?
                             existingImages = _uiState.value.images,
                             installedModelIds = installedModelIds
                         ) { done, total ->
-                            _uiState.update { state ->
+                            uiStateStore.update { state ->
                                 state.copy(
                                     imageLibraryBackup = state.imageLibraryBackup.copy(
                                         done = done,
@@ -3669,7 +3670,7 @@ contextTraceJson: String?
                             }
                         }
                         val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
-                        _uiState.update { it.copy(images = restoredImages) }
+                        uiStateStore.update { it.copy(images = restoredImages) }
                         imported
                     }
                 }
@@ -3693,7 +3694,7 @@ contextTraceJson: String?
                         append(" 个原模型当前未安装，历史仍已保留")
                     }
                 }
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         imageLibraryBackup = ImageLibraryBackupState(message = message),
                         statusMessage = message
@@ -3702,7 +3703,7 @@ contextTraceJson: String?
             } catch (error: CancellationException) {
                 withContext(NonCancellable + Dispatchers.IO) {
                     val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             images = restoredImages,
                             imageLibraryBackup = ImageLibraryBackupState(
@@ -3714,7 +3715,7 @@ contextTraceJson: String?
                 throw error
             } catch (error: Throwable) {
                 val message = error.imageLibraryBackupFailureMessage()
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
                         statusMessage = message
@@ -3744,7 +3745,7 @@ contextTraceJson: String?
                     )
                     val diagnostic = model.localImageVerificationDiagnosticMessage()
                     managedRuntimeReadinessRefreshGate.invalidate()
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             localImageModels = selection.models,
                             qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
@@ -3774,7 +3775,7 @@ contextTraceJson: String?
             .firstOrNull { job -> job.id == activeJobId }
             ?.modelName
             ?.takeIf(String::isNotBlank)
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 statusMessage = buildString {
                     append("当前图片任务已锁定")
@@ -3797,14 +3798,14 @@ contextTraceJson: String?
             val verificationRequestId = "verify-image-${System.currentTimeMillis()}-${UUID.randomUUID()}"
             val generationLease = tryAcquireObservedImageGenerationLease(verificationRequestId)
             if (generationLease == null) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "已有图片任务正在运行，请等待完成后再校验模型。")
                 }
                 return@launch
             }
             try {
                 model.localImageStructuralReadinessMessage()?.let { readiness ->
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(statusMessage = "图像引擎校验未开始：$readiness")
                     }
                     return@launch
@@ -3855,7 +3856,7 @@ contextTraceJson: String?
                     "图像引擎校验失败：${verification.second}"
                 }
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         localImageModels = models,
                         qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
@@ -4009,7 +4010,7 @@ contextTraceJson: String?
     fun deleteLocalImageModel(modelId: String) {
         launchModelOperation("模型操作未完成") {
             if (activeImageGenerationModelId == modelId || activeLocalApiImageModelId == modelId) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "当前图片任务正在使用该模型，请停止或等待任务完成后再删除")
                 }
                 return@launchModelOperation
@@ -4024,7 +4025,7 @@ contextTraceJson: String?
                 preferredId = localImageModelStore.loadSelectedModelId()
             )
             managedRuntimeReadinessRefreshGate.invalidate()
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     localImageModels = models,
                     qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
@@ -4049,11 +4050,11 @@ contextTraceJson: String?
     }
 
     fun onRepoInputChange(value: String) {
-        _uiState.update { it.copy(repoInput = value) }
+        uiStateStore.update { it.copy(repoInput = value) }
     }
 
     fun onHubQueryChange(value: String) {
-        _uiState.update { it.copy(hubQuery = value) }
+        uiStateStore.update { it.copy(hubQuery = value) }
     }
 
     fun updateParams(params: GenerationParams) {
@@ -4073,7 +4074,7 @@ contextTraceJson: String?
         val updatedAssistants = updatedAssistantsWithParams(scopedParams)
         val hasLoadedModel = _uiState.value.loadedModelId != null
         val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 params = scopedParams,
                 assistants = updatedAssistants,
@@ -4109,7 +4110,7 @@ contextTraceJson: String?
                 withContext(NonCancellable) stage@{
                     if (stageGeneration != directParameterStageGeneration.get()) return@stage
                     if (adaptiveTuningJob?.isActive == true || activeTuningJobId != null) {
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(statusMessage = "当前调优任务尚未结束；完成或取消后再应用自定义运行参数。")
                         }
                         return@stage
@@ -4136,7 +4137,7 @@ contextTraceJson: String?
                     candidate.committedExecutionSignature.digest == active.committedExecutionSignature.digest
                 ) {
                     pendingProfileTransactionId = null
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             reloadRequired = false,
                             pendingProfile = null,
@@ -4188,7 +4189,7 @@ contextTraceJson: String?
                 pendingProfileTransactionId = transactionId
                 val currentCtx = active.resolvedLoadBoundValues.toJsonObject().optInt("n_ctx", _uiState.value.stats.nCtx)
                 val pendingCtx = candidate.resolvedLoadBoundValues.toJsonObject().optInt("n_ctx", latestParams.nCtx)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         reloadRequired = true,
                         pendingProfile = AgentPendingProfile(
@@ -4204,7 +4205,7 @@ contextTraceJson: String?
                 }
                     }.onFailure { error ->
                         if (error is CancellationException) return@onFailure
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(
                                 pendingProfile = null,
                                 reloadRequired = true,
@@ -4325,7 +4326,7 @@ contextTraceJson: String?
                 session.copy(assistantSnapshot = revisedSnapshot)
             }
         } else state.chatSessions
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 assistants = updatedAssistants,
                 selectedAssistantId = if (shouldSelectAssistant && existing != null) assistant.id else state.selectedAssistantId,
@@ -4377,7 +4378,7 @@ contextTraceJson: String?
             try {
                 check(chatSessionStore.upsertMemory(record)) { "记忆与角色不匹配" }
                 val refreshed = chatSessionStore.loadMemories(assistantId)
-                _uiState.update { current ->
+                uiStateStore.update { current ->
                     current.copy(
                         assistantMemories = current.assistantMemories.filterNot { it.assistantId == assistantId } + refreshed,
                         statusMessage = "角色记忆已保存"
@@ -4397,7 +4398,7 @@ contextTraceJson: String?
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 check(chatSessionStore.deleteMemory(id, assistantId)) { "记忆不存在或不属于该角色" }
-                _uiState.update { current ->
+                uiStateStore.update { current ->
                     current.copy(
                         assistantMemories = current.assistantMemories.filterNot {
                             it.id == id && it.assistantId == assistantId
@@ -4566,7 +4567,7 @@ contextTraceJson: String?
             }
             if (!committed) return
             val refreshed = chatSessionStore.loadMemories(assistantId)
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 state.copy(assistantMemories = state.assistantMemories.filterNot {
                     it.assistantId == assistantId
                 } + refreshed)
@@ -4596,7 +4597,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun saveConfig(config: WebSearchConfig) {
@@ -4767,7 +4768,7 @@ contextTraceJson: String?
         val state = _uiState.value
         val assistantDefault = state.selectedAssistant()?.webSearchEnabled == true
         if (!state.webSearchConfig.enabled) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     webSearchTurnMode = WebSearchTurnMode.FOLLOW,
                     webSearchOneShotEnabled = false,
@@ -4777,7 +4778,7 @@ contextTraceJson: String?
             }
             return
         }
-        _uiState.update {
+        uiStateStore.update {
             val nextMode = when (it.webSearchTurnMode) {
                 WebSearchTurnMode.FOLLOW -> if (assistantDefault) WebSearchTurnMode.OFF else WebSearchTurnMode.ON
                 WebSearchTurnMode.ON -> WebSearchTurnMode.OFF
@@ -4807,7 +4808,7 @@ contextTraceJson: String?
     fun cycleWebSearchResearchModeForNextTurn() {
         val state = _uiState.value
         if (!state.webSearchConfig.enabled) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     webSearchResearchModeOverride = null,
                     webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
@@ -4816,7 +4817,7 @@ contextTraceJson: String?
             }
             return
         }
-        _uiState.update {
+        uiStateStore.update {
             val current = it.webSearchResearchModeOverride ?: it.webSearchConfig.researchMode
             val next = when (current) {
                 WebSearchResearchMode.AUTO -> WebSearchResearchMode.DEEP
@@ -4834,7 +4835,7 @@ contextTraceJson: String?
     fun selectWebSearchResearchModeForNextTurn(mode: String) {
         val state = _uiState.value
         if (!state.webSearchConfig.enabled) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     webSearchResearchModeOverride = null,
                     webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
@@ -4844,7 +4845,7 @@ contextTraceJson: String?
             return
         }
         val selected = WebSearchResearchMode.from(mode)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 webSearchResearchModeOverride = selected.takeUnless { next -> next == it.webSearchConfig.researchMode },
                 webSearchStatusMessage = "本轮研究模式：${selected.label}",
@@ -4855,7 +4856,7 @@ contextTraceJson: String?
 
     fun clearWebSearchDiagnostics() {
         val records = webSearchDiagnosticStore.clear()
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 webSearchDiagnostics = records,
                 webSearchStatusMessage = null,
@@ -4907,7 +4908,7 @@ contextTraceJson: String?
             ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
             ?: assistantParams
         GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 selectedAssistantId = assistant.id,
                 params = updatedParams,
@@ -4925,7 +4926,7 @@ contextTraceJson: String?
             return
         }
         val target = captureChatAppearanceTarget(scope) ?: return
-        _uiState.update { it.copy(chatBackgroundImporting = true, statusMessage = "正在处理背景图片…") }
+        uiStateStore.update { it.copy(chatBackgroundImporting = true, statusMessage = "正在处理背景图片…") }
         viewModelScope.launch {
             chatAppearanceMutex.withLock {
                 runCatching {
@@ -4936,11 +4937,11 @@ contextTraceJson: String?
                     applyPersistedChatAppearance(target, appearance)
                     cleanupUnusedChatBackgrounds()
                 }.onSuccess {
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(chatBackgroundImporting = false, statusMessage = "聊天背景已更新")
                     }
                 }.onFailure { error ->
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             chatBackgroundImporting = false,
                             statusMessage = "背景图片设置失败：${error.message ?: "无法处理图片"}"
@@ -4971,7 +4972,7 @@ contextTraceJson: String?
                     applyPersistedChatAppearance(target, normalized)
                     cleanupUnusedChatBackgrounds()
                 }.onFailure { error ->
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(statusMessage = "保存聊天外观失败：${error.message ?: "存储错误"}")
                     }
                 }
@@ -5043,7 +5044,7 @@ contextTraceJson: String?
     }
 
     private fun applyPersistedChatAppearance(target: ChatAppearanceTarget, appearance: ChatAppearance?) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             when (target.scope) {
                 ChatAppearanceScope.GLOBAL -> state.copy(globalChatAppearance = appearance ?: ChatAppearance())
                 ChatAppearanceScope.ASSISTANT -> state.copy(
@@ -5122,9 +5123,9 @@ contextTraceJson: String?
                     if (pending.isEmpty()) pendingWorldBookCleanupOwners.remove(scope)
                 }
             }
-            _uiState.update { it.copy(worldBooks = updatedWorldBooks) }
+            uiStateStore.update { it.copy(worldBooks = updatedWorldBooks) }
         }.onFailure { error ->
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = "主体数据已保存，但关联世界书清理失败，原数据已保留：${error.message ?: "存储错误"}"
                 )
@@ -5153,7 +5154,7 @@ contextTraceJson: String?
         try {
             assistantStore.saveAssistants(remaining)
         } catch (error: Throwable) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = "删除助手失败，助手和关联世界书均未修改：${error.message ?: "存储错误"}"
                 )
@@ -5168,7 +5169,7 @@ contextTraceJson: String?
             ?: nextAssistantParams else state.params
         if (deletingSelectedAssistant) GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         val updatedSessions = state.chatSessions
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 assistants = remaining,
                 assistantMemories = it.assistantMemories.filterNot { memory ->
@@ -5183,7 +5184,7 @@ contextTraceJson: String?
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { chatSessionStore.deleteAssistantMemoryData(assistantId) }
                 .onFailure { error ->
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(statusMessage = "助手已删除，但关联记忆清理失败：${error.message ?: "存储错误"}")
                     }
                 }
@@ -5221,7 +5222,7 @@ contextTraceJson: String?
     internal fun restorePendingContentImportPreview() {
         viewModelScope.launch {
             val preview = withContext(Dispatchers.IO) { contentImportPreviewStore.load() } ?: return@launch
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (state.contentImportPreview == null) state.copy(contentImportPreview = preview) else state
             }
         }
@@ -5243,7 +5244,7 @@ contextTraceJson: String?
                 preferredId = localImageModelStore.loadSelectedModelId()
             )
             managedRuntimeReadinessRefreshGate.invalidate()
-            _uiState.update { state -> state.copy(
+            uiStateStore.update { state -> state.copy(
                 localImageModels = models,
                 qnnImageVerificationCurrentByModelId = verification,
                 selectedLocalImageModelId = selectedId,
@@ -5260,7 +5261,7 @@ contextTraceJson: String?
             if (_uiState.value.contentImportCommitting) return
             try {
                 withContext(Dispatchers.IO) { contentImportPreviewStore.save(preview) }
-                _uiState.update { it.copy(contentImportPreview = preview) }
+                uiStateStore.update { it.copy(contentImportPreview = preview) }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 showStatus("导入预览保存失败：${error.message}")
@@ -5274,7 +5275,7 @@ contextTraceJson: String?
                 if (_uiState.value.contentImportCommitting || _uiState.value.contentImportPreview?.id != id) return@withLock
                 try {
                     withContext(Dispatchers.IO) { contentImportPreviewStore.clear(id) }
-                    _uiState.update { it.copy(contentImportPreview = null) }
+                    uiStateStore.update { it.copy(contentImportPreview = null) }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
                     showStatus("无法关闭导入预览：${error.message}")
@@ -5288,7 +5289,7 @@ contextTraceJson: String?
             contentImportCommitMutex.withLock {
                 val preview = _uiState.value.contentImportPreview?.takeIf { it.id == id } ?: return@withLock
                 if (_uiState.value.contentImportCommitting || _uiState.value.isGenerating) return@withLock
-                _uiState.update { it.copy(contentImportCommitting = true) }
+                uiStateStore.update { it.copy(contentImportCommitting = true) }
                 try {
                     val committed = when (preview.kind) {
                         "character_card" -> {
@@ -5306,13 +5307,13 @@ contextTraceJson: String?
                     }
                     if (committed) {
                         withContext(Dispatchers.IO) { contentImportPreviewStore.clear(id) }
-                        _uiState.update { it.copy(contentImportPreview = null) }
+                        uiStateStore.update { it.copy(contentImportPreview = null) }
                     }
                 } catch (error: Throwable) {
                     if (error is CancellationException) throw error
                     showStatus("导入尚未完整提交：${error.message}；预览已保留，可重试。")
                 } finally {
-                    _uiState.update { it.copy(contentImportCommitting = false) }
+                    uiStateStore.update { it.copy(contentImportCommitting = false) }
                 }
             }
         }
@@ -5369,7 +5370,7 @@ contextTraceJson: String?
                     "请重新选择文件并允许文件读取权限。"
                 else -> "请换用标准 PNG/JSON 角色卡后重试。"
             }
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "角色卡导入失败：${failure.error.message} 下一步：$nextStep")
             }
             return false
@@ -5396,7 +5397,7 @@ contextTraceJson: String?
             withContext(Dispatchers.IO) { assistantStore.saveAssistants(updatedAssistants) }
         } catch (error: Throwable) {
             if (error is CancellationException) throw error
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "角色卡导入失败：${error.message ?: "无法保存角色"}")
             }
             return false
@@ -5418,7 +5419,7 @@ contextTraceJson: String?
             !currentState.isGenerating && conversationMutationBarrier?.isActive != true &&
             !hasActiveAssistantImageExecution(currentState.activeChatSessionId)
         val updatedSessions = currentState.chatSessions
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 assistants = it.assistants.filterNot { record -> record.id == assistant.id } + assistant,
                 chatSessions = updatedSessions,
@@ -5445,7 +5446,7 @@ contextTraceJson: String?
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "$importStatus；角色卡已保存，自动切换会话失败：${error.message ?: "请手动选择角色卡"}")
                 }
             }
@@ -5469,7 +5470,7 @@ contextTraceJson: String?
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "${it.statusMessage.orEmpty()}；角色卡已保存，但新会话保存失败：${error.message ?: "存储错误"}")
                 }
             }
@@ -5486,7 +5487,7 @@ contextTraceJson: String?
     fun updateChatImageLoraSelection(selections: List<Pair<String, Double>>?) {
         val frozen = selections?.toList()
         val valid = frozen?.let { runCatching { resolveCurrentLocalImageLoras(it) }.isSuccess } == true
-        _uiState.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
+        uiStateStore.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
     /**
@@ -5525,13 +5526,13 @@ contextTraceJson: String?
             }
 
             is WorldBookImportOutcome.Committed -> {
-                _uiState.update { it.withKnowledgeLibraryChange(outcome.change) }
+                uiStateStore.update { it.withKnowledgeLibraryChange(outcome.change) }
                 if (outcome.invalidateContext) markLocalConversationContextInvalid()
                 true
             }
 
             is WorldBookImportOutcome.Rejected -> {
-                _uiState.update {
+                uiStateStore.update {
                     it.withKnowledgeLibraryChange(KnowledgeLibraryChange(statusMessage = outcome.statusMessage))
                 }
                 false
@@ -5569,7 +5570,7 @@ contextTraceJson: String?
                 _uiState.value.knowledgeLibrarySnapshot(),
                 worldBookId
             ) ?: return@launch
-            _uiState.update { it.withKnowledgeLibraryChange(change) }
+            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
@@ -5581,7 +5582,7 @@ contextTraceJson: String?
                 name,
                 description
             )
-            _uiState.update { it.withKnowledgeLibraryChange(change) }
+            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
@@ -5604,7 +5605,7 @@ contextTraceJson: String?
             return
         }
         val owner = importOwner ?: captureContentImportOwner()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 knowledgeBaseImportingIds = state.knowledgeBaseImportingIds + knowledgeBaseId,
                 statusMessage = "正在准备知识库文档预览…"
@@ -5627,7 +5628,7 @@ contextTraceJson: String?
                 }
                 stageContentImportPreview(preview)
             } finally {
-                _uiState.update { it.copy(knowledgeBaseImportingIds = it.knowledgeBaseImportingIds - knowledgeBaseId) }
+                uiStateStore.update { it.copy(knowledgeBaseImportingIds = it.knowledgeBaseImportingIds - knowledgeBaseId) }
             }
         }
     }
@@ -5672,7 +5673,7 @@ contextTraceJson: String?
                 }
                 val bases = knowledgeBaseStore.loadBases()
                 val count = knowledgeBaseStore.documents(baseId).size
-                _uiState.update { current ->
+                uiStateStore.update { current ->
                     val ownerIsCurrent = owner.isCurrent(current)
                     current.copy(
                         knowledgeBases = bases,
@@ -5695,7 +5696,7 @@ contextTraceJson: String?
         val updatedIds = state.selectedKnowledgeBaseIds.toMutableSet().apply {
             if (selected) add(knowledgeBaseId) else remove(knowledgeBaseId)
         }.toSet()
-        _uiState.update { it.copy(selectedKnowledgeBaseIds = updatedIds) }
+        uiStateStore.update { it.copy(selectedKnowledgeBaseIds = updatedIds) }
         state.activeChatSessionId?.let { sessionId ->
             persistKnowledgeBaseBindings(sessionId, updatedIds)
         }
@@ -5708,7 +5709,7 @@ contextTraceJson: String?
                 _uiState.value.knowledgeLibrarySnapshot(),
                 knowledgeBaseId
             ) ?: return@launch
-            _uiState.update { it.withKnowledgeLibraryChange(change) }
+            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
         }
     }
 
@@ -5726,7 +5727,7 @@ contextTraceJson: String?
         }
         GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         persistModelGenerationParams(state, updatedParams)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 params = updatedParams,
                 statusMessage = "思考模式已切换为：${mode.label}"
@@ -5739,7 +5740,7 @@ contextTraceJson: String?
     }
 
     fun updateCloudApiEnabled(enabled: Boolean) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(enabled = enabled))
         }
     }
@@ -5750,7 +5751,7 @@ contextTraceJson: String?
             ?: CloudApiFormat.OPENAI_COMPATIBLE
         val defaultBaseUrls = CloudApiFormat.entries.map { it.defaultBaseUrl }.filter { it.isNotBlank() }
         val defaultChatModels = CloudApiFormat.entries.map { it.defaultModel }.filter { it.isNotBlank() }
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val current = state.cloudApiConfig
             state.copy(
                 cloudApiConfig = current.copy(
@@ -5771,7 +5772,7 @@ contextTraceJson: String?
         val defaultBaseUrls = CloudImageApiFormat.entries.map { it.defaultBaseUrl }.filter { it.isNotBlank() }
         val defaultImageModels = CloudImageApiFormat.entries.map { it.defaultImageModel }.filter { it.isNotBlank() }
         val defaultImagePaths = CloudImageApiFormat.entries.map { it.defaultEndpointPath }.filter { it.isNotBlank() }
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val current = state.cloudApiConfig
             state.copy(
                 cloudApiConfig = current.copy(
@@ -5788,7 +5789,7 @@ contextTraceJson: String?
 
     fun applyCloudProviderPreset(value: String) {
         val preset = findCloudProviderPreset(value) ?: return
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 cloudApiConfig = state.cloudApiConfig.copy(
                     enabled = true,
@@ -5806,7 +5807,7 @@ contextTraceJson: String?
     fun beginAddCloudModel(kind: String) {
         val modelKind = runCatching { CloudModelKind.valueOf(kind) }.getOrDefault(CloudModelKind.CHAT)
         val current = _uiState.value.cloudApiConfig
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 editingCloudModelId = null,
                 cloudApiConfig = CloudApiConfig(
@@ -5828,7 +5829,7 @@ contextTraceJson: String?
 
     fun editCloudModel(modelId: String) {
         val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId } ?: return
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 editingCloudModelId = model.id,
                 cloudApiConfig = when (model.kind) {
@@ -5841,25 +5842,25 @@ contextTraceJson: String?
     }
 
     fun updateCloudBaseUrl(value: String) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(baseUrl = value))
         }
     }
 
     fun updateCloudApiKey(value: String) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(apiKey = value))
         }
     }
 
     fun updateCloudChatModel(value: String) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(chatModel = value))
         }
     }
 
     fun updateCloudSupportsVision(value: Boolean) {
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(cloudApiConfig = state.cloudApiConfig.copy(supportsVision = value))
         }
     }
@@ -5889,14 +5890,14 @@ contextTraceJson: String?
             // the previous stable model.
             updateParams(updated)
             directParameterStageJob?.cancel()
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = "正在重新加载 ${target.displayName}（${backendLabel(family, backendId)}）…"
                 )
             }
             loadModel(target)
         } else {
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 state.copy(
                     statusMessage = "已保存 ${target.displayName} 的 " +
                         "${backendLabel(family, backendId)} 设置；下次加载该模型时生效。"
@@ -5914,7 +5915,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val cloudApiStore: CloudApiStore
@@ -6034,7 +6035,7 @@ contextTraceJson: String?
         }
         cloudApiStore.saveSelectedCloudImageModelId(model.id)
         localImageModelStore.saveSelectedBackend(ImageBackend.CLOUD)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 selectedCloudImageModelId = model.id,
                 selectedImageBackend = ImageBackend.CLOUD,
@@ -6055,7 +6056,7 @@ contextTraceJson: String?
         // values establish reloadRequired + pending/LKG state instead of only
         // changing the persisted/UI projection.
         if (updatedParams != null) updateParams(updatedParams)
-        _uiState.update { current ->
+        uiStateStore.update { current ->
             current.copy(
                 preference = preference,
                 agentRecommendation = recommendation,
@@ -6088,7 +6089,7 @@ contextTraceJson: String?
         val result = modelIdentityReferenceMigration.reconcileAndMigrate()
         if (result.idMapping.isNotEmpty()) {
             fun canonical(id: String?): String? = result.idMapping[id] ?: id
-            _uiState.update { state -> state.copy(
+            uiStateStore.update { state -> state.copy(
                 models = result.models,
                 loadedModelId = canonical(state.loadedModelId),
                 chatSessions = state.chatSessions.map { it.copy(modelId = canonical(it.modelId)) },
@@ -6116,7 +6117,7 @@ contextTraceJson: String?
     private fun enqueueManagedImport(request: ManagedModelImportRequest) {
         launchImportOperation {
             ManagedModelImportWorker.enqueue(getApplication(), request)
-            _uiState.update { it.copy(statusMessage = if (request.persistentAccess)
+            uiStateStore.update { it.copy(statusMessage = if (request.persistentAccess)
                 "导入任务已保存，可在本地模型页查看进度或暂停；已完成组件可恢复。"
                 else "导入已开始。此文件提供方不支持保留访问权限，重启后可能需要重新选择源文件。") }
         }
@@ -6176,7 +6177,7 @@ contextTraceJson: String?
                     )
                 }
                 // Task state is independent of chat/load/download busy ownership.
-                _uiState.update { it.copy(importTasks = rows.filter { row -> row.active || row.resumable } +
+                uiStateStore.update { it.copy(importTasks = rows.filter { row -> row.active || row.resumable } +
                     rows.filter { row -> !row.active && !row.resumable }.take(3)) }
                 val completed = tasks.map { it.second }.filter {
                     it.state == androidx.work.WorkInfo.State.SUCCEEDED && it.id.toString() !in handled
@@ -6185,7 +6186,7 @@ contextTraceJson: String?
                     managedRuntimeReadinessRefreshGate.invalidate()
                     reconcileModelIdentities()
                     val models = modelStore.listModels()
-                    _uiState.update { it.copy(models = models) }
+                    uiStateStore.update { it.copy(models = models) }
                     handled.addAll(completed.map { it.id.toString() })
                     receipts.edit().putStringSet("handled", handled.toSet()).apply()
                 }
@@ -6200,7 +6201,7 @@ contextTraceJson: String?
             runCatching {
                 modelScopeClient.listEngineFiles(input)
             }.onSuccess { files ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(remoteFiles = files, busy = false, statusMessage = "找到 ${files.size} 个本地推理文件")
                 }
             }.onFailure { error ->
@@ -6222,7 +6223,7 @@ contextTraceJson: String?
                     preferredQairtChipsets = preferredQairtChipsets(currentDeviceProfile())
                 )
             }.onSuccess { files ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         repoInput = model.repoId,
                         remoteFiles = files,
@@ -6259,7 +6260,7 @@ contextTraceJson: String?
                 modelStore.attachVisionProjector(modelId, uri)
             }.onSuccess { model ->
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         models = modelStore.listModels(),
                         busy = false,
@@ -6297,7 +6298,7 @@ contextTraceJson: String?
             runCatching {
                 modelScopeClient.searchModels(query = query, pageNumber = nextPage)
             }.onSuccess { result ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         hubModels = if (reset) result.models else it.hubModels + result.models,
                         hubPage = result.pageNumber,
@@ -6313,13 +6314,13 @@ contextTraceJson: String?
     }
 
     fun fetchHubModelFiles(model: ModelScopeHubModel) {
-        _uiState.update { it.copy(repoInput = model.id) }
+        uiStateStore.update { it.copy(repoInput = model.id) }
         viewModelScope.launch(Dispatchers.IO) {
             busy("正在读取 ${model.displayName} 的本地推理文件...")
             runCatching {
                 modelScopeClient.listEngineFiles(model.id)
             }.onSuccess { files ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         repoInput = model.id,
                         remoteFiles = files,
@@ -6403,7 +6404,7 @@ contextTraceJson: String?
                 .putBoolean("use:${request.identity}", useAfterDownload)
                 .apply()
             if (useAfterDownload) autoUseManagedDownloads.add(request.identity)
-            _uiState.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
+            uiStateStore.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
                 downloadTaskId = request.identity,
                 downloadPhase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED,
                 downloadFailureSource = null,
@@ -6435,7 +6436,7 @@ contextTraceJson: String?
                         ?: infos.firstOrNull { !it.state.isFinished }
                     if (active != null) {
                         val progress = active.progress
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             if (!state.busy) managedDownloadOwnedBusy = true
                             state.copy(busy = true,
                                 downloadTaskId = active.tags.firstOrNull { tag ->
@@ -6481,12 +6482,12 @@ contextTraceJson: String?
                                 val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.matchesCatalogId(id) } }
                                 if (image != null) {
                                     val selection = settleLocalImageSelection(image)
-                                    _uiState.update { it.copy(localImageModels = selection.models,
+                                    uiStateStore.update { it.copy(localImageModels = selection.models,
                                         qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
                                         selectedLocalImageModelId = selection.selectedId, selectedImageBackend = selection.selectedBackend) }
                                 }
                                 if (active == null) {
-                                    _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
+                                    uiStateStore.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
                                         downloadStatus = DownloadStatus.DONE, downloadSpeedBytesPerSecond = 0,
                                         downloadTaskId = info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }
                                             ?: info.id.toString(),
@@ -6511,7 +6512,7 @@ contextTraceJson: String?
                                         // active GGUF immediately so the native runner binds
                                         // the new mmproj instead of advertising a stale text
                                         // session until the next manual model load.
-                                        _uiState.update {
+                                        uiStateStore.update {
                                             it.copy(statusMessage = "视觉投影器已下载，正在重新加载模型以启用识图…")
                                         }
                                         loadModel(model)
@@ -6520,7 +6521,7 @@ contextTraceJson: String?
                                     }
                                 }
                             } else if (active == null) {
-                                _uiState.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
+                                uiStateStore.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
                                     downloadStatus = if (info.state == androidx.work.WorkInfo.State.CANCELLED) DownloadStatus.PAUSED else DownloadStatus.FAILED,
                                     downloadTaskId = info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }
                                         ?: info.id.toString(),
@@ -6553,7 +6554,7 @@ contextTraceJson: String?
         viewModelScope.launch(Dispatchers.IO) {
             recoverModelOperation(operation = { operation() }, onFailure = { error ->
                 Log.e("McaModelOperation", message, error)
-                _uiState.update { state -> state.copy(busy = false,
+                uiStateStore.update { state -> state.copy(busy = false,
                     statusMessage = "$message：${error.message.orEmpty()}。请检查模型文件和存储空间后重试。",
                     engineLifecycle = if (state.engineLifecycle == AgentEngineLifecycle.LOADING) {
                         if (state.stats.loaded) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR
@@ -6585,7 +6586,7 @@ contextTraceJson: String?
         val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
         val config = model?.toChatConfig()?.normalized()
         if (config == null || !config.configured) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "云端推理模型未配置。请到模型管理 > 云端 接入并保存对话推理模型。")
             }
             return
@@ -6603,7 +6604,7 @@ contextTraceJson: String?
             engine.stopGeneration()
         }
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        _uiState.update {
+        uiStateStore.update {
             sessionsToPersist = it.chatSessions.bindSession(
                 sessionId = it.activeChatSessionId,
                 assistantId = it.selectedAssistantId,
@@ -6644,7 +6645,7 @@ contextTraceJson: String?
         // be slow or fail, and a preflight failure must not leave a cancelled
         // generation projected as active in the UI.
         val stats = engine.stats.value
-        _uiState.update {
+        uiStateStore.update {
             it.afterGenerationTerminated(
                 stats = stats,
                 statusMessage = message
@@ -6659,7 +6660,7 @@ contextTraceJson: String?
         }
         val nativeStats = engine.nativeStatsJsonOrEmpty()
         val recentLogs = engine.recentEngineLogsOrEmpty()
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 nativeStatsJson = nativeStats,
                 logs = recentLogs,
@@ -6668,7 +6669,7 @@ contextTraceJson: String?
     }
     cancelGenerationJob()
     engine.stopGeneration()
-    _uiState.update {
+    uiStateStore.update {
         it.copy(
             busy = true,
             engineLifecycle = AgentEngineLifecycle.LOADING,
@@ -6700,7 +6701,7 @@ contextTraceJson: String?
         defaults = _uiState.value.params
     )
     var persistedModels = validatedCatalog.models
-    _uiState.update { it.copy(modelLoadStage = "正在准备运行环境") }
+    uiStateStore.update { it.copy(modelLoadStage = "正在准备运行环境") }
     var model = persistedModels.firstOrNull { it.id == requestedModel.id } ?: requestedModel
     val qairtVerifiedIds = if (model.runtime == ChatModelRuntime.GENIEX_QAIRT) {
         validatedCatalog.qairtVerifiedLocalModelIds
@@ -6795,7 +6796,7 @@ contextTraceJson: String?
 
     try {
         if (memoryAdmission.mode == LocalModelMemoryAdmissionMode.SPARSE_MOE_MMAP) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "正在以稀疏 MoE mmap 模式加载 ${model.displayName}…")
             }
         }
@@ -6945,7 +6946,7 @@ contextTraceJson: String?
             resolvedLoadSignature = bootstrapProfile.resolvedLoadSignature.digest,
             committedExecutionSignature = bootstrapProfile.committedExecutionSignature.digest
         ) { progress ->
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (state.busy) {
                     state.copy(statusMessage = "隔离安全启动：${progress.message}")
                 } else {
@@ -6961,14 +6962,14 @@ contextTraceJson: String?
         ) {
             "隔离安全启动未通过：${workerResult.detail}"
         }
-        _uiState.update {
+        uiStateStore.update {
             it.copy(statusMessage = "隔离安全启动通过，正在正式加载 ${model.displayName}…")
         }
     }
     val loadParams = model.loadParamsForExecutionProfile(bootstrapProfile)
     // LLAMA, MNN, and QAIRT keep the long-lived native handle in a worker process.
     // The load Result still owns concrete runtime failures and recovery decisions.
-    _uiState.update { it.copy(modelLoadStage = "正在加载模型，首次加载可能较慢") }
+    uiStateStore.update { it.copy(modelLoadStage = "正在加载模型，首次加载可能较慢") }
     val nativeLoad = engine.loadModel(
         modelPath = model.path,
         runtime = runtime,
@@ -7012,7 +7013,7 @@ contextTraceJson: String?
         }
         else -> null
     }
-    _uiState.update { it.copy(modelLoadStage = "正在确认模型运行配置") }
+    uiStateStore.update { it.copy(modelLoadStage = "正在确认模型运行配置") }
     val formalProfile = engine.activeExecutionProfile() ?: bootstrapProfile
     require(formalProfile.profileId == bootstrapProfile.profileId) {
         "正式加载激活了非预期 profile。"
@@ -7058,7 +7059,7 @@ contextTraceJson: String?
     activeRuntimeIdentity = identity
     activeVisionProjectorStamp = loadedVisionProjectorStamp(model, identity)
     activeModelForRuntimeProfile = model
-    _uiState.update { it.copy(modelLoadStage = "正在完成准备") }
+    uiStateStore.update { it.copy(modelLoadStage = "正在完成准备") }
     val modelParams = loadModelGenerationParams(
         backend = ChatBackend.LOCAL,
         modelId = model.id,
@@ -7066,7 +7067,7 @@ contextTraceJson: String?
     )
     GenerationPreferences.persistGenerationParams(getApplication(), modelParams)
     val effectiveParams = mergedExecutionProfile(modelParams, formalProfile)
-    _uiState.update { state ->
+    uiStateStore.update { state ->
         state.copy(
             params = effectiveParams,
             reloadRequired = false,
@@ -7102,7 +7103,7 @@ contextTraceJson: String?
         }.getOrDefault(false)
         val logsAfterLoad = engine.recentEngineLogsOrEmpty()
         managedRuntimeReadinessRefreshGate.invalidate()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
             sessionsToPersist = state.chatSessions.bindSession(
                 sessionId = state.activeChatSessionId,
@@ -7231,7 +7232,7 @@ contextTraceJson: String?
                 validatedModel.runtime == ChatModelRuntime.GENIEX_QAIRT &&
                 validatedModel.id !in validatedCatalog.qairtVerifiedLocalModelIds
             ) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "模型包校验通过，正在独立进程执行 QAIRT create/generate/destroy 诊断…")
                 }
                 runCatching {
@@ -7241,7 +7242,7 @@ contextTraceJson: String?
                         nCtx = params.nCtx,
                         nThreads = params.nThreads
                     ) { progress ->
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             if (state.busy) state.copy(statusMessage = progress.message) else state
                         }
                     }
@@ -7253,7 +7254,7 @@ contextTraceJson: String?
             val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), localModels)
             val qairtVerified = validatedModel.id in qairtVerifiedIds
             managedRuntimeReadinessRefreshGate.invalidate()
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     busy = false,
                     models = localModels,
@@ -7313,7 +7314,7 @@ contextTraceJson: String?
         activeProfileTransactionId = null
         val nativeStats = engine.nativeStatsJsonOrEmpty()
         val recentLogs = engine.recentEngineLogsOrEmpty()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.afterNativeRuntimeReleased(
                 lifecycle = lifecycle,
                 statusMessage = statusMessage,
@@ -7343,7 +7344,7 @@ contextTraceJson: String?
         val nativeStats = engine.nativeStatsJsonOrEmpty()
         val recentLogs = engine.recentEngineLogsOrEmpty()
         managedRuntimeReadinessRefreshGate.invalidate()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 models = modelStore.listModels(),
                 loadedModelId = snapshot.model.id,
@@ -7387,7 +7388,7 @@ contextTraceJson: String?
             directParameterStageJob?.cancel()
             cancelGenerationJob()
             val releasedIdentity = activeRuntimeIdentity
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     busy = true,
                     engineLifecycle = AgentEngineLifecycle.STOPPING,
@@ -7404,7 +7405,7 @@ contextTraceJson: String?
                 val error = nativeRelease.exceptionOrNull()
                 val message = "卸载失败：${error?.message ?: "未知错误"}"
                 val stats = engine.stats.value
-                _uiState.update {
+                uiStateStore.update {
                     it.afterGenerationTerminated(
                         stats = stats,
                         statusMessage = message
@@ -7425,7 +7426,7 @@ contextTraceJson: String?
                 )
             }.exceptionOrNull()
             if (cleanupError != null || nativeRelease.isFailure) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         statusMessage = buildString {
                             append("已卸载：${model.displayName}。模型文件和自定义参数已保留")
@@ -7449,7 +7450,7 @@ contextTraceJson: String?
             var nativeReleased = false
             var lifecycleWarning: String? = null
             val releasedIdentity = activeRuntimeIdentity
-            _uiState.update { it.copy(busy = true, statusMessage = "正在删除 ${model.displayName}…") }
+            uiStateStore.update { it.copy(busy = true, statusMessage = "正在删除 ${model.displayName}…") }
             runCatching {
                 if (wasLoaded) {
                     cancelGenerationJob()
@@ -7489,7 +7490,7 @@ contextTraceJson: String?
                 val remainingModels = modelStore.listModels()
                 val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), remainingModels)
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         models = remainingModels,
                         qairtVerifiedLocalModelIds = qairtVerifiedIds,
@@ -7525,7 +7526,7 @@ contextTraceJson: String?
                 }
                 val stats = engine.stats.value
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     val releasedGeneration = if (wasLoaded && !nativeReleased) {
                         state.afterGenerationTerminated(
                             stats = stats,
@@ -7647,7 +7648,7 @@ contextTraceJson: String?
                     return
                 }
             } else if (!isLocalVisionRunnerAvailable(visionAttachmentPort)) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { engine.nativeStatsJson() }.getOrNull()))
                 }
                 return
@@ -7657,7 +7658,7 @@ contextTraceJson: String?
             if (preparedInput.imageAttachments.isNotEmpty() ||
                 preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
             ) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "聊天生图暂不支持把已附加的图片或文件作为参考。请先移除附件，再发送 /image 图片描述。")
                 }
                 return
@@ -7717,7 +7718,7 @@ contextTraceJson: String?
                                 current.selectedImageBackend == state.selectedImageBackend
                         }
                     )
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             pendingChatImageActionDraft = com.muyuchat.feature.chat.ChatImageActionDraftUi(
                                 id = actionId,
@@ -7737,7 +7738,7 @@ contextTraceJson: String?
             activeImageGenerationJobId != null &&
             state.selectedChatBackend == ChatBackend.LOCAL
         ) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "本地生图正在运行，请等图片完成或停止后再启动本地聊天，避免设备内存冲突。")
             }
             return
@@ -7825,7 +7826,7 @@ contextTraceJson: String?
         )
         val admission = localContextWindowAdmission(finalPreflightRequest)
         if (!admission.isAccepted) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = if (state.input.contains(FILE_ATTACHMENT_MARKER)) {
                         "当前文件内容超过模型上下文，消息未发送。请将长文件导入知识库后再提问。"
@@ -7855,7 +7856,7 @@ contextTraceJson: String?
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         var chatSessionIdForKnowledgeBinding: String? = null
         var selectedKnowledgeBaseIdsForBinding: Set<String> = emptySet()
-        _uiState.update {
+        uiStateStore.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
             chatSessionIdForKnowledgeBinding = sessionId
             selectedKnowledgeBaseIdsForBinding = it.selectedKnowledgeBaseIds
@@ -7902,7 +7903,7 @@ contextTraceJson: String?
         chatImagePromptBridgeJob = null
         pendingImageTranslation = null
         pendingChatImageAction = null
-        _uiState.update { it.copy(
+        uiStateStore.update { it.copy(
             pendingChatImageTranslationDraft = null,
             pendingChatImageActionDraft = null
         ) }
@@ -7917,7 +7918,7 @@ contextTraceJson: String?
         }
         val text = editedText.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES).text
         invalidatePendingChatImagePreparation()
-        _uiState.update { it.copy(input = text) }
+        uiStateStore.update { it.copy(input = text) }
         when (pending.kind) {
             com.muyuchat.feature.chat.ChatImageActionKind.AMBIGUOUS -> {
                 if (primary) {
@@ -7952,22 +7953,22 @@ contextTraceJson: String?
     fun importOfflinePromptTranslationBundle(uri: Uri) {
         if (offlineTranslationInstallJob?.isActive == true || offlineTranslationDownloadJob?.isActive == true) return
         offlineTranslationInstallJob = viewModelScope.launch {
-            _uiState.update { it.copy(offlineTranslationInstalling = true, offlineTranslationStatus = "正在导入并校验 Hy-MT2") }
+            uiStateStore.update { it.copy(offlineTranslationInstalling = true, offlineTranslationStatus = "正在导入并校验 Hy-MT2") }
             try {
                 val bundle = offlineTranslationInstaller.install(uri)
                 cacheVerifiedOfflineTranslationBundle(bundle)
-                _uiState.update { it.copy(
+                uiStateStore.update { it.copy(
                     offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
                     offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
                     statusMessage = "离线翻译包已导入。"
                 ) }
             } catch (cancelled: CancellationException) {
-                _uiState.update { it.copy(offlineTranslationStatus = "导入已取消") }
+                uiStateStore.update { it.copy(offlineTranslationStatus = "导入已取消") }
                 throw cancelled
             } catch (error: Exception) {
-                _uiState.update { it.copy(offlineTranslationStatus = error.message ?: "离线翻译包导入失败") }
+                uiStateStore.update { it.copy(offlineTranslationStatus = error.message ?: "离线翻译包导入失败") }
             } finally {
-                _uiState.update { it.copy(offlineTranslationInstalling = false) }
+                uiStateStore.update { it.copy(offlineTranslationInstalling = false) }
             }
         }
     }
@@ -7986,7 +7987,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val offlinePromptTranslationService: OfflinePromptTranslationService
@@ -8015,7 +8016,7 @@ contextTraceJson: String?
     fun downloadOfflinePromptTranslationBundle() {
         if (offlineTranslationDownloadJob?.isActive == true || offlineTranslationInstallJob?.isActive == true) return
         offlineTranslationDownloadJob = viewModelScope.launch {
-            _uiState.update { it.copy(
+            uiStateStore.update { it.copy(
                 offlineTranslationDownloading = true,
                 offlineTranslationDownloadBytes = 0L,
                 offlineTranslationDownloadTotalBytes = 0L,
@@ -8024,7 +8025,7 @@ contextTraceJson: String?
             ) }
             try {
                 val bundle = offlineTranslationDownloader.download { progress ->
-                    _uiState.update { state -> state.copy(
+                    uiStateStore.update { state -> state.copy(
                         offlineTranslationDownloadBytes = progress.downloadedBytes,
                         offlineTranslationDownloadTotalBytes = progress.totalBytes,
                         offlineTranslationDownloadProgress =
@@ -8034,20 +8035,20 @@ contextTraceJson: String?
                     ) }
                 }
                 cacheVerifiedOfflineTranslationBundle(bundle)
-                _uiState.update { it.copy(
+                uiStateStore.update { it.copy(
                     offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
                     offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
                     statusMessage = "Hy-MT2 已下载并安装。"
                 ) }
             } catch (cancelled: CancellationException) {
-                _uiState.update { it.copy(offlineTranslationStatus = "下载已暂停，可继续下载") }
+                uiStateStore.update { it.copy(offlineTranslationStatus = "下载已暂停，可继续下载") }
                 throw cancelled
             } catch (error: Exception) {
-                _uiState.update { it.copy(
+                uiStateStore.update { it.copy(
                     offlineTranslationStatus = "Hy-MT2 下载失败：${error.message ?: "请重试"}"
                 ) }
             } finally {
-                _uiState.update { it.copy(offlineTranslationDownloading = false) }
+                uiStateStore.update { it.copy(offlineTranslationDownloading = false) }
             }
         }
     }
@@ -8075,7 +8076,7 @@ contextTraceJson: String?
             return
         }
         if (state.isGenerating) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "当前对话仍在生成，结束或停止本轮后再发送生图请求。")
             }
             return
@@ -8084,7 +8085,7 @@ contextTraceJson: String?
         if (preparedInput.imageAttachments.isNotEmpty() ||
             preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
         ) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "聊天内生图暂不使用上传附件作为参考图。请移除附件后重试，或在图片页使用图生图。")
             }
             return
@@ -8199,7 +8200,7 @@ contextTraceJson: String?
         )
         val imageModelIdentity = state.chatImageModelBinding()?.authorizationIdentity()
         if (sessionId.isNullOrBlank() || chatModelIdentity == null || imageModelIdentity == null) {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(statusMessage = "先发送一条消息创建对话，再设置本对话的角色生图授权。")
             }
             return
@@ -8216,7 +8217,7 @@ contextTraceJson: String?
                 imageModelIdentity,
                 target
             )
-            _uiState.update { current ->
+            uiStateStore.update { current ->
                 val currentChatIdentity = chatImageToolChatModelIdentity(
                     current.selectedCloudChatModelId,
                     current.selectedChatCloudConfig()?.normalized()
@@ -8264,7 +8265,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun showStatus(message: String) {
@@ -8707,7 +8708,7 @@ contextTraceJson: String?
             modelMode = state.selectedChatBackend.bindingValue(),
             modelId = state.currentChatModelId()
         )
-        _uiState.update {
+        uiStateStore.update {
             it.copy(messages = messages, chatSessions = sessions, statusMessage = message)
         }
         persistChatSessions(sessions)
@@ -8738,7 +8739,7 @@ contextTraceJson: String?
             modelMode = state.selectedChatBackend.bindingValue(),
             modelId = state.currentChatModelId()
         )
-        _uiState.update {
+        uiStateStore.update {
             it.copy(messages = messages, chatSessions = sessions, statusMessage = null)
         }
         persistChatSessions(sessions)
@@ -8787,13 +8788,13 @@ contextTraceJson: String?
                 it.id == pending.cloudModelId && it.kind == CloudModelKind.CHAT && it.configured
             }
             if (!cloudModelStillAvailable) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "图片已处理，但原云端聊天模型不可用；请恢复配置后继续角色回复。")
                 }
                 return
             }
             if (state.isGenerating) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "图片已完成；当前聊天仍有生成任务，请完成或停止后再继续角色回复。")
                 }
                 return
@@ -8802,7 +8803,7 @@ contextTraceJson: String?
             // remains resumable and is retried by onAppForegrounded instead of being lost.
             reservation = reserveUiGenerationStart()
             if (reservation == null) {
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "图片已完成；返回 MCA 后会继续角色回复。")
                 }
                 return
@@ -8843,7 +8844,7 @@ contextTraceJson: String?
                 modelMode = ChatBackend.CLOUD.bindingValue(),
                 modelId = pending.cloudModelId
             )
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     input = "",
                     messages = messages,
@@ -8908,7 +8909,7 @@ contextTraceJson: String?
 
     private fun removeChatImageContinuationPlaceholder(chatSessionId: String) {
         var updatedSessions: List<ChatSessionRecord>? = null
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             if (state.activeChatSessionId != chatSessionId) return@update state
             val last = state.messages.lastOrNull()
             if (last?.role != Role.ASSISTANT || last.content.isNotBlank() ||
@@ -9006,7 +9007,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val imageGenerationJob: Job?
@@ -9186,7 +9187,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun persistChatSessions(
@@ -9226,7 +9227,7 @@ contextTraceJson: String?
             McaGenerationForegroundService.KIND_CHAT
         )
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        _uiState.update {
+        uiStateStore.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
             sessionsToPersist = it.chatSessions.upsertSession(
                 sessionId = sessionId,
@@ -9277,7 +9278,7 @@ contextTraceJson: String?
         val updatedMessages = state.messages.filterIndexed { messageIndex, _ -> messageIndex != index }
         val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
         var updatedSessions: List<ChatSessionRecord> = state.chatSessions
-        _uiState.update {
+        uiStateStore.update {
             updatedSessions = if (updatedMessages.isEmpty()) {
                 it.chatSessions.map { session ->
                     if (session.id == sessionId) session.copy(
@@ -9333,7 +9334,7 @@ contextTraceJson: String?
         val rollback = state.conversationMutationRollbackState()
         val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
         var updatedSessions: List<ChatSessionRecord> = state.chatSessions
-        _uiState.update {
+        uiStateStore.update {
             updatedSessions = if (prune.messages.isEmpty()) {
                 it.chatSessions.map { session ->
                     if (session.id == sessionId) session.copy(
@@ -9468,7 +9469,7 @@ contextTraceJson: String?
             modelId = modelId
         )
         var sessionsToPersist: List<ChatSessionRecord>? = null
-        _uiState.update {
+        uiStateStore.update {
             sessionsToPersist = (listOf(greetingSession) + it.chatSessions).sortedForHistory()
             it.copy(
                 messages = greetingSession.messages,
@@ -9508,7 +9509,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun rejectWhileConversationMutationInProgress(): Boolean =
@@ -9609,7 +9610,7 @@ contextTraceJson: String?
             modelId = state.currentChatModelId()
         )
         val sessions = (listOf(branch) + state.chatSessions).sortedForHistory()
-        _uiState.update { current -> current.copy(chatSessions = sessions) }
+        uiStateStore.update { current -> current.copy(chatSessions = sessions) }
         persistChatSessions(sessions)
         selectChatSession(branch.id)
     }
@@ -9638,7 +9639,7 @@ contextTraceJson: String?
         val remaining = (state.chatSessions.filterNot { it.id == sessionId } + listOfNotNull(replacement))
             .sortedForHistory()
         manualContextCompressionRequests.clear(sessionId)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 chatSessions = remaining,
                 messages = if (isActive) replacement?.messages.orEmpty() else it.messages,
@@ -9674,7 +9675,7 @@ contextTraceJson: String?
             return
         }
         var updatedSessions: List<ChatSessionRecord> = emptyList()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             updatedSessions = state.chatSessions.map { session ->
                 if (session.id == sessionId) {
                     session.copy(
@@ -9698,7 +9699,7 @@ contextTraceJson: String?
         if (rejectWhileConversationMutationInProgress()) return
         var updatedSessions: List<ChatSessionRecord> = emptyList()
         var pinned = false
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             updatedSessions = state.chatSessions.map { session ->
                 if (session.id == sessionId) {
                     pinned = !session.pinned
@@ -9737,7 +9738,7 @@ contextTraceJson: String?
             modelId = state.currentChatModelId()
         )
         manualContextCompressionRequests.clearAll()
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 chatSessions = listOfNotNull(freshSession),
                 messages = freshSession?.messages.orEmpty(),
@@ -9859,7 +9860,7 @@ contextTraceJson: String?
         // visible.  Its foreground service owns process priority and its
         // terminal/persistence callbacks retain the same generation epoch.
         chatRuns.background()
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             val imageActive = state.imageJobs.any { job -> !job.status.terminal }
             if ((state.isGenerating || imageActive) &&
                 state.statusMessage != BACKGROUND_TASK_STATUS
@@ -9939,7 +9940,7 @@ contextTraceJson: String?
             }
             if (recovery != foregroundRecoverySequence.get()) return@launch
 
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (recovery != foregroundRecoverySequence.get()) {
                     state
                 } else {
@@ -10057,7 +10058,7 @@ contextTraceJson: String?
                 } ?: error("无法写入所选位置。")
                 session
             }.onSuccess { session ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "已导出对话：${session.title}")
                 }
             }.onFailure { error ->
@@ -10088,7 +10089,7 @@ contextTraceJson: String?
                     }
                 }
                 agentLogger.append(device, recommendation)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         deviceProfile = device,
                         agentRecommendation = recommendation,
@@ -10133,7 +10134,7 @@ contextTraceJson: String?
         )
         GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         persistModelGenerationParams(state, updatedParams)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 params = updatedParams,
                 rollbackParams = previousParams,
@@ -10148,7 +10149,7 @@ contextTraceJson: String?
         val previous = state.rollbackParams ?: return
         GenerationPreferences.persistGenerationParams(getApplication(), previous)
         persistModelGenerationParams(state, previous)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 params = previous,
                 rollbackParams = null,
@@ -10164,7 +10165,7 @@ contextTraceJson: String?
         if (model != null) {
             loadModel(model)
         } else {
-            _uiState.update {
+            uiStateStore.update {
                 it.copy(
                     statusMessage = "推荐模型尚未在本机。请先到模型页下载或导入，再由 Agent 加载。"
                 )
@@ -10180,7 +10181,7 @@ contextTraceJson: String?
                 val device = currentDeviceProfile()
                 val result = benchmarkRunner.runCurrentParamsBenchmark(currentParams)
                 appendBenchmarkHistory(device, result, currentParams)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         deviceProfile = device,
                         benchmark = result,
@@ -10238,7 +10239,7 @@ contextTraceJson: String?
                 modelStore.markLoaded(model.id)
                 cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
                 managedRuntimeReadinessRefreshGate.invalidate()
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     state.copy(
                         loadedModelId = model.id,
                         loadedModelName = model.displayName,
@@ -10254,7 +10255,7 @@ contextTraceJson: String?
                 }
             }.onFailure { error ->
                 val message = "稳定性自检失败：${error.message ?: "未知错误"}"
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         busy = false,
                         nativeStatsJson = engine.nativeStatsJson(),
@@ -10279,7 +10280,7 @@ contextTraceJson: String?
             AgentTuningMode.POWER_SAVE -> AgentDebugMode.PowerSave
         }
         if (mode == AgentTuningMode.POWER_SAVE) {
-            _uiState.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
+            uiStateStore.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
         }
         startAgentTuning(debugMode = debugMode, autoApply = autoApply)
     }
@@ -10291,7 +10292,7 @@ contextTraceJson: String?
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching { runtimeProfileStore.pauseTuningJob(jobId) }
                     .onSuccess {
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             state.copy(
                                 tuningJobState = AgentTuningJobState.PAUSED,
                                 tuningPhase = "等待用户续跑",
@@ -10301,7 +10302,7 @@ contextTraceJson: String?
                     }
             }
         } else {
-            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待任务") }
+            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待任务") }
         }
     }
 
@@ -10312,7 +10313,7 @@ contextTraceJson: String?
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching { runtimeProfileStore.resumeTuningJob(jobId) }
                     .onSuccess {
-                        _uiState.update { state ->
+                        uiStateStore.update { state ->
                             state.copy(
                                 tuningJobState = AgentTuningJobState.RUNNING,
                                 tuningPhase = "继续执行",
@@ -10322,7 +10323,7 @@ contextTraceJson: String?
                     }
             }
         } else {
-            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.IDLE) }
+            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.IDLE) }
         }
     }
 
@@ -10333,7 +10334,7 @@ contextTraceJson: String?
             viewModelScope.launch(Dispatchers.IO) {
                 runCatching { cancelPersistedTuningJob(jobId) }
                     .onSuccess { canceled ->
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(
                                 tuningJobState = agentJobState(canceled),
                                 tuningPhase = canceled.phase,
@@ -10347,7 +10348,7 @@ contextTraceJson: String?
                     }
             }
         } else {
-            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.IDLE, statusMessage = "当前没有运行中的调优任务。") }
+            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.IDLE, statusMessage = "当前没有运行中的调优任务。") }
         }
     }
 
@@ -10357,7 +10358,7 @@ contextTraceJson: String?
             runCatching { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
                 .onSuccess { snapshot ->
                     val job = snapshot?.activeJob
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         state.copy(
                             tuningJobState = job?.let(::agentJobState) ?: state.tuningJobState,
                             tuningPhase = job?.phase ?: state.tuningPhase,
@@ -10416,7 +10417,7 @@ contextTraceJson: String?
                     ?: error("稳定运行配置恢复记录缺失")
                 val restored = mergedExecutionProfile(_uiState.value.params, restoredProfile)
                 GenerationPreferences.persistGenerationParams(getApplication(), restored)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         params = restored,
                         pendingProfile = null,
@@ -10427,7 +10428,7 @@ contextTraceJson: String?
                     )
                 }
             }.onFailure { error ->
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(statusMessage = "撤销修改失败：${error.message ?: "未知错误"}")
                 }
             }
@@ -10455,7 +10456,7 @@ contextTraceJson: String?
     }
 
     fun runAgentPowerDebug() {
-        _uiState.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
+        uiStateStore.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
         startAgentTuning(AgentDebugMode.PowerSave)
     }
 
@@ -10534,7 +10535,7 @@ contextTraceJson: String?
                             failureSummary = "当前运行时没有可安全自动搜索且未被用户锁定的执行字段。"
                         )
                     }
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             tuningJobState = if (precreatedJob == null) {
                                 AgentTuningJobState.SUCCEEDED
@@ -10574,7 +10575,7 @@ contextTraceJson: String?
                 activeTuningJobId = job.jobId
                 runtimeProfileStore.transitionTuningJob(job.jobId, PersistedTuningJobState.RUNNING, "DISCOVERY")
                 awaitTuningBoundary(job.jobId)
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         busy = true,
                         autoTuningInProgress = true,
@@ -10622,7 +10623,7 @@ contextTraceJson: String?
                     )
                     if (stageCandidates.isEmpty()) continue
                     val measuredStage = mutableListOf<Pair<AgentTuningStageCandidate, CandidateCanaryResult>>()
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             tuningPhase = "${stage.label}候选搜索",
                             statusMessage = "${debugMode.label}：开始 ${stage.label} 阶段；仅从上一阶段最佳配置继续。"
@@ -10632,7 +10633,7 @@ contextTraceJson: String?
                         awaitTuningBoundary(job.jobId)
                         if (adaptiveTuningCancelRequested.get()) error("用户取消调优")
                         val summary = candidate.executionSummary
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(
                                 tuningPhase = "${stage.label} ${candidateIndex + 1}/${stageCandidates.size}",
                                 tuningCandidateProgress = AgentCandidateProgress(
@@ -10669,7 +10670,7 @@ contextTraceJson: String?
                                     jobId = job.jobId,
                                     stage = stage.name,
                                     onProgress = { progress ->
-                                        _uiState.update { state ->
+                                        uiStateStore.update { state ->
                                             if (state.autoTuningInProgress) {
                                                 state.copy(
                                                     tuningPhase = "${stage.label} · ${progress.stage}",
@@ -10715,7 +10716,7 @@ contextTraceJson: String?
                             rejectedCandidates++
                         }
                         completedCandidates++
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(
                                 tuningCandidateProgress = AgentCandidateProgress(
                                     completed = completedCandidates,
@@ -10738,7 +10739,7 @@ contextTraceJson: String?
                     selectedProbeResult = selectedStageCandidate.second
                     val selectedSummary = tuningExecutionParameterSummary(currentBest)
                     selectedStageSummaries += "${stage.label}：$selectedSummary"
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             tuningPhase = "${stage.label}已选定",
                             tuningCandidateProgress = AgentCandidateProgress(
@@ -10818,7 +10819,7 @@ contextTraceJson: String?
                     )
                     activeAdaptiveRecommendation = recommendation.copy(executionProfile = candidateProfile)
                     retainStagedJob = true
-                    _uiState.update { state ->
+                    uiStateStore.update { state ->
                         state.copy(
                             tuningJobState = agentJobState(pausedJob),
                             tuningPhase = "候选已暂存，等待应用",
@@ -10909,7 +10910,7 @@ contextTraceJson: String?
                 val refreshedModels = modelStore.listModels()
                 managedRuntimeReadinessRefreshGate.invalidate()
                 val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     state.copy(
                         models = refreshedModels,
                         params = mergedExecutionProfile(state.params, candidateProfile.engineProfile),
@@ -10983,7 +10984,7 @@ contextTraceJson: String?
                         }
                     }
                 }
-                _uiState.update {
+                uiStateStore.update {
                     it.copy(
                         busy = false,
                         autoTuningInProgress = false,
@@ -11008,7 +11009,7 @@ contextTraceJson: String?
     private suspend fun awaitTuningBoundary(jobId: String) {
         while (adaptiveTuningPauseRequested.get() && !adaptiveTuningCancelRequested.get()) {
             runCatching { runtimeProfileStore.pauseTuningJob(jobId) }
-            _uiState.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待续跑") }
+            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待续跑") }
             delay(250L)
         }
         if (adaptiveTuningCancelRequested.get()) error("用户取消调优")
@@ -11035,7 +11036,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override val runtimeProfileStore: ModelRuntimeProfileStore
@@ -11134,7 +11135,7 @@ contextTraceJson: String?
     }
 
     fun showAgentDebugExplanation() {
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 statusMessage = "智能调试由规则包执行参数搜索，当前已加载模型只用于解释调试结果。"
             )
@@ -11144,7 +11145,7 @@ contextTraceJson: String?
     fun toggleApi(enabled: Boolean) {
         val restEnabled = if (enabled) _uiState.value.restEnabled else false
         persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 statusMessage = if (enabled) {
                     "正在启动本机 API..."
@@ -11163,7 +11164,7 @@ contextTraceJson: String?
     fun toggleRest(enabled: Boolean) {
         val apiEnabled = enabled || _uiState.value.apiEnabled
         persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
-        _uiState.update {
+        uiStateStore.update {
             it.copy(
                 statusMessage = if (enabled) {
                     "正在开放局域网 REST..."
@@ -11253,7 +11254,7 @@ contextTraceJson: String?
             if (!operationIsCurrent()) return@withLock null
 
             persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (!operationIsCurrent()) {
                     state
                 } else {
@@ -11277,7 +11278,7 @@ contextTraceJson: String?
             if (!operationIsCurrent()) return@withLock null
             stopApiServer()
             runCatching { setLocalApiForegroundService(false, false) }
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 if (!operationIsCurrent()) {
                     state
                 } else {
@@ -11560,7 +11561,7 @@ contextTraceJson: String?
             }
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                _uiState.update(transform)
+                uiStateStore.update(transform)
             }
 
             override fun tuningJobPublicJson(job: TuningJobEntity): JSONObject =
@@ -11756,7 +11757,7 @@ contextTraceJson: String?
             override fun currentState(): MainUiState = _uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                _uiState.update(transform)
+                uiStateStore.update(transform)
             }
 
             override fun currentBridgeGeneration(): Long = chatImagePromptBridgeGeneration.get()
@@ -11872,7 +11873,7 @@ contextTraceJson: String?
             override fun currentState(): MainUiState = _uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                _uiState.update(transform)
+                uiStateStore.update(transform)
             }
 
             override fun stopScope() = viewModelScope
@@ -11925,7 +11926,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun currentChatModelId(state: MainUiState): String? =
@@ -12049,7 +12050,7 @@ contextTraceJson: String?
                 }
                 .onFailure { error ->
                     if (localConversationContextInvalidationSequence.get() == sequence) {
-                        _uiState.update {
+                        uiStateStore.update {
                             it.copy(statusMessage = "上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}")
                         }
                     }
@@ -12059,7 +12060,7 @@ contextTraceJson: String?
 
     private fun rejectWhileConversationMutationInProgress(): Boolean {
         if (conversationMutationBarrier?.isActive != true) return false
-        _uiState.update {
+        uiStateStore.update {
             it.copy(statusMessage = "正在保存上一项对话修改，请稍候。")
         }
         return true
@@ -12092,7 +12093,7 @@ contextTraceJson: String?
             }
             .onFailure { error ->
                 if (localConversationContextInvalidationSequence.get() == sequence) {
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(
                             isGenerating = false,
                             generationPhase = null,
@@ -12150,7 +12151,7 @@ contextTraceJson: String?
         val requestedById = requested.associateBy { it.id }
         val correctedById = persisted.filter { it.mixedAssistantHistory }.associateBy { it.id }
         var activeCorrection = false
-        _uiState.update { current ->
+        uiStateStore.update { current ->
             val corrected = current.chatSessions.map { session ->
                 correctedById[session.id]?.takeIf { requestedById[session.id] == session } ?: session
             }
@@ -12203,7 +12204,7 @@ contextTraceJson: String?
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { chatSessionStore.saveFiles(files) }
                 .onFailure { error ->
-                    _uiState.update {
+                    uiStateStore.update {
                         it.copy(statusMessage = "文件库保存失败：${error.message}")
                     }
                 }
@@ -12211,17 +12212,17 @@ contextTraceJson: String?
     }
 
     private fun busy(message: String) {
-        _uiState.update { it.copy(busy = true, statusMessage = message) }
+        uiStateStore.update { it.copy(busy = true, statusMessage = message) }
     }
 
     private fun failDownload(message: String) {
-        _uiState.update { it.copy(busy = false, downloadStatus = DownloadStatus.FAILED,
+        uiStateStore.update { it.copy(busy = false, downloadStatus = DownloadStatus.FAILED,
             downloadFailureSource = com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.DOWNLOAD,
             downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null, statusMessage = message) }
     }
 
     private fun fail(message: String) {
-        _uiState.update { it.copy(busy = false, statusMessage = message) }
+        uiStateStore.update { it.copy(busy = false, statusMessage = message) }
     }
 
 
@@ -12340,7 +12341,7 @@ contextTraceJson: String?
         if (traceJson == null || sessionId == null || assistantMessageId == null ||
             !chatRuns.isCurrent(generationRunId)
         ) return
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             if (!chatRuns.isCurrent(generationRunId) ||
                 state.activeChatSessionId != sessionId
             ) return@update state
@@ -12705,7 +12706,7 @@ contextTraceJson: String?
 
             // Delegates to the real MutableStateFlow.update, so the CAS-based atomicity is kept.
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun selectedLocalImageModel(): LocalImageModelRecord? =
@@ -12875,7 +12876,7 @@ contextTraceJson: String?
         )
         val models = localImageModelStore.updateModel(updated)
         managedRuntimeReadinessRefreshGate.invalidate()
-        _uiState.update { state -> state.copy(localImageModels = models) }
+        uiStateStore.update { state -> state.copy(localImageModels = models) }
     }
 
     /**
@@ -13063,7 +13064,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
@@ -13366,7 +13367,7 @@ contextTraceJson: String?
             runtimeProfileStore.pruneRejectedProfiles()
             runtimeProfileStore.pruneTerminalHistory()
             if (plans.isNotEmpty()) {
-                _uiState.update { state ->
+                uiStateStore.update { state ->
                     state.copy(
                         tuningJobState = AgentTuningJobState.RECOVERING,
                         engineLifecycle = if (state.loadedModelId == null) {
@@ -13380,7 +13381,7 @@ contextTraceJson: String?
                 }
             }
         }.onFailure { error ->
-            _uiState.update { state ->
+            uiStateStore.update { state ->
                 state.copy(
                     tuningJobState = AgentTuningJobState.FAILED,
                     tuningPhase = "启动恢复检查失败",
@@ -13611,7 +13612,7 @@ contextTraceJson: String?
             override fun uiState(): MainUiState = this@MainViewModel._uiState.value
 
             override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel._uiState.update(transform)
+                this@MainViewModel.uiStateStore.update(transform)
             }
 
             override fun currentDeviceProfile(): DeviceProfile =
@@ -13945,7 +13946,7 @@ contextTraceJson: String?
                     )
                 }
                 canceled = runtimeProfileStore.tuningJob(jobId) ?: canceled
-                _uiState.update { it.copy(pendingProfile = null) }
+                uiStateStore.update { it.copy(pendingProfile = null) }
             } else if (canceled.state !in setOf(
                     PersistedTuningJobState.SUCCEEDED.name,
                     PersistedTuningJobState.FAILED.name
@@ -14012,7 +14013,7 @@ contextTraceJson: String?
         operation: suspend () -> TuningJobEntity
     ): com.muyuchat.api.local.LocalApiControlResult = runCatching {
         val job = runBlocking(Dispatchers.IO) { operation() }
-        _uiState.update { state ->
+        uiStateStore.update { state ->
             state.copy(
                 tuningJobState = agentJobState(job),
                 tuningPhase = job.phase,

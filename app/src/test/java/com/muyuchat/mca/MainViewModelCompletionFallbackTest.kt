@@ -417,7 +417,8 @@ class MainViewModelCompletionFallbackTest {
         val body = functionBody(mainViewModelSource(), "fun updateAgentPreference(")
         val recommendation = body.indexOf("tuningPlan?.applyTo")
         val transactionalUpdate = body.indexOf("updateParams(updatedParams)")
-        val preferenceUpdate = body.indexOf("_uiState.update", transactionalUpdate)
+        // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
+        val preferenceUpdate = body.indexOf("uiStateStore.update", transactionalUpdate)
 
         assertTrue(recommendation >= 0)
         assertTrue(transactionalUpdate > recommendation)
@@ -474,7 +475,8 @@ class MainViewModelCompletionFallbackTest {
         val cancel = body.indexOf("cancelGenerationJob()", failStart)
         val fail = body.substring(failStart, cancel)
         val release = fail.indexOf("afterGenerationTerminated(")
-        val uiUpdate = fail.indexOf("_uiState.update")
+        // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
+        val uiUpdate = fail.indexOf("uiStateStore.update")
         // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；顺序合同不变，锚点随迁。
         val nativeStats = fail.indexOf("engine.nativeStatsJsonOrEmpty()")
 
