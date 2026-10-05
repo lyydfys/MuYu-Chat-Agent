@@ -618,30 +618,4 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
                 registration
         }
     }
-
-
-    private fun isReusableDownloadedImageCandidate(
-        installer: ModelBundleInstaller,
-        plan: ModelBundleInstallPlan
-    ): Boolean {
-        if (!plan.bundleRoot.isDirectory) return false
-        val verification = installer.verifyInstalledBundle(plan.bundleRoot)
-        if (!verification.isVerified) return false
-        val verifiedByPath = verification.components.associateBy { it.audit.relativePath }
-        if (verifiedByPath.keys != plan.targets.mapTo(mutableSetOf()) { it.relativePath }) return false
-        return plan.targets.all { target ->
-            val audit = verifiedByPath[target.relativePath]?.audit ?: return@all false
-            val file = target.finalFile
-            if (!file.isFile || file.length() <= 0L) return@all false
-            val expectedSize = target.remote.sizeBytes
-            if (expectedSize != null && expectedSize > 0L && file.length() != expectedSize) return@all false
-            val expectedSha = target.remote.sha256?.takeIf(String::isNotBlank)
-            (audit.sourceIdentity == target.remote.sourceIdentity() ||
-                (expectedSha != null && expectedSha.equals(audit.observedSha256, ignoreCase = true))) &&
-                (expectedSha == null || expectedSha.equals(audit.sourceSha256, ignoreCase = true))
-        }
-    }
-
-
-
 }
