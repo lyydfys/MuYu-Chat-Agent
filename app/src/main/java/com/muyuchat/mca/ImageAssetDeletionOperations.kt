@@ -4,8 +4,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -19,7 +18,9 @@ import kotlinx.coroutines.sync.withLock
  * lifecycle-lock protocol are unchanged.
  */
 internal interface ImageAssetDeletionPort {
-    val uiState: MutableStateFlow<MainUiState>
+    // R3/S25: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
+    val uiState: StateFlow<MainUiState>
+    fun updateUiState(transform: (MainUiState) -> MainUiState)
     val scope: CoroutineScope
     val imageLibraryMutationMutex: Mutex
     val imageUpscaleOwner: ImageUpscaleOwner
@@ -93,7 +94,7 @@ internal fun deleteImageAssetsOperation(
             imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
                 val activeSourceId = imageUpscaleOwner.activeSourceImageId()
                 if (activeSourceId != null && activeSourceId in requestedIds) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能删除。")
                     }
                     return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
@@ -112,7 +113,7 @@ internal fun deleteImageAssetsOperation(
                 )
                 val leases = staging.leases
                 if (leases == null) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(
                             statusMessage = buildString {
                                 append("图片删除失败：无法安全暂存本地文件")
@@ -130,7 +131,7 @@ internal fun deleteImageAssetsOperation(
                 val error = runCatching { chatSessionStore.deleteImages(removedIds) }.exceptionOrNull()
                 if (error != null) {
                     val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(
                             statusMessage = buildString {
                                 append("图片删除失败：")
@@ -146,14 +147,14 @@ internal fun deleteImageAssetsOperation(
                     return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                 }
                 removedIds.forEach(latestImageFavoriteMutations::remove)
-                uiState.update { state ->
+                port.updateUiState { state ->
                     state.copy(images = state.images.filterNot { it.id in removedIds })
                 }
                 candidates to commitImageAssetDeletionLeases(leases)
             }
         }
         if (removed.isEmpty()) return@launch
-        uiState.update { state ->
+        port.updateUiState { state ->
             val successMessage = if (removed.size == 1) {
                 "已从图片库移除：${removed.single().name}"
             } else {
@@ -197,7 +198,7 @@ internal fun setImageAssetFavoriteOperation(
             updateResult
                 .onSuccess { updateCount ->
                     if (updateCount == 1) {
-                        uiState.update { state ->
+                        port.updateUiState { state ->
                             state.copy(
                                 images = state.images.map { current ->
                                     if (current.id == imageId) current.copy(favorite = favorite) else current
@@ -210,13 +211,13 @@ internal fun setImageAssetFavoriteOperation(
                             )
                         }
                     } else {
-                        uiState.update {
+                        port.updateUiState {
                             it.copy(statusMessage = "收藏状态更新失败：图片记录已不存在")
                         }
                     }
                 }
                 .onFailure { error ->
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(statusMessage = "收藏状态更新失败：${error.message ?: "数据库提交失败"}")
                     }
                 }
@@ -243,7 +244,7 @@ internal fun clearImageLibraryOperation(
         val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
             imageUpscaleOwner.withUpscaleLifecycleLock { _ ->
                 if (imageUpscaleOwner.activeSourceImageId() != null) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(statusMessage = "源图片正被放大任务使用，任务结束后才能清空图片库。")
                     }
                     return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
@@ -260,7 +261,7 @@ internal fun clearImageLibraryOperation(
                 )
                 val leases = staging.leases
                 if (leases == null) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(
                             statusMessage = buildString {
                                 append("图片库清空失败：无法安全暂存本地文件")
@@ -277,7 +278,7 @@ internal fun clearImageLibraryOperation(
                 val error = runCatching { chatSessionStore.clearImages() }.exceptionOrNull()
                 if (error != null) {
                     val rollbackFailures = rollbackImageAssetDeletionLeases(leases)
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(
                             statusMessage = buildString {
                                 append("图片库清空失败：")
@@ -293,7 +294,7 @@ internal fun clearImageLibraryOperation(
                     return@withUpscaleLifecycleLock emptyList<ImageAssetRecord>() to 0
                 }
                 latestImageFavoriteMutations.clear()
-                uiState.update {
+                port.updateUiState {
                     it.copy(
                         images = emptyList(),
                         imageJobs = it.imageJobs.filter { job -> !job.status.terminal }
@@ -303,7 +304,7 @@ internal fun clearImageLibraryOperation(
             }
         }
         if (removed.isEmpty()) return@launch
-        uiState.update {
+        port.updateUiState {
             it.copy(
                 statusMessage = buildString {
                     append("已清空图片库：")

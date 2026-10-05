@@ -11428,7 +11428,10 @@ contextTraceJson: String?
 
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         object : ImageLibraryCommitPort {
-            override val uiState get() = this@MainViewModel._uiState
+            override val uiState get() = this@MainViewModel.uiState
+            // R3/S25: 写入经 store 具名方法（端口不再暴露可变流）。
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
+                this@MainViewModel.uiStateStore.update(transform)
             override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
             override val chatSessionPersistenceMutex get() = this@MainViewModel.chatSessionPersistenceMutex
             override val chatSessionPersistenceSequence get() = this@MainViewModel.chatSessionPersistenceSequence
@@ -11467,7 +11470,10 @@ contextTraceJson: String?
 
     private val imageAssetDeletionPort: ImageAssetDeletionPort =
         object : ImageAssetDeletionPort {
-            override val uiState get() = this@MainViewModel._uiState
+            override val uiState get() = this@MainViewModel.uiState
+            // R3/S25: 写入经 store 具名方法（端口不再暴露可变流）。
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
+                this@MainViewModel.uiStateStore.update(transform)
             override val scope get() = this@MainViewModel.viewModelScope
             override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
             override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner

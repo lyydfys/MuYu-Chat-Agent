@@ -4,8 +4,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -21,7 +20,9 @@ import kotlinx.coroutines.sync.withLock
  * caller-side rollback (local-copy delete / CancellationException / fail) stays in attachFile.
  */
 internal interface ImageLibraryCommitPort {
-    val uiState: MutableStateFlow<MainUiState>
+    // R3/S25: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
+    val uiState: StateFlow<MainUiState>
+    fun updateUiState(transform: (MainUiState) -> MainUiState)
     val imageLibraryMutationMutex: Mutex
     val chatSessionPersistenceMutex: Mutex
     val chatSessionPersistenceSequence: AtomicLong
@@ -110,7 +111,7 @@ internal suspend fun commitImageLibraryTransaction(
                             )
                         }
                     }
-                    uiState.update { state ->
+                    port.updateUiState { state ->
                         val job = state.imageJobs.firstOrNull { it.id == jobId }
                         if (activeImageGenerationJobId != jobId ||
                             job?.status != ImageGenerationStatusRecord.GENERATING
@@ -177,7 +178,7 @@ internal suspend fun commitImageLibraryTransaction(
                         }
                         // If rollback fails, Room owns these files. Publish that durable state
                         // so memory and the database cannot silently diverge.
-                        uiState.update { state ->
+                        port.updateUiState { state ->
                             val job = state.imageJobs.firstOrNull { it.id == jobId }
                             if (job == null) {
                                 state
