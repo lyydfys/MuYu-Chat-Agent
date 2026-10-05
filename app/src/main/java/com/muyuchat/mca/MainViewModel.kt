@@ -11678,7 +11678,10 @@ contextTraceJson: String?
 
     private val chatExecutionPort: ChatGenerationExecutionPort =
         object : ChatGenerationExecutionPort {
-            override val uiState: MutableStateFlow<MainUiState> = this@MainViewModel._uiState
+            override val uiState: StateFlow<MainUiState> = this@MainViewModel.uiState
+            // R3/S27: 写入经 store 具名方法（端口不再暴露可变流）。
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
+                this@MainViewModel.uiStateStore.update(transform)
             override val engine: McaInferenceService = this@MainViewModel.engine
             override val chatRuns: ChatRunOwnership = this@MainViewModel.chatRuns
             override val chatSessionStore: ChatSessionStore = this@MainViewModel.chatSessionStore

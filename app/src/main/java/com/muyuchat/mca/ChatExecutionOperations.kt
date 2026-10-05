@@ -32,8 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.supervisorScope
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.withContext
@@ -62,7 +61,9 @@ internal data class AssistantImageModelBinding(
  */
 internal interface ChatGenerationExecutionPort {
 
-    val uiState: MutableStateFlow<MainUiState>
+    // R3/S27: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
+    val uiState: StateFlow<MainUiState>
+    fun updateUiState(transform: (MainUiState) -> MainUiState)
 
     val engine: McaInferenceService
 
@@ -184,7 +185,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         statusMessage: String? = null
     ) {
         if (!generationStillOwnsUi()) return
-        uiState.update { state ->
+        updateUiState { state ->
             if (!generationStillOwnsUi()) {
                 state
             } else {
@@ -194,7 +195,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         }
     }
 
-    val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, uiState)
+    val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, uiState, { transform -> updateUiState(transform) })
 
     try {
     if (!generationStillOwnsUi()) return

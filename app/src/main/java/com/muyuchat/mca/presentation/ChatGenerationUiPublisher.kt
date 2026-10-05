@@ -19,12 +19,11 @@ import com.muyuchat.mca.WebSearchDiagnosticRecord
 import com.muyuchat.mca.WebSearchTurnMode
 import com.muyuchat.mca.activateContextSummaryCandidate
 import com.muyuchat.mca.withReplyGenerationMetrics
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 
 // The named publications a running chat generation writes into MainUiState.
 //
-// Why this exists: startGeneration carried twenty-odd `_uiState.update { … }` sites whose
+// Why this exists: startGeneration carried twenty-odd `_updateUiState { … }` sites whose
 // transform was an arbitrary `(MainUiState) -> MainUiState`, gated only by the run id. The guard
 // is right; the unbounded transform is what makes the execution owner impossible to move out of
 // the ViewModel, because every write can touch any field. These publications give the writes
@@ -58,12 +57,14 @@ import kotlinx.coroutines.flow.update
 internal class ChatGenerationUiPublisher(
     private val chatRuns: ChatRunOwnership,
     private val generationRunId: Long,
-    private val uiState: MutableStateFlow<MainUiState>
+    private val uiState: StateFlow<MainUiState>,
+    // R3/S27: 写入经调用方注入的具名更新（同 run 门控语义不变）。
+    private val updateUiState: (transform: (MainUiState) -> MainUiState) -> Unit
 ) {
 
     private fun updateGenerationUi(transform: (MainUiState) -> MainUiState) {
         if (!chatRuns.matches(generationRunId)) return
-        uiState.update { state ->
+        updateUiState { state ->
             if (chatRuns.matches(generationRunId)) transform(state) else state
         }
     }
@@ -176,17 +177,17 @@ internal class ChatGenerationUiPublisher(
      * reasoning overrides). Not run-gated: see write class 2 in the file comment.
      */
     fun publishNormalizedTurnParams(params: GenerationParams) {
-        uiState.update { it.copy(params = params) }
+        updateUiState { it.copy(params = params) }
     }
 
     /** The manual-compression flag flips off once the queued request is consumed. Not run-gated. */
     fun publishManualCompressionConsumed() {
-        uiState.update { it.copy(contextCompressionPending = false) }
+        updateUiState { it.copy(contextCompressionPending = false) }
     }
 
     /** One-shot / research-override switches reset to FOLLOW for the next turn. Not run-gated. */
     fun publishWebSearchTurnReset() {
-        uiState.update {
+        updateUiState {
             it.copy(
                 webSearchTurnMode = WebSearchTurnMode.FOLLOW,
                 webSearchResearchModeOverride = null,
@@ -205,7 +206,7 @@ internal class ChatGenerationUiPublisher(
         diagnostics: List<WebSearchDiagnosticRecord>?,
         statusMessage: String?
     ) {
-        uiState.update {
+        updateUiState {
             it.copy(
                 webSearchStatusMessage = webSearchStatusMessage ?: it.webSearchStatusMessage,
                 webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
@@ -239,7 +240,7 @@ internal class ChatGenerationUiPublisher(
      * left untouched rather than overwritten with another turn's results.
      */
     fun publishBrowserSearchResults(taskId: String, urls: List<String>, message: String?) {
-        uiState.update { current ->
+        updateUiState { current ->
             val task = current.browserTask
             if (task?.taskId != taskId || task.phase != BrowserTaskPhase.SEARCHING) {
                 current
