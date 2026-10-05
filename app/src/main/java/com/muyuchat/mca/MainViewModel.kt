@@ -3253,7 +3253,7 @@ contextTraceJson: String?
                         "UI image generation lease was replaced before request completion."
                     }
                 }
-                persistFinalChatImageRequestForJob(jobId)
+                persistFinalChatImageRequest(chatImageRequestPort, jobId)
                 completeAssistantImageToolTurnForJob(jobId)
                 if (imageGenerationJob === executionJob) imageGenerationJob = null
             } finally {
@@ -7595,7 +7595,7 @@ contextTraceJson: String?
                 // model-boundary check here as well. This protects message persistence and the
                 // actual runner input if a picker/import callback races that UI preflight.
                 val uniqueAttachments = preparedInput.imageAttachments
-                    .deduplicateVisionAttachmentsForSend(getApplication<Application>())
+                    .deduplicatedVisionAttachmentsForSend(getApplication<Application>())
                 withContext(Dispatchers.Main.immediate) {
                     val current = _uiState.value
                     if (current.input != state.input || current.isGenerating) return@withContext
@@ -7654,9 +7654,9 @@ contextTraceJson: String?
                     showStatus(unavailable)
                     return
                 }
-            } else if (!localVisionRunnerAvailable()) {
+            } else if (!isLocalVisionRunnerAvailable(visionAttachmentPort)) {
                 _uiState.update {
-                    it.copy(statusMessage = state.localVisionUnavailableMessage())
+                    it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { engine.nativeStatsJson() }.getOrNull()))
                 }
                 return
             }
@@ -9226,16 +9226,7 @@ contextTraceJson: String?
         applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
     }
 
-    /** Delegates to [chatImageCommitSnapshot]. */
-    private fun buildChatImageCommitSnapshot(
-        job: ImageGenerationJobRecord,
-        images: List<ImageAssetRecord>
-    ): ChatImageCommitSnapshot? = chatImageCommitSnapshot(chatImageRequestPort, job, images)
 
-    /** Delegates to [persistFinalChatImageRequest]. */
-    private fun persistFinalChatImageRequestForJob(jobId: String) {
-        persistFinalChatImageRequest(chatImageRequestPort, jobId)
-    }
 
 
 
@@ -11464,7 +11455,7 @@ contextTraceJson: String?
             override val chatImageCommitJournal get() = this@MainViewModel.chatImageCommitJournal
 
             override fun buildChatImageCommitSnapshot(job: ImageGenerationJobRecord, images: List<ImageAssetRecord>): ChatImageCommitSnapshot? =
-                this@MainViewModel.buildChatImageCommitSnapshot(job, images)
+                chatImageCommitSnapshot(chatImageRequestPort, job, images)
 
             override fun chatImageCommitJournalJobId(jobId: String, imageId: String): String =
                 chatImageCommitJournalJobId(jobId, imageId)
@@ -11749,7 +11740,7 @@ contextTraceJson: String?
 
             override fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?) = this@MainViewModel.chatImageToolChatModelIdentity(modelId, config)
 
-            override suspend fun localVisionRunnerAvailable() = this@MainViewModel.localVisionRunnerAvailable()
+            override suspend fun localVisionRunnerAvailable() = isLocalVisionRunnerAvailable(visionAttachmentPort)
 
             override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = this@MainViewModel.mergeExecutionProfile(generation, profile)
 
@@ -11767,15 +11758,15 @@ contextTraceJson: String?
 
             override val activeRuntimeIdentity: ModelRuntimeIdentity? = this@MainViewModel.activeRuntimeIdentity
 
-            override fun localVisionUnavailableMessage(state: MainUiState): String = state.localVisionUnavailableMessage()
+            override fun localVisionUnavailableMessage(state: MainUiState): String = localVisionUnavailableReason(state, runCatching { engine.nativeStatsJson() }.getOrNull())
 
             override fun chatContextSnapshot(state: MainUiState, assistantId: String, fileContextEnabled: Boolean): ChatContextSnapshot = state.chatContextSnapshot(assistantId, fileContextEnabled)
 
             override fun isConfigurationActionError(event: GenerateEvent.Error): Boolean = event.isConfigurationActionError()
 
-            override suspend fun withInlineImageDataForCloud(messages: List<ChatMessage>): List<ChatMessage> = messages.withInlineImageDataForCloud()
+            override suspend fun withInlineImageDataForCloud(messages: List<ChatMessage>): List<ChatMessage> = messages.preparedForCloudVision(visionAttachmentPort)
 
-            override suspend fun withLocalImageFilesForVision(messages: List<ChatMessage>, createdFiles: MutableList<File>): List<ChatMessage> = messages.withLocalImageFilesForVision(createdFiles)
+            override suspend fun withLocalImageFilesForVision(messages: List<ChatMessage>, createdFiles: MutableList<File>): List<ChatMessage> = messages.preparedForLocalVision(visionAttachmentPort, createdFiles)
         }
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
@@ -13115,32 +13106,12 @@ contextTraceJson: String?
     private fun mimeTypeForUri(uriString: String): String =
         visionMimeTypeForUri(visionAttachmentPort, uriString)
 
-    /** Delegates to [preparedForCloudVision]. */
-    private suspend fun List<ChatMessage>.withInlineImageDataForCloud(): List<ChatMessage> =
-        preparedForCloudVision(visionAttachmentPort)
-    /** Delegates to [preparedForLocalVision]. */
-    private suspend fun List<ChatMessage>.withLocalImageFilesForVision(
-        createdFiles: MutableList<File>
-    ): List<ChatMessage> = preparedForLocalVision(visionAttachmentPort, createdFiles)
 
 
 
-    /** Delegates to [deduplicatedVisionAttachmentsForSend]; see there for the contract. */
-    private fun List<ChatImageAttachment>.deduplicateVisionAttachmentsForSend(
-        context: Context
-    ): List<ChatImageAttachment> = deduplicatedVisionAttachmentsForSend(context)
 
 
-    /** Delegates to [isLocalVisionRunnerAvailable]. */
-    private suspend fun localVisionRunnerAvailable(): Boolean =
-        isLocalVisionRunnerAvailable(visionAttachmentPort)
 
-    /**
-     * Delegates to [localVisionUnavailableReason]. The engine read stays here: the function itself
-     * is pure over `(state, nativeStatsJson)`, which is what let it move out.
-     */
-    private fun MainUiState.localVisionUnavailableMessage(): String =
-        localVisionUnavailableReason(this, runCatching { engine.nativeStatsJson() }.getOrNull())
 
     private fun currentOpenApiAddress(): String =
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")

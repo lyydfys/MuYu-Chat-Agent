@@ -162,7 +162,9 @@ class ChatContextComposerTest {
         assertTrue(sendPreparedMessage.contains("trigger = if (initialAdmission.isAccepted)"))
         assertTrue(sendPreparedMessage.contains("ContextCompressionTrigger.MANUAL"))
         assertTrue(sendPreparedMessage.contains("listOf(rebuiltPreflightContext.runtimeSystemContext, characterMemoryContext)"))
-        assertTrue(sendMessage.contains("deduplicateVisionAttachmentsForSend"))
+        // R1/S6: sendMessage 的 vision 去重改直接调用 owner（deduplicatedVisionAttachmentsForSend），
+        // 旧 VM wrapper（deduplicateVisionAttachmentsForSend）已删除；断言跟踪到 owner 名。
+        assertTrue(sendMessage.contains("deduplicatedVisionAttachmentsForSend"))
     }
 
     private fun sourceFile(relativePath: String): String {
