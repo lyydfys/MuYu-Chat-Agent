@@ -1,6 +1,5 @@
 package com.muyuchat.mca
 
-import android.content.Context
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.deviceprofile.QnnRuntimeProfileSelector
@@ -12,7 +11,8 @@ import org.json.JSONObject
 /**
  * QNN package inspection for the managed model download installer (P6/M8), moved verbatim from
  * ManagedModelDownloadInstaller: metadata-only context/bundle preflight (never creates a QNN
- * device/context/graph). device + context arrive as explicit parameters; the installer keeps a
+ * device/context/graph). device arrives as an explicit parameter and runtime-directory discovery as
+ * a lambda (P6/M9 seam), so the preflight is fully JVM-testable; the installer keeps a
  * same-signature delegate so its call sites stay unchanged. QnnBundlePreflight is internal because
  * the installer consumes its return type; the metadata/diagnostic types stay file-private.
  */
@@ -91,7 +91,7 @@ internal fun inspectQnnBundleCompatibility(
     bundleDir: File,
     installedBundle: ImageEngineBundleSpec,
     device: DeviceProfile,
-    context: Context
+    qnnRuntimeDirectoriesJson: (File) -> String
 ): QnnBundlePreflight {
     val profile = device.accelerationProfile
     val currentChipset = profile.chipsetCode.ifBlank { device.socModel }
@@ -157,7 +157,7 @@ internal fun inspectQnnBundleCompatibility(
         val json = runCatching {
             NativeQnnBridge().inspectContextMetadata(
                 file.absolutePath,
-                org.json.JSONArray(qnnRuntimeDirectoriesFor(context, bundleDir)).toString()
+                qnnRuntimeDirectoriesJson(bundleDir)
             )
         }.getOrElse { error -> return@map QnnContextDiagnostic(
             text = "${spec.contextBinary}: 预检不可用（${error.message ?: "native bridge unavailable"}）",

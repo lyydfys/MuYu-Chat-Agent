@@ -291,6 +291,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    // ManagedDownloadQnnInspectionTest drives the download-preflight owner on a plain JVM, where
+    // android.util.Log is a stub. Return defaults instead of throwing "not mocked" so the
+    // production logging on those paths stays exercised by the unit test.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 // A debug APK is the complete local validation artifact. Keep accidental

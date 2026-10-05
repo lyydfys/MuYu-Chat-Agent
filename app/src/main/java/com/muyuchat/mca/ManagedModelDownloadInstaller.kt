@@ -112,7 +112,9 @@ internal class ManagedModelDownloadInstaller(private val context: Context, priva
         bundleDir: File,
         installedBundle: ImageEngineBundleSpec
     ): QnnBundlePreflight =
-        inspectQnnBundleCompatibility(bundleDir, installedBundle, device, context)
+        inspectQnnBundleCompatibility(bundleDir, installedBundle, device) { root ->
+            org.json.JSONArray(qnnRuntimeDirectoriesFor(context, root)).toString()
+        }
     suspend fun install(request: ManagedDownloadRequest): InstalledManagedDownload {
         _uiState.value = ManagedDownloadProgress(
             downloadStatus = DownloadStatus.RUNNING,
