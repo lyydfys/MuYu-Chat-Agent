@@ -25,7 +25,13 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.muyuchat.feature.chat.ChatContentActions
+import com.muyuchat.feature.chat.ChatConversationActions
+import com.muyuchat.feature.chat.ChatGenerationActions
+import com.muyuchat.feature.chat.ChatImageActions
 import com.muyuchat.feature.chat.ChatScreen
+import com.muyuchat.feature.chat.ChatScreenActions
+import com.muyuchat.feature.chat.ChatShellActions
 import com.muyuchat.feature.chat.ChatUiState
 import com.muyuchat.feature.chat.ImageAssetUiItem
 import java.io.File
@@ -69,19 +75,46 @@ class ProductionImageGalleryWorkflowTest {
                     MaterialTheme {
                         ChatScreen(
                             state = state,
-                            onInputChange = { state = state.copy(input = it) },
-                            onSend = {}, onStop = {}, onCreateConversationForAssistant = {},
-                            onSelectConversation = {}, onDeleteConversation = {}, onClearHistory = {},
-                            onRenameConversation = { _, _ -> }, onTogglePinConversation = {}, onExportConversation = {},
-                            onRegenerate = {}, onDeleteMessage = {}, onUploadFile = {},
-                            releaseGenerationImageGrantsIfCoordinatorIdle = { release -> release(); true },
-                            onReasoningModeChange = {}, onOpenAgent = {}, onOpenModels = {}, onOpenApi = {}, onOpenSettings = {},
-                            onSetImageAssetFavorite = { id, favorite ->
-                                favoriteEvents += id to favorite
-                                state = state.copy(images = state.images.map { image ->
-                                    if (image.id == id) image.copy(favorite = favorite) else image
-                                })
-                            }
+                            actions = ChatScreenActions(
+                                conversation = ChatConversationActions(
+                                    onClearHistory = {},
+                                    onDeleteConversation = {},
+                                    onDeleteMessage = {},
+                                    onExportConversation = {},
+                                    onRenameConversation = { _, _ -> },
+                                    onSelectConversation = {},
+                                    onTogglePinConversation = {},
+                                    onCreateConversationForAssistant = {},
+                                    onRegenerate = {},
+                                ),
+                                generation = ChatGenerationActions(
+                                    onInputChange = { state = state.copy(input = it) },
+                                    onSend = {},
+                                    onSendImagePrompt = {},
+                                    onStop = {},
+                                    onReasoningModeChange = {},
+                                    onUploadFile = {},
+                                    releaseGenerationImageGrantsIfCoordinatorIdle = { release -> release(); true },
+                                ),
+                                content = ChatContentActions(),
+                                image = ChatImageActions(
+                                    onImportImageModel = {},
+                                    onSetImageAssetFavorite = { id, favorite ->
+                                        favoriteEvents += id to favorite
+                                        state = state.copy(images = state.images.map { image ->
+                                            if (image.id == id) image.copy(favorite = favorite) else image
+                                        })
+                                    },
+                                ),
+                                shell = ChatShellActions(
+                                    onOpenModels = {},
+                                    onOpenRecommendedModels = {},
+                                    onOpenSettings = {},
+                                    onOpenAgent = {},
+                                    onOpenApi = {},
+                                    onImportChatModel = {},
+                                ),
+                            )
                         )
                     }
                 }
