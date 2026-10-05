@@ -431,7 +431,10 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
         val imageChoicePresentation =
             sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ImageChoicePresentation.kt")
         val protocol = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageWorkerProtocol.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+        // P9/S22: the generation canvas and its preview bindings moved to
+        // ImageGenerationResultScreens.kt, so the reader concatenates it too; the preview-transport
+        // contract it pins is unchanged.
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationResultScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
         val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
 
         assertTrue(mainActivity.contains("preview = uiOptions.toLocalImagePreviewOptions()"))
