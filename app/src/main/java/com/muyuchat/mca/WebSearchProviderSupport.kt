@@ -339,3 +339,21 @@ internal fun friendlySearchError(code: Int, message: String): String =
         in 500..599 -> "搜索接口返回 $code：搜索服务端异常，请稍后再试或切换搜索服务。$message"
         else -> "搜索接口返回 $code：$message"
     }
+
+// P7/S13: moved from the WebSearchProvider class body (class-only callers).
+internal fun WebSearchConfig.providerLabelForResult(
+    providerLabels: List<String> = emptyList(),
+    includeDirectRead: Boolean = false
+): String =
+    buildList {
+        if (includeDirectRead) add(WEB_SEARCH_DIRECT_READ_LABEL)
+        addAll(providerLabels)
+    }.distinct().takeIf { it.isNotEmpty() }?.joinToString(" + ")
+        ?: if (configured) providerLabel else WEB_SEARCH_DIRECT_READ_LABEL
+
+internal fun WebSearchConfig.publicCheckSourceWarnings(): List<String> =
+    configuredSearchProviders()
+        .filter { isWebSearchPublicCheckSource(it.provider, it.endpointForRequest()) }
+        .takeIf { it.isNotEmpty() }
+        ?.let { listOf(WEB_SEARCH_PUBLIC_CHECK_WARNING) }
+        .orEmpty()

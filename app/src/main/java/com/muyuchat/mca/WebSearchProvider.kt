@@ -45,10 +45,12 @@ enum class WebSearchProviderType(val label: String, val defaultEndpoint: String,
 }
 
 internal const val WEB_SEARCH_PUBLIC_CHECK_ENDPOINT = "https://hn.algolia.com/api/v1/search"
-private const val WEB_SEARCH_PUBLIC_CHECK_LABEL = "公开 JSON 自检源"
+// P7/S13: shared with WebSearchProviderSupport.kt.
+internal const val WEB_SEARCH_PUBLIC_CHECK_LABEL = "公开 JSON 自检源"
 // P7/S2: shared with WebSearchDiagnosticConversion.kt.
 internal const val WEB_SEARCH_DIRECT_READ_LABEL = "网页直读"
-private const val WEB_SEARCH_PUBLIC_CHECK_WARNING =
+// P7/S13: shared with WebSearchProviderSupport.kt.
+internal const val WEB_SEARCH_PUBLIC_CHECK_WARNING =
     "当前使用的是公开 JSON 协议自检源，只适合验证联网链路、上下文注入和来源卡片；它不是通用搜索服务，正式使用请配置 SearxNG、Brave、Tavily、Jina 或可信自建搜索源。"
 
 internal fun isWebSearchPublicCheckSource(provider: WebSearchProviderType, endpoint: String): Boolean =
@@ -934,23 +936,6 @@ class WebSearchProvider(
         }
         return result
     }
-
-    private fun WebSearchConfig.providerLabelForResult(
-        providerLabels: List<String> = emptyList(),
-        includeDirectRead: Boolean = false
-    ): String =
-        buildList {
-            if (includeDirectRead) add(WEB_SEARCH_DIRECT_READ_LABEL)
-            addAll(providerLabels)
-        }.distinct().takeIf { it.isNotEmpty() }?.joinToString(" + ")
-            ?: if (configured) providerLabel else WEB_SEARCH_DIRECT_READ_LABEL
-
-    private fun WebSearchConfig.publicCheckSourceWarnings(): List<String> =
-        configuredSearchProviders()
-            .filter { isWebSearchPublicCheckSource(it.provider, it.endpointForRequest()) }
-            .takeIf { it.isNotEmpty() }
-            ?.let { listOf(WEB_SEARCH_PUBLIC_CHECK_WARNING) }
-            .orEmpty()
 
     private fun buildSearchCacheKey(
         plan: WebSearchPlan,
