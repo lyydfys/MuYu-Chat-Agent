@@ -119,7 +119,7 @@ private fun qwenImage21MigrationMetadataAgrees(
             component.fileName.equals("dit.mnn", ignoreCase = true)
     } ?: return false
     val pinnedRevision = primary.revision.trim().takeIf(String::isNotEmpty) ?: return false
-    val pinnedRepository = ImageExecutionProfileResolver.normalizeRepositoryIdentity(primary.repoId)
+    val pinnedRepository = normalizeRepositoryIdentity(primary.repoId)
     val pinnedFingerprint = primary.sha256?.trim()?.lowercase() ?: return false
     val pinnedLegacyVaeFingerprint = bundle.requiredComponents
         .singleOrNull { component ->
@@ -155,7 +155,7 @@ private fun qwenImage21MigrationMetadataAgrees(
         bundle.requiredComponents.isEmpty() ||
         bundle.requiredComponents.any { component ->
             component.provider != ModelRepositoryProvider.HUGGING_FACE ||
-                ImageExecutionProfileResolver.normalizeRepositoryIdentity(component.repoId) != pinnedRepository ||
+                normalizeRepositoryIdentity(component.repoId) != pinnedRepository ||
                 component.revision.trim() != pinnedRevision ||
                 component.fileName.isBlank() ||
                 component.fileName.endsWith(".zip", ignoreCase = true) ||
@@ -211,7 +211,7 @@ private fun normalizeBundleComponentPath(value: String): String = value
 private fun qwenImage21DirectFileSourceEvidenceAgrees(
     input: ImageExecutionProfileResolverInput,
     contract: CatalogImageProfileContract,
-    pinnedRepository: String = ImageExecutionProfileResolver.normalizeRepositoryIdentity(
+    pinnedRepository: String = normalizeRepositoryIdentity(
         contract.bundle.requiredComponents.firstOrNull { component ->
             component.role == ImageEngineBundleComponentRole.DIFFUSION &&
                 component.fileName.equals("dit.mnn", ignoreCase = true)
@@ -226,7 +226,7 @@ private fun qwenImage21DirectFileSourceEvidenceAgrees(
     val evidenceRepositories = input.recommendationEvidence.sourceRepositories
         .asSequence()
         .filter(String::isNotBlank)
-        .map(ImageExecutionProfileResolver::normalizeRepositoryIdentity)
+        .map(::normalizeRepositoryIdentity)
         .filter { repository -> '/' in repository }
         .toSet()
     val directPaths = input.recommendationEvidence.artifactPaths
@@ -264,7 +264,7 @@ private fun manifestMigrationIdentityAgrees(
     val conflictingAlias = input.recommendationEvidence.aliases
         .asSequence()
         .filter(String::isNotBlank)
-        .map(ImageExecutionProfileResolver::normalizeIdentityToken)
+        .map(::normalizeIdentityToken)
         .any { alias ->
             identityRules.any { rule ->
                 rule.recommendationId != recommendationId && alias in rule.effectiveAliases()
@@ -274,7 +274,7 @@ private fun manifestMigrationIdentityAgrees(
     val conflictingRepository = input.recommendationEvidence.sourceRepositories
         .asSequence()
         .filter(String::isNotBlank)
-        .map(ImageExecutionProfileResolver::normalizeRepositoryIdentity)
+        .map(::normalizeRepositoryIdentity)
         .any { repository ->
             repository !in targetRule.effectivePrimaryRepositories() &&
                 identityRules.any { rule ->
@@ -286,7 +286,7 @@ private fun manifestMigrationIdentityAgrees(
     val conflictingArtifact = input.recommendationEvidence.artifactPaths
         .asSequence()
         .filter(String::isNotBlank)
-        .flatMap { path -> ImageExecutionProfileResolver.artifactIdentityTokens(path).asSequence() }
+        .flatMap { path -> artifactIdentityTokens(path).asSequence() }
         .any { artifact ->
             identityRules.any { rule ->
                 rule.recommendationId != recommendationId &&
@@ -316,7 +316,7 @@ private fun manifestMigrationSourceEvidenceAgrees(
         .filter { component -> component.role == ImageEngineBundleComponentRole.DIFFUSION }
     val pinnedRepositories = primaryComponents
         .asSequence()
-        .map { component -> ImageExecutionProfileResolver.normalizeRepositoryIdentity(component.repoId) }
+        .map { component -> normalizeRepositoryIdentity(component.repoId) }
         .filter(String::isNotBlank)
         .toSet()
     val pinnedArchiveSourcePaths = primaryComponents
@@ -328,7 +328,7 @@ private fun manifestMigrationSourceEvidenceAgrees(
     val repositoryEvidence = input.recommendationEvidence.sourceRepositories
         .asSequence()
         .filter(String::isNotBlank)
-        .map(ImageExecutionProfileResolver::normalizeRepositoryIdentity)
+        .map(::normalizeRepositoryIdentity)
         // Local records also carry provider labels such as "local". Only owner/repository
         // identities are publisher evidence for this migration boundary.
         .filter { repository -> '/' in repository }
