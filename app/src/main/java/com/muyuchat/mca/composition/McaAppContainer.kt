@@ -1,6 +1,8 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.LocalApiPayloadPort
+import com.muyuchat.mca.LocalApiPayloadPortAdapter
 import com.muyuchat.mca.VisionAttachmentPort
 import com.muyuchat.mca.WebSearchProvider
 import com.muyuchat.mca.LocalImageAdapterPortAdapter
@@ -143,6 +145,16 @@ internal class McaAppContainer(private val application: Application) {
             store = store,
             appContext = application,
             engineRef = engine,
+            admissionRef = runtimeAdmission
+        )
+
+    /** R3/C3-S2：Local API payload 端口的具名适配器工厂。 */
+    fun createLocalApiPayloadPort(store: UiStateStore, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
+        LocalApiPayloadPortAdapter(
+            store = store,
+            engineRef = engine,
+            runtimeProfileStoreRef = runtimeProfileStore,
+            tuningRef = tuningOwner,
             admissionRef = runtimeAdmission
         )
 

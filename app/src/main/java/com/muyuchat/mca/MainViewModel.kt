@@ -12430,30 +12430,8 @@ contextTraceJson: String?
      * runtime summaries. No mutex, job, scope or atomics cross this boundary -- the request flags are
      * read through functions at render time.
      */
-    private val localApiPayloadPort: LocalApiPayloadPort =
-        object : LocalApiPayloadPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override val activeTuningJobId: String?
-                get() = this@MainViewModel.activeTuningJobId
-
-            override fun tuningCancelRequested(): Boolean =
-                this@MainViewModel.adaptiveTuningCancelRequested.get()
-
-            override fun tuningPauseRequested(): Boolean =
-                this@MainViewModel.adaptiveTuningPauseRequested.get()
-
-            override fun runtimeProfileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)
-
-            override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
-
-            override fun runtimeLoaded(): Boolean = this@MainViewModel.engine.stats.value.loaded
-
-            override suspend fun modelRuntimeSummaries(
-                modelIds: Collection<String>
-            ): List<PersistedModelRuntimeSummary> =
-                this@MainViewModel.runtimeProfileStore.modelRuntimeSummaries(modelIds)
-        }
+    // R3/C3-S2（插队裁定 2）：Local API payload 端口具名化——容器工厂构造（真实依赖），匿名实现删除。
+    private val localApiPayloadPort = container.createLocalApiPayloadPort(uiStateStore, engine, tuningOwner)
 
 
 

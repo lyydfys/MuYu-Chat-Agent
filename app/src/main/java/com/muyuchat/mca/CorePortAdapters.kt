@@ -87,3 +87,34 @@ internal class VisionAttachmentPortAdapter(
     override val activeVisionProjectorStamp: LoadedVisionProjectorStamp?
         get() = admissionRef.activeVisionProjectorStamp
 }
+
+internal class LocalApiPayloadPortAdapter(
+    private val store: UiStateStore,
+    private val engineRef: McaInferenceService,
+    private val runtimeProfileStoreRef: ModelRuntimeProfileStore,
+    private val tuningRef: TuningOwner,
+    private val admissionRef: RuntimeAdmissionState
+) : LocalApiPayloadPort {
+    override fun uiState(): MainUiState = store.current
+
+    override val activeTuningJobId: String?
+        get() = tuningRef.activeTuningJobId
+
+    override fun tuningCancelRequested(): Boolean =
+        tuningRef.adaptiveTuningCancelRequested.get()
+
+    override fun tuningPauseRequested(): Boolean =
+        tuningRef.adaptiveTuningPauseRequested.get()
+
+    override fun runtimeProfileJson(): String =
+        runtimeProfileJsonFor(store.current, engineRef, admissionRef.activeRuntimeIdentity)
+
+    override fun nativeStatsJson(): String = engineRef.nativeStatsJson()
+
+    override fun runtimeLoaded(): Boolean = engineRef.stats.value.loaded
+
+    override suspend fun modelRuntimeSummaries(
+        modelIds: Collection<String>
+    ): List<PersistedModelRuntimeSummary> =
+        runtimeProfileStoreRef.modelRuntimeSummaries(modelIds)
+}
