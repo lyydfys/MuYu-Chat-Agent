@@ -142,8 +142,11 @@ class LocalImageProductClosureTest {
         // P5/L8: the sdxlQnnConditioningGraphSha256 call moved with the generate() body.
         val generation =
             sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+        // P7/S31: the durable request lease moved to SdxlTwoPhaseRequestLease.kt; reading it here
+        // keeps the same contract under test -- the assertions below are unchanged.
         val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseRequestLease.kt")
         val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
         val normalizedSource = source.replace("\r\n", "\n")
         val normalizedIsolatedSdxl = isolatedSdxl.replace("\r\n", "\n")

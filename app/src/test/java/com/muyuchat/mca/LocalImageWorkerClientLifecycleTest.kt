@@ -653,7 +653,11 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun splitSdxlProviderCleanupRetainsGlobalGateUntilPersistentRequestBarrier() {
-        val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt")
+        // P7/S31: the durable request lease (incl. awaitFinishAfterProviderCleanup /
+        // finishUnderExclusiveBarrier) moved to SdxlTwoPhaseRequestLease.kt; reading both files
+        // keeps the same contract under test -- the assertions below are unchanged.
+        val coordinator = localImageWorkerSource("SdxlTwoPhaseCoordinator.kt") +
+            localImageWorkerSource("SdxlTwoPhaseRequestLease.kt")
         // P5/L10: the provider-side Qwen generation body (incl. its cacheDir output root)
         // moved out of LocalImageProvider.kt into this owner file.
         val qwenGeneration = localImageWorkerSource("LocalImageQwenImage21Operations.kt")
