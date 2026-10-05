@@ -33,8 +33,13 @@ class QnnStrictGraphSmokeContractTest {
 
     @Test
     fun `recommended sd15 encoders are identity pinned without device admission`() {
+        // P6/M4: the catalog data (encoder identity hashes, smoke specs, context-binary names)
+        // moved out of ModelScopeClient.kt into ModelScopeCatalogData.kt. Read both so every
+        // assertion below keeps its original strength across the new owner boundary.
         val catalog = source(
             "core/download/src/main/java/com/muyuchat/core/download/ModelScopeClient.kt"
+        ) + source(
+            "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogData.kt"
         )
         // The manifest writer moved out of MainViewModel during P2, so it is read from its new
         // file. The two assertions on it below are unchanged -- only the file they read.
