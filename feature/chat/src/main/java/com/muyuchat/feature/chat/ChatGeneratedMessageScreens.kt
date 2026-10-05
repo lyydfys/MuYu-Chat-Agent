@@ -935,3 +935,18 @@ internal fun AssistantActionRow(
         }
     }
 }
+
+internal fun ChatUiState.imageTaskSummary(): String {
+    val running = imageJobs.firstOrNull { job ->
+        !job.failed && job.imageAssetId == null && (job.statusLabel == "排队" || job.statusLabel == "生成中")
+    }
+    if (running != null) {
+        return "${running.statusLabel} · ${running.prompt.take(18)}"
+    }
+    val failedJob = imageJobs.firstOrNull { it.failed }
+    if (failedJob != null) {
+        return "失败，可进入图片页重试"
+    }
+    val completed = imageJobs.firstOrNull { it.imageAssetId != null || it.statusLabel == "完成" }
+    return if (completed != null) "最近完成 · 可查看图片库" else "空闲 · 可进入图片页"
+}
