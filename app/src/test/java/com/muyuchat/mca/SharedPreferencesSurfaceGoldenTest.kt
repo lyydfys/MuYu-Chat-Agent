@@ -93,12 +93,28 @@ class SharedPreferencesSurfaceGoldenTest {
                 names += when {
                     literal.isNotEmpty() -> literal
                     constants.containsKey(identifier) -> constants.getValue(identifier)
-                    else -> "$UNRESOLVED_PREFIX$identifier"
+                    // P9/S30: the ChatScreen split moved a getSharedPreferences call next to
+                    // its sibling file while the constant stayed behind. Resolve a name that
+                    // is unambiguous across sibling files of the same directory; a name with
+                    // zero or several distinct values stays unresolved on purpose.
+                    else -> unambiguousDirectoryConstant(file, identifier) ?: "$UNRESOLVED_PREFIX$identifier"
                 }
             }
         }
         return names.toList()
     }
+
+    /** The single distinct `const val` value for [name] across sibling .kt files, or null. */
+    private fun unambiguousDirectoryConstant(file: File, name: String): String? =
+        (file.parentFile?.listFiles()?.asSequence()?.toList() ?: emptyList())
+            .filter { it.isFile && it.extension == "kt" }
+            .mapNotNull { candidate ->
+                CONSTANT.findAll(candidate.readText())
+                    .firstOrNull { it.groupValues[1] == name }
+                    ?.groupValues?.get(2)
+            }
+            .toSet()
+            .singleOrNull()
 
     private fun sourceFiles(): List<File> = SOURCE_ROOTS.flatMap { root ->
         File(projectRoot(), root).walkTopDown()

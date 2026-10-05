@@ -102,7 +102,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
 
     @Test
     fun `image parameters reload per selected model and preserve explicit empty negative prompt`() {
-        val source = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+        val source = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt") + // P9/S30: 授权/触发器簇移出 ChatScreen.kt，拼接表随迁。
+sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenerationSupport.kt")
         val enqueue = functionBody(source, "fun enqueueImagePrompt(")
 
         assertTrue(source.contains("IMAGE_GENERATION_UI_PARAMETER_PREFS"))
@@ -334,7 +335,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         // P9/S23: the result card's retry label lives in ImageAssetScreens.kt now, so the reader
         // concatenates it too; the immutable-input contract it pins is unchanged.
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt") + // P9/S30: 授权/触发器簇移出 ChatScreen.kt，拼接表随迁。
+sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenerationSupport.kt")
         // ImageGenerationJobRecord moved to PersistedRecords.kt during P2, so the one assertion
         // about its field reads from there. The other four read function bodies that stayed in
         // the ViewModel. No assertion changed -- only the file each one reads.
