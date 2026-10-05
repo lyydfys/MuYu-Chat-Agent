@@ -1421,3 +1421,212 @@ internal fun ImageInputOptionsPanel(
     }
 
 }
+
+// P9/S29：从 ImageWorkspaceScreens.kt 等值移出的预设字段兼容簇（available + compatible 两个字段集函数）。
+// 原样逐字迁移，未做行为改动；跨区入口按协议提升 internal。
+// P9/S29: private→internal（跨文件被 ImagesWorkspaceScreen 复合区引用）
+internal fun availableImageGenerationPresetFields(
+    preset: ImageGenerationUiPreset
+): Set<ImageGenerationPresetField> = buildSet {
+    val hasStructuredUltraFixPayload = preset.ultraFix != null
+    add(ImageGenerationPresetField.PROMPT)
+    add(ImageGenerationPresetField.NEGATIVE_PROMPT)
+    if (!hasStructuredUltraFixPayload && preset.width != null && preset.height != null) {
+        add(ImageGenerationPresetField.SIZE)
+    }
+    if (!hasStructuredUltraFixPayload && preset.steps != null) {
+        add(ImageGenerationPresetField.STEPS)
+    }
+    if (preset.cfgScale != null) add(ImageGenerationPresetField.CFG)
+    if (preset.seed != null) add(ImageGenerationPresetField.SEED)
+    if (!preset.sampleMethod.isNullOrBlank()) add(ImageGenerationPresetField.SAMPLER)
+    if (preset.clipSkip != null) add(ImageGenerationPresetField.CLIP_SKIP)
+    if (preset.loras.isNotEmpty()) add(ImageGenerationPresetField.LORA)
+    if (preset.textualInversionIds.isNotEmpty()) {
+        add(ImageGenerationPresetField.TEXTUAL_INVERSION)
+    }
+    if (preset.ultraFix != null) add(ImageGenerationPresetField.ULTRAFIX)
+    if (!hasStructuredUltraFixPayload && preset.strength != null) {
+        add(ImageGenerationPresetField.STRENGTH)
+    }
+    if (preset.controlStrength != null) add(ImageGenerationPresetField.CONTROL_STRENGTH)
+    if (!hasStructuredUltraFixPayload && preset.batchCount != null) {
+        add(ImageGenerationPresetField.BATCH)
+    }
+    if (!hasStructuredUltraFixPayload && preset.vaeTileSize != null) {
+        add(ImageGenerationPresetField.VAE_TILING)
+    }
+}
+
+internal fun compatibleImageGenerationPresetFields(
+    preset: ImageGenerationUiPreset,
+    selectedModel: ChatModelChoice?,
+    selectedModelIsCloud: Boolean,
+    supportsNegativePrompt: Boolean,
+    supportsClipSkip: Boolean,
+    supportsVaeTiling: Boolean,
+    supportsLora: Boolean,
+    availableLoraIds: Set<String>,
+    maxBatchCount: Int,
+    currentTaskMode: ImageGenerationUiTaskMode = ImageGenerationUiTaskMode.TEXT_TO_IMAGE,
+    supportsTextualInversion: Boolean = false,
+    supportsUltraFix: Boolean = false,
+    availableTextualInversionIds: Set<String> = emptySet(),
+): Set<ImageGenerationPresetField> {
+    val available = availableImageGenerationPresetFields(preset)
+    return buildSet {
+        if (ImageGenerationPresetField.PROMPT in available) add(ImageGenerationPresetField.PROMPT)
+        if (supportsNegativePrompt && ImageGenerationPresetField.NEGATIVE_PROMPT in available) {
+            add(ImageGenerationPresetField.NEGATIVE_PROMPT)
+        }
+        if (ImageGenerationPresetField.STRENGTH in available &&
+            preset.taskMode in setOf(
+                ImageGenerationUiTaskMode.IMG2IMG,
+                ImageGenerationUiTaskMode.INPAINT,
+            ) &&
+            currentTaskMode in setOf(
+                ImageGenerationUiTaskMode.IMG2IMG,
+                ImageGenerationUiTaskMode.INPAINT,
+            ) &&
+            preset.strength?.let { it.isFinite() && it in 0.0..1.0 } == true
+        ) {
+            add(ImageGenerationPresetField.STRENGTH)
+        }
+        if (ImageGenerationPresetField.CONTROL_STRENGTH in available &&
+            preset.taskMode == ImageGenerationUiTaskMode.CONTROL &&
+            currentTaskMode == ImageGenerationUiTaskMode.CONTROL &&
+            preset.controlStrength?.let { it.isFinite() && it in 0.0..2.0 } == true
+        ) {
+            add(ImageGenerationPresetField.CONTROL_STRENGTH)
+        }
+        if (!selectedModelIsCloud && selectedModel != null) {
+            val width = preset.width
+            val height = preset.height
+            val ultraFixSizeContract = supportsUltraFix &&
+                currentTaskMode == ImageGenerationUiTaskMode.IMG2IMG &&
+                preset.ultraFix != null
+            val minWidth = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMinWidth
+            } else {
+                selectedModel.imageMinWidth
+            }
+            val maxWidth = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMaxWidth
+            } else {
+                selectedModel.imageMaxWidth
+            }
+            val minHeight = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMinHeight
+            } else {
+                selectedModel.imageMinHeight
+            }
+            val maxHeight = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixMaxHeight
+            } else {
+                selectedModel.imageMaxHeight
+            }
+            val widthMultiple = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixWidthMultiple
+            } else {
+                selectedModel.imageWidthMultiple
+            }
+            val heightMultiple = if (ultraFixSizeContract) {
+                selectedModel.imageUltraFixHeightMultiple
+            } else {
+                selectedModel.imageHeightMultiple
+            }
+            if (ImageGenerationPresetField.SIZE in available &&
+                width != null && height != null &&
+                width in minWidth..maxWidth && height in minHeight..maxHeight &&
+                width % widthMultiple == 0 && height % heightMultiple == 0 &&
+                (!ultraFixSizeContract ||
+                    width.toLong() * height.toLong() <= 64L * 1024L * 1024L)
+            ) {
+                add(ImageGenerationPresetField.SIZE)
+            }
+            if (ImageGenerationPresetField.STEPS in available &&
+                preset.steps?.let { it in selectedModel.imageMinSteps..selectedModel.imageMaxSteps } == true
+            ) {
+                add(ImageGenerationPresetField.STEPS)
+            }
+            if (ImageGenerationPresetField.CFG in available &&
+                preset.cfgScale?.let { it.isFinite() && it in 0.0..30.0 } == true
+            ) {
+                add(ImageGenerationPresetField.CFG)
+            }
+            if (ImageGenerationPresetField.SEED in available && preset.seed?.let { it >= 0 } == true) {
+                add(ImageGenerationPresetField.SEED)
+            }
+            if (ImageGenerationPresetField.SAMPLER in available &&
+                preset.sampleMethod in selectedModel.imageSupportedSamplersForTask(currentTaskMode)
+            ) {
+                add(ImageGenerationPresetField.SAMPLER)
+            }
+            if (ImageGenerationPresetField.BATCH in available &&
+                preset.batchCount?.let { it in 1..maxBatchCount.coerceAtLeast(1) } == true
+            ) {
+                add(ImageGenerationPresetField.BATCH)
+            }
+        }
+        if (supportsClipSkip && ImageGenerationPresetField.CLIP_SKIP in available) {
+            add(ImageGenerationPresetField.CLIP_SKIP)
+        }
+        if (supportsVaeTiling &&
+            ImageGenerationPresetField.VAE_TILING in available &&
+            selectedModel != null &&
+            preset.vaeTileSize == selectedModel.imageDefaultVaeTileSize &&
+            preset.vaeTileOverlap?.let {
+                kotlin.math.abs(it - selectedModel.imageDefaultVaeTileOverlap) < 0.000_001
+            } == true
+        ) {
+            add(ImageGenerationPresetField.VAE_TILING)
+        }
+        if (supportsLora &&
+            ImageGenerationPresetField.LORA in available &&
+            preset.loras.isNotEmpty() &&
+            preset.loras.all { selection -> selection.id in availableLoraIds }
+        ) {
+            add(ImageGenerationPresetField.LORA)
+        }
+        if (supportsTextualInversion &&
+            ImageGenerationPresetField.TEXTUAL_INVERSION in available &&
+            preset.textualInversionIds.size <= 8 &&
+            preset.textualInversionIds.distinct().size == preset.textualInversionIds.size &&
+            preset.textualInversionIds.all(availableTextualInversionIds::contains)
+        ) {
+            add(ImageGenerationPresetField.TEXTUAL_INVERSION)
+        }
+        val ultraFix = preset.ultraFix
+        if (!selectedModelIsCloud && selectedModel != null && supportsUltraFix &&
+            currentTaskMode == ImageGenerationUiTaskMode.IMG2IMG &&
+            ImageGenerationPresetField.ULTRAFIX in available && ultraFix != null &&
+            ultraFix.targetWidth in selectedModel.imageUltraFixMinWidth..
+                selectedModel.imageUltraFixMaxWidth &&
+            ultraFix.targetHeight in selectedModel.imageUltraFixMinHeight..
+                selectedModel.imageUltraFixMaxHeight &&
+            ultraFix.targetWidth % selectedModel.imageUltraFixWidthMultiple == 0 &&
+            ultraFix.targetHeight % selectedModel.imageUltraFixHeightMultiple == 0 &&
+            ultraFix.targetWidth.toLong() * ultraFix.targetHeight.toLong() <=
+                64L * 1024L * 1024L &&
+            ultraFix.strength.isFinite() && ultraFix.strength > 0.0 && ultraFix.strength <= 1.0 &&
+            ultraFix.refinementSteps in 1..IMAGE_GENERATION_ULTRAFIX_MAX_REFINEMENT_STEPS &&
+            ultraFix.inversionSteps in 1..minOf(
+                IMAGE_GENERATION_ULTRAFIX_MAX_DENOISING_STEPS,
+                ultraFix.refinementSteps,
+            ) &&
+            ultraFix.inversionSteps == imageGenerationUltraFixDenoisingTailStepCount(
+                ultraFix.refinementSteps,
+                ultraFix.strength,
+            ) &&
+            ultraFix.tileSize in 128..2048 && ultraFix.tileSize % 8 == 0 &&
+            ultraFix.tileSize % selectedModel.imageUltraFixWidthMultiple == 0 &&
+            ultraFix.tileSize % selectedModel.imageUltraFixHeightMultiple == 0 &&
+            (selectedModel.imageUltraFixRequiredTileSize == 0 ||
+                ultraFix.tileSize == selectedModel.imageUltraFixRequiredTileSize) &&
+            ultraFix.tileSize <= minOf(ultraFix.targetWidth, ultraFix.targetHeight) &&
+            ultraFix.overlap.isFinite() && ultraFix.overlap in 0.0..0.5
+        ) {
+            add(ImageGenerationPresetField.ULTRAFIX)
+        }
+    }
+}
