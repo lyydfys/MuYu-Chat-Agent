@@ -341,9 +341,11 @@ class MainViewModelCompletionFallbackTest {
     @Test
     fun localApiProviderOwnsSharedGenerationLifecycle() {
         // P3 step 2 moved the provider installation to ChatLocalApiProviderOperations; the
-        // lifecycle assertions are unchanged -- the provider is read where it now lives. The
-        // two `source.contains` facts below stay on MainViewModel.
+        // lifecycle assertions are unchanged -- the provider is read where it now lives. P8/S40
+        // then moved the read-only control-plane facts to LocalApiControlPlaneOperations.kt, so
+        // the two `contains` facts below are read dual-source; assertion strength is unchanged.
         val source = mainViewModelSource()
+        val controlPlane = localApiControlPlaneSource()
         val install = chatLocalApiProviderSource()
         val provider = install.substring(
             install.indexOf("LocalApiRuntime.streamChatWithContextProvider ="),
@@ -354,8 +356,14 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(provider.contains("afterGenerationStarted"))
         assertTrue(provider.contains(".onCompletion"))
         assertTrue(provider.contains("afterGenerationCompleted(engine.stats.value)"))
-        assertTrue(source.contains("state.engineLifecycle == AgentEngineLifecycle.GENERATING"))
-        assertTrue(source.contains("\"generation_in_progress\""))
+        assertTrue(
+            source.contains("state.engineLifecycle == AgentEngineLifecycle.GENERATING") ||
+                controlPlane.contains("state.engineLifecycle == AgentEngineLifecycle.GENERATING")
+        )
+        assertTrue(
+            source.contains("\"generation_in_progress\"") ||
+                controlPlane.contains("\"generation_in_progress\"")
+        )
     }
 
     @Test
@@ -610,6 +618,20 @@ class MainViewModelCompletionFallbackTest {
     }
 
     /** The owner that installs the Local API chat providers (P3 step 2). */
+    private fun localApiControlPlaneSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/LocalApiControlPlaneOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/LocalApiControlPlaneOperations.kt")
+            )
+            candidates.firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("Unable to locate LocalApiControlPlaneOperations.kt")
+    }
+
     private fun chatLocalApiProviderSource(): String {
         var directory: File? = File(System.getProperty("user.dir")).absoluteFile
         repeat(8) {

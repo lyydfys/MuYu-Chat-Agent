@@ -1364,75 +1364,17 @@ contextTraceJson: String?
         installChatLocalApiProviders(chatLocalApiProviderPort)
         installLocalApiAuxProviders(localApiAuxProviderPort)
         LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
-            override fun busyState(): LocalApiBusyState {
-                val state = _uiState.value
-                val busyCode = when {
-                    state.isGenerating || state.engineLifecycle == AgentEngineLifecycle.GENERATING ->
-                        "generation_in_progress"
-                    state.engineLifecycle == AgentEngineLifecycle.LOADING -> "model_loading"
-                    state.engineLifecycle == AgentEngineLifecycle.RELOADING -> "model_reloading"
-                    state.engineLifecycle == AgentEngineLifecycle.ROLLING_BACK -> "profile_rollback"
-                    state.tuningJobState in setOf(
-                        AgentTuningJobState.QUEUED,
-                        AgentTuningJobState.RUNNING,
-                        AgentTuningJobState.VALIDATING,
-                        AgentTuningJobState.CANCELING,
-                        AgentTuningJobState.RECOVERING
-                    ) -> "tuning_in_progress"
-                    state.busy && !state.isGenerating -> "runtime_busy"
-                    else -> return LocalApiBusyState.IDLE
-                }
-                return LocalApiBusyState(
-                    busy = true,
-                    code = busyCode,
-                    message = state.statusMessage ?: "本地模型运行时正在执行独占操作，请稍后重试。",
-                    retryAfterMs = 1_000L,
-                    detailsJson = tuningStateJson()
-                )
-            }
+            override fun busyState(): LocalApiBusyState =
+                localApiBusyStateFor(_uiState.value, tuningJson = { tuningStateJson() })
 
-            override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {
-                val state = _uiState.value
-                val requestedModel = request.requestedModel?.trim().orEmpty()
-                if (requestedModel.isNotBlank()) {
-                    val matches = requestedModel == state.loadedModelId ||
-                        requestedModel == state.loadedModelName ||
-                        state.models.firstOrNull { it.id == state.loadedModelId }?.let { model ->
-                            requestedModel == model.fileName ||
-                                requestedModel == model.displayName ||
-                                requestedModel == localApiPublicModelId(model.displayName, model.id)
-                        } == true
-                    if (!matches) {
-                        return LocalApiPreflightResult.Rejected(
-                            httpStatus = 409,
-                            code = "model_mismatch",
-                            message = "请求的模型不是当前正式 MainActivity 已加载模型。",
-                            detailsJson = JSONObject()
-                                .put("requestedModel", requestedModel)
-                                .put("loadedModelId", state.loadedModelId)
-                                .put("loadedModelName", state.loadedModelName)
-                                .toString()
-                        )
-                    }
-                }
-                return when (val preflight = runBlocking(Dispatchers.IO) {
-                    engine.preflightChat(request.chatRequest)
-                }) {
-                    is CompletionPreflight.Ready -> LocalApiPreflightResult.Ready
-                    is CompletionPreflight.Rejected -> LocalApiPreflightResult.Rejected(
-                        httpStatus = 409,
-                        code = preflight.code,
-                        message = preflight.message,
-                        detailsJson = JSONObject()
-                            .put("changedFields", JSONArray(preflight.changedFields.toList().sorted()))
-                            .put("quarantinedOverrides", JSONArray().also { array ->
-                                preflight.quarantinedOverrides.forEach { value -> array.put(value.toString()) }
-                            })
-                            .put("profile", JSONObject(runtimeProfileJson()))
-                            .toString()
-                    )
-                }
-            }
+            override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult =
+                localApiPreflightFor(
+                    request = request,
+                    state = _uiState.value,
+                    engine = engine,
+                    publicModelId = { displayName, id -> localApiPublicModelId(displayName, id) },
+                    runtimeProfileJson = { runtimeProfileJson() }
+                )
 
             override fun profileJson(): String = runtimeProfileJson()
 
