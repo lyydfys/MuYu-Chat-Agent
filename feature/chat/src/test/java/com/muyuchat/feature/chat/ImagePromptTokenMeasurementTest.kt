@@ -45,10 +45,13 @@ class ImagePromptTokenMeasurementTest {
         // of this test is that workspace, so it reads both files rather than one: the assertions
         // below are unchanged, and reading both keeps them meaningful wherever each declaration
         // now lives.
+        // P9/S6: 提示栏与 token 测量簇移入 ImagePromptBarScreens.kt（多源拼接随迁）。
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt",
         ) + sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt",
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImagePromptBarScreens.kt",
         )
 
         assertTrue(source.contains("Token 统计暂不可用 · 生成前仍会检查模型和提示词"))
