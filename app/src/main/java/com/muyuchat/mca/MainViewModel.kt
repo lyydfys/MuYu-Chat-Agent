@@ -605,14 +605,11 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.pendingImageTranslation = value
         }
-    private data class PendingChatImageAction(
-        val id: String,
-        val kind: com.muyuchat.feature.chat.ChatImageActionKind,
-        val visibleUserText: String,
-        val requestedOutputCount: Int?,
-        val stillOwned: () -> Boolean
-    )
-    private var pendingChatImageAction: PendingChatImageAction? = null
+    private var pendingChatImageAction: PendingChatImageAction?
+        get() = container.runtimeAdmission.pendingChatImageAction
+        set(value) {
+            container.runtimeAdmission.pendingChatImageAction = value
+        }
     private val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OfflinePromptTranslationService(AppOfflinePromptTranslationRuntimeProvider(application))
     }
@@ -7267,17 +7264,8 @@ contextTraceJson: String?
         )
     }
 
-    private fun invalidatePendingChatImagePreparation() {
-        chatImagePromptBridgeGeneration.incrementAndGet()
-        chatImagePromptBridgeJob?.cancel()
-        chatImagePromptBridgeJob = null
-        pendingImageTranslation = null
-        pendingChatImageAction = null
-        uiStateStore.update { it.copy(
-            pendingChatImageTranslationDraft = null,
-            pendingChatImageActionDraft = null
-        ) }
-    }
+    private fun invalidatePendingChatImagePreparation() =
+        invalidatePendingChatImagePreparationInto(uiStateStore, container.runtimeAdmission)
 
     fun resolveChatImageActionDraft(id: String, primary: Boolean, editedText: String) {
         val pending = pendingChatImageAction?.takeIf { it.id == id } ?: return
@@ -8498,16 +8486,8 @@ contextTraceJson: String?
 
     private fun findChatGeneratedImageRequest(
         requestId: String
-    ): Pair<String, ChatGeneratedImageRequest>? {
-        val state = _uiState.value
-        return state.chatSessions.firstNotNullOfOrNull { session ->
-            session.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
-                ?.generatedImageRequest
-                ?.let { session.id to it }
-        } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
-            ?.generatedImageRequest
-            ?.let { request -> state.activeChatSessionId?.let { it to request } }
-    }
+    ): Pair<String, ChatGeneratedImageRequest>? =
+        findChatGeneratedImageRequestIn(_uiState.value, requestId)
 
     private fun hasUnresolvedAssistantImageToolTurn(chatSessionId: String?): Boolean {
         if (chatSessionId.isNullOrBlank()) return false

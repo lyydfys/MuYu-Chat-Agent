@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import com.muyuchat.core.modelstore.ModelManifest
 import kotlinx.coroutines.Job
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatGeneratedImageStatus
 import com.muyuchat.core.engine.ChatGeneratedImageOrigin
@@ -68,6 +69,8 @@ internal class RuntimeAdmissionState(
     val chatImagePromptBridgeGeneration = AtomicLong(0L)
 
     var pendingImageTranslation: PendingImageTranslation? = null
+
+    var pendingChatImageAction: PendingChatImageAction? = null
 }
 
 /** R3/C3-S9：`rejectWhileConversationMutationInProgress` 顶层化（体逐字等价，store/holder 参数化）。 */
@@ -134,3 +137,36 @@ internal fun loadModelGenerationParamsFor(
     modelId = modelId,
     defaults = defaults
 )
+
+/** R3/C3-S10：自 VM 迁出的 pending 动作类型（同包 internal，holder 可承载）。 */
+internal data class PendingChatImageAction(
+    val id: String,
+    val kind: com.muyuchat.feature.chat.ChatImageActionKind,
+    val visibleUserText: String,
+    val requestedOutputCount: Int?,
+    val stillOwned: () -> Boolean
+)
+
+/** R3/C3-S10：`invalidatePendingChatImagePreparation` 顶层化（体逐字等价；store/holder 参数化）。 */
+internal fun invalidatePendingChatImagePreparationInto(store: UiStateStore, admission: RuntimeAdmissionState) {
+        admission.chatImagePromptBridgeGeneration.incrementAndGet()
+        admission.chatImagePromptBridgeJob?.cancel()
+        admission.chatImagePromptBridgeJob = null
+        admission.pendingImageTranslation = null
+        admission.pendingChatImageAction = null
+        store.update { it.copy(
+            pendingChatImageTranslationDraft = null,
+            pendingChatImageActionDraft = null
+        ) }
+}
+
+/** R3/C3-S10：`findChatGeneratedImageRequest` 顶层化（纯函数，体逐字等价，state 参数化）。 */
+internal fun findChatGeneratedImageRequestIn(state: MainUiState, requestId: String): Pair<String, ChatGeneratedImageRequest>? {
+        return state.chatSessions.firstNotNullOfOrNull { session ->
+            session.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+                ?.generatedImageRequest
+                ?.let { session.id to it }
+        } ?: state.messages.firstOrNull { it.generatedImageRequest?.id == requestId }
+            ?.generatedImageRequest
+            ?.let { request -> state.activeChatSessionId?.let { it to request } }
+}
