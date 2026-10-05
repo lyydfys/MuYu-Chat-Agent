@@ -9772,7 +9772,8 @@ contextTraceJson: String?
         val operation = persistentPrefixCacheOperationSequence.incrementAndGet()
         GenerationPreferences.persistPersistentPrefixCacheEnabled(getApplication(), enabled)
         engine.setPersistentPrefixCacheEnabled(enabled)
-        _uiState.update {
+        // R3/S21: 前缀缓存族写入统一经 UiStateStore。
+        uiStateStore.update {
             it.copy(
                 persistentPrefixCacheEnabled = enabled,
                 statusMessage = if (enabled) {
@@ -9821,7 +9822,8 @@ contextTraceJson: String?
             val summary = engine.persistentPrefixCacheSummary()
             val enabledNow = _uiState.value.persistentPrefixCacheEnabled
             engine.setPersistentPrefixCacheEnabled(enabledNow)
-            _uiState.update { state ->
+            // R3/S21: 前缀缓存族写入统一经 UiStateStore。
+            uiStateStore.update { state ->
                 state.copy(
                     persistentPrefixCacheEntryCount = summary.entryCount,
                     persistentPrefixCacheBytes = summary.totalBytes,
@@ -12013,7 +12015,8 @@ contextTraceJson: String?
     private fun refreshPersistentPrefixCacheSummary() {
         viewModelScope.launch(Dispatchers.IO) {
             val summary = engine.persistentPrefixCacheSummary()
-            _uiState.update {
+            // R3/S21: 前缀缓存族写入统一经 UiStateStore。
+            uiStateStore.update {
                 it.copy(
                     persistentPrefixCacheEntryCount = summary.entryCount,
                     persistentPrefixCacheBytes = summary.totalBytes
