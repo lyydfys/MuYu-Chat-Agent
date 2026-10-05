@@ -850,51 +850,10 @@ class MainViewModel @JvmOverloads constructor(
     /** New UI generations join this job before entering the engine, preventing a stale stop. */
     /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
     /** Identity, cancellation and the published run handle for the UI chat run. */
-    private val chatRuns = ChatRunOwnership()
-    /**
-     * Owns the streamed assistant output: the buffer lock, the buffered text, the deferred publish
-     * job and the generation id they belong to. See [ChatStreamAccumulator].
-     */
-    private val chatStreamAccumulator = ChatStreamAccumulator(
-        scope = viewModelScope,
-        currentRunId = { chatRuns.currentRunId() },
-        activeSessionId = { _uiState.value.activeChatSessionId },
-        hasAssistantMessage = { _uiState.value.messages.any { it.role == Role.ASSISTANT } },
-        commit = { batch, isStillCurrent ->
-            uiStateStore.update { state ->
-                if (!isStillCurrent()) {
-                    state
-                } else {
-                    val updated = state.messages.toMutableList()
-                    val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-                    if (index >= 0) {
-                        val current = updated[index]
-                        updated[index] = current.copy(
-                            content = current.content + batch.content,
-                            reasoningContent = current.reasoningContent + batch.reasoning,
-                            reasoningDurationMs = maxOf(
-                                current.reasoningDurationMs,
-                                batch.reasoningDurationMs
-                            )
-                        )
-                    }
-                    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-                    state.copy(
-                        messages = updated,
-                        activeChatSessionId = sessionId,
-                        chatSessions = state.chatSessions.upsertSession(
-                            sessionId = sessionId,
-                            messages = updated,
-                            assistantId = state.selectedAssistantId,
-                            modelMode = state.selectedChatBackend.bindingValue(),
-                            modelId = state.currentChatModelId()
-                        )
-                    )
-                }
-            }
-        }
-    )
-
+    private val chatRuns: ChatRunOwnership
+        get() = container.chatRuns
+    private val chatStreamAccumulator: ChatStreamAccumulator
+        get() = container.chatStreamAccumulator
     /** Delegates to [ChatStreamAccumulator.append]. Signature kept verbatim. */
     private fun appendAssistant(
         delta: String,
@@ -1305,6 +1264,9 @@ contextTraceJson: String?
             appUpdate = initialAppUpdateState
         )
     )
+    // R3/C3-S5：chatRuns/流缓冲累加器入容器；terminalSettlement 端口具名化。
+    private val chatStreamAccumulatorInit = container.initializeChatStreamAccumulator(uiStateStore, viewModelScope)
+    private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
     // R3/C3-S1（插队裁定 2）：三个小端口具名化为容器工厂构造（真实依赖注入），匿名实现已删除。
@@ -10693,49 +10655,6 @@ contextTraceJson: String?
             }
         }
 
-    /** The ViewModel side of [ChatTerminalSettlementPort]. */
-    private val chatTerminalSettlementPort: ChatTerminalSettlementPort =
-        object : ChatTerminalSettlementPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun currentChatModelId(state: MainUiState): String? =
-                this@MainViewModel.run { state.currentChatModelId() }
-
-            override fun upsertSession(
-                sessions: List<ChatSessionRecord>,
-                sessionId: String,
-                messages: List<ChatMessage>,
-                assistantId: String?,
-                modelMode: String?,
-                modelId: String?
-            ): List<ChatSessionRecord> =
-                this@MainViewModel.run {
-                    with(sessions) {
-                        upsertSession(
-                            sessionId = sessionId,
-                            messages = messages,
-                            assistantId = assistantId,
-                            modelMode = modelMode,
-                            modelId = modelId
-                        )
-                    }
-                }
-
-
-            override val webSearchDiagnosticStore: WebSearchDiagnosticStore
-                get() = this@MainViewModel.webSearchDiagnosticStore
-
-            override fun isRunCurrent(runId: Long?): Boolean = this@MainViewModel.chatRuns.isCurrent(runId)
-
-            override fun discardPendingOutput(runId: Long?) {
-                this@MainViewModel.discardPendingAssistantOutput(runId)
-            }
-        }
-
 /** Delegates to [settleWebSearchAnswerGuards]. Signature kept verbatim. */
     fun applyWebSearchAnswerGuardsToLastAssistant(
         generationRunId: Long? = null
@@ -11018,12 +10937,6 @@ contextTraceJson: String?
         modelMode = modelMode,
         modelId = modelId
     )
-
-    private fun MainUiState.currentChatModelId(): String? =
-        when (selectedChatBackend) {
-            ChatBackend.LOCAL -> loadedModelId
-            ChatBackend.CLOUD -> selectedCloudChatModelId
-        }
 
     private fun Throwable.imageLibraryBackupFailureMessage(): String = when (this) {
         is ImageLibraryBackupFormatException ->

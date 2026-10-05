@@ -66,3 +66,10 @@ internal fun List<ChatSessionRecord>.upsertSessionFor(
         )
         return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
     }
+
+/** R3/C3-S5：`MainUiState.currentChatModelId()` 顶层化（纯函数，体逐字等价）。 */
+internal fun MainUiState.currentChatModelId(): String? =
+    when (selectedChatBackend) {
+            ChatBackend.LOCAL -> loadedModelId
+            ChatBackend.CLOUD -> selectedCloudChatModelId
+        }

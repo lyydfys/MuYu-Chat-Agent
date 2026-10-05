@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
+import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
 /**
@@ -140,5 +141,45 @@ internal class ImagePromptTokenMeasurementHostAdapter(
 
     override fun cacheDescriptor(modelKey: String, descriptor: LocalImagePromptTokenizerDescriptor) {
         tokenizerDescriptorsRef.putIfAbsent(modelKey, descriptor)
+    }
+}
+
+internal class ChatTerminalSettlementPortAdapter(
+    private val store: UiStateStore,
+    private val chatRunsRef: ChatRunOwnership,
+    private val diagnosticStoreRef: WebSearchDiagnosticStore,
+    private val accumulatorRef: ChatStreamAccumulator
+) : ChatTerminalSettlementPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun currentChatModelId(state: MainUiState): String? = state.currentChatModelId()
+
+    override fun upsertSession(
+        sessions: List<ChatSessionRecord>,
+        sessionId: String,
+        messages: List<ChatMessage>,
+        assistantId: String?,
+        modelMode: String?,
+        modelId: String?
+    ): List<ChatSessionRecord> = sessions.upsertSessionFor(
+        state = store.current,
+        sessionId = sessionId,
+        messages = messages,
+        assistantId = assistantId,
+        modelMode = modelMode,
+        modelId = modelId
+    )
+
+    override val webSearchDiagnosticStore: WebSearchDiagnosticStore
+        get() = diagnosticStoreRef
+
+    override fun isRunCurrent(runId: Long?): Boolean = chatRunsRef.isCurrent(runId)
+
+    override fun discardPendingOutput(runId: Long?) {
+        accumulatorRef.discard(runId)
     }
 }

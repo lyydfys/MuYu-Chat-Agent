@@ -1,6 +1,15 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.core.engine.Role
+import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
+import com.muyuchat.mca.upsertSessionFor
+import com.muyuchat.mca.bindingValue
+import com.muyuchat.mca.currentChatModelId
+import java.util.UUID
+import com.muyuchat.mca.ChatTerminalSettlementPort
+import com.muyuchat.mca.ChatStreamAccumulator
+import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.ChatSessionRecord
 import com.muyuchat.mca.ChatSessionPersistenceState
 import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
@@ -183,6 +192,64 @@ internal class McaAppContainer(private val application: Application) {
 
     fun initializeChatSessionPersistenceState(initialDurableSessions: List<ChatSessionRecord>): ChatSessionPersistenceState =
         ChatSessionPersistenceState(initialDurableSessions).also { chatSessionPersistenceState = it }
+
+
+    // R3/C3-S5：chatRuns 与流缓冲累加器（捕获面=真实对象：store/scope/chatRuns；两段式初始化等待 store）。
+    val chatRuns = ChatRunOwnership()
+
+    lateinit var chatStreamAccumulator: ChatStreamAccumulator
+        private set
+
+    fun initializeChatStreamAccumulator(store: UiStateStore, scope: CoroutineScope): ChatStreamAccumulator =
+        ChatStreamAccumulator(
+            scope = scope,
+            currentRunId = { chatRuns.currentRunId() },
+            activeSessionId = { store.current.activeChatSessionId },
+            hasAssistantMessage = { store.current.messages.any { it.role == Role.ASSISTANT } },
+            commit = { batch, isStillCurrent ->
+            store.update { state ->
+                if (!isStillCurrent()) {
+                    state
+                } else {
+                    val updated = state.messages.toMutableList()
+                    val index = updated.indexOfLast { it.role == Role.ASSISTANT }
+                    if (index >= 0) {
+                        val current = updated[index]
+                        updated[index] = current.copy(
+                            content = current.content + batch.content,
+                            reasoningContent = current.reasoningContent + batch.reasoning,
+                            reasoningDurationMs = maxOf(
+                                current.reasoningDurationMs,
+                                batch.reasoningDurationMs
+                            )
+                        )
+                    }
+                    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
+                    state.copy(
+                        messages = updated,
+                        activeChatSessionId = sessionId,
+                        chatSessions = state.chatSessions.upsertSessionFor(
+                            state = state,
+                            sessionId = sessionId,
+                            messages = updated,
+                            assistantId = state.selectedAssistantId,
+                            modelMode = state.selectedChatBackend.bindingValue(),
+                            modelId = state.currentChatModelId()
+                        )
+                    )
+                }
+            }
+            }
+        ).also { chatStreamAccumulator = it }
+
+    /** R3/C3-S5：terminalSettlement 端口具名适配器工厂。 */
+    fun createChatTerminalSettlementPort(store: UiStateStore): ChatTerminalSettlementPort =
+        ChatTerminalSettlementPortAdapter(
+            store = store,
+            chatRunsRef = chatRuns,
+            diagnosticStoreRef = webSearchDiagnosticStore,
+            accumulatorRef = chatStreamAccumulator
+        )
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()
