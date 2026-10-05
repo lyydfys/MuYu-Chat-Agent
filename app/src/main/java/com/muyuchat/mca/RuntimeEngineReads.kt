@@ -4,6 +4,7 @@ import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.telemetry.RuntimeMetrics
+import com.muyuchat.mca.presentation.nativeRuntimeReleaseObserved
 import org.json.JSONObject
 
 // R3/S15: Runtime 读取缝——从 MainViewModel 移出的 engine 读取封装（行为逐字等价：
@@ -13,6 +14,12 @@ internal fun McaInferenceService.nativeStatsJsonOrEmpty(): String =
 
 internal fun McaInferenceService.recentEngineLogsOrEmpty(): List<RuntimeMetrics> =
     runCatching { recentLogs() }.getOrDefault(emptyList())
+
+// R3/S20: 从 MainViewModel 移出的释放观测（stats × 诊断 JSON 组合；体逐字等价，engine 作接收者）。
+internal fun McaInferenceService.nativeRuntimeReleaseObservedNow(): Boolean = nativeRuntimeReleaseObserved(
+    engineLoaded = stats.value.loaded,
+    nativeStatsJson = nativeStatsJsonOrEmpty()
+)
 
 // R3/S18: 从 MainViewModel 移出的 API 生成参数投影（engine 活跃 profile × 状态合并；体逐字保留，engine 作参数）。
 internal fun engineApiGenerationParams(engine: McaInferenceService, state: MainUiState): GenerationParams {

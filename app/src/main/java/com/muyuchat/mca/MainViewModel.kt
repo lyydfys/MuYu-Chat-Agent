@@ -6915,7 +6915,7 @@ contextTraceJson: String?
                 engine.stopGeneration()
                 engine.unloadModel()
             } catch (error: Throwable) {
-                if (nativeRuntimeReleaseObservedNow()) {
+                if (engine.nativeRuntimeReleaseObservedNow()) {
                     nativeReplacementOccurred = true
                     clearNativeRuntimeSessionState(
                         lifecycle = AgentEngineLifecycle.LOADING,
@@ -6978,7 +6978,7 @@ contextTraceJson: String?
         executionProfile = bootstrapProfile
     )
     if (nativeLoad.isFailure && runtimeBeforeLoad != null &&
-        nativeRuntimeReleaseObservedNow()
+        engine.nativeRuntimeReleaseObservedNow()
     ) {
         nativeReplacementOccurred = true
     }
@@ -7177,7 +7177,7 @@ contextTraceJson: String?
     persistChatSessions(sessionsToPersist)
     } catch (error: CancellationException) {
         if (runtimeBeforeLoad != null &&
-            nativeRuntimeReleaseObservedNow()
+            engine.nativeRuntimeReleaseObservedNow()
         ) {
             nativeReplacementOccurred = true
         }
@@ -7199,7 +7199,7 @@ contextTraceJson: String?
             error
         )
         if (runtimeBeforeLoad != null &&
-            nativeRuntimeReleaseObservedNow()
+            engine.nativeRuntimeReleaseObservedNow()
         ) {
             nativeReplacementOccurred = true
         }
@@ -7296,11 +7296,6 @@ contextTraceJson: String?
             adaptiveRecommendation = activeAdaptiveRecommendation
         )
     }
-
-    private fun nativeRuntimeReleaseObservedNow(): Boolean = nativeRuntimeReleaseObserved(
-        engineLoaded = engine.stats.value.loaded,
-        nativeStatsJson = engine.nativeStatsJsonOrEmpty()
-    )
 
     private fun clearNativeRuntimeSessionState(
         lifecycle: AgentEngineLifecycle,
@@ -7404,7 +7399,7 @@ contextTraceJson: String?
                 engine.unloadModel()
             }
             if (nativeRelease.isFailure &&
-                !nativeRuntimeReleaseObservedNow()
+                !engine.nativeRuntimeReleaseObservedNow()
             ) {
                 val error = nativeRelease.exceptionOrNull()
                 val message = "卸载失败：${error?.message ?: "未知错误"}"
@@ -7461,7 +7456,7 @@ contextTraceJson: String?
                     engine.stopGeneration()
                     val release = runCatching { engine.unloadModel() }
                     if (release.isFailure &&
-                        !nativeRuntimeReleaseObservedNow()
+                        !engine.nativeRuntimeReleaseObservedNow()
                     ) {
                         throw requireNotNull(release.exceptionOrNull())
                     }
