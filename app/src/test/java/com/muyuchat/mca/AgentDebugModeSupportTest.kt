@@ -40,4 +40,18 @@ class AgentDebugModeSupportTest {
         assertEquals(45L, tuningEtaSecondsFromPreviousLoad(0L, AgentDebugMode.Quick))
         assertEquals(45L, tuningEtaSecondsFromPreviousLoad(-5L, AgentDebugMode.Quick))
     }
+
+    @Test
+    fun `local api debug mode parses aliases case dirt and dashes`() {
+        assertEquals(AgentDebugMode.Quick, agentDebugModeFromLocalApiValue("quick"))
+        assertEquals(AgentDebugMode.Standard, agentDebugModeFromLocalApiValue("  Standard "))
+        assertEquals(AgentDebugMode.Deep, agentDebugModeFromLocalApiValue("DEEP"))
+        assertEquals(AgentDebugMode.Deep, agentDebugModeFromLocalApiValue("full"))
+        assertEquals(AgentDebugMode.PowerSave, agentDebugModeFromLocalApiValue("power"))
+        assertEquals(AgentDebugMode.PowerSave, agentDebugModeFromLocalApiValue("power_save"))
+        assertEquals(AgentDebugMode.PowerSave, agentDebugModeFromLocalApiValue("powersave"))
+        assertEquals(AgentDebugMode.PowerSave, agentDebugModeFromLocalApiValue("power-save"))
+        assertEquals(null, agentDebugModeFromLocalApiValue("turbo"))
+        assertEquals(null, agentDebugModeFromLocalApiValue(""))
+    }
 }

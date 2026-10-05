@@ -11534,7 +11534,7 @@ contextTraceJson: String?
             ): Boolean = this@MainViewModel.localApiModelMatches(requestedModel, state, model)
 
             override fun localApiDebugMode(value: String): AgentDebugMode? =
-                this@MainViewModel.localApiDebugMode(value)
+                agentDebugModeFromLocalApiValue(value)
 
             override fun localApiPerformancePreference(value: String?): UserPreference? =
                 this@MainViewModel.localApiPerformancePreference(value)
@@ -13891,16 +13891,6 @@ contextTraceJson: String?
             "idempotency_journal_corrupt",
             "该 Idempotency-Key 的最终响应记录不可读；为避免重复执行，已拒绝重放。"
         )
-    }
-
-    private fun localApiDebugMode(value: String): AgentDebugMode? = when (
-        value.trim().lowercase(Locale.ROOT).replace("-", "_")
-    ) {
-        "quick" -> AgentDebugMode.Quick
-        "standard" -> AgentDebugMode.Standard
-        "deep", "full" -> AgentDebugMode.Deep
-        "power", "power_save", "powersave" -> AgentDebugMode.PowerSave
-        else -> null
     }
 
     private fun localApiPerformancePreference(value: String?): UserPreference? {
