@@ -6,8 +6,7 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,7 +19,9 @@ import kotlinx.coroutines.sync.withLock
  * collaborator calls. MainViewModel keeps a same-signature delegate so no call site changed.
  */
 internal interface ChatSessionPersistencePort {
-    val uiState: MutableStateFlow<MainUiState>
+    // R3/S24: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法（对齐姊妹端口模式）。
+    val uiState: StateFlow<MainUiState>
+    fun updateUiState(transform: (MainUiState) -> MainUiState)
     val scope: CoroutineScope
     val chatRuns: ChatRunOwnership
     val chatSessionStore: ChatSessionStore
@@ -120,7 +121,7 @@ internal fun runChatSessionPersistence(
                 )
             }.onFailure { error ->
                 if (sequence == chatSessionPersistenceSequence.get()) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(statusMessage = "聊天历史保存失败，关联世界书已保留：${error.message}")
                     }
                 }
@@ -183,7 +184,7 @@ internal fun runPersistConversationMutation(
                 }
                 port.publishReconciledChatSessions(snapshot, persisted)
                 if (!sessionCachesCleared) {
-                    uiState.update {
+                    port.updateUiState {
                         it.copy(statusMessage = "聊天已删除，但磁盘会话缓存清理失败；请在设置中清空缓存。")
                     }
                 }
@@ -218,7 +219,7 @@ internal fun runPersistConversationMutation(
                         }
                         .onFailure { error ->
                             if (port.localConversationContextInvalidationSequence.get() == invalidationSequence) {
-                                uiState.update {
+                                port.updateUiState {
                                     it.copy(
                                         statusMessage = "聊天已保存；上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}"
                                     )
@@ -233,7 +234,7 @@ internal fun runPersistConversationMutation(
                 // rolls the transaction back; restore managed state to the
                 // last snapshot known to have committed to that database.
                 port.cancelPendingWorldBookCleanup(WorldBookScope.CHAT, removedChatOwners)
-                uiState.update { current ->
+                port.updateUiState { current ->
                     val mutationStillVisible = current.chatSessions == sessions
                     if (!mutationStillVisible) {
                         current.copy(

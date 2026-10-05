@@ -11380,7 +11380,10 @@ contextTraceJson: String?
     /** The ViewModel side of [ChatGenerationExecutionPort]. */
     private val chatSessionPersistencePort: ChatSessionPersistencePort =
         object : ChatSessionPersistencePort {
-            override val uiState get() = this@MainViewModel._uiState
+            override val uiState get() = this@MainViewModel.uiState
+            // R3/S24: 写入经 store 具名方法（端口不再暴露可变流）。
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
+                this@MainViewModel.uiStateStore.update(transform)
             override val scope get() = this@MainViewModel.viewModelScope
             override val chatRuns get() = this@MainViewModel.chatRuns
             override val chatSessionStore get() = this@MainViewModel.chatSessionStore
