@@ -46,23 +46,23 @@ internal fun migratePinnedCatalogManifestProfile(
         // current input is the exact pinned bundle. A complete bundle fingerprint is also
         // allowed to reach that check; it must never be treated as a primary-file SHA.
         val qwenCandidate = ImageExecutionProfileResolver.resolveBuiltInTarget(input)
-            ?.recommendationId == ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID
+            ?.recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID
         val completeQwenCandidate = qwenCandidate &&
             input.modelFingerprintScope == ImageModelFingerprintScope.COMPLETE_BUNDLE
         if (!qwenCandidate ||
             (!completeQwenCandidate &&
-                persistedFingerprint != ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)
+                persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)
         ) {
             return persisted
         }
     }
     val target = ImageExecutionProfileResolver.resolveBuiltInTarget(input)
-        ?.takeIf { it.recommendationId in ImageExecutionProfileResolver.MIGRATABLE_PINNED_RECOMMENDATIONS }
+        ?.takeIf { it.recommendationId in MIGRATABLE_PINNED_RECOMMENDATIONS }
         ?: return persisted
     val recommendationId = target.recommendationId
     val contract = ImageExecutionProfileResolver.catalogProfileContractsByRecommendationId[recommendationId]
         ?: return persisted
-    if (recommendationId == ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID) {
+    if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
         if (!qwenImage21MigrationMetadataAgrees(input, persisted, contract)) return persisted
     }
     if (!manifestMigrationIdentityAgrees(input, persisted, recommendationId)) return persisted
@@ -74,7 +74,7 @@ internal fun migratePinnedCatalogManifestProfile(
     ) ?: return persisted
     if (
         persisted.profileId != catalogProfile.profileId ||
-        (if (recommendationId == ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID) {
+        (if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
             persisted.profileRevision != 1
         } else {
             persisted.profileRevision <= 0 ||
@@ -132,9 +132,9 @@ private fun qwenImage21MigrationMetadataAgrees(
     val inputFingerprint = input.modelFingerprint.trim().lowercase()
     val persistedFingerprint = persisted.modelFingerprint.trim().lowercase()
     val readinessUsesKnownLegacyIdentity =
-        inputFingerprint == ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
-            persistedFingerprint == ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
-            pinnedLegacyVaeFingerprint == ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT
+        inputFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
+            persistedFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT &&
+            pinnedLegacyVaeFingerprint == QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT
     val inputUsesCompleteBundleIdentity =
         input.modelFingerprintScope == ImageModelFingerprintScope.COMPLETE_BUNDLE
     val completeBundleEvidenceAgrees = inputUsesCompleteBundleIdentity &&
@@ -151,7 +151,7 @@ private fun qwenImage21MigrationMetadataAgrees(
         inputFingerprint == pinnedFingerprint || readinessUsesKnownLegacyIdentity
     }
     if (
-        bundle.recommendationId != ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID ||
+        bundle.recommendationId != QWEN_IMAGE_21_RECOMMENDATION_ID ||
         bundle.requiredComponents.isEmpty() ||
         bundle.requiredComponents.any { component ->
             component.provider != ModelRepositoryProvider.HUGGING_FACE ||
@@ -164,10 +164,10 @@ private fun qwenImage21MigrationMetadataAgrees(
         contract.modelFingerprint != pinnedFingerprint ||
         !inputFingerprintAgrees ||
         (persistedFingerprint != pinnedFingerprint &&
-            (persistedFingerprint != ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT ||
-                pinnedLegacyVaeFingerprint != ImageExecutionProfileResolver.QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)) ||
-        input.recommendationId?.trim() != ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID ||
-        persisted.provenance.recommendationId?.trim() != ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID ||
+            (persistedFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT ||
+                pinnedLegacyVaeFingerprint != QWEN_IMAGE_21_LEGACY_VAE_PROFILE_FINGERPRINT)) ||
+        input.recommendationId?.trim() != QWEN_IMAGE_21_RECOMMENDATION_ID ||
+        persisted.provenance.recommendationId?.trim() != QWEN_IMAGE_21_RECOMMENDATION_ID ||
         input.recommendationRevision?.trim()?.takeIf(String::isNotEmpty)
             ?.let { it != pinnedRevision } == true ||
         persisted.provenance.recommendationRevision?.trim()?.takeIf(String::isNotEmpty)
@@ -250,7 +250,7 @@ private fun manifestMigrationIdentityAgrees(
     persisted: ImageExecutionProfile,
     recommendationId: String
 ): Boolean {
-    val targetRule = ImageExecutionProfileResolver.identityRules.single { rule -> rule.recommendationId == recommendationId }
+    val targetRule = identityRules.single { rule -> rule.recommendationId == recommendationId }
     val persistedIdentity = persisted.provenance.recommendationId
         ?.takeIf(String::isNotBlank)
         ?: return false
@@ -266,7 +266,7 @@ private fun manifestMigrationIdentityAgrees(
         .filter(String::isNotBlank)
         .map(ImageExecutionProfileResolver::normalizeIdentityToken)
         .any { alias ->
-            ImageExecutionProfileResolver.identityRules.any { rule ->
+            identityRules.any { rule ->
                 rule.recommendationId != recommendationId && alias in rule.effectiveAliases()
             }
         }
@@ -277,7 +277,7 @@ private fun manifestMigrationIdentityAgrees(
         .map(ImageExecutionProfileResolver::normalizeRepositoryIdentity)
         .any { repository ->
             repository !in targetRule.effectivePrimaryRepositories() &&
-                ImageExecutionProfileResolver.identityRules.any { rule ->
+                identityRules.any { rule ->
                     rule.recommendationId != recommendationId &&
                         repository in rule.effectivePrimaryRepositories()
                 }
@@ -288,7 +288,7 @@ private fun manifestMigrationIdentityAgrees(
         .filter(String::isNotBlank)
         .flatMap { path -> ImageExecutionProfileResolver.artifactIdentityTokens(path).asSequence() }
         .any { artifact ->
-            ImageExecutionProfileResolver.identityRules.any { rule ->
+            identityRules.any { rule ->
                 rule.recommendationId != recommendationId &&
                     artifact in rule.effectiveArtifactMarkers()
             }
@@ -307,7 +307,7 @@ private fun manifestMigrationSourceEvidenceAgrees(
 ): Boolean {
     val contract = ImageExecutionProfileResolver.catalogProfileContractsByRecommendationId[recommendationId]
         ?: return false
-    if (recommendationId == ImageExecutionProfileResolver.QWEN_IMAGE_21_RECOMMENDATION_ID) {
+    if (recommendationId == QWEN_IMAGE_21_RECOMMENDATION_ID) {
         // Direct-file Qwen bundle evidence is checked separately. Keep the existing strict
         // `archive!/member` rule unchanged for archive-backed recommendations.
         return qwenImage21DirectFileSourceEvidenceAgrees(input, contract)
