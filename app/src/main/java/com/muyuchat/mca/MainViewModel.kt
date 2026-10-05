@@ -4754,38 +4754,10 @@ contextTraceJson: String?
         )
     }
 
-    /** Delegates to [webSearchConfigFrom]; six members still build a config this way. */
-    private fun buildWebSearchConfig(
-        enabled: Boolean,
-        provider: String,
-        endpoint: String,
-        apiKey: String,
-        maxResults: Int,
-        fetchPageContent: Boolean,
-        triggerMode: String,
-        researchMode: String,
-        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ): WebSearchConfig = webSearchConfigFrom(
-        enabled = enabled,
-        provider = provider,
-        endpoint = endpoint,
-        apiKey = apiKey,
-        maxResults = maxResults,
-        fetchPageContent = fetchPageContent,
-        triggerMode = triggerMode,
-        researchMode = researchMode,
-        backupProviders = backupProviders
-    )
 
 
 
 
-    /**
-     * Delegates to [androidWebSearchNetworkChecks]. It is a pure Android read, which is why it needed
-     * no port -- only the `Application` this class already held.
-     */
-    private fun buildAndroidWebSearchNetworkChecks(): List<String> =
-        androidWebSearchNetworkChecks(getApplication())
 
 
 
@@ -12288,36 +12260,6 @@ contextTraceJson: String?
         _uiState.update { it.copy(busy = false, statusMessage = message) }
     }
 
-    private fun DownloadTaskSnapshot.progressText(): String {
-        val total = expectedLength.takeIf { it > 0L }
-        val percent = total?.let {
-            downloadedBytes.toDouble().div(it).times(100.0).coerceIn(0.0, 100.0)
-        }
-        val progress = if (total != null) {
-            "${formatPercent(percent ?: 0.0)} · ${formatBytes(downloadedBytes)} / ${formatBytes(total)}"
-        } else {
-            "${formatBytes(downloadedBytes)} / 未知大小"
-        }
-        val speed = speedBytesPerSecond
-            .takeIf { it > 0L }
-            ?.let { " · ${formatBytes(it)}/s" }
-            .orEmpty()
-        val remaining = remainingSeconds
-            ?.let { " · 剩余约 ${formatDuration(it)}" }
-            .orEmpty()
-        val error = errorMessage
-            ?.takeIf { it.isNotBlank() }
-            ?.let { " · $it" }
-            .orEmpty()
-        val label = when (status) {
-            DownloadStatus.RUNNING -> "正在下载"
-            DownloadStatus.FAILED -> "连接中断，准备续传"
-            DownloadStatus.DONE -> "下载完成"
-            DownloadStatus.PAUSED -> "已暂停"
-            DownloadStatus.QUEUED -> "排队中"
-        }
-        return "$label ${fileName}: $progress$speed$remaining$error"
-    }
 
     private fun List<ChatSessionRecord>.upsertSession(
         sessionId: String,
@@ -13005,8 +12947,6 @@ contextTraceJson: String?
      */
     private fun cloudProviderPreset(key: String): CloudProviderPreset? = findCloudProviderPreset(key)
 
-    private fun credentialFailureMessage(result: CredentialSaveResult): String? =
-        credentialWriteFailureMessage(result)
 
     private fun loadOrCreateApiKey(application: Application): String =
         GenerationPreferences.loadOrCreateApiKey(application)
@@ -13223,30 +13163,14 @@ contextTraceJson: String?
         createdFiles: MutableList<File>
     ): List<ChatMessage> = preparedForLocalVision(visionAttachmentPort, createdFiles)
 
-    /** Delegates to [compressedForLocalVision]. */
-    private fun ChatImageAttachment.withCompressedFileForLocalVision(
-        createdFiles: MutableList<File>
-    ): ChatImageAttachment = compressedForLocalVision(visionAttachmentPort, createdFiles)
 
-    /** Delegates to [decodeVisionBitmap]. */
-    private fun ChatImageAttachment.decodeBitmapForLocalVision(): Bitmap =
-        decodeVisionBitmap(visionAttachmentPort)
 
     /** Delegates to [deduplicatedVisionAttachmentsForSend]; see there for the contract. */
     private fun List<ChatImageAttachment>.deduplicateVisionAttachmentsForSend(
         context: Context
     ): List<ChatImageAttachment> = deduplicatedVisionAttachmentsForSend(context)
 
-    /** Delegates to [compressedInlineForCloud]. */
-    private fun ChatImageAttachment.withCompressedInlineData(): ChatImageAttachment =
-        compressedInlineForCloud(visionAttachmentPort)
 
-    /** Delegates to [scaledDownToMaxEdge]. */
-    private fun Bitmap.scaledToMaxEdge(maxEdge: Int): Bitmap = scaledDownToMaxEdge(maxEdge)
-
-    /** Delegates to [visionDecodeOptions]. */
-    private fun visionBitmapOptions(sampleSize: Int): BitmapFactory.Options =
-        visionDecodeOptions(sampleSize)
     /** Delegates to [isLocalVisionRunnerAvailable]. */
     private suspend fun localVisionRunnerAvailable(): Boolean =
         isLocalVisionRunnerAvailable(visionAttachmentPort)
@@ -13861,10 +13785,6 @@ contextTraceJson: String?
         return runCanary(port = tuningCanaryPort, candidate = candidate, canaryParams = canaryParams, authorization = authorization, disposition = disposition, lifecycleLease = lifecycleLease)
     }
 
-/** Delegates to [canaryHardGate]. Signature kept verbatim. */
-    private fun tuningCandidateHardGate(result: CandidateCanaryResult): CandidateHardGate {
-        return canaryHardGate(port = tuningCanaryPort, result = result)
-    }
 
 /** Delegates to [canaryScore]. Signature kept verbatim. */
     private fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore = canaryScore(port = tuningCanaryPort, result = result)
