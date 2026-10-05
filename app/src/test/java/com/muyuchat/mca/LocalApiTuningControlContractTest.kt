@@ -92,13 +92,63 @@ class LocalApiTuningControlContractTest {
         val source = mainViewModelSource()
         assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJson()"))
         assertTrue(source.contains("override fun tuningJson(): String = tuningStateJson()"))
-        for (method in listOf("pauseTuningJob", "resumeTuningJob", "cancelTuningJob")) {
+        for (method in listOf("pauseTuningJob", "resumeTuningJob", "cancelTuningJob", "applyTuningJob", "rollbackTuning")) {
             val count = Regex("override fun $method\\(").findAll(source).count()
             assertEquals("$method must keep exactly its two overloads", 2, count)
         }
     }
 
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+
+    @Test
+    fun applyTuningJobKeepsItsValidationMatrixAndAcceptPayload() {
+        // P8/S40-2B-2: the apply overload's validation chain, the gated state writes and the
+        // 202 accept payload moved to LocalApiControlPlaneOperations unchanged; the apply job
+        // launch and its lifecycle ownership stay on MainViewModel behind the control port.
+        val body = functionBody(
+            localApiControlPlaneOperationsSource(),
+            "internal fun localApiApplyTuningJobFor("
+        )
+
+        val ordered = listOf(
+            "val identity = activeRuntimeIdentity()",
+            "\"model_not_loaded\"",
+            "if (activeModelForRuntimeProfile() == null) {",
+            "tuningJob(jobId)",
+            "code = \"tuning_job_not_found\"",
+            "job.identityKey != identity.identityHash",
+            "\"tuning_job_model_mismatch\"",
+            "localApiExclusiveLifecycleConflict(\"apply\", allowedStagedJobId = jobId)",
+            "pendingTransaction(identity.identityHash)",
+            "\"pending_profile_unavailable\"",
+            "pending.journal.jobId != jobId",
+            "\"staged_candidate_not_found\"",
+            "TuningJournalState.STAGED.name",
+            "\"staged_candidate_not_ready\"",
+            "PersistedTuningJobState.PAUSED.name",
+            "\"tuning_apply_state_conflict\"",
+            "assignActiveTuningJobId(jobId)",
+            "setTuningCancelRequested(false)",
+            "setTuningPauseRequested(false)",
+            "launchTuningApply(pending)",
+            ".put(\"action\", \"apply\")",
+            "httpStatus = 202"
+        )
+        var cursor = 0
+        for (fact in ordered) {
+            val at = body.indexOf(fact, cursor)
+            assertTrue("expected [$fact] after offset $cursor", at >= 0)
+            cursor = at + fact.length
+        }
+        assertTrue(body.contains("engineLifecycle = AgentEngineLifecycle.RELOADING"))
+        assertTrue(body.contains("tuningJobState = AgentTuningJobState.VALIDATING"))
+        assertTrue(body.contains("tuningPhase = \"等待应用 staged candidate\""))
+        assertTrue(body.contains("statusMessage = \"Local API 已接受 apply，正在取得运行时生命周期。\""))
+        assertTrue(body.contains(".put(\"accepted\", true)"))
+        assertTrue(body.contains(".put(\"idempotencyKeyAccepted\", idempotencyKey.isNotBlank())"))
+        assertEquals(8, Regex("localApiTuningRejected\\(").findAll(body).count())
+        assertTrue(body.contains("tuningJobPublicJson(job)"))
+    }
 
     private fun localApiControlPlaneOperationsSource(): String =
         sourceFile("LocalApiControlPlaneOperations.kt")

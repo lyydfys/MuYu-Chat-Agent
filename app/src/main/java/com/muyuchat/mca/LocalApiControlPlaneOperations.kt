@@ -179,6 +179,16 @@ internal interface LocalApiTuningControlPort {
         failureCode: String?,
         failureSummary: String?
     ): TuningJobEntity?
+
+    suspend fun tuningJob(jobId: String): TuningJobEntity?
+
+    suspend fun pendingTransaction(identityKey: String): PendingRuntimeProfileTransaction?
+
+    fun setTuningCancelRequested(value: Boolean)
+
+    fun setTuningPauseRequested(value: Boolean)
+
+    fun launchTuningApply(pending: PendingRuntimeProfileTransaction)
 }
 
 /**
@@ -318,6 +328,92 @@ internal fun localApiCreateTuningJobFor(
     return com.muyuchat.api.local.LocalApiControlResult.Success(
         json = JSONObject()
             .put("accepted", true)
+            .put("job", tuningJobPublicJson(job))
+            .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
+            .toString(),
+        httpStatus = 202
+    )
+}
+
+
+/**
+ * P8/S40-2B-2: the Local API control-plane apply overload, moved verbatim out of
+ * MainViewModel's `LocalApiRuntime.controlPlane` object. Validation chain, gated state writes
+ * and the 202 accept payload are unchanged; the apply job launch and its lifecycle ownership
+ * stay on the VM behind [LocalApiTuningControlPort.launchTuningApply].
+ */
+internal fun localApiApplyTuningJobFor(
+    jobId: String,
+    idempotencyKey: String,
+    port: LocalApiTuningControlPort
+): LocalApiControlResult = with(port) {
+    val identity = activeRuntimeIdentity()
+        ?: return localApiTuningRejected(409, "model_not_loaded", "当前没有已加载的本地模型。")
+    if (activeModelForRuntimeProfile() == null) {
+        return localApiTuningRejected(409, "model_not_loaded", "当前模型没有可应用的运行配置。")
+    }
+    val job = runCatching {
+        runBlocking(Dispatchers.IO) { tuningJob(jobId) }
+    }.getOrNull() ?: return localApiTuningRejected(
+        httpStatus = 404,
+        code = "tuning_job_not_found",
+        message = "未找到调优任务：$jobId"
+    )
+    if (job.identityKey != identity.identityHash) {
+        return localApiTuningRejected(
+            409,
+            "tuning_job_model_mismatch",
+            "该调优任务不属于当前已加载模型。"
+        )
+    }
+    localApiExclusiveLifecycleConflict("apply", allowedStagedJobId = jobId)?.let { return it }
+    val pending = runCatching {
+        runBlocking(Dispatchers.IO) { pendingTransaction(identity.identityHash) }
+    }.getOrElse { error ->
+        return localApiTuningRejected(
+            409,
+            "pending_profile_unavailable",
+            error.message ?: "无法读取 staged candidate。"
+        )
+    }
+    if (pending == null || pending.journal.jobId != jobId) {
+        return localApiTuningRejected(
+            409,
+            "staged_candidate_not_found",
+            "该任务没有可应用的 staged candidate。"
+        )
+    }
+    if (pending.journal.state != TuningJournalState.STAGED.name) {
+        return localApiTuningRejected(
+            409,
+            "staged_candidate_not_ready",
+            "候选事务当前处于 ${pending.journal.state.lowercase()}，不能重复应用。"
+        )
+    }
+    if (job.state !in setOf(PersistedTuningJobState.PAUSED.name, PersistedTuningJobState.RUNNING.name)) {
+        return localApiTuningRejected(
+            409,
+            "tuning_apply_state_conflict",
+            "调优任务当前处于 ${job.state.lowercase()}，不能应用 staged candidate。"
+        )
+    }
+    assignActiveTuningJobId(jobId)
+    setTuningCancelRequested(false)
+    setTuningPauseRequested(false)
+    updateUiState {
+        it.copy(
+            busy = true,
+            engineLifecycle = AgentEngineLifecycle.RELOADING,
+            tuningJobState = AgentTuningJobState.VALIDATING,
+            tuningPhase = "等待应用 staged candidate",
+            statusMessage = "Local API 已接受 apply，正在取得运行时生命周期。"
+        )
+    }
+    launchTuningApply(pending)
+    return com.muyuchat.api.local.LocalApiControlResult.Success(
+        json = JSONObject()
+            .put("accepted", true)
+            .put("action", "apply")
             .put("job", tuningJobPublicJson(job))
             .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
             .toString(),
