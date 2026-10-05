@@ -85,7 +85,7 @@ class LocalImageProductClosureTest {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + // P9/S2: ChatUiItemModels.kt 承接原 ChatScreen.kt 的条目模型与小助手（多源拼接随迁）。
-sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageLibrarySupportScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
         // ImageGenerationStatusRecord's entries moved to PersistedRecords.kt during P2, so the
         // first assertion reads from there. The other four read function bodies that stayed in
         // the ViewModel, an expression in MainActivity and one in ChatScreen. No assertion
