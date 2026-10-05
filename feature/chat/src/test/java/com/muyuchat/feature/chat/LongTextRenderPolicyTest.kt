@@ -26,7 +26,10 @@ class LongTextRenderPolicyTest {
         // still reads it). The assertion tracks the declaration, so it tracks the new modifier; the
         // value it pins, 16_384, is unchanged.
         assertTrue(source.contains("internal const val MESSAGE_RENDER_PAGE_CHARS = 16_384"))
-        assertTrue(source.contains("private fun PagedPlainMessageText("))
+        // P9/S9: PagedPlainMessageText moved to ChatMessageTextRenderers.kt and had to widen from
+        // private to internal there (cross-file entry). The assertion tracks the declaration; the
+        // page-bound behaviour it pins is unchanged.
+        assertTrue(source.contains("internal fun PagedPlainMessageText("))
         // P9/S8: PagedAssistantRichText moved to ChatMarkdownBlockRenderers.kt and had to widen from
         // private to internal there (cross-file entry). The assertion tracks the declaration; the
         // signature and the bound it enforces are unchanged.
@@ -83,8 +86,8 @@ class LongTextRenderPolicyTest {
             ).firstOrNull(File::isFile)
             if (chatScreen != null) {
                 val directory = chatScreen.parentFile
-                // P9/S5+S6+S8: markdown 解析器/渲染器与提示栏簇已迁出（多源拼接随迁）。
-                return listOf("ChatScreen.kt", "ChatChromeScreens.kt", "ChatMarkdownRenderSupport.kt", "ChatMarkdownBlockParser.kt", "ChatMarkdownBlockRenderers.kt", "ImagePromptBarScreens.kt").joinToString("\n") { name ->
+                // P9/S5–S9: markdown 解析器/渲染器、提示栏与消息文本簇已迁出（多源拼接随迁）。
+                return listOf("ChatScreen.kt", "ChatChromeScreens.kt", "ChatMarkdownRenderSupport.kt", "ChatMarkdownBlockParser.kt", "ChatMarkdownBlockRenderers.kt", "ImagePromptBarScreens.kt", "ChatMessageTextRenderers.kt").joinToString("\n") { name ->
                     File(directory, name).takeIf(File::isFile)?.readText(Charsets.UTF_8).orEmpty()
                 }
             }
