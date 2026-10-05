@@ -181,7 +181,3 @@ internal class OfflinePromptTranslationBundleInstaller(context: Context) {
 
     private data class BundleDocument(val uri: Uri, val isDirectory: Boolean)
 }
-
-private fun ByteArray.toLowercaseHex(): String = joinToString("") { byte ->
-    "%02x".format(byte.toInt() and 0xff)
-}
