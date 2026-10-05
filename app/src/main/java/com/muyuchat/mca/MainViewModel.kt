@@ -1378,10 +1378,10 @@ contextTraceJson: String?
                     state = _uiState.value,
                     engine = engine,
                     publicModelId = { displayName, id -> localApiPublicModelId(displayName, id) },
-                    runtimeProfileJson = { runtimeProfileJson() }
+                    runtimeProfileJson = { runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity) }
                 )
 
-            override fun profileJson(): String = runtimeProfileJson()
+            override fun profileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)
 
             override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)
 
@@ -13702,48 +13702,6 @@ contextTraceJson: String?
 
 
 
-    private fun runtimeProfileJson(): String {
-        val state = _uiState.value
-        val runtimeLoaded = state.loadedModelId != null && engine.stats.value.loaded
-        val profile = engine.activeExecutionProfile().takeIf { runtimeLoaded }
-        val signatures = engine.parameterSignatureSnapshot().takeIf { runtimeLoaded }
-        return JSONObject()
-            .put("modelId", state.loadedModelId)
-            .put("modelName", state.loadedModelName)
-            .put("identityHash", activeRuntimeIdentity?.identityHash.takeIf { runtimeLoaded })
-            .put("profileId", if (runtimeLoaded) state.profileId ?: profile?.profileId else null)
-            .put("revision", if (runtimeLoaded) state.revision ?: profile?.revision else null)
-            .put("recordState", state.profileRecordState.name.lowercase())
-            .put("verification", state.verification.name.lowercase())
-            .put("engineLifecycle", state.engineLifecycle.name.lowercase())
-            .put("reloadRequired", state.reloadRequired)
-            .put("signatures", JSONObject().apply {
-                signatures?.let { value ->
-                    put("desired", value.desired.digest)
-                    put("resolvedLoad", value.resolved.digest)
-                    put("activeLoaded", value.active?.digest)
-                    put("committedExecution", value.committed.digest)
-                    put("runtimeOverride", value.override.digest)
-                    put("effectiveExecution", value.effective?.digest)
-                }
-            })
-            .put("pending", state.pendingProfile?.let { pending ->
-                JSONObject()
-                    .put("profileId", pending.profileId)
-                    .put("revision", pending.revision)
-                    .put("summary", pending.summary)
-                    .put("readyToApply", pending.readyToApply)
-            } ?: JSONObject.NULL)
-            .put("rollback", state.rollbackProfile?.let { rollback ->
-                JSONObject()
-                    .put("profileId", rollback.targetProfileId)
-                    .put("revision", rollback.targetRevision)
-                    .put("summary", rollback.summary)
-                    .put("available", rollback.available)
-            } ?: JSONObject.NULL)
-            .toString()
-    }
-
     private fun localApiModelMatches(
         requestedModel: String,
         state: MainUiState,
@@ -14025,7 +13983,7 @@ contextTraceJson: String?
             override fun tuningPauseRequested(): Boolean =
                 this@MainViewModel.adaptiveTuningPauseRequested.get()
 
-            override fun runtimeProfileJson(): String = this@MainViewModel.runtimeProfileJson()
+            override fun runtimeProfileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)
 
             override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
 

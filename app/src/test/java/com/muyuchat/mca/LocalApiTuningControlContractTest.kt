@@ -90,7 +90,8 @@ class LocalApiTuningControlContractTest {
         // method's String/IdempotencyContext overload pair. Extracting any of these must keep both
         // surfaces accounted for.
         val source = mainViewModelSource()
-        assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJson()"))
+        // R3/S19: profileJson 的一行委托目标随投影外移改为 RuntimeEngineReads 缝；surface 合同保持。
+        assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)"))
         // R1/S9: tuningJson 的转发目标随 VM 私有委托坍塌改为 payload 投影 owner；
         // "投影 surface 是一行委托"的合同保持，仅更新代理目标。
         assertTrue(source.contains("override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)"))

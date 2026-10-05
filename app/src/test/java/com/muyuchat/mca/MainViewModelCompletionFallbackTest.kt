@@ -507,8 +507,8 @@ class MainViewModelCompletionFallbackTest {
     @Test
     fun localApiActiveProfileProjectionRequiresARealLoadedRuntime() {
         val source = mainViewModelSource()
-        val profileBody = functionBody(source, "private fun runtimeProfileJson()")
-        // R3/S18: apiGenerationParams 已移至 RuntimeEngineReads 缝（engine 作参数，体逐字）；双源读取。
+        // R3/S18+S19: runtimeProfileJson 与 apiGenerationParams 均已移至 RuntimeEngineReads 缝（体逐字）；双源读取。
+        val profileBody = functionBody(runtimeEngineReadsSource(), "internal fun runtimeProfileJsonFor(")
         val paramsBody = functionBody(runtimeEngineReadsSource(), "internal fun engineApiGenerationParams(")
 
         assertTrue(profileBody.contains("state.loadedModelId != null && engine.stats.value.loaded"))
