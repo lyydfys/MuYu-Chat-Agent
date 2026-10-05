@@ -534,10 +534,10 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
     }
-    private val globalChatAppearanceStore = GlobalChatAppearanceStore(application)
-    private val backgroundImageStore = BackgroundImageStore(application)
+    private val globalChatAppearanceStore = container.globalChatAppearanceStore
+    private val backgroundImageStore = container.backgroundImageStore
     private val chatAppearanceMutex = Mutex()
-    private val cloudApiStore = CloudApiStore(application)
+    private val cloudApiStore = container.cloudApiStore
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
     /** Optional, independently verified Hy-MT2 bundle. A missing bundle stays an explicit
      * fallback state and never masquerades as a completed translation. */
@@ -590,7 +590,7 @@ class MainViewModel @JvmOverloads constructor(
             bundle
         }
     }
-    private val offlineTranslationInstaller = OfflinePromptTranslationBundleInstaller(application)
+    private val offlineTranslationInstaller = container.offlineTranslationInstaller
     private val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
     private var offlineTranslationInstallJob: Job? = null
     private var offlineTranslationDownloadJob: Job? = null
@@ -607,15 +607,15 @@ class MainViewModel @JvmOverloads constructor(
         OfflinePromptTranslationService(AppOfflinePromptTranslationRuntimeProvider(application))
     }
     private val cloudImageProvider = CloudImageProvider()
-    private val webSearchStore = WebSearchStore(application)
-    private val webSearchDiagnosticStore = WebSearchDiagnosticStore(application)
+    private val webSearchStore = container.webSearchStore
+    private val webSearchDiagnosticStore = container.webSearchDiagnosticStore
     private val webSearchProvider = WebSearchProvider()
     @Volatile private var activeWebSearchDeferred: Deferred<WebSearchResult>? = null
     @Volatile private var activeWebSearchTaskId: String? = null
-    private val localImageModelStore = LocalImageModelStore(application)
-    private val localImageLoraStore = LocalImageLoraStore(application)
-    private val localImageTextualInversionStore = TextualInversionStore(application)
-    private val localImageUpscalerStore = LocalImageUpscalerStore(application)
+    private val localImageModelStore = container.localImageModelStore
+    private val localImageLoraStore = container.localImageLoraStore
+    private val localImageTextualInversionStore = container.localImageTextualInversionStore
+    private val localImageUpscalerStore = container.localImageUpscalerStore
     private val imagePromptTokenizerDescriptors =
         java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>()
     private val imagePromptTokenMeasurementCache = ImagePromptTokenMeasurementCache()
