@@ -508,7 +508,8 @@ class MainViewModelCompletionFallbackTest {
     fun localApiActiveProfileProjectionRequiresARealLoadedRuntime() {
         val source = mainViewModelSource()
         val profileBody = functionBody(source, "private fun runtimeProfileJson()")
-        val paramsBody = functionBody(source, "private fun apiGenerationParams()")
+        // R3/S18: apiGenerationParams 已移至 RuntimeEngineReads 缝（engine 作参数，体逐字）；双源读取。
+        val paramsBody = functionBody(runtimeEngineReadsSource(), "internal fun engineApiGenerationParams(")
 
         assertTrue(profileBody.contains("state.loadedModelId != null && engine.stats.value.loaded"))
         assertTrue(paramsBody.contains("state.loadedModelId != null && engine.stats.value.loaded"))
@@ -586,6 +587,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** R3/S18: the runtime engine-read seam that now hosts apiGenerationParams. */
+    private fun runtimeEngineReadsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/RuntimeEngineReads.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/RuntimeEngineReads.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("RuntimeEngineReads.kt not found from ${System.getProperty("user.dir")}")
     }
 
     /** The owner that holds the streamed-output buffer and its generation-ownership guard. */

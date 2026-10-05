@@ -10175,7 +10175,7 @@ contextTraceJson: String?
 
     fun runAgentBenchmark() {
         viewModelScope.launch(Dispatchers.IO) {
-            val currentParams = apiGenerationParams()
+            val currentParams = engineApiGenerationParams(engine, _uiState.value)
             busy("正在按当前参数测速...")
             runCatching {
                 val device = currentDeviceProfile()
@@ -11484,9 +11484,9 @@ contextTraceJson: String?
 
     private val localApiAuxProviderPort: LocalApiAuxProviderPort =
         object : LocalApiAuxProviderPort {
-            override fun analysisParamsJson(): String = apiGenerationParams().toJson()
+            override fun analysisParamsJson(): String = engineApiGenerationParams(engine, _uiState.value).toJson()
 
-            override fun analysisGenerationParams(): GenerationParams = apiGenerationParams()
+            override fun analysisGenerationParams(): GenerationParams = engineApiGenerationParams(engine, _uiState.value)
 
             override fun modelsJsonText(): String = localApiModelsJson(localApiPayloadPort)
 
@@ -13742,13 +13742,6 @@ contextTraceJson: String?
                     .put("available", rollback.available)
             } ?: JSONObject.NULL)
             .toString()
-    }
-
-    private fun apiGenerationParams(): GenerationParams {
-        val state = _uiState.value
-        val active = engine.activeExecutionProfile()
-            .takeIf { state.loadedModelId != null && engine.stats.value.loaded }
-        return if (active == null) state.params else mergedExecutionProfile(state.params, active)
     }
 
     private fun localApiModelMatches(
