@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import com.muyuchat.mca.composition.McaAppContainer
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -425,9 +426,11 @@ class MainViewModel @JvmOverloads constructor(
     private val restoredModelIdentityReferences = runBlocking(Dispatchers.IO) {
         modelIdentityReferenceMigration.migratePendingReferences()
     }
-    private val runtimeProfileStore = ModelRuntimeProfileStore(application)
+    // R2/S12：组合根接管装配（本片 7 个 application-only store；1:1 构造，零行为变化）。
+    private val container = McaAppContainer(application)
+    private val runtimeProfileStore = container.runtimeProfileStore
     /** User-facing sampling/reasoning values, isolated by local/cloud model identity. */
-    private val modelGenerationProfileStore = ModelGenerationProfileStore(application)
+    private val modelGenerationProfileStore = container.modelGenerationProfileStore
     private val installationScopeId = runBlocking(Dispatchers.IO) {
         runtimeProfileStore.installationScopeId()
     }
@@ -499,12 +502,12 @@ class MainViewModel @JvmOverloads constructor(
     /** Deduplicates repeated process-foreground callbacks and their worker health probes. */
     private var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
-    private val chatSessionStore = ChatSessionStore(application)
+    private val chatSessionStore = container.chatSessionStore
     private val characterMemorySummaryJobs = mutableMapOf<String, Job>()
     private val characterMemorySummaryReschedule = mutableSetOf<String>()
-    private val chatImageToolAuthorizationStore = ChatImageToolAuthorizationStore(application)
-    private val worldBookStore = WorldBookStore(application)
-    private val knowledgeBaseStore = KnowledgeBaseStore(application)
+    private val chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore
+    private val worldBookStore = container.worldBookStore
+    private val knowledgeBaseStore = container.knowledgeBaseStore
     private val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
     private val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
@@ -516,7 +519,7 @@ class MainViewModel @JvmOverloads constructor(
             assetDirectory = imageAssetDirectory
         )
     }
-    private val assistantStore = AssistantStore(application)
+    private val assistantStore = container.assistantStore
     private val assistantSaveMutex = Mutex()
 
     private fun persistAssistantsAsync() {
