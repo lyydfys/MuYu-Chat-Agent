@@ -17,4 +17,6 @@ internal class RuntimeAdmissionState(
     var activeModelForRuntimeProfile: ModelManifest? = null
 
     var activeAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
+
+    var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
 }

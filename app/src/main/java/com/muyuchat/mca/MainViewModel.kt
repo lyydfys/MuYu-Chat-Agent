@@ -612,7 +612,8 @@ class MainViewModel @JvmOverloads constructor(
     private val cloudImageProvider = CloudImageProvider()
     private val webSearchStore = container.webSearchStore
     private val webSearchDiagnosticStore = container.webSearchDiagnosticStore
-    private val webSearchProvider = WebSearchProvider()
+    private val webSearchProvider: WebSearchProvider
+        get() = container.webSearchProvider
     @Volatile private var activeWebSearchDeferred: Deferred<WebSearchResult>? = null
     @Volatile private var activeWebSearchTaskId: String? = null
     private val localImageModelStore = container.localImageModelStore
@@ -1076,7 +1077,11 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.activeRuntimeIdentity = value
         }
-    private var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
+    private var activeVisionProjectorStamp: LoadedVisionProjectorStamp?
+        get() = container.runtimeAdmission.activeVisionProjectorStamp
+        set(value) {
+            container.runtimeAdmission.activeVisionProjectorStamp = value
+        }
     private var activeAdaptiveRecommendation: AdaptiveTuningRecommendation?
         get() = container.runtimeAdmission.activeAdaptiveRecommendation
         set(value) {
@@ -1102,8 +1107,10 @@ class MainViewModel @JvmOverloads constructor(
     private val localImageGenerationCoordinatorObservationLock = Any()
     private val localApiImageGenerationLifecycleLock = Any()
     private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
-    private val localImageLoraLifecycleLock = Any()
-    private val localImageTextualInversionLifecycleLock = Any()
+    private val localImageLoraLifecycleLock: Any
+        get() = container.localImageLoraLifecycleLock
+    private val localImageTextualInversionLifecycleLock: Any
+        get() = container.localImageTextualInversionLifecycleLock
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
         if (imageLibraryStartupReconciliation.await() != null) {
@@ -1291,6 +1298,10 @@ contextTraceJson: String?
             appUpdate = initialAppUpdateState
         )
     )
+    // R3/C3-S1（插队裁定 2）：三个小端口具名化为容器工厂构造（真实依赖注入），匿名实现已删除。
+    private val localImageAdapterPort = container.createLocalImageAdapterPort(uiStateStore)
+    private val webSearchConfigPort = container.createWebSearchConfigPort(uiStateStore)
+    private val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
     private val tuningOwner = container.createTuningOwner(
         store = uiStateStore,
@@ -2296,31 +2307,6 @@ contextTraceJson: String?
         }
         persistFiles(emptyList())
     }
-
-    /**
-     * The ViewModel side of [LocalImageAdapterPort]. Both lifecycle locks stay here and are only ever
-     * entered through the two locked-section methods.
-     */
-    private val localImageAdapterPort: LocalImageAdapterPort =
-        object : LocalImageAdapterPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val loraStore: LocalImageLoraStore
-                get() = this@MainViewModel.localImageLoraStore
-
-            override val textualInversionStore: TextualInversionStore
-                get() = this@MainViewModel.localImageTextualInversionStore
-
-            override fun <T> withLoraLifecycleLock(block: () -> T): T =
-                synchronized(this@MainViewModel.localImageLoraLifecycleLock) { block() }
-
-            override fun <T> withTextualInversionLifecycleLock(block: () -> T): T =
-                synchronized(this@MainViewModel.localImageTextualInversionLifecycleLock) { block() }
-        }
 
     /** Delegates to [importLocalImageLoraAdapter]. */
     fun importLocalImageLora(uriString: String) {
@@ -4007,34 +3993,6 @@ contextTraceJson: String?
             }
         }
     }
-
-    /**
-     * The ViewModel side of [WebSearchConfigPort]. Six members; the coroutine scope is passed to the
-     * operations as a parameter instead, because a scope belongs to the caller.
-     */
-    private val webSearchConfigPort: WebSearchConfigPort =
-        object : WebSearchConfigPort {
-            override val context: Application
-                get() = this@MainViewModel.getApplication()
-
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun saveConfig(config: WebSearchConfig) {
-                this@MainViewModel.webSearchStore.save(config)
-            }
-
-            override fun appendDiagnostic(
-                record: WebSearchDiagnosticRecord
-            ): List<WebSearchDiagnosticRecord> =
-                this@MainViewModel.appendWebSearchDiagnostic(record)
-
-            override val provider: WebSearchProvider
-                get() = this@MainViewModel.webSearchProvider
-        }
 
     /** Delegates to [persistWebSearchConfig]. */
     fun saveWebSearchConfig(
@@ -11841,31 +11799,6 @@ contextTraceJson: String?
             imageAttachments = attachments.deduplicateVisionAttachmentsForDisplay()
         )
     }
-
-    /**
-     * The ViewModel side of [VisionAttachmentPort]. This interface is the Android adapter seam for
-     * vision preparation: the `ContentResolver`, the cache directory and the engine's native stats are
-     * the four things the moved functions genuinely need from their owner.
-     */
-    private val visionAttachmentPort: VisionAttachmentPort =
-        object : VisionAttachmentPort {
-            override val context: Context
-                get() = this@MainViewModel.getApplication()
-
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun nativeStatsJson(): String = this@MainViewModel.engine.nativeStatsJson()
-
-            override val activeRuntimeIdentity: ModelRuntimeIdentity?
-                get() = this@MainViewModel.activeRuntimeIdentity
-
-            override val activeVisionProjectorStamp: LoadedVisionProjectorStamp?
-                get() = this@MainViewModel.activeVisionProjectorStamp
-        }
 
     /** Delegates to [visionMimeTypeForUri]; the Context read stays on the owner side. */
     private fun mimeTypeForUri(uriString: String): String =

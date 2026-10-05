@@ -1,6 +1,13 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.VisionAttachmentPort
+import com.muyuchat.mca.WebSearchProvider
+import com.muyuchat.mca.LocalImageAdapterPortAdapter
+import com.muyuchat.mca.WebSearchConfigPortAdapter
+import com.muyuchat.mca.VisionAttachmentPortAdapter
+import com.muyuchat.mca.WebSearchConfigPort
+import com.muyuchat.mca.LocalImageAdapterPort
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.mca.AssistantStore
 import com.muyuchat.core.engine.McaInferenceService
@@ -73,6 +80,13 @@ internal class McaAppContainer(private val application: Application) {
 
     val localImageLoraStore = LocalImageLoraStore(application)
 
+    // R3/C3-S1（插队裁定 2/3）：自 VM 迁出的共享锁实例与 webSearch provider。
+    val localImageLoraLifecycleLock = Any()
+
+    val localImageTextualInversionLifecycleLock = Any()
+
+    val webSearchProvider = WebSearchProvider()
+
     val localImageTextualInversionStore = TextualInversionStore(application)
 
     val localImageUpscalerStore = LocalImageUpscalerStore(application)
@@ -103,6 +117,33 @@ internal class McaAppContainer(private val application: Application) {
             application = application,
             advisor = advisor,
             admission = runtimeAdmission
+        )
+
+    /** R3/C3-S1：三个小端口的具名适配器工厂（真实依赖注入）。 */
+    fun createLocalImageAdapterPort(store: UiStateStore): LocalImageAdapterPort =
+        LocalImageAdapterPortAdapter(
+            store = store,
+            loraStoreRef = localImageLoraStore,
+            textualInversionStoreRef = localImageTextualInversionStore,
+            loraLifecycleLock = localImageLoraLifecycleLock,
+            textualInversionLifecycleLock = localImageTextualInversionLifecycleLock
+        )
+
+    fun createWebSearchConfigPort(store: UiStateStore): WebSearchConfigPort =
+        WebSearchConfigPortAdapter(
+            store = store,
+            appContext = application,
+            webSearchStoreRef = webSearchStore,
+            diagnosticStoreRef = webSearchDiagnosticStore,
+            providerRef = webSearchProvider
+        )
+
+    fun createVisionAttachmentPort(store: UiStateStore, engine: McaInferenceService): VisionAttachmentPort =
+        VisionAttachmentPortAdapter(
+            store = store,
+            appContext = application,
+            engineRef = engine,
+            admissionRef = runtimeAdmission
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
