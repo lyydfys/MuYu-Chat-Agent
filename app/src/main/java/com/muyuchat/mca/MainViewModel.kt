@@ -177,7 +177,6 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
@@ -1087,7 +1086,7 @@ contextTraceJson: String?
             true
         }
 
-    private val _uiState = MutableStateFlow(
+    private val uiStateStore = UiStateStore(
         MainUiState(
             messages = initialStartupSession?.messages.orEmpty(),
             chatSessions = initialChatSessions,
@@ -1162,7 +1161,11 @@ contextTraceJson: String?
             appUpdate = initialAppUpdateState
         )
     )
-    val uiState = _uiState.asStateFlow()
+    val uiState = uiStateStore.state
+
+    // R1/S10 过渡访问器：与 UiStateStore.ownerFlow 同一实例，保留既有 CAS/读取语义；
+    // 删除条件见 UiStateStore KDoc（R2–R4 迁移完 update/value 站点后移除）。
+    private val _uiState: MutableStateFlow<MainUiState> get() = uiStateStore.ownerFlow
 
     /**
      * The single writer for the transient status line the shell shows the user.

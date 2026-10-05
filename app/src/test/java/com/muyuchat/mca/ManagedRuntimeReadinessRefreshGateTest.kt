@@ -127,7 +127,8 @@ class ManagedRuntimeReadinessRefreshGateTest {
         val backupStarter = section(
             source,
             "private fun startImageLibraryBackupJob(",
-            "private val _uiState = MutableStateFlow("
+            // R1/S10: 状态源声明改为 UiStateStore 持有，区段边界标记随迁；区段内更新仍经 _uiState 过渡访问器。
+            "private val uiStateStore = UiStateStore("
         )
         assertTrue(
             backupStarter.indexOf("imageLibraryBackupJob = launchedJob") <
