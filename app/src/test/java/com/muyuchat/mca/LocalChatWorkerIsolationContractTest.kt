@@ -26,7 +26,11 @@ class LocalChatWorkerIsolationContractTest {
     @Test
     fun ordinaryTextRuntimesUseTheDedicatedProcessAndBinderProxy() {
         val manifest = sourceFile("app/src/main/AndroidManifest.xml")
-        val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt")
+        // The watchdog operation target/policy helpers moved to LocalChatWorkerSupport.kt during the
+        // P7/S28 worker-support extraction. Reading both files keeps the same contract under test --
+        // the assertions below are unchanged.
+        val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerSupport.kt")
         val runners = sourceFile("app/src/main/java/com/muyuchat/mca/IsolatedLocalChatRunners.kt")
         val client = sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunner.kt")
         val aidl = sourceFile("app/src/main/aidl/com/muyuchat/mca/ILocalChatWorker.aidl")
