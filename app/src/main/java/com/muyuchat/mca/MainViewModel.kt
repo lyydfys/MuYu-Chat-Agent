@@ -203,7 +203,6 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
-import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -4071,7 +4070,7 @@ contextTraceJson: String?
         persistModelGenerationParams(state, scopedParams)
         val updatedAssistants = updatedAssistantsWithParams(scopedParams)
         val hasLoadedModel = _uiState.value.loadedModelId != null
-        val reloadRequired = hasLoadedModel && executionProfileDiffers(scopedParams, engine.activeExecutionProfile())
+        val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
         _uiState.update { state ->
             state.copy(
                 params = scopedParams,
@@ -10251,7 +10250,7 @@ contextTraceJson: String?
                     ?.let { error("加载前内存检查失败：$it") }
 
                 val runtime = model.runtime.toLocalChatRuntime()
-                val loadParams = model.toLoadParams(initialState.params)
+                val loadParams = model.buildLoadParamsFor(initialState.params)
                 val firstLoadMs = timedLoadModel(model, runtime, loadParams)
                 val secondLoadMs = timedLoadModel(model, runtime, loadParams)
                 val generation = runLocalGenerationSmoke(initialState.params)
@@ -13170,9 +13169,6 @@ contextTraceJson: String?
      * declarations moved. The names differ from the top-level ones on purpose: a same-named member
      * would shadow the top-level function inside this class and the forwarder would call itself.
      */
-    private fun ModelManifest.toLoadParams(params: GenerationParams): LoadParams =
-        buildLoadParamsFor(params)
-
     private fun mergeExecutionProfile(
         generation: GenerationParams,
         profile: ModelExecutionProfile
@@ -13184,11 +13180,6 @@ contextTraceJson: String?
         authoritativeFields: Set<String>
     ): ModelExecutionProfile =
         mergeUserRequestedIntoProfile(base, requested, authoritativeFields)
-
-    private fun executionProfileDiffers(
-        requested: GenerationParams,
-        active: ModelExecutionProfile?
-    ): Boolean = profileDiffersFrom(requested, active)
 
     private suspend fun timedLoadModel(
         model: ModelManifest,
@@ -13948,11 +13939,6 @@ contextTraceJson: String?
         preferences.edit().putString(storageKey, completed.toString()).commit()
         result
     }
-
-    private fun localApiIdempotencyKeyHash(value: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest(value.toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xff) }
 
     private fun encodeDurableLocalApiResult(
         requestFingerprint: String,
