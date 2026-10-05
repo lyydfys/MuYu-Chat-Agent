@@ -37,44 +37,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
 
-data class TextualInversionImportResult(
-    val artifact: TextualInversionArtifact,
-    val duplicate: Boolean = false
-)
-
-private data class ArtifactFileVerification(
-    val canonicalPath: String,
-    val fileKey: String?,
-    val sizeBytes: Long,
-    val lastModifiedMillis: Long,
-    val sha256: String
-) {
-    fun sameIdentity(other: ArtifactFileVerification): Boolean =
-        canonicalPath == other.canonicalPath &&
-            fileKey == other.fileKey &&
-            sizeBytes == other.sizeBytes &&
-            lastModifiedMillis == other.lastModifiedMillis &&
-            sha256 == other.sha256
-}
-
-class TextualInversionSelectionLease internal constructor(
-    val selection: TextualInversionSelection,
-    val rootPath: String,
-    private val verify: () -> Unit = {},
-    private val release: () -> Unit
-) : Closeable {
-    private val closed = AtomicBoolean(false)
-
-    fun verifyUnchanged() {
-        check(!closed.get()) { "Textual inversion selection lease is already closed." }
-        verify()
-    }
-
-    override fun close() {
-        if (closed.compareAndSet(false, true)) release()
-    }
-}
-
 /**
  * App-private textual-inversion artifact store.
  *
@@ -1308,17 +1270,3 @@ class TextualInversionStore private constructor(
         private val processFileLockMutex = Mutex()
     }
 }
-
-internal fun requireTextualInversionContentImportUri(
-    scheme: String?,
-    authority: String?
-) {
-    require(scheme.equals("content", ignoreCase = true) && !authority.isNullOrBlank()) {
-        "Textual inversion import requires a content URI with an authority."
-    }
-}
-
-class TextualInversionStoreException(
-    message: String,
-    cause: Throwable? = null
-) : IOException(message, cause)
