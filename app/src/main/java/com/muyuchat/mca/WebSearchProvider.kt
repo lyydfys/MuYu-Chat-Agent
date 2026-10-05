@@ -989,28 +989,7 @@ class WebSearchProvider(
     }
 
     private suspend fun fetchDirectDocuments(urls: List<String>, config: WebSearchConfig): List<WebSearchDocument> =
-        coroutineScope {
-            urls.map { url ->
-                async {
-                    runCatching { fetchReadableDocument(url, WEB_SEARCH_DIRECT_READ_LABEL, config) }
-                        .fold(
-                            onSuccess = { it },
-                            onFailure = { error ->
-                                if (error is BlockedWebSearchUrlException) {
-                                    WebSearchDocument(
-                                        title = "已阻止读取受限地址",
-                                        url = url,
-                                        snippet = error.message.orEmpty(),
-                                        provider = "安全拦截"
-                                    )
-                                } else {
-                                    null
-                                }
-                            }
-                        )
-                }
-            }.awaitAll().filterNotNull()
-        }
+        runDirectDocumentFetch(readableFetchPort, urls, config)
 
     private suspend fun collectProviderDocuments(
         queries: List<String>,
@@ -1165,67 +1144,13 @@ class WebSearchProvider(
     private fun searchProviderQuery(query: String, config: WebSearchConfig): List<WebSearchDocument> =
         runProviderQuery(queryOperationsPort, query, config)
 
-    private fun fetchReadableDocument(url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument {
-        val httpUrl = url.toHttpUrlOrNull()
-        if (httpUrl == null || (httpUrl.scheme != "http" && httpUrl.scheme != "https")) {
-            return WebSearchDocument(title = url, url = url, provider = provider)
-        }
-        if (!allowPrivateNetworkFetch) {
-            validateReadableWebSearchUrl(url)
-        }
-        val direct = runCatching { fetchReadableDocumentDirect(url, provider) }.getOrNull()
-        if (direct != null && direct.content.length >= 280) {
-            return direct
-        }
-        if (config?.canUseJinaReader == true) {
-            val jina = runCatching { fetchJinaReaderDocument(url, provider, config) }.getOrNull()
-            if (jina != null && (jina.content.isNotBlank() || jina.snippet.isNotBlank())) {
-                return jina
-            }
-        }
-        if (direct != null) {
-            return direct
-        }
-        return WebSearchDocument(title = url, url = url, provider = provider)
+    private val readableFetchPort = object : WebSearchReadableFetchPort {
+        override val client: OkHttpClient get() = this@WebSearchProvider.client
+        override val allowPrivateNetworkFetch: Boolean get() = this@WebSearchProvider.allowPrivateNetworkFetch
     }
 
-    private fun fetchReadableDocumentDirect(url: String, provider: String): WebSearchDocument {
-        val response = client.newCall(baseRequest(url).build()).execute()
-        response.use {
-            if (!it.isSuccessful) return WebSearchDocument(title = url, url = url, provider = provider)
-            val contentType = it.header("content-type").orEmpty().lowercase()
-            if (contentType.isNotBlank() && "text" !in contentType && "html" !in contentType && "json" !in contentType) {
-                return WebSearchDocument(title = url, url = url, provider = provider)
-            }
-            val raw = it.body?.string().orEmpty()
-            val readable = raw.htmlToReadableText()
-            return WebSearchDocument(
-                title = raw.extractHtmlTitle().ifBlank { url },
-                url = url,
-                snippet = readable.lineSequence().firstOrNull().orEmpty().limitForPrompt(360),
-                content = readable.limitForPrompt(4_000),
-                provider = provider
-            )
-        }
-    }
-
-    private fun fetchJinaReaderDocument(url: String, provider: String, config: WebSearchConfig): WebSearchDocument {
-        val readerUrl = jinaReaderUrlFor(url)
-        val requestBuilder = baseRequest(readerUrl)
-            .header("Accept", "text/plain,text/markdown;q=0.9,*/*;q=0.2")
-        if (config.apiKey.isNotBlank()) {
-            requestBuilder.header("Authorization", "Bearer ${config.apiKey.trim()}")
-        }
-        val raw = client.newCall(requestBuilder.build()).executeBodyOrThrow()
-        val readable = raw.jinaReaderToReadableText()
-        return WebSearchDocument(
-            title = raw.extractJinaReaderTitle().ifBlank { url },
-            url = url,
-            snippet = readable.lineSequence().firstOrNull().orEmpty().limitForPrompt(360),
-            content = readable.limitForPrompt(4_000),
-            provider = provider
-        )
-    }
+    private fun fetchReadableDocument(url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument =
+        fetchReadableDocumentVia(readableFetchPort, url, provider, config)
 
 }
 
