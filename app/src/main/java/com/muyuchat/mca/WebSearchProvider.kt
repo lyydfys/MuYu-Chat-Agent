@@ -1394,32 +1394,5 @@ class WebSearchProvider(
         )
     }
 
-    private fun baseRequest(url: String): Request.Builder =
-        Request.Builder()
-            .url(url)
-            .header("Accept", "application/json,text/html;q=0.8,text/plain;q=0.7,*/*;q=0.3")
-            .header("User-Agent", "MCA-WebSearch/0.1 Android")
-
-    private fun okhttp3.Call.executeBodyOrThrow(): String {
-        val response = execute()
-        response.use {
-            val body = it.body?.string().orEmpty()
-            if (!it.isSuccessful) {
-                val message = body.extractErrorMessage().ifBlank { "HTTP ${it.code}" }
-                error(friendlySearchError(it.code, message))
-            }
-            return body
-        }
-    }
-
-    private fun friendlySearchError(code: Int, message: String): String =
-        when (code) {
-            400 -> "搜索接口返回 400：请求参数不被服务接受，请检查接口地址、协议类型和结果数量。$message"
-            401, 403 -> "搜索接口返回 $code：鉴权失败，请检查 API Key、套餐权限或服务端访问控制。Brave 使用 X-Subscription-Token，Tavily/Jina 使用 Bearer Key。$message"
-            404 -> "搜索接口返回 404：接口路径不存在。Brave 要 /res/v1/web/search 或 /res/v1/llm/context，Tavily 要 /search，Jina Search 推荐 https://s.jina.ai，SearxNG 通常填实例根地址。$message"
-            429 -> "搜索接口返回 429：服务限流。请稍后再试，或换自建 SearxNG / Brave / Tavily / Jina Key。$message"
-            in 500..599 -> "搜索接口返回 $code：搜索服务端异常，请稍后再试或切换搜索服务。$message"
-            else -> "搜索接口返回 $code：$message"
-        }
 }
 
