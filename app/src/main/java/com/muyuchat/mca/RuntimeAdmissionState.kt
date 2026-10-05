@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.modelstore.ModelManifest
+import kotlinx.coroutines.Job
 import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
@@ -19,4 +20,18 @@ internal class RuntimeAdmissionState(
     var activeAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
 
     var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
+
+    @Volatile
+    var activeImageGenerationJobId: String? = null
+
+    @Volatile
+    var activeImageGenerationBackend: ImageBackend? = null
+
+    @Volatile
+    var activeImageGenerationModelId: String? = null
+
+    var imageGenerationJob: Job? = null
+
+    @Volatile
+    var imageLibraryBackupJob: Job? = null
 }

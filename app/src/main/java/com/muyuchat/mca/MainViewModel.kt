@@ -516,7 +516,8 @@ class MainViewModel @JvmOverloads constructor(
     private val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
     private val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
-    private val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
+    private val imageAssetDirectory: File
+        get() = container.imageAssetDirectory
     private val chatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         ChatImageCommitJournal(
             ownedRoot = File(application.filesDir, "pending-chat-image-commits"),
@@ -908,7 +909,8 @@ class MainViewModel @JvmOverloads constructor(
     private val directParameterStageGeneration = AtomicLong(0L)
     private val managedRuntimeReadinessRefreshGate = container.readinessRefreshGate
     private val imageAssetWriteMutex = Mutex()
-    private val imageLibraryMutationMutex = Mutex()
+    private val imageLibraryMutationMutex: Mutex
+        get() = container.imageLibraryMutationMutex
     private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
         try {
             val loadedImages = chatSessionStore.loadImages()
@@ -946,7 +948,11 @@ class MainViewModel @JvmOverloads constructor(
     private val imageFavoriteMutationSequence = AtomicLong(0L)
     private val latestImageFavoriteMutations =
         java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>()
-    private var imageGenerationJob: Job? = null
+    private var imageGenerationJob: Job?
+        get() = container.runtimeAdmission.imageGenerationJob
+        set(value) {
+            container.runtimeAdmission.imageGenerationJob = value
+        }
     /** Serializes the optional chat-model prompt bridge used by chat-page image requests. */
     private var chatImagePromptBridgeJob: Job? = null
     /** Invalidates a cancelled bridge before a slow provider can enqueue its stale result. */
@@ -1031,7 +1037,11 @@ class MainViewModel @JvmOverloads constructor(
     fun cancelImageUpscale() {
         imageUpscaleOwner.cancelImageUpscale(viewModelScope)
     }
-    @Volatile private var imageLibraryBackupJob: Job? = null
+    private var imageLibraryBackupJob: Job?
+        get() = container.runtimeAdmission.imageLibraryBackupJob
+        set(value) {
+            container.runtimeAdmission.imageLibraryBackupJob = value
+        }
     private val imageLibraryBackupSequence = AtomicLong(0L)
     private val imageLibraryBackupLifecycleLock = Any()
     private var adaptiveTuningJob: Job? = null
@@ -1064,9 +1074,21 @@ class MainViewModel @JvmOverloads constructor(
         }
     private val localApiIdempotencyJournalLock = Any()
     private val pendingRuntimeRecoveries = linkedMapOf<String, RuntimeRecoveryPlan>()
-    @Volatile private var activeImageGenerationJobId: String? = null
-    @Volatile private var activeImageGenerationBackend: ImageBackend? = null
-    @Volatile private var activeImageGenerationModelId: String? = null
+    private var activeImageGenerationJobId: String?
+        get() = container.runtimeAdmission.activeImageGenerationJobId
+        set(value) {
+            container.runtimeAdmission.activeImageGenerationJobId = value
+        }
+    private var activeImageGenerationBackend: ImageBackend?
+        get() = container.runtimeAdmission.activeImageGenerationBackend
+        set(value) {
+            container.runtimeAdmission.activeImageGenerationBackend = value
+        }
+    private var activeImageGenerationModelId: String?
+        get() = container.runtimeAdmission.activeImageGenerationModelId
+        set(value) {
+            container.runtimeAdmission.activeImageGenerationModelId = value
+        }
     @Volatile private var activeLocalImageWorkerRequestId: String? = null
     @Volatile private var activeLocalApiImageModelId: String? = null
     private val localImageGenerationCoordinator = LocalImageGenerationCoordinator()

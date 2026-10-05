@@ -1,6 +1,8 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import kotlinx.coroutines.sync.Mutex
+import com.muyuchat.mca.canonicalImageAssetDirectory
 import com.muyuchat.core.engine.Role
 import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
@@ -123,6 +125,10 @@ internal class McaAppContainer(private val application: Application) {
     val readinessRefreshGate = ManagedRuntimeReadinessRefreshGate()
 
     val advisor = AgentAdvisor()
+
+    val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
+
+    val imageLibraryMutationMutex = Mutex()
 
     /** R3/C2（插队裁定 2）：调参 owner 工厂——VM 只传它自有的运行时对象（store/scope/engine），
      *  其余依赖由容器装配。 */
