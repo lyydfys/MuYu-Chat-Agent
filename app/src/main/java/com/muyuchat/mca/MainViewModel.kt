@@ -1362,30 +1362,7 @@ contextTraceJson: String?
             )
         }
         installChatLocalApiProviders(chatLocalApiProviderPort)
-        LocalApiRuntime.paramsJsonProvider = { apiGenerationParams().toJson() }
-        LocalApiRuntime.generationParamsProvider = { apiGenerationParams() }
-        LocalApiRuntime.modelsJsonProvider = { modelsJson() }
-        LocalApiRuntime.imageTextualInversionsJsonProvider = {
-            JSONArray().apply {
-                _uiState.value.localImageTextualInversions.forEach { artifact ->
-                    put(artifact.toJson(includePath = false))
-                }
-            }.toString()
-        }
-        LocalApiRuntime.modelRuntimeStatesJsonProvider = { modelRuntimeStatesJson() }
-        LocalApiRuntime.deviceProfileJsonProvider = { currentDeviceProfile().toJson().toString() }
-        LocalApiRuntime.agentRecommendationJsonProvider = { requestJson ->
-            val preference = UserPreference.fromJson(requestJson)
-            buildRecommendation(preference).toJson().toString()
-        }
-        LocalApiRuntime.benchmarkJsonProvider = {
-            benchmarkRunner.runCurrentParamsBenchmark(_uiState.value.params)
-                .toJson()
-                .toString()
-        }
-        LocalApiRuntime.imageGenerationProvider = { requestId, body ->
-            generateLocalApiImage(requestId, body)
-        }
+        installLocalApiAuxProviders(localApiAuxProviderPort)
         LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
             override fun busyState(): LocalApiBusyState {
                 val state = _uiState.value
@@ -11899,6 +11876,39 @@ contextTraceJson: String?
             override fun showStatus(message: String?) {
                 this@MainViewModel.showStatus(message)
             }
+        }
+
+    private val localApiAuxProviderPort: LocalApiAuxProviderPort =
+        object : LocalApiAuxProviderPort {
+            override fun analysisParamsJson(): String = apiGenerationParams().toJson()
+
+            override fun analysisGenerationParams(): GenerationParams = apiGenerationParams()
+
+            override fun modelsJsonText(): String = modelsJson()
+
+            override fun textualInversionsJsonText(): String = JSONArray().apply {
+                _uiState.value.localImageTextualInversions.forEach { artifact ->
+                    put(artifact.toJson(includePath = false))
+                }
+            }.toString()
+
+            override fun modelRuntimeStatesJsonText(): String = modelRuntimeStatesJson()
+
+            override fun deviceProfileJsonText(): String =
+                currentDeviceProfile().toJson().toString()
+
+            override fun recommendationJsonText(requestJson: String): String {
+                val preference = UserPreference.fromJson(requestJson)
+                return buildRecommendation(preference).toJson().toString()
+            }
+
+            override suspend fun benchmarkJsonText(): String =
+                benchmarkRunner.runCurrentParamsBenchmark(_uiState.value.params)
+                    .toJson()
+                    .toString()
+
+            override suspend fun generateImage(requestId: String, body: String): String =
+                generateLocalApiImage(requestId, body)
         }
 
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
