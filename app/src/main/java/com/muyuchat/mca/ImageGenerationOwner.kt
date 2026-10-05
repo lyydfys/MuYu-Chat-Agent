@@ -867,4 +867,13 @@ internal fun LocalImageProgress.toImageGenerationMessage(): String {
     )
 }
 
-
+/** R3/C3-S8：自 MainViewModel 顶层化的租约延迟位写入（体逐字等价，store 参数化）。 */
+internal fun updateGenerationImageGrantReleaseDeferInto(store: UiStateStore, defer: Boolean) {
+    store.update { state ->
+        if (state.deferGenerationImageGrantRelease == defer) {
+            state
+        } else {
+            state.copy(deferGenerationImageGrantRelease = defer)
+        }
+    }
+}

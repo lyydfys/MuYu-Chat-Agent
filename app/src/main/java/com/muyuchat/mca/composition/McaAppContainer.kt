@@ -1,6 +1,7 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.LocalImageWorkerClient
 import com.muyuchat.mca.LocalImageGenerationCoordinator
 import com.muyuchat.mca.ContextCompressionRequestStore
 import com.muyuchat.mca.ImageLibraryBackup
@@ -149,6 +150,10 @@ internal class McaAppContainer(private val application: Application) {
     )
 
     val imageLibraryMutationMutex = Mutex()
+
+    val imageAssetWriteMutex = Mutex()
+
+    val localImageWorkerClient = LocalImageWorkerClient(application)
 
     /** R3/C2（插队裁定 2）：调参 owner 工厂——VM 只传它自有的运行时对象（store/scope/engine），
      *  其余依赖由容器装配。 */

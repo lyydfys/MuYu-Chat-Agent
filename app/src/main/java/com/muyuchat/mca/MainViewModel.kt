@@ -636,7 +636,8 @@ class MainViewModel @JvmOverloads constructor(
     private val manualContextCompressionRequests: ContextCompressionRequestStore
         get() = container.manualContextCompressionRequests
     private val contextSummarizationService = ContextSummarizationService()
-    private val localImageWorkerClient = LocalImageWorkerClient(application)
+    private val localImageWorkerClient: LocalImageWorkerClient
+        get() = container.localImageWorkerClient
     private val deviceProfileReader = container.deviceProfileReader
     private val advisor = container.advisor
     private val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
@@ -912,7 +913,8 @@ class MainViewModel @JvmOverloads constructor(
     private val directParameterStageMutex = Mutex()
     private val directParameterStageGeneration = AtomicLong(0L)
     private val managedRuntimeReadinessRefreshGate = container.readinessRefreshGate
-    private val imageAssetWriteMutex = Mutex()
+    private val imageAssetWriteMutex: Mutex
+        get() = container.imageAssetWriteMutex
     private val imageLibraryMutationMutex: Mutex
         get() = container.imageLibraryMutationMutex
     private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
@@ -1434,15 +1436,8 @@ contextTraceJson: String?
 
 
 
-    private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) {
-        uiStateStore.update { state ->
-            if (state.deferGenerationImageGrantRelease == defer) {
-                state
-            } else {
-                state.copy(deferGenerationImageGrantRelease = defer)
-            }
-        }
-    }
+    private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
+        updateGenerationImageGrantReleaseDeferInto(uiStateStore, defer)
 
     private val autoUseManagedDownloads = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var managedDownloadOwnedBusy = false
