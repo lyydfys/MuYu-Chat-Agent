@@ -9,21 +9,25 @@ import org.junit.Test
  * P8/S40-2B precondition: behavioral contract for the Local API control-plane create path.
  *
  * Pins the rejection matrix order, the two state writes, the failure rollback and the 202
- * acceptance payload of `createTuningJob(request, idempotencyKey)` inside MainViewModel's
- * `LocalApiRuntime.controlPlane` object, plus the idempotency wrapper's delegation. Written
- * BEFORE the S40-2B extraction so the move cannot silently reorder guards or drop payload
- * fields; assertions are on the facts, not on the file that hosts them.
+ * acceptance payload of `createTuningJob(request, idempotencyKey)`, plus the idempotency
+ * wrapper's delegation. P8/S40-2B-1 moved the main implementation to
+ * `LocalApiControlPlaneOperations.localApiCreateTuningJobFor`; the main-body facts are read
+ * from there (call forms remapped to the control port), while the wrapper facts stay on
+ * MainViewModel. Assertions are on the facts, not on the file that hosts them.
  */
 class LocalApiTuningControlContractTest {
     @Test
     fun createTuningJobKeepsItsRejectionMatrixOrderAndPayloads() {
         val source = mainViewModelSource()
-        val body = functionBody(source, "override fun createTuningJob(")
+        val body = functionBody(
+            localApiControlPlaneOperationsSource(),
+            "internal fun localApiCreateTuningJobFor("
+        )
 
         val ordered = listOf(
-            "val identity = activeRuntimeIdentity",
+            "val identity = activeRuntimeIdentity()",
             "code = \"model_not_loaded\"",
-            "val model = activeModelForRuntimeProfile",
+            "val model = activeModelForRuntimeProfile()",
             "code = \"profile_not_loaded\"",
             "if (!localApiModelMatches(request.modelId, state, model))",
             "code = \"model_mismatch\"",
@@ -31,11 +35,11 @@ class LocalApiTuningControlContractTest {
             "code = \"invalid_tuning_mode\"",
             "val requestedPreference = localApiPerformancePreference(request.performancePreference)",
             "code = \"invalid_performance_preference\"",
-            "runtimeProfileStore.activeTuningJob(identity.identityHash)",
+            "activeTuningJob(identity.identityHash)",
             "code = \"tuning_state_unavailable\"",
             "localApiTuningConflict(",
             "localApiExclusiveLifecycleConflict(\"create\")",
-            "runtimeProfileStore.createTuningJob(",
+            "createTuningJob(",
             "code = \"tuning_create_conflict\""
         )
         var cursor = 0
@@ -49,7 +53,7 @@ class LocalApiTuningControlContractTest {
         assertTrue(body.contains(".put(\"loadedModelId\", state.loadedModelId)"))
         assertTrue(body.contains(".put(\"loadedModelName\", state.loadedModelName)"))
         assertTrue(body.contains("phase = \"QUEUED\""))
-        assertTrue(body.contains("activeTuningJobId = job.jobId"))
+        assertTrue(body.contains("assignActiveTuningJobId(job.jobId)"))
         assertTrue(body.contains("tuningJobState = AgentTuningJobState.QUEUED"))
         assertTrue(body.contains("tuningPhase = \"等待取得调优生命周期\""))
         assertTrue(body.contains("statusMessage = \"Local API 已创建调优任务，正在进入安全候选搜索。\""))
@@ -60,7 +64,7 @@ class LocalApiTuningControlContractTest {
         assertTrue(body.contains("state = PersistedTuningJobState.FAILED"))
         assertTrue(body.contains("phase = \"START_REJECTED\""))
         assertTrue(body.contains("failureCode = \"LIFECYCLE_CONFLICT\""))
-        assertTrue(body.contains("activeTuningJobId = null"))
+        assertTrue(body.contains("assignActiveTuningJobId(null)"))
         assertTrue(body.contains("tuningJobState = AgentTuningJobState.FAILED"))
         assertTrue(body.contains("tuningPhase = \"启动冲突\""))
 
@@ -95,6 +99,9 @@ class LocalApiTuningControlContractTest {
     }
 
     private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+
+    private fun localApiControlPlaneOperationsSource(): String =
+        sourceFile("LocalApiControlPlaneOperations.kt")
 
     private fun sourceFile(fileName: String): String {
         var root = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

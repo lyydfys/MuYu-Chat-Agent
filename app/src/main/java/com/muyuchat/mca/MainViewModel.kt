@@ -1394,138 +1394,13 @@ contextTraceJson: String?
             override fun createTuningJob(
                 request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
                 idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult {
-                val state = _uiState.value
-                val identity = activeRuntimeIdentity
-                    ?: return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "model_not_loaded",
-                        message = "请先通过正式 MainActivity 加载本地模型。"
-                    )
-                val model = activeModelForRuntimeProfile
-                    ?: return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "model_not_loaded",
-                        message = "当前模型没有可调优的本地运行身份。"
-                    )
-                if (engine.activeExecutionProfile() == null) {
-                    return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "profile_not_loaded",
-                        message = "当前模型尚未建立 active execution profile。"
-                    )
-                }
-                if (!localApiModelMatches(request.modelId, state, model)) {
-                    return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "model_mismatch",
-                        message = "调优请求的模型不是当前正式 MainActivity 已加载模型。",
-                        details = JSONObject()
-                            .put("requestedModel", request.modelId)
-                            .put("loadedModelId", state.loadedModelId)
-                            .put("loadedModelName", state.loadedModelName)
-                    )
-                }
-                val debugMode = localApiDebugMode(request.mode)
-                    ?: return localApiTuningRejected(
-                        httpStatus = 400,
-                        code = "invalid_tuning_mode",
-                        message = "mode 仅支持 quick、standard、deep 或 power_save。"
-                    )
-                val requestedPreference = localApiPerformancePreference(request.performancePreference)
-                if (!request.performancePreference.isNullOrBlank() && requestedPreference == null) {
-                    return localApiTuningRejected(
-                        httpStatus = 400,
-                        code = "invalid_performance_preference",
-                        message = "performancePreference 仅支持 balanced、speed、quality、long_context 或 power_save。"
-                    )
-                }
-                val preference = requestedPreference ?: if (debugMode == AgentDebugMode.PowerSave) {
-                    state.preference.copy(mode = PerformanceMode.PowerSave)
-                } else {
-                    state.preference
-                }
-                val existing = runCatching {
-                    runBlocking(Dispatchers.IO) { runtimeProfileStore.activeTuningJob(identity.identityHash) }
-                }.getOrElse { error ->
-                    return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "tuning_state_unavailable",
-                        message = error.message ?: "无法读取当前调优任务状态。"
-                    )
-                }
-                if (existing != null) {
-                    return localApiTuningConflict(
-                        action = "create",
-                        activeJobId = existing.jobId,
-                        message = "当前模型已有未结束的调优任务。"
-                    )
-                }
-                localApiExclusiveLifecycleConflict("create")?.let { return it }
-                val job = runCatching {
-                    runBlocking(Dispatchers.IO) {
-                        runtimeProfileStore.createTuningJob(
-                            identityKey = identity.identityHash,
-                            autoApplyLoadChanges = request.autoApply,
-                            phase = "QUEUED"
-                        )
-                    }
-                }.getOrElse { error ->
-                    return localApiTuningRejected(
-                        httpStatus = 409,
-                        code = "tuning_create_conflict",
-                        message = error.message ?: "调优任务创建失败。"
-                    )
-                }
-                activeTuningJobId = job.jobId
-                _uiState.update {
-                    it.copy(
-                        tuningJobState = AgentTuningJobState.QUEUED,
-                        tuningPhase = "等待取得调优生命周期",
-                        statusMessage = "Local API 已创建调优任务，正在进入安全候选搜索。"
-                    )
-                }
-                val started = startAgentTuning(
-                    debugMode = debugMode,
-                    autoApply = request.autoApply,
-                    precreatedJob = job,
-                    preferenceOverride = preference
-                )
-                if (!started) {
-                    val failed = runCatching {
-                        runBlocking(Dispatchers.IO) {
-                            runtimeProfileStore.transitionTuningJob(
-                                jobId = job.jobId,
-                                state = PersistedTuningJobState.FAILED,
-                                phase = "START_REJECTED",
-                                failureCode = "LIFECYCLE_CONFLICT",
-                                failureSummary = "调优任务未能取得运行时生命周期所有权。"
-                            )
-                        }
-                    }.getOrNull()
-                    activeTuningJobId = null
-                    _uiState.update {
-                        it.copy(
-                            tuningJobState = AgentTuningJobState.FAILED,
-                            tuningPhase = "启动冲突",
-                            statusMessage = "调优任务未能启动，运行时状态已变化。"
-                        )
-                    }
-                    return localApiTuningConflict(
-                        action = "create",
-                        activeJobId = failed?.jobId,
-                        message = "调优任务未能启动，运行时状态已变化。"
-                    )
-                }
-                return com.muyuchat.api.local.LocalApiControlResult.Success(
-                    json = JSONObject()
-                        .put("accepted", true)
-                        .put("job", tuningJobPublicJson(job))
-                        .put("idempotencyKeyAccepted", idempotencyKey.isNotBlank())
-                        .toString(),
-                    httpStatus = 202
-                )
-            }
+            ): com.muyuchat.api.local.LocalApiControlResult = localApiCreateTuningJobFor(
+                request = request,
+                idempotencyKey = idempotencyKey,
+                state = _uiState.value,
+                engine = engine,
+                port = localApiTuningControlPort
+            )
 
             override fun createTuningJob(
                 request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
@@ -11829,6 +11704,98 @@ contextTraceJson: String?
                 generateLocalApiImage(requestId, body)
         }
 
+    private val localApiTuningControlPort: LocalApiTuningControlPort =
+        object : LocalApiTuningControlPort {
+            override fun activeRuntimeIdentity(): ModelRuntimeIdentity? =
+                this@MainViewModel.activeRuntimeIdentity
+
+            override fun activeModelForRuntimeProfile(): ModelManifest? =
+                this@MainViewModel.activeModelForRuntimeProfile
+
+            override fun localApiModelMatches(
+                requestedModel: String,
+                state: MainUiState,
+                model: ModelManifest
+            ): Boolean = this@MainViewModel.localApiModelMatches(requestedModel, state, model)
+
+            override fun localApiDebugMode(value: String): AgentDebugMode? =
+                this@MainViewModel.localApiDebugMode(value)
+
+            override fun localApiPerformancePreference(value: String?): UserPreference? =
+                this@MainViewModel.localApiPerformancePreference(value)
+
+            override fun localApiTuningRejected(
+                httpStatus: Int,
+                code: String,
+                message: String,
+                details: JSONObject
+            ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
+                this@MainViewModel.localApiTuningRejected(httpStatus, code, message, details)
+
+            override fun localApiTuningConflict(
+                action: String,
+                activeJobId: String?,
+                message: String
+            ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
+                this@MainViewModel.localApiTuningConflict(action, activeJobId, message)
+
+            override fun localApiExclusiveLifecycleConflict(
+                action: String,
+                allowedStagedJobId: String?
+            ): com.muyuchat.api.local.LocalApiControlResult.Rejected? =
+                this@MainViewModel.localApiExclusiveLifecycleConflict(action, allowedStagedJobId)
+
+            override fun assignActiveTuningJobId(jobId: String?) {
+                activeTuningJobId = jobId
+            }
+
+            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+                _uiState.update(transform)
+            }
+
+            override fun tuningJobPublicJson(job: TuningJobEntity): JSONObject =
+                this@MainViewModel.tuningJobPublicJson(job)
+
+            override fun startAgentTuning(
+                debugMode: AgentDebugMode,
+                autoApply: Boolean,
+                precreatedJob: TuningJobEntity?,
+                preferenceOverride: UserPreference?
+            ): Boolean = this@MainViewModel.startAgentTuning(
+                debugMode = debugMode,
+                autoApply = autoApply,
+                precreatedJob = precreatedJob,
+                preferenceOverride = preferenceOverride
+            )
+
+            override suspend fun activeTuningJob(identityKey: String): TuningJobEntity? =
+                runtimeProfileStore.activeTuningJob(identityKey)
+
+            override suspend fun createTuningJob(
+                identityKey: String,
+                autoApplyLoadChanges: Boolean,
+                phase: String
+            ): TuningJobEntity = runtimeProfileStore.createTuningJob(
+                identityKey = identityKey,
+                autoApplyLoadChanges = autoApplyLoadChanges,
+                phase = phase
+            )
+
+            override suspend fun transitionTuningJob(
+                jobId: String,
+                state: PersistedTuningJobState,
+                phase: String,
+                failureCode: String?,
+                failureSummary: String?
+            ): TuningJobEntity? = runtimeProfileStore.transitionTuningJob(
+                jobId = jobId,
+                state = state,
+                phase = phase,
+                failureCode = failureCode,
+                failureSummary = failureSummary
+            )
+        }
+
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
         object : ChatLocalApiProviderPort {
             override val engine get() = this@MainViewModel.engine
@@ -13645,7 +13612,8 @@ contextTraceJson: String?
             .toString(2)
     }
 
-    private enum class AgentDebugMode(val label: String) {
+    // P8/S40-2B-1: Local API tuning-control create port needs to name this label-only enum.
+    internal enum class AgentDebugMode(val label: String) {
         Quick("快速调试"),
         Standard("标准调试"),
         Deep("深度调试"),
