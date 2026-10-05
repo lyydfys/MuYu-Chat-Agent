@@ -123,284 +123,64 @@ class ModelScopeClient(
     fun userFacingRecommendedModels(): List<ModelScopeRecommendedModel> =
         DEFAULT_RECOMMENDED_MODELS.filter { it.visibleInRecommendations }
 
-    private fun requireDownloadableRecommendation(model: ModelScopeRecommendedModel) {
-        require(model.downloadable) {
-            model.downloadBlockReason ?: "该推荐模型暂未接入可验证的一键下载链路。"
+    private val modelScopeRecommendedPort: ModelScopeRecommendedCatalogPort =
+        object : ModelScopeRecommendedCatalogPort {
+            override val client get() = this@ModelScopeClient.client
+            override val huggingFaceEndpoints get() = this@ModelScopeClient.huggingFaceEndpoints
+
+            override fun listModelFiles(
+                input: String,
+                revision: String,
+                provider: ModelRepositoryProvider,
+                extensions: Set<String>
+            ): List<RemoteModelFile> =
+                this@ModelScopeClient.listModelFiles(input, revision, provider, extensions)
+
+            override fun listGgufFiles(
+                input: String,
+                revision: String,
+                provider: ModelRepositoryProvider
+            ): List<RemoteModelFile> =
+                this@ModelScopeClient.listGgufFiles(input, revision, provider)
+
+            override fun pinnedQairtImageReleaseAssetIntegrity(
+                modelId: String,
+                resolvedName: String,
+                recommendedName: String
+            ): Pair<Long?, String?> =
+                this@ModelScopeClient.pinnedQairtImageReleaseAssetIntegrity(modelId, resolvedName, recommendedName)
         }
-    }
 
     fun listRecommendedFiles(
         model: ModelScopeRecommendedModel,
         preferredQairtChipsets: List<String> = emptyList()
-    ): List<RemoteModelFile> {
-        requireDownloadableRecommendation(model)
-        model.mnnModelBundle?.let { return recommendedMnnBundleFiles(model) }
-        model.visionModelBundle?.let { return recommendedVisionBundleFiles(model) }
-        model.imageEngineBundle?.let {
-            return recommendedImageBundleFiles(model, preferredQairtChipsets)
-        }
-        if (model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
-            return listOf(recommendedQairtChatFile(model, preferredQairtChipsets))
-        }
-        if (model.chatRuntime == RecommendedChatRuntime.LITERT_LM) {
-            return listModelFiles(
-                input = model.repoId,
-                revision = model.revision,
-                provider = model.provider,
-                extensions = setOf("litertlm")
-            ).sortedWith(
-                compareByDescending<RemoteModelFile> {
-                    it.name.equals(model.recommendedFileName, ignoreCase = true)
-                }.thenBy {
-                    it.sizeBytes ?: Long.MAX_VALUE
-                }
-            )
-        }
-        return listGgufFiles(model.repoId, model.revision, model.provider).sortedWith(
-            compareByDescending<RemoteModelFile> {
-                it.name.equals(model.recommendedFileName, ignoreCase = true)
-            }.thenByDescending {
-                if (model.kind == ModelScopeRecommendedKind.IMAGE) {
-                    it.isImageModelCandidate()
-                } else {
-                    it.isChatModelCandidate()
-                }
-            }.thenByDescending {
-                it.name.contains(model.quant, ignoreCase = true)
-            }.thenBy {
-                it.sizeBytes ?: Long.MAX_VALUE
-            }
-        )
-    }
+    ): List<RemoteModelFile> =
+        listRecommendedFilesVia(modelScopeRecommendedPort, model, preferredQairtChipsets)
 
     fun recommendedFile(
         model: ModelScopeRecommendedModel,
         preferredQairtChipsets: List<String> = emptyList()
-    ): RemoteModelFile {
-        requireDownloadableRecommendation(model)
-        model.mnnModelBundle?.let { bundle ->
-            return recommendedMnnBundleFiles(model).firstOrNull {
-                it.mnnBundleRole == MnnModelBundleComponentRole.CONFIG
-            } ?: error("推荐 MNN 包 ${bundle.title} 没有配置 config.json。")
-        }
-        model.visionModelBundle?.let { bundle ->
-            return recommendedVisionBundleFiles(model).firstOrNull {
-                it.visionBundleRole == VisionModelBundleComponentRole.MAIN_MODEL
-            } ?: error("推荐多模态模型包 ${bundle.title} 没有配置主模型。")
-        }
-        model.imageEngineBundle?.let { bundle ->
-            return recommendedImageBundleFiles(model, preferredQairtChipsets)
-                .firstOrNull { it.bundleRole == ImageEngineBundleComponentRole.DIFFUSION }
-                ?: error("推荐生图引擎 ${bundle.title} 没有配置 diffusion 主模型。")
-        }
-        if (model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
-            return recommendedQairtChatFile(model, preferredQairtChipsets)
-        }
-        val files = listRecommendedFiles(model, preferredQairtChipsets)
-        return selectRecommendedModelFile(model, files)
-    }
+    ): RemoteModelFile =
+        recommendedFileVia(modelScopeRecommendedPort, model, preferredQairtChipsets)
 
-    fun recommendedMnnBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> {
-        val bundle = model.mnnModelBundle ?: error("${model.title} 没有配置 MNN 模型包。")
-        val files = listModelFiles(
-            input = bundle.repoId,
-            revision = bundle.revision,
-            provider = bundle.provider,
-            extensions = MNN_MODEL_FILE_EXTENSIONS
-        )
-        return bundle.components.map { component ->
-            val match = files.firstOrNull { it.path.equals(component.fileName, ignoreCase = true) } ?:
-                files.firstOrNull { it.name.equals(component.fileName.substringAfterLast('/'), ignoreCase = true) }
-            if (match == null && component.required) {
-                error("MNN 模型包缺少组件：${component.role.label} / ${component.fileName}")
-            }
-            match?.copy(
-                mnnBundleRole = component.role,
-                relativePath = component.relativePath
-            )
-        }.filterNotNull()
-    }
+    fun recommendedMnnBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> =
+        recommendedMnnBundleFilesVia(modelScopeRecommendedPort, model)
 
     fun recommendedImageBundleFiles(
         model: ModelScopeRecommendedModel,
         preferredQairtChipsets: List<String> = emptyList()
-    ): List<RemoteModelFile> {
-        requireDownloadableRecommendation(model)
-        val bundle = model.imageEngineBundle ?: error("${model.title} 没有配置图像生成引擎包。")
-        if (model.id in QAIRT_IMAGE_RELEASE_ASSET_MODEL_IDS) {
-            return listOf(recommendedQairtImageFile(model, preferredQairtChipsets)) +
-                resolveImageBundleComponents(bundle.components.filterNot {
-                    it.role == ImageEngineBundleComponentRole.DIFFUSION
-                })
-        }
-        return resolveImageBundleComponents(bundle.components.filter { it.downloadByDefault })
-    }
+    ): List<RemoteModelFile> =
+        recommendedImageBundleFilesVia(modelScopeRecommendedPort, model, preferredQairtChipsets)
 
-    private fun resolveImageBundleComponents(
-        components: List<ImageEngineBundleComponentSpec>
-    ): List<RemoteModelFile> {
-        val fileListCache = mutableMapOf<String, List<RemoteModelFile>>()
-        return components.map { component ->
-            val cacheKey = "${component.provider.name}:${component.repoId}:${component.revision}"
-            val files = fileListCache.getOrPut(cacheKey) {
-                listModelFiles(
-                    input = component.repoId,
-                    revision = component.revision,
-                    provider = component.provider,
-                    extensions = MODEL_FILE_EXTENSIONS + MNN_MODEL_FILE_EXTENSIONS
-                )
-            }
-            val match = files.firstOrNull { it.path.equals(component.fileName, ignoreCase = true) } ?:
-                files.firstOrNull {
-                    '/' !in component.fileName &&
-                        it.name.equals(component.fileName, ignoreCase = true)
-                }
-            if (match == null && component.required) {
-                error("图像生成引擎包缺少组件：${component.role.label} / ${component.fileName}")
-            }
-            match?.let { remote ->
-                component.expectedSizeBytes?.let { expected ->
-                    remote.sizeBytes?.let { actual ->
-                        require(actual == expected) {
-                            "图像生成引擎组件大小不匹配：${component.fileName}，期望 $expected，实际 $actual"
-                        }
-                    }
-                }
-                // Hugging Face returns a 40-character Git blob SHA-1 for
-                // ordinary (non-LFS) files.  It is not comparable with the
-                // repository-owned SHA-256 contract below.  Only accept a
-                // real 64-hex publisher digest as remote SHA-256; otherwise
-                // retain the pinned component SHA-256 as the install check.
-                val remoteSha256 = normalizedRemoteSha256OrNull(remote.sha256)
-                component.sha256?.let { expected ->
-                    remoteSha256?.let { actual ->
-                        require(actual.equals(expected, ignoreCase = true)) {
-                            "图像生成引擎组件 SHA-256 不匹配：${component.fileName}，期望 $expected，实际 $actual"
-                        }
-                    }
-                }
-                remote.copy(
-                    sizeBytes = remote.sizeBytes ?: component.expectedSizeBytes,
-                    sha256 = remoteSha256 ?: component.sha256,
-                    bundleRole = component.role,
-                    relativePath = component.relativePath
-                )
-            }
-        }.filterNotNull()
-    }
-
-    private fun recommendedQairtImageFile(
-        model: ModelScopeRecommendedModel,
-        preferredChipsets: List<String>
-    ): RemoteModelFile {
-        val safeRevision = model.revision.ifBlank { "main" }
-        val errors = mutableListOf<String>()
-        for (endpoint in huggingFaceEndpoints) {
-            val url = "$endpoint/${model.repoId.urlEncodePath()}/resolve/${safeRevision.urlEncode()}/release_assets.json"
-            val file = runCatching {
-                client.newCall(request(url)).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val root = JSONObject(response.body?.string().orEmpty())
-                    val asset = root.selectQnnContextAsset(
-                        preferredChipsets = preferredChipsets,
-                        catalogTargetChipset = QAIRT_GEN5_IMAGE_RELEASE_ASSET_CHIPSET
-                    )
-                    val downloadUrl = preferHuggingFaceDownloadUrl(asset.downloadUrl)
-                    val name = downloadUrl.substringBefore('?').substringAfterLast('/').ifBlank {
-                        model.recommendedFileName.ifBlank { "${model.id}.zip" }
-                    }
-                    val pinnedIntegrity = pinnedQairtImageReleaseAssetIntegrity(
-                        modelId = model.id,
-                        resolvedName = name,
-                        recommendedName = model.recommendedFileName
-                    )
-                    RemoteModelFile(
-                        repoId = model.repoId,
-                        revision = safeRevision,
-                        path = name,
-                        name = name,
-                        // The pinned size belongs to the catalog's exact named
-                        // archive. A generic/vendor variant of the same target
-                        // can differ in length, so do not attach a false size.
-                        sizeBytes = pinnedIntegrity.first,
-                        sha256 = pinnedIntegrity.second,
-                        downloadUrl = downloadUrl,
-                        provider = ModelRepositoryProvider.HUGGING_FACE,
-                        bundleRole = ImageEngineBundleComponentRole.DIFFUSION,
-                        relativePath = name
-                    )
-                }
-            }.onFailure { error ->
-                errors += "${endpoint.removePrefix("https://")}: ${error.message}"
-            }.getOrNull()
-            if (file != null) return file
-        }
-        error("Qualcomm QNN 生图 release assets 读取失败：${model.repoId}。详情：${errors.joinToString("；")}")
-    }
-
-    fun recommendedVisionBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> {
-        val bundle = model.visionModelBundle ?: error("${model.title} 没有配置多模态模型包。")
-        val fileListCache = mutableMapOf<String, List<RemoteModelFile>>()
-        return bundle.components.map { component ->
-            val cacheKey = "${component.provider.name}:${component.repoId}:${component.revision}"
-            val files = fileListCache.getOrPut(cacheKey) {
-                listModelFiles(
-                    input = component.repoId,
-                    revision = component.revision,
-                    provider = component.provider,
-                    extensions = MODEL_FILE_EXTENSIONS
-                )
-            }
-            val match = files.firstOrNull { it.path.equals(component.fileName, ignoreCase = true) } ?:
-                files.firstOrNull { it.name.equals(component.fileName.substringAfterLast('/'), ignoreCase = true) }
-            if (match == null && component.required) {
-                error("多模态模型包缺少组件：${component.role.label} / ${component.fileName}")
-            }
-            match?.copy(
-                visionBundleRole = component.role,
-                relativePath = component.relativePath
-            )
-        }.filterNotNull()
-    }
+    fun recommendedVisionBundleFiles(model: ModelScopeRecommendedModel): List<RemoteModelFile> =
+        recommendedVisionBundleFilesVia(modelScopeRecommendedPort, model)
 
     fun recommendedQairtChatFile(
         model: ModelScopeRecommendedModel,
         preferredChipsets: List<String> = emptyList()
-    ): RemoteModelFile {
-        require(model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT) {
-            "${model.title} 不是 GenieX QAIRT 聊天引擎推荐。"
-        }
-        val safeRevision = model.revision.ifBlank { "main" }
-        val errors = mutableListOf<String>()
-        for (endpoint in huggingFaceEndpoints) {
-            val url = "$endpoint/${model.repoId.urlEncodePath()}/resolve/${safeRevision.urlEncode()}/release_assets.json"
-            val file = runCatching {
-                client.newCall(request(url)).execute().use { response ->
-                    if (!response.isSuccessful) error("HTTP ${response.code}")
-                    val root = JSONObject(response.body?.string().orEmpty())
-                    val asset = root.selectGenieXQairtAsset(preferredChipsets)
-                    val downloadUrl = preferHuggingFaceDownloadUrl(asset.downloadUrl)
-                    val name = downloadUrl.substringBefore('?').substringAfterLast('/').ifBlank {
-                        model.recommendedFileName.ifBlank { "${model.id}.zip" }
-                    }
-                    RemoteModelFile(
-                        repoId = model.repoId,
-                        revision = safeRevision,
-                        path = name,
-                        name = name,
-                        sizeBytes = null,
-                        sha256 = null,
-                        downloadUrl = downloadUrl,
-                        provider = ModelRepositoryProvider.HUGGING_FACE
-                    )
-                }
-            }.onFailure { error ->
-                errors += "${endpoint.removePrefix("https://")}: ${error.message}"
-            }.getOrNull()
-            if (file != null) return file
-        }
-        error("Qualcomm QAIRT release assets 读取失败：${model.repoId}。详情：${errors.joinToString("；")}")
-    }
+    ): RemoteModelFile =
+        recommendedQairtChatFileVia(modelScopeRecommendedPort, model, preferredChipsets)
+
 
     fun searchModels(
         query: String = "Qwen3.5 MNN",
