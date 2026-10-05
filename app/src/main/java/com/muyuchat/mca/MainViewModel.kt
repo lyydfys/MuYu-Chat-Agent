@@ -1542,7 +1542,7 @@ contextTraceJson: String?
         // Publish the persisted catalog before either QAIRT recovery or stable-identity
         // reconciliation takes the model-store lock for multi-gigabyte hashing.
         viewModelScope.launch(Dispatchers.IO) {
-            refreshManagedRuntimeReadiness()
+            refreshRuntimeReadiness(managedRuntimeReadinessPort)
             // GenieX recovery is still needed when its installed package survived a lost
             // product manifest, but its directory hashing must follow catalog publication.
             if (!skipInitialModelDiscovery) {
@@ -1550,7 +1550,7 @@ contextTraceJson: String?
                     operation = { modelStore.recoverInstalledQairtBundles() },
                     onSuccess = { recovered ->
                         if (recovered.isNotEmpty()) {
-                            refreshManagedRuntimeReadiness()
+                            refreshRuntimeReadiness(managedRuntimeReadinessPort)
                             _uiState.update { state ->
                                 state.copy(statusMessage =
                                     "已恢复 ${recovered.size} 个现有 QAIRT NPU 模型；首次加载会自动隔离安全启动。")
@@ -1567,7 +1567,7 @@ contextTraceJson: String?
                 )
             }
             reconcileModelIdentities()
-            refreshManagedRuntimeReadiness()
+            refreshRuntimeReadiness(managedRuntimeReadinessPort)
         }
     }
 
@@ -1575,7 +1575,7 @@ contextTraceJson: String?
         _uiState.update { it.copy(tab = tab) }
         if (tab == AppTab.MODELS) {
             viewModelScope.launch(Dispatchers.IO) {
-                refreshManagedRuntimeReadiness()
+                refreshRuntimeReadiness(managedRuntimeReadinessPort)
             }
         }
     }
@@ -1654,10 +1654,6 @@ contextTraceJson: String?
     private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot =
         publishChatCatalogSnapshot(managedRuntimeReadinessPort)
 
-    /** Refreshes product-facing readiness; persisted verification remains advisory. */
-    private fun refreshManagedRuntimeReadiness() {
-        refreshRuntimeReadiness(managedRuntimeReadinessPort)
-    }
 
     /** Refreshes product-facing readiness; persisted verification remains advisory. */
 
@@ -4060,9 +4056,9 @@ contextTraceJson: String?
         val changedRuntimeFields = runtimeParameterChanges(previous, scopedParams)
         if (changedRuntimeFields.isNotEmpty()) {
             runtimeUserOverrideFields += changedRuntimeFields
-            persistRuntimeUserOverrideFields(runtimeUserOverrideFields)
+            GenerationPreferences.persistRuntimeUserOverrideFields(getApplication(), runtimeUserOverrideFields)
         }
-        persistGenerationParams(scopedParams)
+        GenerationPreferences.persistGenerationParams(getApplication(), scopedParams)
         // Keep the legacy global/assistant preference for migration, while also
         // recording this edit against the active model so switching models does
         // not make users repeat the same tuning work.
@@ -4296,7 +4292,7 @@ contextTraceJson: String?
         if (shouldSelectAssistant && existing != null) assistantStore.saveSelectedAssistantId(assistant.id)
         val updatedParams = assistant.toGenerationParams(state.params)
         if (shouldSelectAssistant && existing != null) {
-            persistGenerationParams(updatedParams)
+            GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
             // Editing the active assistant is an explicit user change for the
             // currently selected model; retain it in that model's profile.
             persistModelGenerationParams(state, updatedParams)
@@ -4903,7 +4899,7 @@ contextTraceJson: String?
         val updatedParams = current.modelGenerationProfileKey()
             ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
             ?: assistantParams
-        persistGenerationParams(updatedParams)
+        GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         _uiState.update {
             it.copy(
                 selectedAssistantId = assistant.id,
@@ -5163,7 +5159,7 @@ contextTraceJson: String?
         val updatedParams = if (deletingSelectedAssistant) state.modelGenerationProfileKey()
             ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, nextAssistantParams) }
             ?: nextAssistantParams else state.params
-        if (deletingSelectedAssistant) persistGenerationParams(updatedParams)
+        if (deletingSelectedAssistant) GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         val updatedSessions = state.chatSessions
         _uiState.update {
             it.copy(
@@ -5721,7 +5717,7 @@ contextTraceJson: String?
         ).let { params ->
             params.copy(nPredict = params.effectiveNPredict())
         }
-        persistGenerationParams(updatedParams)
+        GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         persistModelGenerationParams(state, updatedParams)
         _uiState.update {
             it.copy(
@@ -5941,7 +5937,7 @@ contextTraceJson: String?
             }
 
             override fun persistGenerationParams(params: GenerationParams) {
-                this@MainViewModel.persistGenerationParams(params)
+                GenerationPreferences.persistGenerationParams(getApplication(), params)
             }
 
             override fun showStatus(message: String?) {
@@ -6077,7 +6073,7 @@ contextTraceJson: String?
     fun refreshLocalModels() {
         viewModelScope.launch(Dispatchers.IO) {
             reconcileModelIdentities()
-            refreshManagedRuntimeReadiness()
+            refreshRuntimeReadiness(managedRuntimeReadinessPort)
         }
     }
 
@@ -6473,7 +6469,7 @@ contextTraceJson: String?
                                         .edit().remove(identity).remove("use:$identity").apply()
                                 }
                                 reconcileModelIdentities()
-                                refreshManagedRuntimeReadiness()
+                                refreshRuntimeReadiness(managedRuntimeReadinessPort)
                                 val imageId = info.outputData.getString("imageId")
                                 val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.matchesCatalogId(id) } }
                                 if (image != null) {
@@ -6595,7 +6591,7 @@ contextTraceJson: String?
             modelId = model.id,
             defaults = _uiState.value.params
         )
-        persistGenerationParams(modelParams)
+        GenerationPreferences.persistGenerationParams(getApplication(), modelParams)
         viewModelScope.launch(Dispatchers.IO) {
             engine.stopGeneration()
         }
@@ -7061,7 +7057,7 @@ contextTraceJson: String?
         modelId = model.id,
         defaults = params
     )
-    persistGenerationParams(modelParams)
+    GenerationPreferences.persistGenerationParams(getApplication(), modelParams)
     val effectiveParams = mergeExecutionProfile(modelParams, formalProfile)
     _uiState.update { state ->
         state.copy(
@@ -9559,7 +9555,7 @@ contextTraceJson: String?
             )
 
             override fun persistGenerationParams(params: GenerationParams) {
-                this@MainViewModel.persistGenerationParams(params)
+                GenerationPreferences.persistGenerationParams(getApplication(), params)
             }
 
             override fun saveSelectedBackend(backend: ChatBackend) {
@@ -9778,7 +9774,7 @@ contextTraceJson: String?
             return
         }
         val operation = persistentPrefixCacheOperationSequence.incrementAndGet()
-        persistPersistentPrefixCacheEnabled(enabled)
+        GenerationPreferences.persistPersistentPrefixCacheEnabled(getApplication(), enabled)
         engine.setPersistentPrefixCacheEnabled(enabled)
         _uiState.update {
             it.copy(
@@ -10133,7 +10129,7 @@ contextTraceJson: String?
             appliedPlan = recommendation.tuningPlan,
             userConfirmed = true
         )
-        persistGenerationParams(updatedParams)
+        GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
         persistModelGenerationParams(state, updatedParams)
         _uiState.update {
             it.copy(
@@ -10148,7 +10144,7 @@ contextTraceJson: String?
     fun rollbackAgentParams() {
         val state = _uiState.value
         val previous = state.rollbackParams ?: return
-        persistGenerationParams(previous)
+        GenerationPreferences.persistGenerationParams(getApplication(), previous)
         persistModelGenerationParams(state, previous)
         _uiState.update {
             it.copy(
@@ -10417,7 +10413,7 @@ contextTraceJson: String?
                     ?: runtimeProfileStore.currentRuntimeState(identity.identityHash)?.activeExecutionProfile
                     ?: error("稳定运行配置恢复记录缺失")
                 val restored = mergeExecutionProfile(_uiState.value.params, restoredProfile)
-                persistGenerationParams(restored)
+                GenerationPreferences.persistGenerationParams(getApplication(), restored)
                 _uiState.update {
                     it.copy(
                         params = restored,
@@ -11727,7 +11723,7 @@ contextTraceJson: String?
 
             override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = this@MainViewModel.mergeExecutionProfile(generation, profile)
 
-            override fun persistGenerationParams(params: GenerationParams) = this@MainViewModel.persistGenerationParams(params)
+            override fun persistGenerationParams(params: GenerationParams) = GenerationPreferences.persistGenerationParams(getApplication(), params)
 
             override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean = state.canWriteToActiveAssistantSession()
 
@@ -12937,23 +12933,14 @@ contextTraceJson: String?
     private fun loadGenerationParams(application: Application): GenerationParams =
         GenerationPreferences.loadGenerationParams(application)
 
-    private fun persistGenerationParams(params: GenerationParams) {
-        GenerationPreferences.persistGenerationParams(getApplication(), params)
-    }
 
     private fun loadPersistentPrefixCacheEnabled(application: Application): Boolean =
         GenerationPreferences.loadPersistentPrefixCacheEnabled(application)
 
-    private fun persistPersistentPrefixCacheEnabled(enabled: Boolean) {
-        GenerationPreferences.persistPersistentPrefixCacheEnabled(getApplication(), enabled)
-    }
 
     private fun loadRuntimeUserOverrideFields(application: Application): Set<String> =
         GenerationPreferences.loadRuntimeUserOverrideFields(application)
 
-    private fun persistRuntimeUserOverrideFields(fields: Set<String>) {
-        GenerationPreferences.persistRuntimeUserOverrideFields(getApplication(), fields)
-    }
 
     private fun updatedAssistantsWithParams(params: GenerationParams): List<AssistantRecord> {
         val state = _uiState.value
