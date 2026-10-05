@@ -1500,87 +1500,6 @@ private fun WebSearchPlan.providerQueryLimit(): Int =
         3
     }
 
-internal fun ChatMessage.withWebSearchGroundingGuard(): ChatMessage {
-    if (role != Role.ASSISTANT || sourceReferences.isEmpty()) return this
-    val guardedContent = content.repairWebSearchGroundingText()
-    val guardedReasoning = reasoningContent.repairWebSearchGroundingText()
-    return if (guardedContent == content && guardedReasoning == reasoningContent) {
-        this
-    } else {
-        copy(content = guardedContent, reasoningContent = guardedReasoning)
-    }
-}
-
-internal fun ChatMessage.withWebSearchAnswerGuards(): WebSearchAnswerGuardResult {
-    val grounded = withWebSearchGroundingGuard()
-    val citationResult = grounded.withWebSearchCitationAuditGuard()
-    return citationResult
-}
-
-private fun ChatMessage.withWebSearchCitationAuditGuard(): WebSearchAnswerGuardResult {
-    if (role != Role.ASSISTANT || sourceReferences.isEmpty()) {
-        return WebSearchAnswerGuardResult(message = this)
-    }
-    val sourceCount = sourceReferences.size
-    val citedIndices = webSearchCitationRegex.findAll(content)
-        .mapNotNull { it.webSearchCitationIndex() }
-        .toList()
-    val invalidIndices = citedIndices
-        .filter { it !in 1..sourceCount }
-        .distinct()
-    var repairedContent = content
-    var repaired = false
-    if (invalidIndices.isNotEmpty()) {
-        repairedContent = webSearchCitationRegex.replace(repairedContent) { match ->
-            val index = match.webSearchCitationIndex()
-            if (index != null && index in 1..sourceCount) match.value else ""
-        }.cleanupWebSearchCitationSpacing()
-        repaired = true
-    }
-    val validIndicesAfterRepair = webSearchCitationRegex.findAll(repairedContent)
-        .mapNotNull { it.webSearchCitationIndex() }
-        .filter { it in 1..sourceCount }
-        .toList()
-    val appendedFallback = validIndicesAfterRepair.isEmpty() && repairedContent.isNotBlank()
-    if (appendedFallback) {
-        repairedContent = repairedContent.trimEnd() + "\n\n参考来源：[1]"
-        repaired = true
-    }
-    val finalCitedIndices = webSearchCitationRegex.findAll(repairedContent)
-        .mapNotNull { it.webSearchCitationIndex() }
-        .toList()
-    return WebSearchAnswerGuardResult(
-        message = if (repaired) copy(content = repairedContent) else this,
-        citationAudit = WebSearchCitationAudit(
-            sourceCount = sourceCount,
-            citedIndices = finalCitedIndices,
-            invalidIndices = invalidIndices,
-            appendedFallbackCitation = appendedFallback,
-            repaired = repaired
-        )
-    )
-}
-
-private fun String.repairWebSearchGroundingText(): String {
-    if (isBlank()) return this
-    var repaired = this
-    webSearchGroundingReplacementRules.forEach { (pattern, replacement) ->
-        repaired = pattern.replace(repaired, replacement)
-    }
-    return repaired
-        .replace(Regex("""\n{3,}"""), "\n\n")
-        .trimStart()
-}
-
-private fun MatchResult.webSearchCitationIndex(): Int? =
-    groupValues.drop(1).firstOrNull { it.isNotBlank() }?.toIntOrNull()
-
-private fun String.cleanupWebSearchCitationSpacing(): String =
-    replace(Regex(""" {2,}"""), " ")
-        .replace(Regex("""\s+([，。！？、；：,.!?;:])"""), "$1")
-        .replace(Regex("""\n{3,}"""), "\n\n")
-        .trimEnd()
-
 private fun WebSearchResult.toWebSearchResearchReport(): WebSearchResearchReport {
     val usableDocuments = documents.filterNot { it.provider == "安全拦截" }
     if (usableDocuments.isEmpty()) {
@@ -1866,7 +1785,8 @@ private fun JSONObject.toWebSearchDiagnosticHealthReport(): WebSearchHealthRepor
 
 // P7/S5: shared with WebSearchScoringOperations.kt.
 internal val yearRegex = Regex("""\b20\d{2}\b""")
-private val webSearchCitationRegex = Regex("""(?:\[(\d{1,2})]|［(\d{1,2})］)""")
+// P7/S6: shared with WebSearchAnswerGuards.kt.
+internal val webSearchCitationRegex = Regex("""(?:\[(\d{1,2})]|［(\d{1,2})］)""")
 private const val DEFAULT_WEB_SEARCH_CACHE_TTL_MS = 2 * 60 * 1000L
 private const val MAX_WEB_SEARCH_CACHE_ENTRIES = 24
 // P7/S1: widened private->internal because both this file and WebSearchPreflightChecks.kt
@@ -1876,7 +1796,8 @@ private const val MAX_WEB_SEARCH_QUERY_ATTEMPTS = 5
 private const val WEB_SEARCH_CACHE_HIT = "命中本机短缓存"
 private const val WEB_SEARCH_CACHE_STORED = "实时检索，已写入本机短缓存"
 private const val WEB_SEARCH_CACHE_NOT_USED = "未使用缓存"
-private val webSearchGroundingReplacementRules = listOf(
+// P7/S6: shared with WebSearchAnswerGuards.kt.
+internal val webSearchGroundingReplacementRules = listOf(
     Regex("""联网检索资料较少，以下主要基于我的知识库整理（截至[^）]*）：""") to
         "本轮联网检索来源有限，以下基于已检索到的资料整理；未覆盖的信息会标注不确定性：",
     Regex("""以下主要基于我的知识库整理（截至[^）]*）：""") to
