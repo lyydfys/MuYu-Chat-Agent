@@ -2,6 +2,8 @@ package com.muyuchat.mca
 
 import com.muyuchat.core.modelstore.ModelManifest
 import kotlinx.coroutines.Job
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatToolCall
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatGeneratedImageStatus
@@ -43,6 +45,14 @@ internal class RuntimeAdmissionState(
     var pendingProfileTransactionId: String? = null
 
     var activeProfileTransactionId: String? = null
+
+    // R3/C3-S21：图片工具续写族状态（自 VM 迁出；同一实例经零抖动别名共享）。
+    val pendingAssistantImageToolTurns =
+        java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
+
+    val assistantImageContinuationLock = Any()
+
+    val assistantImageContinuationsInFlight = mutableSetOf<String>()
 
     var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
 
@@ -188,3 +198,15 @@ internal fun findChatGeneratedImageRequestIn(state: MainUiState, requestId: Stri
             ?.generatedImageRequest
             ?.let { request -> state.activeChatSessionId?.let { it to request } }
 }
+
+/** R3/C3-S21：自 MainViewModel 迁出（private → internal，随工具续写族状态入 holder）。 */
+internal data class PendingAssistantImageToolTurn(
+    val requestId: String,
+    val chatSessionId: String,
+    val originalRequestMessages: List<ChatMessage>,
+    val params: GenerationParams,
+    val cloudModelId: String,
+    val toolCalls: List<ChatToolCall>,
+    val primaryToolCallId: String,
+    val initialToolOutputs: Map<String, String>
+)

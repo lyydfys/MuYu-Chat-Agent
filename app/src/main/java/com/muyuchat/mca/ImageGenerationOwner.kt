@@ -930,3 +930,28 @@ internal fun resolveCurrentLocalImageTextualInversionIdsFor(
     }
     return normalizedIds
 }
+
+/** R3/C3-S21：负向提示支持判定顶层化（自 VM 迁出；体逐字，state 参数化）。 */
+internal fun chatImageNegativePromptSupportedFor(state: MainUiState): Boolean {
+    if (state.selectedImageBackend != ImageBackend.LOCAL) return true
+    val model = state.selectedLocalImageModel() ?: return false
+    val bundleRoot = model.bundleRoot
+        ?.takeIf(String::isNotBlank)
+        ?.let(::File)
+        ?.takeIf(File::isDirectory)
+        ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+    return runCatching {
+        val profile = resolveLocalImageExecutionProfile(
+            model = model,
+            options = LocalImageGenerationOptions()
+                .normalizedForPromptExecutionProfile(model.runtime),
+            bundleRoot = bundleRoot
+        ).profile
+        profile.capabilities.supportsNegativePrompt && profile.defaults.useCfg
+    }.getOrElse {
+        // Imported/legacy records can be usable before their sidecar is materialized. Keep
+        // the same conservative family gate used for default conditioning instead of
+        // silently dropping the negative branch for a valid SD/SDXL model.
+        chatImageFallbackNegativePromptForModel(model.family, model.runtime) != null
+    }
+}

@@ -255,17 +255,6 @@ enum class AppTab(val title: String) {
     API("本地 API"),
     SETTINGS("系统设置")
 }
-private data class PendingAssistantImageToolTurn(
-    val requestId: String,
-    val chatSessionId: String,
-    val originalRequestMessages: List<ChatMessage>,
-    val params: GenerationParams,
-    val cloudModelId: String,
-    val toolCalls: List<ChatToolCall>,
-    val primaryToolCallId: String,
-    val initialToolOutputs: Map<String, String>
-)
-
 // R3/C2: private → internal：随 enqueue 体移入 ImageGenerationOwner 所需。
 internal fun chatImageCommitJournalJobId(jobId: String, imageId: String): String {
     val safeImageId = imageId.filter { it.isLetterOrDigit() || it in "._:-" }
@@ -963,9 +952,12 @@ class MainViewModel @JvmOverloads constructor(
     private fun ContentImportOwner.isCurrent(state: MainUiState): Boolean =
         selectionRevision == contentImportSelectionRevision.get() &&
             sessionId == state.activeChatSessionId && assistantId == state.selectedAssistantId
-    private val pendingAssistantImageToolTurns = java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
-    private val assistantImageContinuationLock = Any()
-    private val assistantImageContinuationsInFlight = mutableSetOf<String>()
+    private val pendingAssistantImageToolTurns: java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>
+        get() = container.runtimeAdmission.pendingAssistantImageToolTurns
+    private val assistantImageContinuationLock: Any
+        get() = container.runtimeAdmission.assistantImageContinuationLock
+    private val assistantImageContinuationsInFlight: MutableSet<String>
+        get() = container.runtimeAdmission.assistantImageContinuationsInFlight
 
     /** Delegates to [ImageUpscaleOwner.upscaleImageAsset]. */
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
@@ -7085,29 +7077,9 @@ class MainViewModel @JvmOverloads constructor(
      * cannot condition on one. Keep that branch out of CFG-disabled/unsupported workers; an
      * explicit non-empty options.negativePrompt would otherwise be rejected as a user override.
      */
-    private fun chatImageNegativePromptSupported(state: MainUiState): Boolean {
-        if (state.selectedImageBackend != ImageBackend.LOCAL) return true
-        val model = state.selectedLocalImageModel() ?: return false
-        val bundleRoot = model.bundleRoot
-            ?.takeIf(String::isNotBlank)
-            ?.let(::File)
-            ?.takeIf(File::isDirectory)
-            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
-        return runCatching {
-            val profile = resolveLocalImageExecutionProfile(
-                model = model,
-                options = LocalImageGenerationOptions()
-                    .normalizedForPromptExecutionProfile(model.runtime),
-                bundleRoot = bundleRoot
-            ).profile
-            profile.capabilities.supportsNegativePrompt && profile.defaults.useCfg
-        }.getOrElse {
-            // Imported/legacy records can be usable before their sidecar is materialized. Keep
-            // the same conservative family gate used for default conditioning instead of
-            // silently dropping the negative branch for a valid SD/SDXL model.
-            chatImageFallbackNegativePromptForModel(model.family, model.runtime) != null
-        }
-    }
+    /** Delegates to [chatImageNegativePromptSupportedFor]. Signature kept verbatim. */
+    private fun chatImageNegativePromptSupported(state: MainUiState): Boolean =
+        chatImageNegativePromptSupportedFor(state)
 
     internal fun chatImageToolPermissionUiState(): ChatImageToolPermissionUiState {
         val state = _uiState.value
