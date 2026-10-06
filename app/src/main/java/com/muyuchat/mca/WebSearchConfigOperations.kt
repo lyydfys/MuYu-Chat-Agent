@@ -34,6 +34,8 @@ internal interface WebSearchConfigPort {
 
     fun appendDiagnostic(record: WebSearchDiagnosticRecord): List<WebSearchDiagnosticRecord>
 
+    fun clearDiagnostics(): List<WebSearchDiagnosticRecord>
+
     val provider: WebSearchProvider
 }
 
@@ -419,4 +421,106 @@ internal fun webSearchConfigFrom(
             researchMode = WebSearchResearchMode.from(researchMode),
             backupProviders = backupProviders.take(3)
         )
+
+internal fun applyToggleWebSearchForNextTurn(port: WebSearchConfigPort) {
+    val state = port.uiState()
+    val assistantDefault = state.selectedAssistant()?.webSearchEnabled == true
+    if (!state.webSearchConfig.enabled) {
+        port.updateUiState {
+            it.copy(
+                webSearchTurnMode = WebSearchTurnMode.FOLLOW,
+                webSearchOneShotEnabled = false,
+                webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                statusMessage = "请先启用联网检索"
+            )
+        }
+        return
+    }
+    port.updateUiState {
+        val nextMode = when (it.webSearchTurnMode) {
+            WebSearchTurnMode.FOLLOW -> if (assistantDefault) WebSearchTurnMode.OFF else WebSearchTurnMode.ON
+            WebSearchTurnMode.ON -> WebSearchTurnMode.OFF
+            WebSearchTurnMode.OFF -> WebSearchTurnMode.FOLLOW
+        }
+        it.copy(
+            webSearchTurnMode = nextMode,
+            webSearchOneShotEnabled = nextMode == WebSearchTurnMode.ON,
+            webSearchStatusMessage = when (nextMode) {
+                WebSearchTurnMode.ON -> when {
+                    it.webSearchConfig.realSearchConfigured -> "本轮将联网检索"
+                    it.webSearchConfig.isPublicCheckSource -> "当前是协议自检源；本轮仅可读取网页链接"
+                    else -> "本轮仅可读取网页链接"
+                }
+                WebSearchTurnMode.OFF -> "本轮不使用联网检索"
+                WebSearchTurnMode.FOLLOW -> if (assistantDefault) "跟随助手默认联网" else "跟随智能联网策略"
+            },
+            statusMessage = when (nextMode) {
+                WebSearchTurnMode.ON -> "本轮已开启联网检索"
+                WebSearchTurnMode.OFF -> "本轮已关闭联网检索"
+                WebSearchTurnMode.FOLLOW -> "联网检索跟随默认策略"
+            }
+        )
+    }
+}
+
+internal fun applyCycleWebSearchResearchModeForNextTurn(port: WebSearchConfigPort) {
+    val state = port.uiState()
+    if (!state.webSearchConfig.enabled) {
+        port.updateUiState {
+            it.copy(
+                webSearchResearchModeOverride = null,
+                webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                statusMessage = "请先启用联网检索"
+            )
+        }
+        return
+    }
+    port.updateUiState {
+        val current = it.webSearchResearchModeOverride ?: it.webSearchConfig.researchMode
+        val next = when (current) {
+            WebSearchResearchMode.AUTO -> WebSearchResearchMode.DEEP
+            WebSearchResearchMode.DEEP -> WebSearchResearchMode.OFF
+            WebSearchResearchMode.OFF -> WebSearchResearchMode.AUTO
+        }
+        it.copy(
+            webSearchResearchModeOverride = next.takeUnless { mode -> mode == it.webSearchConfig.researchMode },
+            webSearchStatusMessage = "本轮研究模式：${next.label}",
+            statusMessage = "本轮研究模式：${next.label}"
+        )
+    }
+}
+
+internal fun applySelectWebSearchResearchModeForNextTurn(port: WebSearchConfigPort, mode: String) {
+    val state = port.uiState()
+    if (!state.webSearchConfig.enabled) {
+        port.updateUiState {
+            it.copy(
+                webSearchResearchModeOverride = null,
+                webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
+                statusMessage = "请先启用联网检索"
+            )
+        }
+        return
+    }
+    val selected = WebSearchResearchMode.from(mode)
+    port.updateUiState {
+        it.copy(
+            webSearchResearchModeOverride = selected.takeUnless { next -> next == it.webSearchConfig.researchMode },
+            webSearchStatusMessage = "本轮研究模式：${selected.label}",
+            statusMessage = "本轮研究模式：${selected.label}"
+        )
+    }
+}
+
+internal fun applyClearWebSearchDiagnostics(port: WebSearchConfigPort) {
+    val records = port.clearDiagnostics()
+    port.updateUiState {
+        it.copy(
+            webSearchDiagnostics = records,
+            webSearchStatusMessage = null,
+            statusMessage = "已清空联网检索记录"
+        )
+    }
+}
+
 

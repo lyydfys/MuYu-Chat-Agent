@@ -2646,109 +2646,20 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    fun toggleWebSearchForNextTurn() {
-        val state = _uiState.value
-        val assistantDefault = state.selectedAssistant()?.webSearchEnabled == true
-        if (!state.webSearchConfig.enabled) {
-            uiStateStore.update {
-                it.copy(
-                    webSearchTurnMode = WebSearchTurnMode.FOLLOW,
-                    webSearchOneShotEnabled = false,
-                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
-                    statusMessage = "请先启用联网检索"
-                )
-            }
-            return
-        }
-        uiStateStore.update {
-            val nextMode = when (it.webSearchTurnMode) {
-                WebSearchTurnMode.FOLLOW -> if (assistantDefault) WebSearchTurnMode.OFF else WebSearchTurnMode.ON
-                WebSearchTurnMode.ON -> WebSearchTurnMode.OFF
-                WebSearchTurnMode.OFF -> WebSearchTurnMode.FOLLOW
-            }
-            it.copy(
-                webSearchTurnMode = nextMode,
-                webSearchOneShotEnabled = nextMode == WebSearchTurnMode.ON,
-                webSearchStatusMessage = when (nextMode) {
-                    WebSearchTurnMode.ON -> when {
-                        it.webSearchConfig.realSearchConfigured -> "本轮将联网检索"
-                        it.webSearchConfig.isPublicCheckSource -> "当前是协议自检源；本轮仅可读取网页链接"
-                        else -> "本轮仅可读取网页链接"
-                    }
-                    WebSearchTurnMode.OFF -> "本轮不使用联网检索"
-                    WebSearchTurnMode.FOLLOW -> if (assistantDefault) "跟随助手默认联网" else "跟随智能联网策略"
-                },
-                statusMessage = when (nextMode) {
-                    WebSearchTurnMode.ON -> "本轮已开启联网检索"
-                    WebSearchTurnMode.OFF -> "本轮已关闭联网检索"
-                    WebSearchTurnMode.FOLLOW -> "联网检索跟随默认策略"
-                }
-            )
-        }
-    }
+    fun toggleWebSearchForNextTurn() =
+        applyToggleWebSearchForNextTurn(webSearchConfigPort)
 
-    fun cycleWebSearchResearchModeForNextTurn() {
-        val state = _uiState.value
-        if (!state.webSearchConfig.enabled) {
-            uiStateStore.update {
-                it.copy(
-                    webSearchResearchModeOverride = null,
-                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
-                    statusMessage = "请先启用联网检索"
-                )
-            }
-            return
-        }
-        uiStateStore.update {
-            val current = it.webSearchResearchModeOverride ?: it.webSearchConfig.researchMode
-            val next = when (current) {
-                WebSearchResearchMode.AUTO -> WebSearchResearchMode.DEEP
-                WebSearchResearchMode.DEEP -> WebSearchResearchMode.OFF
-                WebSearchResearchMode.OFF -> WebSearchResearchMode.AUTO
-            }
-            it.copy(
-                webSearchResearchModeOverride = next.takeUnless { mode -> mode == it.webSearchConfig.researchMode },
-                webSearchStatusMessage = "本轮研究模式：${next.label}",
-                statusMessage = "本轮研究模式：${next.label}"
-            )
-        }
-    }
+    fun cycleWebSearchResearchModeForNextTurn() =
+        applyCycleWebSearchResearchModeForNextTurn(webSearchConfigPort)
 
-    fun selectWebSearchResearchModeForNextTurn(mode: String) {
-        val state = _uiState.value
-        if (!state.webSearchConfig.enabled) {
-            uiStateStore.update {
-                it.copy(
-                    webSearchResearchModeOverride = null,
-                    webSearchStatusMessage = "请先在系统设置 > 联网检索 启用联网",
-                    statusMessage = "请先启用联网检索"
-                )
-            }
-            return
-        }
-        val selected = WebSearchResearchMode.from(mode)
-        uiStateStore.update {
-            it.copy(
-                webSearchResearchModeOverride = selected.takeUnless { next -> next == it.webSearchConfig.researchMode },
-                webSearchStatusMessage = "本轮研究模式：${selected.label}",
-                statusMessage = "本轮研究模式：${selected.label}"
-            )
-        }
-    }
+    fun selectWebSearchResearchModeForNextTurn(mode: String) =
+        applySelectWebSearchResearchModeForNextTurn(webSearchConfigPort, mode)
 
-    fun clearWebSearchDiagnostics() {
-        val records = webSearchDiagnosticStore.clear()
-        uiStateStore.update {
-            it.copy(
-                webSearchDiagnostics = records,
-                webSearchStatusMessage = null,
-                statusMessage = "已清空联网检索记录"
-            )
-        }
-    }
+    fun clearWebSearchDiagnostics() =
+        applyClearWebSearchDiagnostics(webSearchConfigPort)
 
     private fun appendWebSearchDiagnostic(record: WebSearchDiagnosticRecord): List<WebSearchDiagnosticRecord> =
-        webSearchDiagnosticStore.add(record)
+        webSearchConfigPort.appendDiagnostic(record)
 
     fun selectAssistant(assistantId: String) {
         val state = _uiState.value

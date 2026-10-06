@@ -124,6 +124,9 @@ internal class WebSearchConfigPortAdapter(
         record: WebSearchDiagnosticRecord
     ): List<WebSearchDiagnosticRecord> = diagnosticStoreRef.add(record)
 
+    override fun clearDiagnostics(): List<WebSearchDiagnosticRecord> =
+        diagnosticStoreRef.clear()
+
     override val provider: WebSearchProvider
         get() = providerRef
 }
