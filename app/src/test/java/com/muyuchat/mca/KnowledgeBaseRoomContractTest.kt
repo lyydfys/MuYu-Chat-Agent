@@ -242,7 +242,10 @@ class KnowledgeBaseRoomContractTest {
             assertFalse("$functionName must not delete world books before Room commit", body.contains("removeScoped("))
         }
 
-        val deleteAssistantBody = functionBody(source, "deleteAssistant")
+        val deleteAssistantBody = functionBody(
+            sourceFile("AssistantProfileOperations.kt"),
+            "deleteAssistantFor"
+        )
         assertCallsInOrder(
             deleteAssistantBody,
             "assistantStore.saveAssistants(remaining)",

@@ -2571,123 +2571,23 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     private fun stageDirectParameterProfile(params: GenerationParams) {
-        val identity = activeRuntimeIdentity ?: return
-        val active = engine.activeExecutionProfile() ?: return
-        if (_uiState.value.loadedModelId == null || active.runtimeIdentity.identityHash != identity.identityHash) return
-        val stageGeneration = directParameterStageGeneration.incrementAndGet()
-        directParameterStageJob?.cancel()
-        directParameterStageJob = viewModelScope.launch(Dispatchers.IO) {
-            delay(120L)
-            directParameterStageMutex.withLock {
-                withContext(NonCancellable) stage@{
-                    if (stageGeneration != directParameterStageGeneration.get()) return@stage
-                    if (adaptiveTuningJob?.isActive == true || activeTuningJobId != null) {
-                        uiStateStore.update {
-                            it.copy(statusMessage = "当前调优任务尚未结束；完成或取消后再应用自定义运行参数。")
-                        }
-                        return@stage
-                    }
-                    val latestParams = _uiState.value.params
-                    if (latestParams != params) return@stage
-                    runCatching {
-                val nextRevision = nextExecutionProfileRevision(
-                    committedRevision = active.revision,
-                    persistedRevisions = runtimeProfileStore.profiles(identity.identityHash).map { it.revision }
-                )
-                val requested = engine.resolveExecutionProfile(
-                    identity = identity,
-                    requestedParamsJson = latestParams.toJson(),
-                    profileId = "manual-${UUID.randomUUID().toString().replace("-", "").take(20)}",
-                    revision = nextRevision
-                ).profile
-                val candidate = mergeUserRequestedExecutionProfile(
-                    base = active,
-                    requested = requested,
-                    authoritativeFields = runtimeUserOverrideFields
-                )
-                if (candidate.resolvedLoadSignature.digest == active.resolvedLoadSignature.digest &&
-                    candidate.committedExecutionSignature.digest == active.committedExecutionSignature.digest
-                ) {
-                    pendingProfileTransactionId = null
-                    uiStateStore.update {
-                        it.copy(
-                            reloadRequired = false,
-                            pendingProfile = null,
-                            statusMessage = "自定义参数与当前生效配置一致。"
-                        )
-                    }
-                    return@runCatching
-                }
-
-                runtimeProfileStore.pendingTransaction(identity.identityHash)?.let { existing ->
-                    if (existing.journal.transactionId != pendingProfileTransactionId) {
-                        error("已有调优候选等待处理，请先应用、回滚或取消该候选。")
-                    }
-                    val recovery = runtimeProfileStore.rejectCandidate(
-                        transactionId = existing.journal.transactionId,
-                        failureStage = "USER_EDIT_REPLACED",
-                        failureCode = "SUPERSEDED",
-                        failureSummary = "用户继续修改运行参数，旧候选已被新候选替换。"
-                    )
-                    runtimeProfileStore.completeRecovery(
-                        transactionId = existing.journal.transactionId,
-                        restoredProfileId = recovery.rollbackProfileId
-                    )
-                }
-
-                val transactionId = "manual-${UUID.randomUUID()}"
-                runtimeProfileStore.stageCandidate(
-                    snapshot = candidate.toPersistedExecutionProfileSnapshot(
-                        parentCommittedProfileId = active.profileId,
-                        verificationLevel = PersistedProfileVerificationLevel.SAFE,
-                        sourceSummaryJson = JSONObject()
-                            .put("kind", "user_parameter_edit")
-                            .put("authoritativeFields", JSONArray(runtimeUserOverrideFields.sorted()))
-                            .toString()
-                    ),
-                    transactionId = transactionId,
-                    rollbackTargetProfileId = active.profileId
-                )
-                if (stageGeneration != directParameterStageGeneration.get() || _uiState.value.params != params) {
-                    val recovery = runtimeProfileStore.rejectCandidate(
-                        transactionId = transactionId,
-                        failureStage = "USER_EDIT_SUPERSEDED",
-                        failureCode = "SUPERSEDED",
-                        failureSummary = "候选建立期间用户再次修改参数，失效候选已撤销。"
-                    )
-                    runtimeProfileStore.completeRecovery(transactionId, recovery.rollbackProfileId)
-                    return@runCatching
-                }
-                pendingProfileTransactionId = transactionId
-                val currentCtx = active.resolvedLoadBoundValues.toJsonObject().optInt("n_ctx", _uiState.value.stats.nCtx)
-                val pendingCtx = candidate.resolvedLoadBoundValues.toJsonObject().optInt("n_ctx", latestParams.nCtx)
-                uiStateStore.update {
-                    it.copy(
-                        reloadRequired = true,
-                        pendingProfile = AgentPendingProfile(
-                            profileId = candidate.profileId,
-                            revision = candidate.revision,
-                            summary = "当前 n_ctx=$currentCtx · 待应用 n_ctx=$pendingCtx",
-                            readyToApply = true
-                        ),
-                        tuningJobState = AgentTuningJobState.PAUSED,
-                        tuningPhase = "自定义参数等待应用",
-                        statusMessage = "上下文已修改为 $pendingCtx，需要重新加载后生效；当前聊天仍使用 $currentCtx。"
-                    )
-                }
-                    }.onFailure { error ->
-                        if (error is CancellationException) return@onFailure
-                        uiStateStore.update {
-                            it.copy(
-                                pendingProfile = null,
-                                reloadRequired = true,
-                                statusMessage = "自定义参数候选建立失败：${error.message ?: "未知错误"}"
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        stageDirectParameterProfileFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            engine = engine,
+            runtimeProfileStore = runtimeProfileStore,
+            activeRuntimeIdentity = { activeRuntimeIdentity },
+            runtimeUserOverrideFields = runtimeUserOverrideFields,
+            directParameterStageGeneration = directParameterStageGeneration,
+            getActiveDirectParameterStageJob = { directParameterStageJob },
+            setActiveDirectParameterStageJob = { directParameterStageJob = it },
+            directParameterStageMutex = directParameterStageMutex,
+            adaptiveTuningJobIsActive = { adaptiveTuningJob?.isActive == true },
+            getActiveTuningJobId = { activeTuningJobId },
+            getPendingProfileTransactionId = { pendingProfileTransactionId },
+            setPendingProfileTransactionId = { pendingProfileTransactionId = it },
+            params = params
+        )
     }
 
     fun saveAssistantProfile(
@@ -2713,119 +2613,41 @@ class MainViewModel @JvmOverloads constructor(
         webSearchEnabled: Boolean,
         fileContextEnabled: Boolean
     ) {
-        val cleanName = name.trim().take(36).ifBlank { "未命名助手" }
-        val cleanAvatar = avatar.trim().take(4)
-        val cleanTag = tag.trim().take(24)
-        val cleanPrompt = boundedManualAssistantSystemPrompt(systemPrompt)
-        val cleanDefaultModelMode = defaultModelMode.normalizedAssistantModelMode()
-        val cleanDefaultModelId = defaultModelId
-            ?.trim()
-            ?.takeIf { it.isNotBlank() && cleanDefaultModelMode != ASSISTANT_MODEL_MODE_FOLLOW_CURRENT }
-        val state = _uiState.value
-        if (rejectWhileConversationMutationInProgress() || state.isGenerating ||
-            hasActiveAssistantImageExecution(state.activeChatSessionId)) {
-            showStatus("请先结束当前角色请求，再保存角色卡。")
-            return
-        }
-        val now = System.currentTimeMillis()
-        val existing = id?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
-        val assistant = (existing ?: AssistantRecord(name = cleanName, createdAt = now)).copy(
-            name = cleanName,
-            avatar = cleanAvatar,
-            tag = cleanTag,
-            systemPrompt = cleanPrompt,
-            defaultModelMode = cleanDefaultModelMode,
-            defaultModelId = cleanDefaultModelId,
-            characterCardJson = existing?.characterCardJson,
-            paramsJson = state.params.copy(
-                systemPrompt = cleanPrompt,
-                temperature = temperature.coerceIn(0f, 2f),
-                topP = topP.coerceIn(0f, 1f),
-                nPredict = nPredict.coerceIn(16, 65_536),
-                topK = topK.coerceIn(0, 1000),
-                minP = minP.coerceIn(0f, 1f),
-                repeatPenalty = repeatPenalty.coerceIn(0.5f, 2f),
-                presencePenalty = presencePenalty.coerceIn(-2f, 2f),
-                frequencyPenalty = frequencyPenalty.coerceIn(-2f, 2f),
-                stopWords = stopWords.asSequence()
-                    .map(String::trim)
-                    .filter { it.isNotEmpty() && it.length <= 128 }
-                    .distinct()
-                    .take(32)
-                    .toList(),
-                reasoningMode = reasoningMode,
-                hideReasoning = reasoningMode == ReasoningMode.OFF
-            ).toAssistantGenerationJson()
-                .withAssistantPromptProvenance(AssistantPromptProvenance.USER_AUTHORED),
+        saveAssistantProfileFor(
+            store = uiStateStore,
+            assistantStore = assistantStore,
+            application = getApplication(),
+            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            showStatus = ::showStatus,
+            persistModelGenerationParams = ::persistModelGenerationParams,
+            persistAssistantsAsync = ::persistAssistantsAsync,
+            persistChatSessions = ::persistChatSessions,
+            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+            selectAssistant = ::selectAssistant,
+            applyAssistantDefaultModel = ::applyAssistantDefaultModel,
+            id = id,
+            name = name,
+            avatar = avatar,
+            tag = tag,
+            systemPrompt = systemPrompt,
+            defaultModelMode = defaultModelMode,
+            defaultModelId = defaultModelId,
+            temperature = temperature,
+            topP = topP,
+            nPredict = nPredict,
+            topK = topK,
+            minP = minP,
+            repeatPenalty = repeatPenalty,
+            presencePenalty = presencePenalty,
+            frequencyPenalty = frequencyPenalty,
+            stopWords = stopWords,
+            reasoningMode = reasoningMode,
             memoryEnabled = memoryEnabled,
-            memorySummaryInterval = memorySummaryInterval.coerceIn(2, 100),
+            memorySummaryInterval = memorySummaryInterval,
             webSearchEnabled = webSearchEnabled,
-            fileContextEnabled = fileContextEnabled,
-            updatedAt = now
+            fileContextEnabled = fileContextEnabled
         )
-        val updatedAssistants = if (existing == null) {
-            (state.assistants + assistant).distinctBy { it.id }
-        } else {
-            state.assistants.map { if (it.id == assistant.id) assistant else it }
-        }
-        val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId
-        if (shouldSelectAssistant && existing != null) assistantStore.saveSelectedAssistantId(assistant.id)
-        val updatedParams = assistant.toGenerationParams(state.params)
-        if (shouldSelectAssistant && existing != null) {
-            GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
-            // Editing the active assistant is an explicit user change for the
-            // currently selected model; retain it in that model's profile.
-            persistModelGenerationParams(state, updatedParams)
-        }
-        // An explicit edit applies to this role's active conversation only. Other
-        // conversations keep the prompt version they captured when created.
-        val activeSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
-        val applyToActiveConversation = existing != null && shouldSelectAssistant &&
-            activeSession?.assistantId == assistant.id &&
-            activeSession?.assistantSnapshot?.assistantId == assistant.id &&
-            activeSession?.mixedAssistantHistory == false
-        val updatedSessions = if (applyToActiveConversation) state.chatSessions.map { session ->
-            val previousSnapshot = session.assistantSnapshot
-            if (session.id != state.activeChatSessionId || session.mixedAssistantHistory ||
-                session.assistantId != assistant.id ||
-                previousSnapshot?.assistantId != assistant.id) session else {
-                val revisedSnapshot = assistant.toConversationSnapshot(previousSnapshot.capturedAt).copy(
-                    priorSystemPromptHashes = (
-                        previousSnapshot.priorSystemPromptHashes +
-                            com.muyuchat.core.engine.PrefixCacheKey.sha256Utf8(previousSnapshot.systemPrompt)
-                        ).distinct().takeLast(32)
-                )
-                session.copy(assistantSnapshot = revisedSnapshot)
-            }
-        } else state.chatSessions
-        uiStateStore.update {
-            it.copy(
-                assistants = updatedAssistants,
-                selectedAssistantId = if (shouldSelectAssistant && existing != null) assistant.id else state.selectedAssistantId,
-                params = if (shouldSelectAssistant && existing != null) updatedParams else state.params,
-                chatSessions = updatedSessions,
-                statusMessage = when {
-                    existing == null -> "已创建助手：${assistant.name}"
-                    applyToActiveConversation ->
-                        "已更新助手：${assistant.name}；当前对话已应用新的角色卡。"
-                    else -> "已更新助手：${assistant.name}"
-                }
-            )
-        }
-        persistAssistantsAsync()
-        if (existing != null) persistChatSessions(updatedSessions)
-        if (applyToActiveConversation) {
-            // The persona prefix changed. Do not allow a local runner to continue from the
-            // previous role's KV cache, regardless of whether the assistant was newly created.
-            markLocalConversationContextInvalid()
-        }
-        if (existing == null) {
-            selectAssistant(assistant.id)
-            persistChatSessions()
-            showStatus("已创建助手：${assistant.name}")
-        } else if (shouldSelectAssistant) {
-            applyAssistantDefaultModel(assistant)
-        }
     }
 
     fun upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) {
@@ -2964,97 +2786,29 @@ class MainViewModel @JvmOverloads constructor(
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
     ) {
-        val selected = _uiState.value.assistants.firstOrNull { it.id == assistantId && it.memoryEnabled }
-            ?: return
-        var pending = chatSessionStore.loadMemoryTurns(assistantId)
-        var remaining = pending.size
-        if (remaining < selected.memorySummaryInterval.coerceIn(2, 100)) return
-        while (remaining > 0 && pending.isNotEmpty()) {
-            val previousAuto = chatSessionStore.loadMemories(assistantId)
-                .firstOrNull { it.source == "automatic" || it.source == "auto" }
-            val prepared = listOf(24, 12, 6, 3, 1)
-                .map { minOf(it, remaining, pending.size) }
-                .distinct()
-                .firstNotNullOfOrNull { size ->
-                    val turns = pending.take(size)
-                    buildCharacterMemorySummaryRequest(turns, previousAuto, params)
-                        ?.let { turns to it }
-                } ?: return
-            val (batch, request) = prepared
-            fun stillCurrent(): Boolean = _uiState.value.assistants.any {
-                it.id == assistantId && it.memoryEnabled
-            } && (backend != ChatBackend.LOCAL ||
-                localIdentity != null && activeRuntimeIdentity?.identityHash == localIdentity)
-            if (!stillCurrent()) return
-            val raw = try {
-                withTimeoutOrNull(30_000L) {
-                    if (backend == ChatBackend.CLOUD) {
-                        val config = cloudConfig ?: return@withTimeoutOrNull null
-                        collectContextSummary(cloudChatProvider.streamChat(config, request), ::stillCurrent)
-                    } else {
-                        withContext(Dispatchers.IO) {
-                            val lease = engine.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
-                            try {
-                                if (!stillCurrent()) return@withContext null
-                                collectContextSummary(
-                                    engine.streamChat(
-                                        request,
-                                        LocalChatExecutionContext(
-                                            requestId = "character-memory-${UUID.randomUUID()}",
-                                            lifecycleLease = lease,
-                                            includeDeviceClockContext = false
-                                        )
-                                    ),
-                                    ::stillCurrent
-                                )
-                            } finally {
-                                localConversationContextNeedsInvalidation = true
-                                localConversationContextInvalidationSequence.incrementAndGet()
-                                withContext(NonCancellable) { lease.release() }
-                            }
-                        }
-                    }
+        summarizeCharacterMemoryFor(
+            store = uiStateStore,
+            chatSessionStore = chatSessionStore,
+            cloudChatProvider = cloudChatProvider,
+            engine = engine,
+            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+            activeRuntimeIdentity = { activeRuntimeIdentity },
+            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+            onLocalConversationContextNeedsInvalidation = {
+                localConversationContextNeedsInvalidation = true
+                localConversationContextInvalidationSequence.incrementAndGet()
+            },
+            recordReschedule = { id ->
+                synchronized(characterMemorySummaryJobs) {
+                    characterMemorySummaryReschedule.add(id)
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                null
-            } ?: return
-            val validated = validateCharacterMemorySummary(raw, batch, previousAuto) ?: return
-            if (!stillCurrent()) return
-            val currentAuto = chatSessionStore.loadMemories(assistantId)
-                .firstOrNull { it.source == "automatic" || it.source == "auto" }
-            if (currentAuto != previousAuto) return
-            val summary = MemoryRecord(
-                assistantId = assistantId,
-                scope = "auto_summary",
-                content = validated,
-                source = "automatic"
-            )
-            val committed = chatSessionPersistenceMutex.withLock {
-                if (!stillCurrent() || batch.any { turn ->
-                        !_uiState.value.chatSessions.containsCompletedMemoryTurn(turn)
-                    }) false
-                else chatSessionStore.commitMemorySummary(assistantId, batch.map { it.id }, summary)
-            }
-            if (!committed) return
-            val refreshed = chatSessionStore.loadMemories(assistantId)
-            uiStateStore.update { state ->
-                state.copy(assistantMemories = state.assistantMemories.filterNot {
-                    it.assistantId == assistantId
-                } + refreshed)
-            }
-            markLocalConversationContextInvalid()
-            remaining -= batch.size
-            pending = chatSessionStore.loadMemoryTurns(assistantId)
-        }
-        val interval = _uiState.value.assistants.firstOrNull { it.id == assistantId && it.memoryEnabled }
-            ?.memorySummaryInterval?.coerceIn(2, 100) ?: return
-        if (pending.size >= interval) {
-            synchronized(characterMemorySummaryJobs) {
-                characterMemorySummaryReschedule.add(assistantId)
-            }
-        }
+            },
+            assistantId = assistantId,
+            backend = backend,
+            params = params,
+            cloudConfig = cloudConfig,
+            localIdentity = localIdentity
+        )
     }
 
     /** Delegates to [persistWebSearchConfig]. */
@@ -3545,75 +3299,25 @@ class MainViewModel @JvmOverloads constructor(
         cleanupPendingWorldBooksAfterOwnerCommitFor(container.chatSessionPersistenceState, worldBookStore, uiStateStore, scope, retainedOwnerIds)
 
     fun deleteAssistant(assistantId: String) {
-        val state = _uiState.value
-        if (rejectWhileConversationMutationInProgress()) return
-        if (state.isGenerating || hasActiveAssistantImageExecution(state.activeChatSessionId)) {
-            showStatus("请先结束当前角色请求，再删除助手。")
-            return
-        }
-        if (assistantId == AssistantRecord.DEFAULT_ID || state.assistants.size <= 1) {
-            showStatus("默认助手不能删除")
-            return
-        }
-        val removed = state.assistants.firstOrNull { it.id == assistantId } ?: return
-        val remaining = state.assistants.filterNot { it.id == assistantId }
-        val next = if (state.selectedAssistantId == assistantId) {
-            remaining.firstOrNull { it.id == AssistantRecord.DEFAULT_ID } ?: remaining.first()
-        } else {
-            remaining.firstOrNull { it.id == state.selectedAssistantId } ?: remaining.first()
-        }
-        try {
-            assistantStore.saveAssistants(remaining)
-        } catch (error: Throwable) {
-            uiStateStore.update {
-                it.copy(
-                    statusMessage = "删除助手失败，助手和关联世界书均未修改：${error.message ?: "存储错误"}"
-                )
-            }
-            return
-        }
-        val deletingSelectedAssistant = state.selectedAssistantId == assistantId
-        if (deletingSelectedAssistant) assistantStore.saveSelectedAssistantId(next.id)
-        val nextAssistantParams = next.toGenerationParams(state.params)
-        val updatedParams = if (deletingSelectedAssistant) state.modelGenerationProfileKey()
-            ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, nextAssistantParams) }
-            ?: nextAssistantParams else state.params
-        if (deletingSelectedAssistant) GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
-        val updatedSessions = state.chatSessions
-        uiStateStore.update {
-            it.copy(
-                assistants = remaining,
-                assistantMemories = it.assistantMemories.filterNot { memory ->
-                    memory.assistantId == assistantId
-                },
-                selectedAssistantId = if (deletingSelectedAssistant) next.id else it.selectedAssistantId,
-                params = updatedParams,
-                chatSessions = updatedSessions,
-                statusMessage = "已删除助手：${removed.name}"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { chatSessionStore.deleteAssistantMemoryData(assistantId) }
-                .onFailure { error ->
-                    uiStateStore.update {
-                        it.copy(statusMessage = "助手已删除，但关联记忆清理失败：${error.message ?: "存储错误"}")
-                    }
-                }
-        }
-        queueWorldBookCleanup(WorldBookScope.ASSISTANT, setOf(assistantId))
-        // AssistantStore's canonical Room transaction has already committed.
-        // The file-backed world-book cleanup is therefore safe to run now.
-        cleanupPendingWorldBooksAfterOwnerCommit(
-            scope = WorldBookScope.ASSISTANT,
-            retainedOwnerIds = remaining.mapTo(hashSetOf()) { it.id }
+        deleteAssistantFor(
+            store = uiStateStore,
+            assistantStore = assistantStore,
+            modelGenerationProfileStore = modelGenerationProfileStore,
+            chatSessionStore = chatSessionStore,
+            application = getApplication(),
+            scope = viewModelScope,
+            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            showStatus = ::showStatus,
+            queueWorldBookCleanup = ::queueWorldBookCleanup,
+            cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
+            selectAssistant = ::selectAssistant,
+            persistChatSessions = ::persistChatSessions,
+            chatAppearanceMutex = chatAppearanceMutex,
+            cleanupUnusedChatBackgrounds = ::cleanupUnusedChatBackgrounds,
+            currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
+            assistantId = assistantId
         )
-        if (deletingSelectedAssistant) {
-            selectAssistant(next.id)
-            persistChatSessions()
-        } else {
-            persistChatSessions(updatedSessions)
-        }
-        viewModelScope.launch { chatAppearanceMutex.withLock { cleanupUnusedChatBackgrounds() } }
     }
 
     fun importAssistantCard(rawJson: String) {
@@ -3762,132 +3466,25 @@ class MainViewModel @JvmOverloads constructor(
         owner: ContentImportOwner,
         commitId: String? = null
     ): Boolean {
-        val success = result as? CharacterCardParseResult.Success ?: run {
-            val failure = result as CharacterCardParseResult.Failure
-            val nextStep = when (failure.error.code) {
-                CharacterCardParseErrorCode.MISSING_CARD_METADATA ->
-                    "请确认选择的是带 chara/ccv3 角色卡元数据的 PNG，而不是普通图片。"
-                CharacterCardParseErrorCode.INVALID_PNG,
-                CharacterCardParseErrorCode.PNG_TOO_LARGE ->
-                    "请重新导出 PNG 角色卡，或改用同一角色卡的 JSON 文件。"
-                CharacterCardParseErrorCode.INVALID_CARD_METADATA,
-                CharacterCardParseErrorCode.CARD_METADATA_TOO_LARGE ->
-                    "请使用标准 Character Card v2/v3 导出文件；如果来自其他应用，请先重新导出。"
-                CharacterCardParseErrorCode.INVALID_JSON,
-                CharacterCardParseErrorCode.UNSUPPORTED_CARD,
-                CharacterCardParseErrorCode.MISSING_CARD_DATA ->
-                    "请导入标准角色卡 JSON（chara_card_v2/chara_card_v3）后重试。"
-                CharacterCardParseErrorCode.IO_ERROR ->
-                    "请重新选择文件并允许文件读取权限。"
-                else -> "请换用标准 PNG/JSON 角色卡后重试。"
-            }
-            uiStateStore.update {
-                it.copy(statusMessage = "角色卡导入失败：${failure.error.message} 下一步：$nextStep")
-            }
-            return false
-        }
-        if (commitId == null) {
-            stageContentImportPreview(characterCardPreview(success, owner))
-            return true
-        }
-        val state = _uiState.value
-        val imported = success.card.toAssistantRecord()
-        val now = System.currentTimeMillis()
-        val assistant = imported.copy(
-            id = commitId,
-            name = imported.name.ifBlank { "导入助手" }.take(36),
-            systemPrompt = imported.systemPrompt.ifBlank { characterCardFallbackSystemPrompt(imported.name) },
-            createdAt = now,
-            updatedAt = now
+        return finishCharacterCardImportFor(
+            store = uiStateStore,
+            assistantStore = assistantStore,
+            worldBookStore = worldBookStore,
+            chatSessionStore = chatSessionStore,
+            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+            chatSessionPersistenceSequence = chatSessionPersistenceSequence,
+            getPendingKnowledgeBindings = { pendingKnowledgeBindings },
+            setDurableChatSessions = { durableChatSessions = it },
+            chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
+            stageContentImportPreview = { stageContentImportPreview(it) },
+            conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
+            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            currentOwnerIsCurrent = { owner.isCurrent(_uiState.value) },
+            selectAssistant = ::selectAssistant,
+            result = result,
+            owner = owner,
+            commitId = commitId
         )
-        val embeddedWorldBookImport = parseEmbeddedCharacterBook(success.card, assistant.id).let { parsed ->
-            parsed.copy(book = parsed.book?.copy(id = "$commitId:world-book"))
-        }
-        val updatedAssistants = state.assistants.filterNot { it.id == assistant.id } + assistant
-        try {
-            withContext(Dispatchers.IO) { assistantStore.saveAssistants(updatedAssistants) }
-        } catch (error: Throwable) {
-            if (error is CancellationException) throw error
-            uiStateStore.update {
-                it.copy(statusMessage = "角色卡导入失败：${error.message ?: "无法保存角色"}")
-            }
-            return false
-        }
-        var updatedWorldBooks = state.worldBooks
-        var embeddedWorldBookSaveError: String? = null
-        embeddedWorldBookImport.book?.let { book ->
-            try {
-                updatedWorldBooks = withContext(Dispatchers.IO) { worldBookStore.upsert(book) }
-            } catch (error: Throwable) {
-                if (error is CancellationException) throw error
-                embeddedWorldBookSaveError = error.message?.trim()?.takeIf(String::isNotBlank)
-                    ?: "无法保存到本机"
-            }
-        }
-        val currentState = _uiState.value
-        val currentOwnerIsCurrent = owner.isCurrent(currentState)
-        val selectImportedAssistant = currentOwnerIsCurrent &&
-            !currentState.isGenerating && conversationMutationBarrier?.isActive != true &&
-            !hasActiveAssistantImageExecution(currentState.activeChatSessionId)
-        val updatedSessions = currentState.chatSessions
-        uiStateStore.update {
-            it.copy(
-                assistants = it.assistants.filterNot { record -> record.id == assistant.id } + assistant,
-                chatSessions = updatedSessions,
-                worldBooks = updatedWorldBooks,
-                statusMessage = buildString {
-                    append("已导入")
-                    append(if (success.source == CharacterCardSource.JSON) " JSON " else " PNG ")
-                    append("角色卡：")
-                    append(assistant.name)
-                    if (!selectImportedAssistant) {
-                        append("；当前对话未切换角色")
-                    }
-                    append(embeddedCharacterBookStatusSuffix(embeddedWorldBookImport, embeddedWorldBookSaveError))
-                }
-            )
-        }
-        if (selectImportedAssistant) {
-            val importStatus = _uiState.value.statusMessage
-            try {
-                selectAssistant(assistant.id)
-                if (_uiState.value.selectedAssistantId == assistant.id &&
-                    _uiState.value.activeChatSessionId != currentState.activeChatSessionId) {
-                    showStatus(importStatus)
-                }
-            } catch (error: Throwable) {
-                if (error is CancellationException) throw error
-                uiStateStore.update {
-                    it.copy(statusMessage = "$importStatus；角色卡已保存，自动切换会话失败：${error.message ?: "请手动选择角色卡"}")
-                }
-            }
-        }
-        val createdSessionId = _uiState.value.activeChatSessionId?.takeIf { activeId ->
-            currentState.chatSessions.none { it.id == activeId }
-        }
-        if (createdSessionId != null) {
-            try {
-                chatSessionPersistenceSequence.incrementAndGet()
-                withContext(Dispatchers.IO) {
-                    chatSessionPersistenceMutex.withLock {
-                        val snapshot = _uiState.value.chatSessions
-                        val liveIds = snapshot.mapTo(hashSetOf()) { it.id }
-                        val bindings = synchronized(chatSessionPersistenceStateLock) {
-                            pendingKnowledgeBindings.filterKeys { it in liveIds }.mapValues { (_, ids) -> ids.toSet() }
-                        }
-                        chatSessionStore.save(snapshot, bindings)
-                        durableChatSessions = snapshot
-                    }
-                }
-            } catch (error: Throwable) {
-                if (error is CancellationException) throw error
-                uiStateStore.update {
-                    it.copy(statusMessage = "${it.statusMessage.orEmpty()}；角色卡已保存，但新会话保存失败：${error.message ?: "存储错误"}")
-                }
-            }
-        }
-        // Import success depends on the role and its book, not on optional chat navigation.
-        return embeddedWorldBookSaveError == null
     }
 
     fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {

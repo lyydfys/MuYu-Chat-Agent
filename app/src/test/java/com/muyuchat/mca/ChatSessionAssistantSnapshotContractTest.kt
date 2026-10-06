@@ -50,18 +50,19 @@ class ChatSessionAssistantSnapshotContractTest {
     @Test
     fun replacingAnActivePersonaInvalidatesTheLocalConversationKv() {
         val source = sourceFile("MainViewModel.kt")
+        val assistantOpsSource = sourceFile("AssistantProfileOperations.kt")
 
         assertTrue(functionBody(source, "selectAssistant")
             .contains("newChatForAssistant(assistant, bindDefaultModel = true)"))
         assertTrue(functionBody(source, "newChatForAssistant")
             .contains("markLocalConversationContextInvalid()"))
-        assertTrue(functionBody(source, "finishCharacterCardImport")
+        assertTrue(functionBody(assistantOpsSource, "finishCharacterCardImportFor")
             .contains("selectAssistant(assistant.id)"))
     }
 
     @Test
     fun `editing a non-selected assistant does not rebind the active conversation`() {
-        val body = functionBody(sourceFile("MainViewModel.kt"), "saveAssistantProfile")
+        val body = functionBody(sourceFile("AssistantProfileOperations.kt"), "saveAssistantProfileFor")
 
         assertTrue(body.contains("val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId"))
         assertTrue(body.contains("val applyToActiveConversation = existing != null && shouldSelectAssistant &&"))
@@ -72,7 +73,7 @@ class ChatSessionAssistantSnapshotContractTest {
 
     @Test
     fun characterCardImportReportsWorldBookFailureWithoutRollingBackTheAssistant() {
-        val body = functionBody(sourceFile("MainViewModel.kt"), "finishCharacterCardImport")
+        val body = functionBody(sourceFile("AssistantProfileOperations.kt"), "finishCharacterCardImportFor")
 
         val assistantCommit = body.indexOf("assistantStore.saveAssistants(updatedAssistants)")
         val worldBookPublish = body.indexOf("worldBookStore.upsert(book)")

@@ -27,8 +27,9 @@ class ChatSessionWritePathContractTest {
         assertEquals(
             "A new direct chatSessionStore.save( site needs a deliberate owner decision; update this record's KDoc.",
             mapOf(
+                "AssistantProfileOperations.kt" to 1,
                 "ChatSessionPersistenceOperations.kt" to 2,
-                "MainViewModel.kt" to 3
+                "MainViewModel.kt" to 2
             ),
             sessionSaveSites()
         )
@@ -37,6 +38,7 @@ class ChatSessionWritePathContractTest {
     @Test
     fun theResidualViewModelSitesKeepTheirExactGuardedShapes() {
         val vm = sourceFile("MainViewModel.kt")
+        val assistantOps = sourceFile("AssistantProfileOperations.kt")
 
         assertEquals(
             1,
@@ -44,7 +46,7 @@ class ChatSessionWritePathContractTest {
         )
         assertEquals(
             1,
-            Regex(Regex.escape("chatSessionStore.save(snapshot, bindings)")).findAll(vm).count()
+            Regex(Regex.escape("chatSessionStore.save(snapshot, bindings)")).findAll(assistantOps).count()
         )
         assertEquals(
             1,
