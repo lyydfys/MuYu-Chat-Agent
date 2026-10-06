@@ -737,12 +737,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun ContentImportOwner.isCurrent(state: MainUiState): Boolean =
         selectionRevision == contentImportSelectionRevision.get() &&
             sessionId == state.activeChatSessionId && assistantId == state.selectedAssistantId
-    private val pendingAssistantImageToolTurns: java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>
-        get() = container.runtimeAdmission.pendingAssistantImageToolTurns
-    private val assistantImageContinuationLock: Any
-        get() = container.runtimeAdmission.assistantImageContinuationLock
-    private val assistantImageContinuationsInFlight: MutableSet<String>
-        get() = container.runtimeAdmission.assistantImageContinuationsInFlight
 
     /** Delegates to [ImageUpscaleOwner.upscaleImageAsset]. */
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
@@ -968,7 +962,7 @@ class MainViewModel @JvmOverloads constructor(
         imageLibraryCommitPortProvider = { imageLibraryCommitPort },
         chatImageRequestPortProvider = { chatImageRequestPort },
         imagePromptTranslationPortProvider = { imagePromptTranslationPort },
-        completeAssistantImageToolTurnForJob = { completeAssistantImageToolTurnForJob(it) }
+        completeAssistantImageToolTurnForJob = { assistantImageContinuationCoordinator.completeAssistantImageToolTurnForJob(it) }
     )
     val uiState = uiStateStore.state
 
@@ -1126,6 +1120,21 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    private val assistantImageContinuationCoordinator = AssistantImageToolContinuationCoordinator(
+        store = uiStateStore,
+        admission = container.runtimeAdmission,
+        container = container,
+        cloudChatProvider = cloudChatProvider,
+        chatContextComposer = chatContextComposer,
+        chatImageRequestPort = { chatImageRequestPort },
+        chatImageRequestApprovalPort = { chatImageRequestApprovalPort },
+        persistChatSessions = { persistChatSessions(it) },
+        buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
+        chatImageNegativePromptSupported = { chatImageNegativePromptSupported(it) },
+        continueAssistantImageToolTurn = { reqId, json -> continueAssistantImageToolTurn(reqId, json) },
+        cancelImageGenerationForJob = { cancelImageGenerationForJob(it) }
+    )
+
     private val offlinePromptTranslationAndChatImageCoordinator = OfflinePromptTranslationAndChatImageCoordinator(
         store = uiStateStore,
         admission = container.runtimeAdmission,
@@ -1136,7 +1145,7 @@ class MainViewModel @JvmOverloads constructor(
         prepareChatInput = { it.prepareChatInput() },
         showStatus = ::showStatus,
         rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasUnresolvedAssistantImageToolTurn = ::hasUnresolvedAssistantImageToolTurn,
+        hasUnresolvedAssistantImageToolTurn = assistantImageContinuationCoordinator::hasUnresolvedAssistantImageToolTurn,
         sendChatImageRequestWithPromptBridge = ::sendChatImageRequestWithPromptBridge,
         sendPreparedMessage = ::sendPreparedMessage
     )
@@ -2303,7 +2312,7 @@ class MainViewModel @JvmOverloads constructor(
         assistantStore = assistantStore,
         application = getApplication(),
         rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
         showStatus = ::showStatus,
         persistModelGenerationParams = ::persistModelGenerationParams,
         persistAssistantsAsync = ::persistAssistantsAsync,
@@ -2775,7 +2784,7 @@ class MainViewModel @JvmOverloads constructor(
         application = getApplication(),
         scope = viewModelScope,
         rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
         showStatus = ::showStatus,
         queueWorldBookCleanup = ::queueWorldBookCleanup,
         cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
@@ -2900,7 +2909,7 @@ class MainViewModel @JvmOverloads constructor(
         chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
         stageContentImportPreview = { stageContentImportPreview(it) },
         conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
-        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
         currentOwnerIsCurrent = { owner.isCurrent(_uiState.value) },
         selectAssistant = ::selectAssistant,
         result = result,
@@ -3450,7 +3459,7 @@ class MainViewModel @JvmOverloads constructor(
     fun sendMessage() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
-        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
+        if (assistantImageContinuationCoordinator.hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
             showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
             return
         }
@@ -3500,7 +3509,7 @@ class MainViewModel @JvmOverloads constructor(
             showStatus("此对话的角色归属不明确或角色已删除，请在历史中查看并手动分支。")
             return
         }
-        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
+        if (assistantImageContinuationCoordinator.hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
             showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
             return
         }
@@ -3873,126 +3882,20 @@ class MainViewModel @JvmOverloads constructor(
     private fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
         chatImageSubmissionBlockMessageFor(state, container.runtimeAdmission, localImageGenerationCoordinator)
 
-    private suspend fun handleAssistantImageToolCalls(
-        calls: List<ChatToolCall>,
-        originalRequestMessages: List<ChatMessage>,
-        paramsBeforeAssistant: GenerationParams,
-        chatSessionId: String?,
-        cloudModelId: String?,
-        chatModelIdentity: String?,
-        imageModelBinding: AssistantImageModelBinding?,
-        chatConfig: CloudApiConfig?
-    ): Boolean {
-        // R3-S34：助手生图工具轮次端口具名适配器（容器工厂装配，出清 94 行局部匿名类与 7 处 this@VM）。
-        val port = container.createAssistantImageToolTurnPort(
-            store = uiStateStore,
-            chatImageNegativePromptSupported = { chatImageNegativePromptSupported(it) },
-            prepareAssistantImagePrompt = { prompt, config, params, ctx ->
-                prepareAssistantImagePrompt(prompt, config, params, ctx)
-            },
-            prepareAssistantImageNegativePrompt = { prompt, config, params, ctx, preserve ->
-                prepareAssistantImageNegativePrompt(prompt, config, params, ctx, preserve)
-            },
-            setPendingAssistantToolFailure = { setPendingAssistantToolFailure(it) },
-            buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
-            attachAssistantImageRequestToTimeline = { sId, req -> attachAssistantImageRequestToTimeline(sId, req) },
-            approveChatImageRequest = { approveChatImageRequest(it) }
-        )
-        return handleAssistantImageToolTurn(
-            port = port,
-            calls = calls,
-            originalRequestMessages = originalRequestMessages,
-            paramsBeforeAssistant = paramsBeforeAssistant,
-            chatSessionId = chatSessionId,
-            cloudModelId = cloudModelId,
-            chatModelIdentity = chatModelIdentity,
-            // The private binding stays private: only the fields the turn reads cross the port.
-            // `authorizationIdentity` stays a provider so its read still happens at the
-            // auto-approval gate, after the request and the pending turn were created.
-            imageModelBinding = imageModelBinding?.let { binding ->
-                AssistantImageToolModelBinding(
-                    backend = binding.backend,
-                    modelId = binding.modelId,
-                    modelName = binding.modelName,
-                    options = binding.options,
-                    fingerprint = binding.fingerprint,
-                    authorizationIdentity = { binding.authorizationIdentity() }
-                )
-            },
-            chatConfig = chatConfig
-        )
-    }
-
-    /**
-     * Normalizes a tool-call negative branch without pretending it is a positive image request.
-     * The bridge contract requires a positive branch, so a neutral subject is used only inside
-     * the isolated translation request. Authored tool arguments fail closed when their Chinese
-     * exclusion cannot be translated; a model-provided default may safely fall back to an empty
-     * branch so the image backend can apply its own defaults.
-     */
-    private suspend fun prepareAssistantImageNegativePrompt(
-        prompt: String,
-        chatConfig: CloudApiConfig?,
-        params: GenerationParams,
-        conversationContext: List<ChatMessage>,
-        preserveAuthoredNegative: Boolean
-    ): ChatImagePromptBridge.Result = prepareAssistantImageNegativePromptFor(
-        prepareAssistantImagePrompt = ::prepareAssistantImagePrompt,
-        prompt = prompt,
-        chatConfig = chatConfig,
-        params = params,
-        conversationContext = conversationContext,
-        preserveAuthoredNegative = preserveAuthoredNegative
-    )
-
-    /** Translate an assistant tool prompt with the exact chat connector that produced the call. */
-    private suspend fun prepareAssistantImagePrompt(
-        prompt: String,
-        chatConfig: CloudApiConfig?,
-        params: GenerationParams,
-        conversationContext: List<ChatMessage> = _uiState.value.messages
-    ): ChatImagePromptBridge.Result = prepareAssistantImagePromptFor(
-        store = uiStateStore,
-        cloudChatProvider = cloudChatProvider,
-        chatContextComposer = chatContextComposer,
-        prompt = prompt,
-        chatConfig = chatConfig,
-        params = params,
-        conversationContext = conversationContext
-    )
-
-    private fun setPendingAssistantToolFailure(message: String) =
-        setPendingAssistantToolFailureFor(
-            store = uiStateStore,
-            persistChatSessions = ::persistChatSessions,
-            message = message
-        )
-
-    private fun attachAssistantImageRequestToTimeline(
-        chatSessionId: String,
-        request: ChatGeneratedImageRequest
-    ) = attachAssistantImageRequestToTimelineFor(
-        store = uiStateStore,
-        persistChatSessions = ::persistChatSessions,
-        chatSessionId = chatSessionId,
-        request = request
-    )
-
-
     private fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
-        synchronized(assistantImageContinuationLock) {
-            val current = findChatGeneratedImageRequest(requestId)?.second ?: return
+        synchronized(container.runtimeAdmission.assistantImageContinuationLock) {
+            val current = findChatGeneratedImageRequestIn(_uiState.value, requestId)?.second ?: return
             if (!current.canContinueAssistantImageTurn() ||
-                !assistantImageContinuationsInFlight.add(requestId)
+                !container.runtimeAdmission.assistantImageContinuationsInFlight.add(requestId)
             ) return
             current
         }
         var reservation: UiGenerationReservation? = null
         var started = false
         try {
-            val (sessionId, request) = findChatGeneratedImageRequest(requestId) ?: return
-            val pending = pendingAssistantImageToolTurns[requestId]
-                ?: restorePendingAssistantImageToolTurn(sessionId, request)
+            val (sessionId, request) = findChatGeneratedImageRequestIn(_uiState.value, requestId) ?: return
+            val pending = container.runtimeAdmission.pendingAssistantImageToolTurns[requestId]
+                ?: assistantImageContinuationCoordinator.restorePendingAssistantImageToolTurn(sessionId, request)
                 ?: run {
                     applyChatGeneratedImageRequest(chatImageRequestPort,
                         sessionId,
@@ -4004,10 +3907,10 @@ class MainViewModel @JvmOverloads constructor(
                             message = "图片已保存，但聊天上下文已变化，已跳过自动续答。你可以继续发送新消息。"
                         )
                     )
-                    pendingAssistantImageToolTurns.remove(requestId)
+                    container.runtimeAdmission.pendingAssistantImageToolTurns.remove(requestId)
                     return
                 }
-            val latest = findChatGeneratedImageRequest(requestId)?.second ?: request
+            val latest = findChatGeneratedImageRequestIn(_uiState.value, requestId)?.second ?: request
             applyChatGeneratedImageRequest(chatImageRequestPort,
                 sessionId,
                 requestId,
@@ -4112,34 +4015,12 @@ class MainViewModel @JvmOverloads constructor(
             }
         } finally {
             if (!started) reservation?.let { chatRuns.cancelPending(it) }
-            synchronized(assistantImageContinuationLock) {
-                assistantImageContinuationsInFlight.remove(requestId)
+            synchronized(container.runtimeAdmission.assistantImageContinuationLock) {
+                container.runtimeAdmission.assistantImageContinuationsInFlight.remove(requestId)
             }
         }
     }
 
-    private fun finishAssistantImageContinuation(
-        requestId: String,
-        completed: Boolean,
-        failureMessage: String
-    ) {
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (sessionId, request) = owner
-        if (request.toolContinuationStatus != ChatImageToolContinuationStatus.RUNNING) return
-        val updated = request.copy(
-            toolContinuationStatus = if (completed) {
-                ChatImageToolContinuationStatus.COMPLETED
-            } else {
-                ChatImageToolContinuationStatus.FAILED
-            },
-            toolContinuationStarted = completed,
-            message = if (completed) request.assistantTranscriptText() else failureMessage
-        )
-        applyChatGeneratedImageRequest(chatImageRequestPort, sessionId, requestId, updated)
-        if (completed) {
-            pendingAssistantImageToolTurns.remove(requestId)
-        }
-    }
 
     private fun removeChatImageContinuationPlaceholder(chatSessionId: String) {
         var updatedSessions: List<ChatSessionRecord>? = null
@@ -4166,58 +4047,6 @@ class MainViewModel @JvmOverloads constructor(
         updatedSessions?.let(::persistChatSessions)
     }
 
-    /** Rebuild the volatile continuation envelope from the durable chat timeline after process death. */
-    private fun restorePendingAssistantImageToolTurn(
-        chatSessionId: String,
-        request: ChatGeneratedImageRequest
-    ): PendingAssistantImageToolTurn? {
-        if (request.origin != ChatGeneratedImageOrigin.ASSISTANT_TOOL ||
-            !request.canContinueAssistantImageTurn()
-        ) return null
-        val callId = request.toolCallId?.takeIf(String::isNotBlank) ?: return null
-        val modelId = request.toolChatModelId?.takeIf(String::isNotBlank) ?: return null
-        val params = request.toolParamsJson?.let { encoded ->
-            runCatching { GenerationParams.fromJson(JSONObject(encoded)) }.getOrNull()
-        } ?: return null
-        val state = _uiState.value
-        val session = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return null
-        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session.messages
-        val requestIndex = messages.indexOfFirst { it.generatedImageRequest?.id == request.id }
-        if (requestIndex < 0) return null
-        val requestMessageCount = request.toolRequestMessageCount ?: requestIndex
-        if (requestMessageCount !in 0..requestIndex) return null
-        val originalMessages = messages.take(requestMessageCount)
-        request.toolRequestMessagesFingerprint?.let { expected ->
-            if (chatImageToolContextFingerprint(originalMessages) != expected) return null
-        }
-        val call = ChatToolCall(
-            id = callId,
-            name = CHAT_IMAGE_TOOL_NAME,
-            argumentsJson = request.toolArgumentsJson ?: JSONObject().put("prompt", request.prompt).toString()
-        )
-        val pending = PendingAssistantImageToolTurn(
-            requestId = request.id,
-            chatSessionId = chatSessionId,
-            originalRequestMessages = originalMessages,
-            params = params,
-            cloudModelId = modelId,
-            toolCalls = listOf(call),
-            primaryToolCallId = call.id,
-            initialToolOutputs = emptyMap()
-        )
-        pendingAssistantImageToolTurns[request.id] = pending
-        return pending
-    }
-
-    /** Delegates to [completeAssistantImageToolTurnForJobFor]. Signature kept verbatim. */
-    private fun completeAssistantImageToolTurnForJob(jobId: String) =
-        completeAssistantImageToolTurnForJobFor(
-            uiStateStore,
-            chatImageRequestPort,
-            { findChatGeneratedImageRequest(it) },
-            { requestId, output -> continueAssistantImageToolTurn(requestId, output) },
-            jobId
-        )
 
     /** R3-S35：聊天生图审批端口具名适配器（容器工厂装配，出清 66 行匿名类与 9 处 this@VM）。 */
     private val chatImageRequestApprovalPort: ChatImageRequestApprovalPort =
@@ -4240,51 +4069,11 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
     fun continueAssistantImageTurn(requestId: String) =
-        continueAssistantImageTurnFor(
-            store = uiStateStore,
-            findRequest = ::findChatGeneratedImageRequest,
-            continueTurn = ::continueAssistantImageToolTurn,
-            requestId = requestId
-        )
+        assistantImageContinuationCoordinator.continueAssistantImageTurn(requestId)
 
     /** Delegates to [cancelChatImageGenerationFor]. Signature kept verbatim. */
     fun cancelChatImageGeneration(requestId: String) =
-        cancelChatImageGenerationFor(
-            uiStateStore,
-            { findChatGeneratedImageRequest(it) },
-            { rejectChatImageRequest(it) },
-            { cancelImageGenerationForJob(it) },
-            requestId
-        )
-
-    private fun findChatGeneratedImageRequest(
-        requestId: String
-    ): Pair<String, ChatGeneratedImageRequest>? =
-        findChatGeneratedImageRequestIn(_uiState.value, requestId)
-
-    private fun hasUnresolvedAssistantImageToolTurn(chatSessionId: String?): Boolean {
-        if (chatSessionId.isNullOrBlank()) return false
-        val state = _uiState.value
-        val session = state.chatSessions.firstOrNull { it.id == chatSessionId }
-        val messages = if (state.activeChatSessionId == chatSessionId) state.messages else session?.messages.orEmpty()
-        return messages.any { message ->
-            message.generatedImageRequest?.let { request ->
-                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
-                    request.toolContinuationStatus != ChatImageToolContinuationStatus.COMPLETED
-            } == true
-        } || pendingAssistantImageToolTurns.values.any { pending ->
-            pending.chatSessionId == chatSessionId
-        }
-    }
-
-    private fun hasActiveAssistantImageExecution(chatSessionId: String?): Boolean =
-        hasActiveAssistantImageExecutionIn(_uiState.value, chatSessionId)
-    private fun isChatImageRequestActive(request: ChatGeneratedImageRequest): Boolean =
-        request.status in setOf(
-            ChatGeneratedImageStatus.AWAITING_APPROVAL,
-            ChatGeneratedImageStatus.QUEUED,
-            ChatGeneratedImageStatus.GENERATING
-        ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING
+        assistantImageContinuationCoordinator.cancelChatImageGeneration(requestId)
 
     fun regenerateLastResponse() {
         val state = _uiState.value
@@ -4346,7 +4135,7 @@ class MainViewModel @JvmOverloads constructor(
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
             isChatImageRequestActive = ::isChatImageRequestActive,
-            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+            pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
             index = index
         )
@@ -4359,7 +4148,7 @@ class MainViewModel @JvmOverloads constructor(
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
             isChatImageRequestActive = ::isChatImageRequestActive,
-            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+            pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             persistConversationMutation = { sessions, rollback, _ ->
                 persistConversationMutation(
                     sessions = sessions,
@@ -4447,7 +4236,7 @@ class MainViewModel @JvmOverloads constructor(
         val created = newChatForAssistantFor(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
             showStatus = ::showStatus,
             invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
             cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
@@ -4472,7 +4261,7 @@ class MainViewModel @JvmOverloads constructor(
         container.createSelectChatSessionPort(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecution(it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
             invalidatePendingChatImagePreparation = { invalidatePendingChatImagePreparation() },
             cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
             bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
@@ -4487,7 +4276,7 @@ class MainViewModel @JvmOverloads constructor(
         branchMixedChatSessionFor(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
             persistChatSessions = { persistChatSessions(it) },
             selectChatSession = ::selectChatSession,
             sessionId = sessionId,
@@ -4502,9 +4291,9 @@ class MainViewModel @JvmOverloads constructor(
             scope = viewModelScope,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
-            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+            pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             queueWorldBookCleanup = ::queueWorldBookCleanup,
             persistConversationMutation = { remaining, rollback ->
                 persistConversationMutation(remaining, rollback)
@@ -4542,10 +4331,10 @@ class MainViewModel @JvmOverloads constructor(
             scope = viewModelScope,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
             queueWorldBookCleanup = ::queueWorldBookCleanup,
-            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+            pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
             chatImageToolAuthorizationStore = chatImageToolAuthorizationStore
         )
@@ -4687,7 +4476,7 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
         maybeCheckForAppUpdate()
-        resumePendingAssistantImageToolTurnIfReady()
+        assistantImageContinuationCoordinator.resumePendingAssistantImageToolTurnIfReady()
         val recovery = foregroundRecoverySequence.incrementAndGet()
         foregroundRecoveryJob?.cancel()
         foregroundRecoveryJob = viewModelScope.launch(Dispatchers.IO) {
@@ -4757,29 +4546,9 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
             if (recovery == foregroundRecoverySequence.get()) {
-                resumePendingAssistantImageToolTurnIfReady()
+                assistantImageContinuationCoordinator.resumePendingAssistantImageToolTurnIfReady()
             }
         }
-    }
-
-    private fun resumePendingAssistantImageToolTurnIfReady() {
-        val state = _uiState.value
-        val sessionId = state.activeChatSessionId ?: return
-        val requestId = state.messages.asSequence()
-            .mapNotNull(ChatMessage::generatedImageRequest)
-            .firstOrNull { request ->
-                request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
-                    request.toolContinuationStatus == ChatImageToolContinuationStatus.NOT_STARTED &&
-                    request.status in setOf(
-                        ChatGeneratedImageStatus.DONE,
-                        ChatGeneratedImageStatus.FAILED,
-                        ChatGeneratedImageStatus.CANCELLED,
-                        ChatGeneratedImageStatus.INTERRUPTED
-                    )
-            }
-            ?.id
-            ?: return
-        continueAssistantImageTurn(requestId)
     }
 
     fun refreshLogs() {
@@ -5313,8 +5082,8 @@ class MainViewModel @JvmOverloads constructor(
             summarizeContextForGenerationRef = ::summarizeContextForGeneration,
             ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
             loadContextCompressionThresholdRef = ::loadContextCompressionThreshold,
-            handleAssistantImageToolCallsRef = ::handleAssistantImageToolCalls,
-            finishAssistantImageContinuationRef = ::finishAssistantImageContinuation,
+            handleAssistantImageToolCallsRef = assistantImageContinuationCoordinator::handleAssistantImageToolCalls,
+            finishAssistantImageContinuationRef = assistantImageContinuationCoordinator::finishAssistantImageContinuation,
         )
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
