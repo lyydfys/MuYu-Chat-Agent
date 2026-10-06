@@ -15,9 +15,17 @@ import java.util.concurrent.atomic.AtomicLong
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.LoadAuthorization
+import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.core.engine.ModelRuntimeIdentity
+import com.muyuchat.core.engine.PendingProfileDisposition
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelStoreRepository
+import com.muyuchat.core.tuning.CanaryEvaluationParams
+import com.muyuchat.core.tuning.CandidateScore
+import com.muyuchat.core.tuning.ExecutionProfileKind
+import com.muyuchat.core.tuning.ProfileVerificationLevel
+import com.muyuchat.core.tuning.TuningExecutionProfile
 
 /**
  * R3/C3-S1（插队裁定 2）：自 MainViewModel 具名化的端口适配器——只持有真实依赖
@@ -1498,6 +1506,77 @@ internal class SelectChatSessionPortAdapter(
     override fun continueAssistantImageTurn(requestId: String) {
         continueAssistantImageTurnRef(requestId)
     }
+}
+
+internal class RuntimeProfileTransactionPortAdapter(
+    private val store: UiStateStore,
+    override val runtimeProfileStore: ModelRuntimeProfileStore,
+    override val engine: McaInferenceService,
+    private val runtimeAdmission: RuntimeAdmissionState,
+    private val tuningOwner: TuningOwner,
+    private val showStatusAction: (String) -> Unit,
+) : RuntimeProfileTransactionPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val activeModelForRuntimeProfile: ModelManifest?
+        get() = runtimeAdmission.activeModelForRuntimeProfile
+
+    override var pendingProfileTransactionId: String?
+        get() = runtimeAdmission.pendingProfileTransactionId
+        set(value) {
+            runtimeAdmission.pendingProfileTransactionId = value
+        }
+
+    override fun candidateMeasurement(
+        profileId: String,
+        jobId: String?,
+        phase: String,
+        result: CandidateCanaryResult
+    ): CandidateMeasurementEntity =
+        tuningOwner.candidateMeasurement(profileId, jobId, phase, result)
+
+    override fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
+        canaryScore(port = tuningOwner.canaryPort, result)
+
+    override fun mergeExecutionProfile(
+        generation: GenerationParams,
+        profile: ModelExecutionProfile
+    ): GenerationParams = mergedExecutionProfile(generation, profile)
+
+    override suspend fun restoreExactRuntimeProfile(
+        model: ModelManifest,
+        profile: ModelExecutionProfile
+    ): Boolean = tuningOwner.restoreExactRuntimeProfile(model, profile)
+
+    override fun showStatus(message: String) {
+        showStatusAction(message)
+    }
+
+    override fun asTuningExecutionProfile(
+        profile: ModelExecutionProfile,
+        kind: ExecutionProfileKind,
+        verificationLevel: ProfileVerificationLevel,
+        reason: String
+    ): TuningExecutionProfile =
+        tuningOwner.asTuningExecutionProfile(profile, kind = kind, verificationLevel = verificationLevel, reason = reason)
+
+    override suspend fun runCandidateCanary(
+        candidate: TuningExecutionProfile,
+        canaryParams: CanaryEvaluationParams,
+        authorization: LoadAuthorization,
+        disposition: PendingProfileDisposition,
+        lifecycleLease: EngineLifecycleLease?
+    ): CandidateCanaryResult = tuningOwner.runCandidateCanary(
+        candidate = candidate,
+        canaryParams = canaryParams,
+        authorization = authorization,
+        disposition = disposition,
+        lifecycleLease = lifecycleLease
+    )
 }
 
 

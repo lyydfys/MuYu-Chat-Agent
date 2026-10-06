@@ -119,6 +119,8 @@ import com.muyuchat.mca.TextualInversionStore
 import com.muyuchat.mca.WebSearchDiagnosticStore
 import com.muyuchat.mca.WebSearchStore
 import com.muyuchat.mca.WorldBookStore
+import com.muyuchat.mca.RuntimeProfileTransactionPort
+import com.muyuchat.mca.RuntimeProfileTransactionPortAdapter
 
 /**
  * R2：组合根骨架（方案 §9 / §14.4）。
@@ -718,6 +720,21 @@ internal class McaAppContainer(private val application: Application) {
             loadModelGenerationParamsRef = loadModelGenerationParams,
             markLocalConversationContextInvalidRef = markLocalConversationContextInvalid,
             continueAssistantImageTurnRef = continueAssistantImageTurn
+        )
+
+    fun createRuntimeProfileTransactionPort(
+        store: UiStateStore,
+        engine: McaInferenceService,
+        tuningOwner: TuningOwner,
+        showStatusAction: (String) -> Unit
+    ): RuntimeProfileTransactionPort =
+        RuntimeProfileTransactionPortAdapter(
+            store = store,
+            runtimeProfileStore = runtimeProfileStore,
+            engine = engine,
+            runtimeAdmission = runtimeAdmission,
+            tuningOwner = tuningOwner,
+            showStatusAction = showStatusAction
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

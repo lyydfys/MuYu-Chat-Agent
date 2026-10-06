@@ -7696,75 +7696,12 @@ class MainViewModel @JvmOverloads constructor(
 
 
     private val runtimeProfileTransactionPort: RuntimeProfileTransactionPort =
-        object : RuntimeProfileTransactionPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val runtimeProfileStore: ModelRuntimeProfileStore
-                get() = this@MainViewModel.runtimeProfileStore
-
-            override val engine: McaInferenceService
-                get() = this@MainViewModel.engine
-
-            override val activeModelForRuntimeProfile: ModelManifest?
-                get() = this@MainViewModel.activeModelForRuntimeProfile
-
-            override var pendingProfileTransactionId: String?
-                get() = this@MainViewModel.pendingProfileTransactionId
-                set(value) {
-                    this@MainViewModel.pendingProfileTransactionId = value
-                }
-
-            override fun candidateMeasurement(
-                profileId: String,
-                jobId: String?,
-                phase: String,
-                result: CandidateCanaryResult
-            ): CandidateMeasurementEntity =
-                tuningOwner.candidateMeasurement(profileId, jobId, phase, result)
-
-            override fun tuningCandidateScore(result: CandidateCanaryResult): CandidateScore =
-                canaryScore(port = tuningOwner.canaryPort, result)
-
-            override fun mergeExecutionProfile(
-                generation: GenerationParams,
-                profile: ModelExecutionProfile
-            ): GenerationParams = mergedExecutionProfile(generation, profile)
-
-            override suspend fun restoreExactRuntimeProfile(
-                model: ModelManifest,
-                profile: ModelExecutionProfile
-            ): Boolean = tuningOwner.restoreExactRuntimeProfile(model, profile)
-
-            override fun showStatus(message: String) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override fun asTuningExecutionProfile(
-                profile: ModelExecutionProfile,
-                kind: ExecutionProfileKind,
-                verificationLevel: ProfileVerificationLevel,
-                reason: String
-            ): TuningExecutionProfile =
-                tuningOwner.asTuningExecutionProfile(profile, kind = kind, verificationLevel = verificationLevel, reason = reason)
-
-            override suspend fun runCandidateCanary(
-                candidate: TuningExecutionProfile,
-                canaryParams: CanaryEvaluationParams,
-                authorization: LoadAuthorization,
-                disposition: PendingProfileDisposition,
-                lifecycleLease: EngineLifecycleLease?
-            ): CandidateCanaryResult = tuningOwner.runCandidateCanary(
-                candidate = candidate,
-                canaryParams = canaryParams,
-                authorization = authorization,
-                disposition = disposition,
-                lifecycleLease = lifecycleLease
-            )
-        }
+        container.createRuntimeProfileTransactionPort(
+            store = uiStateStore,
+            engine = engine,
+            tuningOwner = tuningOwner,
+            showStatusAction = ::showStatus
+        )
 
     private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) {
         applyPendingRuntimeTransaction(port = runtimeProfileTransactionPort, pending = pending)
