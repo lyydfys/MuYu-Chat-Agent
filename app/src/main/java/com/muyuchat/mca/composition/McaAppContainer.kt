@@ -48,6 +48,8 @@ import com.muyuchat.mca.AppUpdatePort
 import com.muyuchat.mca.AppUpdatePortAdapter
 import com.muyuchat.mca.CloudModelConfigPort
 import com.muyuchat.mca.CloudModelConfigPortAdapter
+import com.muyuchat.mca.SelectChatSessionPort
+import com.muyuchat.mca.SelectChatSessionPortAdapter
 import com.muyuchat.mca.ChatBackend
 import com.muyuchat.mca.OpenAiCompatibleChatProvider
 import com.muyuchat.core.engine.GenerationParams
@@ -687,6 +689,35 @@ internal class McaAppContainer(private val application: Application) {
             localImageModelStore = localImageModelStore,
             loadModelGenerationParamsRef = loadModelGenerationParams,
             persistChatSessionsRef = persistChatSessions
+        )
+
+    /** R3-S39：选择聊天会话端口工厂（B 族第 4 端口）。 */
+    fun createSelectChatSessionPort(
+        store: UiStateStore,
+        rejectWhileConversationMutationInProgress: () -> Boolean,
+        hasActiveAssistantImageExecution: (String?) -> Boolean,
+        invalidatePendingChatImagePreparation: () -> Unit,
+        cancelActiveWebSearch: () -> Unit,
+        bumpContentImportSelectionRevision: () -> Unit,
+        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+        markLocalConversationContextInvalid: () -> Unit,
+        continueAssistantImageTurn: (String) -> Unit
+    ): SelectChatSessionPort =
+        SelectChatSessionPortAdapter(
+            application = application,
+            store = store,
+            knowledgeBaseStore = knowledgeBaseStore,
+            assistantStore = assistantStore,
+            cloudApiStore = cloudApiStore,
+            manualContextCompressionRequests = manualContextCompressionRequests,
+            rejectWhileConversationMutationInProgressRef = rejectWhileConversationMutationInProgress,
+            hasActiveAssistantImageExecutionRef = hasActiveAssistantImageExecution,
+            invalidatePendingChatImagePreparationRef = invalidatePendingChatImagePreparation,
+            cancelActiveWebSearchRef = cancelActiveWebSearch,
+            bumpContentImportSelectionRevisionRef = bumpContentImportSelectionRevision,
+            loadModelGenerationParamsRef = loadModelGenerationParams,
+            markLocalConversationContextInvalidRef = markLocalConversationContextInvalid,
+            continueAssistantImageTurnRef = continueAssistantImageTurn
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

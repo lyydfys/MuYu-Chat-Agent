@@ -1400,5 +1400,105 @@ internal class CloudModelConfigPortAdapter(
     }
 }
 
+/**
+ * R3-S39：选择聊天会话端口具名适配器（B 族第 4 端口）。
+ */
+internal class SelectChatSessionPortAdapter(
+    private val application: Application,
+    private val store: UiStateStore,
+    private val knowledgeBaseStore: KnowledgeBaseStore,
+    private val assistantStore: AssistantStore,
+    private val cloudApiStore: CloudApiStore,
+    private val manualContextCompressionRequests: ContextCompressionRequestStore,
+    private val rejectWhileConversationMutationInProgressRef: () -> Boolean,
+    private val hasActiveAssistantImageExecutionRef: (String?) -> Boolean,
+    private val invalidatePendingChatImagePreparationRef: () -> Unit,
+    private val cancelActiveWebSearchRef: () -> Unit,
+    private val bumpContentImportSelectionRevisionRef: () -> Unit,
+    private val loadModelGenerationParamsRef: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+    private val markLocalConversationContextInvalidRef: () -> Unit,
+    private val continueAssistantImageTurnRef: (String) -> Unit
+) : SelectChatSessionPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun rejectWhileConversationMutationInProgress(): Boolean =
+        rejectWhileConversationMutationInProgressRef()
+
+    override fun hasActiveAssistantImageExecution(sessionId: String?): Boolean =
+        hasActiveAssistantImageExecutionRef(sessionId)
+
+    override fun showStatus(message: String) {
+        store.showStatus(message)
+    }
+
+    override fun invalidatePendingChatImagePreparation() {
+        invalidatePendingChatImagePreparationRef()
+    }
+
+    override fun cancelActiveWebSearch() {
+        cancelActiveWebSearchRef()
+    }
+
+    override fun bumpContentImportSelectionRevision() {
+        bumpContentImportSelectionRevisionRef()
+    }
+
+    override fun selectedKnowledgeBaseIdsFor(sessionId: String): Set<String> =
+        knowledgeBaseStore.selectedKnowledgeBaseIds(sessionId)
+
+    override fun saveSelectedAssistantId(assistantId: String) {
+        assistantStore.saveSelectedAssistantId(assistantId)
+    }
+
+    override fun loadModelGenerationParams(
+        backend: ChatBackend,
+        modelId: String?,
+        defaults: GenerationParams
+    ): GenerationParams = loadModelGenerationParamsRef(backend, modelId, defaults)
+
+    override fun persistGenerationParams(params: GenerationParams) {
+        GenerationPreferences.persistGenerationParams(application, params)
+    }
+
+    override fun saveSelectedBackend(backend: ChatBackend) {
+        cloudApiStore.saveSelectedBackend(backend)
+    }
+
+    override fun saveSelectedCloudChatModelId(modelId: String) {
+        cloudApiStore.saveSelectedCloudChatModelId(modelId)
+    }
+
+    override fun normalizedCloudChatConfig(config: CloudApiConfig): CloudApiConfig =
+        config.normalized()
+
+    override fun saveCloudChatConfig(config: CloudApiConfig) {
+        cloudApiStore.save(config.normalized())
+    }
+
+    override fun toGenerationParams(
+        assistant: AssistantRecord,
+        defaults: GenerationParams
+    ): GenerationParams = assistantGenerationParamsFromJson(
+        assistant.paramsJson,
+        defaults,
+        assistant.systemPrompt
+    )
+
+    override fun isContextCompressionPending(sessionId: String): Boolean =
+        manualContextCompressionRequests.isPending(sessionId)
+
+    override fun markLocalConversationContextInvalid() {
+        markLocalConversationContextInvalidRef()
+    }
+
+    override fun continueAssistantImageTurn(requestId: String) {
+        continueAssistantImageTurnRef(requestId)
+    }
+}
+
 
 

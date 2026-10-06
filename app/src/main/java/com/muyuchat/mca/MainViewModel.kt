@@ -6872,90 +6872,21 @@ class MainViewModel @JvmOverloads constructor(
         selectChatSession(port = selectChatSessionPort, sessionId = sessionId)
     }
 
+    /** R3-S39：选择聊天会话端口具名适配器（容器工厂装配，出清 84 行匿名实现与 18 处 this@VM）。 */
     private val selectChatSessionPort: SelectChatSessionPort =
-        object : SelectChatSessionPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun rejectWhileConversationMutationInProgress(): Boolean =
-                this@MainViewModel.rejectWhileConversationMutationInProgress()
-
-            override fun hasActiveAssistantImageExecution(sessionId: String?): Boolean =
-                this@MainViewModel.hasActiveAssistantImageExecution(sessionId)
-
-            override fun showStatus(message: String) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override fun invalidatePendingChatImagePreparation() {
-                this@MainViewModel.invalidatePendingChatImagePreparation()
-            }
-
-            override fun cancelActiveWebSearch() {
-                this@MainViewModel.activeWebSearchDeferred?.cancel()
-            }
-
-            override fun bumpContentImportSelectionRevision() {
-                this@MainViewModel.contentImportSelectionRevision.incrementAndGet()
-            }
-
-            override fun selectedKnowledgeBaseIdsFor(sessionId: String): Set<String> =
-                this@MainViewModel.knowledgeBaseStore.selectedKnowledgeBaseIds(sessionId)
-
-            override fun saveSelectedAssistantId(assistantId: String) {
-                this@MainViewModel.assistantStore.saveSelectedAssistantId(assistantId)
-            }
-
-            override fun loadModelGenerationParams(
-                backend: ChatBackend,
-                modelId: String?,
-                defaults: GenerationParams
-            ): GenerationParams = this@MainViewModel.loadModelGenerationParams(
-                backend = backend,
-                modelId = modelId,
-                defaults = defaults
-            )
-
-            override fun persistGenerationParams(params: GenerationParams) {
-                GenerationPreferences.persistGenerationParams(getApplication(), params)
-            }
-
-            override fun saveSelectedBackend(backend: ChatBackend) {
-                this@MainViewModel.cloudApiStore.saveSelectedBackend(backend)
-            }
-
-            override fun saveSelectedCloudChatModelId(modelId: String) {
-                this@MainViewModel.cloudApiStore.saveSelectedCloudChatModelId(modelId)
-            }
-
-            override fun normalizedCloudChatConfig(config: CloudApiConfig): CloudApiConfig =
-                config.normalized()
-
-            override fun saveCloudChatConfig(config: CloudApiConfig) {
-                // `normalized()` is a private extension of this class, so the normalisation stays
-                // here rather than moving into the operations file.
-                this@MainViewModel.cloudApiStore.save(config.normalized())
-            }
-
-            override fun toGenerationParams(
-                assistant: AssistantRecord,
-                defaults: GenerationParams
-            ): GenerationParams = assistant.toGenerationParams(defaults)
-
-            override fun isContextCompressionPending(sessionId: String): Boolean =
-                this@MainViewModel.manualContextCompressionRequests.isPending(sessionId)
-
-            override fun markLocalConversationContextInvalid() {
-                this@MainViewModel.markLocalConversationContextInvalid()
-            }
-
-            override fun continueAssistantImageTurn(requestId: String) {
-                this@MainViewModel.continueAssistantImageTurn(requestId)
-            }
-        }
+        container.createSelectChatSessionPort(
+            store = uiStateStore,
+            rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecution(it) },
+            invalidatePendingChatImagePreparation = { invalidatePendingChatImagePreparation() },
+            cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
+            bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
+            loadModelGenerationParams = { backend, modelId, defaults ->
+                loadModelGenerationParams(backend, modelId, defaults)
+            },
+            markLocalConversationContextInvalid = { markLocalConversationContextInvalid() },
+            continueAssistantImageTurn = { continueAssistantImageTurn(it) }
+        )
 
     fun branchMixedChatSession(sessionId: String, assistantId: String) {
         val state = _uiState.value
