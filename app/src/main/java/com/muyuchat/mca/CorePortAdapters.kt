@@ -13,6 +13,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicBoolean
+import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.chat.ChatImageActionKind
 import com.muyuchat.api.local.LocalApiRuntime
 import com.muyuchat.core.engine.LocalChatExecutionContext
@@ -53,6 +55,7 @@ import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.ChatRequest
 import com.muyuchat.mca.presentation.ChatContextSnapshot
 import com.muyuchat.mca.presentation.chatContextSnapshot
+import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 
 /**
  * R3/C3-S1（插队裁定 2）：自 MainViewModel 具名化的端口适配器——只持有真实依赖
@@ -2184,6 +2187,73 @@ internal class ChatImagePromptBridgePortAdapter(
     override fun selectedAssistant(state: MainUiState): AssistantRecord? =
         state.selectedAssistant()
 }
+
+internal class ChatStopGenerationPortAdapter(
+    private val store: UiStateStore,
+    private val engine: McaInferenceService,
+    private val chatRuns: ChatRunOwnership,
+    private val stopScopeRef: () -> CoroutineScope,
+    private val rejectWhileConversationMutationInProgressRef: () -> Boolean,
+    private val stopGenerationInProgressRef: AtomicBoolean,
+    private val currentReplyMetricsRef: () -> ReplyGenerationMetrics?,
+    private val cancelGenerationJobRef: () -> UiGenerationCancellation,
+    private val flushPendingAssistantOutputRef: () -> Unit,
+    private val persistConversationMutationRef: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Unit,
+) : ChatStopGenerationPort {
+
+    override fun currentState(): MainUiState = store.state.value
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun stopScope(): CoroutineScope = stopScopeRef()
+
+    override fun rejectWhileConversationMutationInProgress(): Boolean =
+        rejectWhileConversationMutationInProgressRef()
+
+    override fun tryEnterStop(): Boolean =
+        stopGenerationInProgressRef.compareAndSet(false, true)
+
+    override fun exitStop() {
+        stopGenerationInProgressRef.set(false)
+    }
+
+    override fun currentReplyMetrics(): ReplyGenerationMetrics? =
+        currentReplyMetricsRef()
+
+    override fun isRunCurrent(runId: Long?): Boolean = chatRuns.isCurrent(runId)
+
+    override fun currentRunId(): Long = chatRuns.currentRunId()
+
+    override fun cancelCurrentGeneration(): UiGenerationCancellation =
+        cancelGenerationJobRef()
+
+    override fun activeUiStopRequestId(): String? =
+        engine.activeGenerationStopToken()?.requestId
+
+    override suspend fun requestRuntimeStop() {
+        engine.stopGeneration()
+    }
+
+    override fun runtimeLifecycle(): AgentEngineLifecycle =
+        engine.stats.value.lifecycleAfterGeneration()
+
+    override fun rollbackState(): ConversationMutationRollbackState =
+        store.state.value.conversationMutationRollbackState()
+
+    override fun flushPendingAssistantOutput() {
+        flushPendingAssistantOutputRef()
+    }
+
+    override fun persistConversationMutation(
+        sessions: List<ChatSessionRecord>,
+        rollback: ConversationMutationRollbackState
+    ) {
+        persistConversationMutationRef(sessions, rollback)
+    }
+}
+
 
 
 

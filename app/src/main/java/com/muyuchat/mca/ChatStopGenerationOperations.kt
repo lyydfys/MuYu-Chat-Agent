@@ -129,3 +129,14 @@ internal fun stopActiveGeneration(port: ChatStopGenerationPort) {
         }
     }
 }
+
+internal fun MainUiState.conversationMutationRollbackState(): ConversationMutationRollbackState =
+    ConversationMutationRollbackState(
+        messages = messages,
+        activeChatSessionId = activeChatSessionId,
+        chatSessions = chatSessions,
+        selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
+        generationPhase = generationPhase,
+        generationTokenProgress = generationTokenProgress,
+        promptContextUsage = promptContextUsage
+    )

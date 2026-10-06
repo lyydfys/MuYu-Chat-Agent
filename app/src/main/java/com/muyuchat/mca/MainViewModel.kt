@@ -8105,56 +8105,17 @@ class MainViewModel @JvmOverloads constructor(
 
     /** The ViewModel side of [ChatStopGenerationPort]. */
     private val chatStopGenerationPort: ChatStopGenerationPort =
-        object : ChatStopGenerationPort {
-            override fun currentState(): MainUiState = _uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                uiStateStore.update(transform)
-            }
-
-            override fun stopScope() = viewModelScope
-
-            override fun rejectWhileConversationMutationInProgress(): Boolean =
-                this@MainViewModel.rejectWhileConversationMutationInProgress()
-
-            override fun tryEnterStop(): Boolean = stopGenerationInProgress.compareAndSet(false, true)
-
-            override fun exitStop() {
-                stopGenerationInProgress.set(false)
-            }
-
-            override fun currentReplyMetrics(): ReplyGenerationMetrics? = replyGenerationMetrics
-
-            override fun isRunCurrent(runId: Long?): Boolean = chatRuns.isCurrent(runId)
-
-            override fun currentRunId(): Long = chatRuns.currentRunId()
-
-            override fun cancelCurrentGeneration(): UiGenerationCancellation = cancelGenerationJob()
-
-            override fun activeUiStopRequestId(): String? =
-                engine.activeGenerationStopToken()?.requestId
-
-            override suspend fun requestRuntimeStop() {
-                engine.stopGeneration()
-            }
-
-            override fun runtimeLifecycle(): AgentEngineLifecycle =
-                engine.stats.value.lifecycleAfterGeneration()
-
-            override fun rollbackState(): ConversationMutationRollbackState =
-                _uiState.value.conversationMutationRollbackState()
-
-            override fun flushPendingAssistantOutput() {
-                this@MainViewModel.flushPendingAssistantOutput()
-            }
-
-            override fun persistConversationMutation(
-                sessions: List<ChatSessionRecord>,
-                rollback: ConversationMutationRollbackState
-            ) {
-                this@MainViewModel.persistConversationMutation(sessions, rollback)
-            }
-        }
+        container.createChatStopGenerationPort(
+            store = uiStateStore,
+            engine = engine,
+            stopScopeRef = { viewModelScope },
+            rejectWhileConversationMutationInProgressRef = { rejectWhileConversationMutationInProgress() },
+            stopGenerationInProgressRef = stopGenerationInProgress,
+            currentReplyMetricsRef = { replyGenerationMetrics },
+            cancelGenerationJobRef = { cancelGenerationJob() },
+            flushPendingAssistantOutputRef = { flushPendingAssistantOutput() },
+            persistConversationMutationRef = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
+        )
 
 /** Delegates to [settleWebSearchAnswerGuards]. Signature kept verbatim. */
     fun applyWebSearchAnswerGuardsToLastAssistant(
@@ -8225,16 +8186,6 @@ class MainViewModel @JvmOverloads constructor(
         markLocalConversationContextInvalidInto(container.runtimeAdmission, uiStateStore, viewModelScope, engine)
     private fun rejectWhileConversationMutationInProgress(): Boolean =
         rejectWhileConversationMutationInProgressInto(uiStateStore, container.runtimeAdmission)
-    private fun MainUiState.conversationMutationRollbackState() =
-        ConversationMutationRollbackState(
-            messages = messages,
-            activeChatSessionId = activeChatSessionId,
-            chatSessions = chatSessions,
-            selectedKnowledgeBaseIds = selectedKnowledgeBaseIds,
-            generationPhase = generationPhase,
-            generationTokenProgress = generationTokenProgress,
-            promptContextUsage = promptContextUsage
-        )
 
     private suspend fun ensureLocalConversationContextInvalidated(): Boolean {
         // A delete/edit first commits Room, then invalidates native KV. Joining

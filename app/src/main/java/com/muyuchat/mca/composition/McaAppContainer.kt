@@ -84,6 +84,12 @@ import com.muyuchat.mca.ChatGenerationExecutionPort
 import com.muyuchat.mca.ChatGenerationExecutionPortAdapter
 import com.muyuchat.mca.ChatImagePromptBridgePort
 import com.muyuchat.mca.ChatImagePromptBridgePortAdapter
+import com.muyuchat.mca.ChatStopGenerationPort
+import com.muyuchat.mca.ChatStopGenerationPortAdapter
+import com.muyuchat.mca.ReplyGenerationMetrics
+import com.muyuchat.mca.UiGenerationCancellation
+import com.muyuchat.mca.ConversationMutationRollbackState
+import java.util.concurrent.atomic.AtomicBoolean
 import com.muyuchat.feature.chat.ChatImageActionKind
 import com.muyuchat.mca.PendingChatImageAction
 import com.muyuchat.mca.PendingImageTranslation
@@ -941,6 +947,30 @@ internal class McaAppContainer(private val application: Application) {
             verifiedOfflineTranslationBundleRef = verifiedOfflineTranslationBundleRef,
             sendChatImageRequestRef = sendChatImageRequestRef,
             negativePromptSupportedRef = negativePromptSupportedRef,
+        )
+
+    fun createChatStopGenerationPort(
+        store: UiStateStore,
+        engine: McaInferenceService,
+        stopScopeRef: () -> CoroutineScope,
+        rejectWhileConversationMutationInProgressRef: () -> Boolean,
+        stopGenerationInProgressRef: AtomicBoolean,
+        currentReplyMetricsRef: () -> ReplyGenerationMetrics?,
+        cancelGenerationJobRef: () -> UiGenerationCancellation,
+        flushPendingAssistantOutputRef: () -> Unit,
+        persistConversationMutationRef: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Unit,
+    ): ChatStopGenerationPort =
+        ChatStopGenerationPortAdapter(
+            store = store,
+            engine = engine,
+            chatRuns = chatRuns,
+            stopScopeRef = stopScopeRef,
+            rejectWhileConversationMutationInProgressRef = rejectWhileConversationMutationInProgressRef,
+            stopGenerationInProgressRef = stopGenerationInProgressRef,
+            currentReplyMetricsRef = currentReplyMetricsRef,
+            cancelGenerationJobRef = cancelGenerationJobRef,
+            flushPendingAssistantOutputRef = flushPendingAssistantOutputRef,
+            persistConversationMutationRef = persistConversationMutationRef,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
