@@ -50,6 +50,10 @@ internal class RuntimeAdmissionState(
     val pendingAssistantImageToolTurns =
         java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
 
+    // R3-S30：本地生图 worker 请求代际（@Volatile 随迁；VM 唯一读点直改容器读）。
+    @Volatile
+    var activeLocalImageWorkerRequestId: String? = null
+
     val assistantImageContinuationLock = Any()
 
     val assistantImageContinuationsInFlight = mutableSetOf<String>()

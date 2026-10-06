@@ -1020,7 +1020,7 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.activeImageGenerationModelId = value
         }
-    @Volatile private var activeLocalImageWorkerRequestId: String? = null
+    // R3-S30：activeLocalImageWorkerRequestId 已入 RuntimeAdmissionState；读点直改容器读。
     private var activeLocalApiImageModelId: String?
         get() = container.runtimeAdmission.activeLocalApiImageModelId
         set(value) {
@@ -2454,7 +2454,7 @@ class MainViewModel @JvmOverloads constructor(
             uiStateStore,
             container.runtimeAdmission,
             localImageWorkerClient,
-            activeLocalImageWorkerRequestId,
+            container.runtimeAdmission.activeLocalImageWorkerRequestId,
             expectedJobId
         )
 
@@ -2864,6 +2864,7 @@ class MainViewModel @JvmOverloads constructor(
     )
 
 
+    /** Delegates to [executionWithQnnVerificationEvidenceFor]. Signature kept verbatim. */
     private fun executionWithQnnVerificationEvidence(
         model: LocalImageModelRecord,
         result: LocalImageResult,
@@ -2871,34 +2872,9 @@ class MainViewModel @JvmOverloads constructor(
         requestId: String,
         attemptId: String,
         entryPoint: QnnImageEvidenceEntryPoint
-    ): String {
-        if (model.runtime != LocalImageRuntime.QNN_HTP) return result.executionMetadataJson
-        val execution = JSONObject(result.executionMetadataJson)
-        runCatching {
-            val bundleRoot = requireNotNull(model.qnnBundleRootForVerification())
-            val resolved = resolveLocalImageExecutionProfile(
-                model, options.normalizedForPromptExecutionProfile(model.runtime), bundleRoot
-            ).layers.resolved
-            val fullRegression = options.taskMode == LocalImageTaskMode.TEXT_TO_IMAGE &&
-                resolved.width == 512 && resolved.height == 512 && resolved.steps == 20
-            val evidence = QnnImageExecutionEvidence.fromNativeImageExecution(
-                level = if (fullRegression) QnnImageEvidenceLevel.FULL_IMAGE_REGRESSION
-                    else QnnImageEvidenceLevel.PRODUCT_IMAGE_SMOKE,
-                entryPoint = entryPoint,
-                requestId = requestId,
-                attemptId = attemptId,
-                expected = QnnImageRunParameters(resolved.width, resolved.height, resolved.steps, resolved.seed),
-                executionMetadataJson = result.executionMetadataJson,
-                output = result.bytes
-            )
-            execution.put("qnnVerificationStamp", JSONObject(qnnImageVerificationStampFor(
-                getApplication<Application>(), bundleRoot, execution = evidence
-            )))
-        }.onFailure { error ->
-            execution.put("qnnVerificationEvidenceError", error.message ?: error.javaClass.simpleName)
-        }
-        return execution.toString()
-    }
+    ): String = executionWithQnnVerificationEvidenceFor(
+        getApplication(), model, result, options, requestId, attemptId, entryPoint
+    )
 
     private fun qnnVerificationPersistence(
         model: LocalImageModelRecord,
@@ -9435,65 +9411,9 @@ class MainViewModel @JvmOverloads constructor(
      * share their names with the ViewModel members they forward to, so an unqualified call would
      * recurse into the override instead of reaching the original implementation.
      */
+    // R3-S30：本地生图资产生成端口的具名适配器（真实客户端经网关注入；worker 代际经 holder）。
     private val createLocalGeneratedImageAssetPort: CreateLocalGeneratedImageAssetPort =
-        object : CreateLocalGeneratedImageAssetPort {
-            /** The same field `cancelActiveImageGeneration` observes, so it stays the port's own property. */
-            override var activeLocalImageWorkerRequestId: String?
-                get() = this@MainViewModel.activeLocalImageWorkerRequestId
-                set(value) {
-                    this@MainViewModel.activeLocalImageWorkerRequestId = value
-                }
-
-            override val localImageWorkerClient: LocalGeneratedImageWorkerGateway =
-                object : LocalGeneratedImageWorkerGateway {
-                    override suspend fun generate(
-                        model: LocalImageModelRecord,
-                        prompt: String,
-                        options: LocalImageGenerationOptions,
-                        inputDraft: LocalImageInputDraft,
-                        requestId: String,
-                        batchLineage: ImageGenerationBatchLineage?,
-                        onProgress: (LocalImageProgress) -> Unit
-                    ): LocalImageResult = this@MainViewModel.localImageWorkerClient.generate(
-                        model = model,
-                        prompt = prompt,
-                        options = options,
-                        inputDraft = inputDraft,
-                        onProgress = onProgress,
-                        requestId = requestId,
-                        batchLineage = batchLineage
-                    )
-                }
-
-            override fun recordLocalImageExecutionOutcome(
-                model: LocalImageModelRecord,
-                failureMessage: String?
-            ) {
-                this@MainViewModel.recordLocalImageExecutionOutcome(model, failureMessage)
-            }
-
-            override fun executionWithQnnVerificationEvidence(
-                model: LocalImageModelRecord,
-                result: LocalImageResult,
-                options: LocalImageGenerationOptions,
-                requestId: String,
-                attemptId: String,
-                entryPoint: QnnImageEvidenceEntryPoint
-            ): String = this@MainViewModel.executionWithQnnVerificationEvidence(
-                model = model,
-                result = result,
-                options = options,
-                requestId = requestId,
-                attemptId = attemptId,
-                entryPoint = entryPoint
-            )
-
-            override val imageAssetWriteMutex: Mutex
-                get() = this@MainViewModel.imageAssetWriteMutex
-
-            override val imageAssetDirectory: File
-                get() = this@MainViewModel.imageAssetDirectory
-        }
+        container.createCreateLocalGeneratedImageAssetPort(uiStateStore, application)
 
     private suspend fun createLocalGeneratedImageAsset(
         requestId: String,
@@ -9679,35 +9599,13 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     /** Records actual worker execution only; this evidence is never an admission certificate. */
+    /** Delegates to [recordLocalImageExecutionOutcomeFor]. Signature kept verbatim. */
     private fun recordLocalImageExecutionOutcome(
         model: LocalImageModelRecord,
         failureMessage: String?
-    ) {
-        if (
-            model.runtime != LocalImageRuntime.MNN_DIFFUSION &&
-            model.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP
-        ) {
-            return
-        }
-        val succeeded = failureMessage == null
-        val current = localImageModelStore.loadModels().firstOrNull { it.id == model.id } ?: model
-        val updated = current.copy(
-            verificationStatus = if (succeeded) {
-                LocalImageVerificationStatus.PASSED
-            } else {
-                LocalImageVerificationStatus.FAILED
-            },
-            verificationMessage = if (succeeded) {
-                "真实图片生成执行成功。"
-            } else {
-                failureMessage.orEmpty().ifBlank { "本地 native 生图执行失败。" }
-            },
-            verifiedAt = System.currentTimeMillis()
-        )
-        val models = localImageModelStore.updateModel(updated)
-        managedRuntimeReadinessRefreshGate.invalidate()
-        uiStateStore.update { state -> state.copy(localImageModels = models) }
-    }
+    ) = recordLocalImageExecutionOutcomeFor(
+        localImageModelStore, managedRuntimeReadinessRefreshGate, uiStateStore, model, failureMessage
+    )
 
     /**
      * Thin forwarders to [GenerationPreferences] and the two pure helpers beside it. The store is a

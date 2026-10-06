@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import android.app.Application
 import android.graphics.BitmapFactory
 import android.net.Uri
 import java.io.File
@@ -7,6 +8,7 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
 
 /**
  * The ViewModel members `createLocalGeneratedImageAsset` actually reached for, one member each.
@@ -236,4 +238,76 @@ internal object CreateLocalGeneratedImageAssetOperations {
             }
         }
     }
+}
+
+// R3-S30：本地生图端口的两个依赖助手自 MainViewModel 顶层化（体逐字；store/门/application 参数化）。
+
+internal fun recordLocalImageExecutionOutcomeFor(
+    localImageModelStore: LocalImageModelStore,
+    readinessGate: ManagedRuntimeReadinessRefreshGate,
+    store: UiStateStore,
+    model: LocalImageModelRecord,
+    failureMessage: String?
+) {
+    if (
+        model.runtime != LocalImageRuntime.MNN_DIFFUSION &&
+        model.runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP
+    ) {
+        return
+    }
+    val succeeded = failureMessage == null
+    val current = localImageModelStore.loadModels().firstOrNull { it.id == model.id } ?: model
+    val updated = current.copy(
+        verificationStatus = if (succeeded) {
+            LocalImageVerificationStatus.PASSED
+        } else {
+            LocalImageVerificationStatus.FAILED
+        },
+        verificationMessage = if (succeeded) {
+            "真实图片生成执行成功。"
+        } else {
+            failureMessage.orEmpty().ifBlank { "本地 native 生图执行失败。" }
+        },
+        verifiedAt = System.currentTimeMillis()
+    )
+    val models = localImageModelStore.updateModel(updated)
+    readinessGate.invalidate()
+    store.update { state -> state.copy(localImageModels = models) }
+}
+
+internal fun executionWithQnnVerificationEvidenceFor(
+    application: Application,
+    model: LocalImageModelRecord,
+    result: LocalImageResult,
+    options: LocalImageGenerationOptions,
+    requestId: String,
+    attemptId: String,
+    entryPoint: QnnImageEvidenceEntryPoint
+): String {
+    if (model.runtime != LocalImageRuntime.QNN_HTP) return result.executionMetadataJson
+    val execution = JSONObject(result.executionMetadataJson)
+    runCatching {
+        val bundleRoot = requireNotNull(model.qnnBundleRootForVerification())
+        val resolved = resolveLocalImageExecutionProfile(
+            model, options.normalizedForPromptExecutionProfile(model.runtime), bundleRoot
+        ).layers.resolved
+        val fullRegression = options.taskMode == LocalImageTaskMode.TEXT_TO_IMAGE &&
+            resolved.width == 512 && resolved.height == 512 && resolved.steps == 20
+        val evidence = QnnImageExecutionEvidence.fromNativeImageExecution(
+            level = if (fullRegression) QnnImageEvidenceLevel.FULL_IMAGE_REGRESSION
+                else QnnImageEvidenceLevel.PRODUCT_IMAGE_SMOKE,
+            entryPoint = entryPoint,
+            requestId = requestId,
+            attemptId = attemptId,
+            expected = QnnImageRunParameters(resolved.width, resolved.height, resolved.steps, resolved.seed),
+            executionMetadataJson = result.executionMetadataJson,
+            output = result.bytes
+        )
+        execution.put("qnnVerificationStamp", JSONObject(qnnImageVerificationStampFor(
+            application, bundleRoot, execution = evidence
+        )))
+    }.onFailure { error ->
+        execution.put("qnnVerificationEvidenceError", error.message ?: error.javaClass.simpleName)
+    }
+    return execution.toString()
 }

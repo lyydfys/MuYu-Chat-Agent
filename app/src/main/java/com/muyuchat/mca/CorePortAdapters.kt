@@ -768,3 +768,71 @@ internal class ImagePromptTranslationPortAdapter(
         }
     }
 }
+
+/** R3-S30：本地生图 worker 网关具名化（真实客户端经命名参数纯转发）。 */
+internal class LocalGeneratedImageWorkerGatewayAdapter(
+    private val client: LocalImageWorkerClient
+) : LocalGeneratedImageWorkerGateway {
+    override suspend fun generate(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        inputDraft: LocalImageInputDraft,
+        requestId: String,
+        batchLineage: ImageGenerationBatchLineage?,
+        onProgress: (LocalImageProgress) -> Unit
+    ): LocalImageResult = client.generate(
+        model = model,
+        prompt = prompt,
+        options = options,
+        inputDraft = inputDraft,
+        onProgress = onProgress,
+        requestId = requestId,
+        batchLineage = batchLineage
+    )
+}
+
+/** R3-S30：本地生图资产生成端口具名化（worker 代际经 holder；两助手经顶层 For）。 */
+internal class CreateLocalGeneratedImageAssetPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val gateway: LocalGeneratedImageWorkerGateway,
+    private val localImageModelStoreRef: LocalImageModelStore,
+    private val readinessGate: ManagedRuntimeReadinessRefreshGate,
+    private val assetWriteMutex: Mutex,
+    private val assetDirectory: File,
+    private val application: Application
+) : CreateLocalGeneratedImageAssetPort {
+    override var activeLocalImageWorkerRequestId: String?
+        get() = admission.activeLocalImageWorkerRequestId
+        set(value) {
+            admission.activeLocalImageWorkerRequestId = value
+        }
+
+    override val localImageWorkerClient: LocalGeneratedImageWorkerGateway
+        get() = gateway
+
+    override fun recordLocalImageExecutionOutcome(
+        model: LocalImageModelRecord,
+        failureMessage: String?
+    ) = recordLocalImageExecutionOutcomeFor(
+        localImageModelStoreRef, readinessGate, store, model, failureMessage
+    )
+
+    override fun executionWithQnnVerificationEvidence(
+        model: LocalImageModelRecord,
+        result: LocalImageResult,
+        options: LocalImageGenerationOptions,
+        requestId: String,
+        attemptId: String,
+        entryPoint: QnnImageEvidenceEntryPoint
+    ): String = executionWithQnnVerificationEvidenceFor(
+        application, model, result, options, requestId, attemptId, entryPoint
+    )
+
+    override val imageAssetWriteMutex: Mutex
+        get() = assetWriteMutex
+
+    override val imageAssetDirectory: File
+        get() = assetDirectory
+}

@@ -29,6 +29,9 @@ import com.muyuchat.mca.ImageLibraryCommitPortAdapter
 import com.muyuchat.mca.ImageUpscaleOwner
 import com.muyuchat.mca.ImageUpscalePort
 import com.muyuchat.mca.ImageUpscalePortAdapter
+import com.muyuchat.mca.CreateLocalGeneratedImageAssetPort
+import com.muyuchat.mca.CreateLocalGeneratedImageAssetPortAdapter
+import com.muyuchat.mca.LocalGeneratedImageWorkerGatewayAdapter
 import com.muyuchat.mca.ImagePromptTranslationPort
 import com.muyuchat.mca.ImagePromptTranslationPortAdapter
 import com.muyuchat.mca.OfflinePromptTranslationService
@@ -483,6 +486,22 @@ internal class McaAppContainer(private val application: Application) {
             admission = runtimeAdmission,
             serviceProvider = serviceProvider,
             verifiedBundleRef = verifiedBundle
+        )
+
+    /** R3-S30：本地生图资产生成端口工厂（worker 代际经 holder；网关包真实客户端）。 */
+    fun createCreateLocalGeneratedImageAssetPort(
+        store: UiStateStore,
+        application: Application
+    ): CreateLocalGeneratedImageAssetPort =
+        CreateLocalGeneratedImageAssetPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            gateway = LocalGeneratedImageWorkerGatewayAdapter(localImageWorkerClient),
+            localImageModelStoreRef = localImageModelStore,
+            readinessGate = readinessRefreshGate,
+            assetWriteMutex = imageAssetWriteMutex,
+            assetDirectory = imageAssetDirectory,
+            application = application
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
