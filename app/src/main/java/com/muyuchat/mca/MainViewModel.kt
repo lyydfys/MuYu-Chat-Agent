@@ -1150,6 +1150,25 @@ class MainViewModel @JvmOverloads constructor(
         sendPreparedMessage = ::sendPreparedMessage
     )
 
+    private val localApiControlPlaneCoordinator = LocalApiControlPlaneCoordinator(
+        container = container,
+        store = uiStateStore,
+        engine = engine,
+        tuningOwner = tuningOwner,
+        runtimeProfileStore = runtimeProfileStore,
+        agentTuningCoordinator = agentTuningCoordinator,
+        getActiveTuningJobId = { activeTuningJobId },
+        setActiveTuningJobId = { activeTuningJobId = it },
+        getAdaptiveTuningJob = { adaptiveTuningJob },
+        setAdaptiveTuningJob = { adaptiveTuningJob = it },
+        getActiveRuntimeIdentity = { activeRuntimeIdentity },
+        applyPendingRuntimeTransaction = ::applyPendingRuntimeTransaction,
+        rollbackCommittedRuntimeProfile = ::rollbackCommittedRuntimeProfile,
+        idempotencyJournalLock = localApiIdempotencyJournalLock,
+        application = getApplication(),
+        scope = viewModelScope
+    )
+
     init {
         if (!deferStartup) startAfterConstruction()
     }
@@ -1217,80 +1236,7 @@ class MainViewModel @JvmOverloads constructor(
         }
         installChatLocalApiProviders(chatLocalApiProviderPort)
         installLocalApiAuxProviders(localApiAuxProviderPort)
-        LocalApiRuntime.controlPlane = container.createLocalApiControlPlane(
-            busyStateProvider = {
-                localApiBusyStateFor(_uiState.value, tuningJson = { localApiTuningStateJson(localApiPayloadPort) })
-            },
-            preflightProvider = { request ->
-                localApiPreflightFor(
-                    request = request,
-                    state = _uiState.value,
-                    engine = engine,
-                    publicModelId = { displayName, id -> localApiPublicModelId(displayName, id) },
-                    runtimeProfileJson = { runtimeProfileJsonFor(_uiState.value, engine, activeRuntimeIdentity) }
-                )
-            },
-            profileJsonProvider = {
-                runtimeProfileJsonFor(_uiState.value, engine, activeRuntimeIdentity)
-            },
-            tuningJsonProvider = {
-                localApiTuningStateJson(localApiPayloadPort)
-            },
-            tuningJobProvider = { jobId ->
-                localApiTuningJobFor(
-                    requestedJobId = jobId,
-                    currentIdentityKey = { activeRuntimeIdentity?.identityHash },
-                    currentActiveTuningJobId = { activeTuningJobId },
-                    lookupJob = { id -> runtimeProfileStore.tuningJob(id) },
-                    lookupActiveJob = { key -> runtimeProfileStore.activeTuningJob(key) },
-                    tuningJson = { localApiTuningStateJson(localApiPayloadPort) },
-                    publicJobJson = { job -> tuningJobPublicJson(job) }
-                )
-            },
-            createTuningJobDelegate = { request, idempotencyKey ->
-                localApiCreateTuningJobFor(
-                    request = request,
-                    idempotencyKey = idempotencyKey,
-                    state = _uiState.value,
-                    engine = engine,
-                    port = localApiTuningControlPort
-                )
-            },
-            pauseTuningJobDelegate = { jobId, idempotencyKey ->
-                runTuningControl(jobId, "pause") {
-                    agentTuningCoordinator.adaptiveTuningPauseRequested.set(true)
-                    runtimeProfileStore.pauseTuningJob(jobId)
-                }
-            },
-            resumeTuningJobDelegate = { jobId, idempotencyKey ->
-                runTuningControl(jobId, "resume") {
-                    agentTuningCoordinator.adaptiveTuningPauseRequested.set(false)
-                    runtimeProfileStore.resumeTuningJob(jobId)
-                }
-            },
-            cancelTuningJobDelegate = { jobId, idempotencyKey ->
-                runTuningControl(jobId, "cancel") {
-                    agentTuningCoordinator.adaptiveTuningCancelRequested.set(true)
-                    cancelPersistedTuningJob(jobId)
-                }
-            },
-            applyTuningJobDelegate = { jobId, idempotencyKey ->
-                localApiApplyTuningJobFor(
-                    jobId = jobId,
-                    idempotencyKey = idempotencyKey,
-                    port = localApiTuningControlPort
-                )
-            },
-            rollbackTuningDelegate = { idempotencyKey ->
-                localApiRollbackTuningFor(
-                    idempotencyKey = idempotencyKey,
-                    port = localApiTuningControlPort
-                )
-            },
-            runDurableLocalApiControl = { idempotency, operation ->
-                runDurableLocalApiControl(idempotency, operation)
-            }
-        )
+        LocalApiRuntime.controlPlane = localApiControlPlaneCoordinator.createControlPlane()
 
         // Every provider above is now installed. Publish them as one immutable set so a runtime call
         // that starts from here on can never observe a half-installed owner (for example the new
@@ -2997,7 +2943,7 @@ class MainViewModel @JvmOverloads constructor(
             try {
                 val preview = runCatching {
                     val uri = Uri.parse(uriString)
-                    val name = displayNameForUri(uri)
+                    val name = displayNameForUri(getApplication<Application>().contentResolver, uri)
                     require(isSupportedTextAttachment(getApplication<Application>().contentResolver, uri, name)) { "知识库目前支持文本、Markdown、JSON、XML、CSV 与代码文件。" }
                     val text = getApplication<Application>().contentResolver.openInputStream(uri)
                         ?.use { KnowledgeDocumentImportCodec.readTextCancellable(it) }
@@ -4674,7 +4620,7 @@ class MainViewModel @JvmOverloads constructor(
         agentTuningCoordinator.resumeAgentTuning(runtimeProfileStore, uiStateStore, viewModelScope)
 
     fun cancelAgentTuning() =
-        agentTuningCoordinator.cancelAgentTuning(::cancelPersistedTuningJob, uiStateStore, viewModelScope)
+        agentTuningCoordinator.cancelAgentTuning(localApiControlPlaneCoordinator::cancelPersistedTuningJob, uiStateStore, viewModelScope)
 
     fun queryAgentTuningJob() =
         agentTuningCoordinator.queryAgentTuningJob(runtimeProfileStore, uiStateStore, viewModelScope, activeRuntimeIdentity)
@@ -5008,46 +4954,10 @@ class MainViewModel @JvmOverloads constructor(
         container.createLocalApiAuxProviderPort(
             store = uiStateStore,
             engine = engine,
-            localApiPayloadPortProvider = { localApiPayloadPort },
+            localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
             benchmarkRunner = benchmarkRunner,
             buildRecommendationAction = ::buildRecommendation,
             generateLocalApiImageAction = ::generateLocalApiImage,
-        )
-
-    private val localApiTuningControlPort: LocalApiTuningControlPort =
-        container.createLocalApiTuningControlPort(
-            store = uiStateStore,
-            tuningOwner = tuningOwner,
-            localApiModelMatchesRef = ::localApiModelMatches,
-            localApiPerformancePreferenceRef = ::localApiPerformancePreference,
-            localApiTuningRejectedRef = ::localApiTuningRejected,
-            localApiTuningConflictRef = ::localApiTuningConflict,
-            localApiExclusiveLifecycleConflictRef = ::localApiExclusiveLifecycleConflict,
-            assignActiveTuningJobIdRef = { activeTuningJobId = it },
-            tuningJobPublicJsonRef = ::tuningJobPublicJson,
-            setTuningCancelRequestedRef = { agentTuningCoordinator.adaptiveTuningCancelRequested.set(it) },
-            setTuningPauseRequestedRef = { agentTuningCoordinator.adaptiveTuningPauseRequested.set(it) },
-            launchTuningApplyRef = { pending ->
-                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
-                    try {
-                        applyPendingRuntimeTransaction(pending)
-                    } finally {
-                        activeTuningJobId = null
-                        adaptiveTuningJob = null
-                        agentTuningCoordinator.adaptiveTuningCancelRequested.set(false)
-                        agentTuningCoordinator.adaptiveTuningPauseRequested.set(false)
-                    }
-                }
-            },
-            launchTuningRollbackRef = { identity, model ->
-                adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
-                    try {
-                        rollbackCommittedRuntimeProfile(identity, model)
-                    } finally {
-                        adaptiveTuningJob = null
-                    }
-                }
-            }
         )
 
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
@@ -5055,7 +4965,7 @@ class MainViewModel @JvmOverloads constructor(
             engine = engine,
             store = uiStateStore,
             cancelActiveLocalApiImageGenerationAction = ::cancelActiveLocalApiImageGeneration,
-            localApiPayloadPortProvider = { localApiPayloadPort },
+            localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
         )
 
     private val chatExecutionPort: ChatGenerationExecutionPort =
@@ -5258,11 +5168,6 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun reconciledChatSessionsAfterSave(snapshot: List<ChatSessionRecord>): List<ChatSessionRecord> =
-        reconciledChatSessionsAfterSaveFor(container.chatSessionPersistenceState, chatSessionStore, snapshot)
-
-    private fun publishReconciledChatSessions(requested: List<ChatSessionRecord>, persisted: List<ChatSessionRecord>) =
-        publishReconciledChatSessionsInto(uiStateStore, chatRuns, requested, persisted)
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
     private fun persistChatSessions(
@@ -5365,97 +5270,12 @@ class MainViewModel @JvmOverloads constructor(
         chatImageOptionsForCurrentSelectionFor(state)
 
 
-    private fun displayNameForUri(uri: Uri): String =
-        displayNameForUri(getApplication<Application>().contentResolver, uri)
-
-    private fun isImageAttachment(uri: Uri, name: String): Boolean =
-        isImageAttachment(getApplication<Application>().contentResolver, uri, name)
-
     private fun readAttachmentText(uri: Uri, maxBytes: Int = 64 * 1024): Pair<String, Boolean> =
         readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes)
 
-    private fun createFileAsset(
-        uri: Uri,
-        displayName: String,
-        text: String,
-        truncated: Boolean,
-        source: String,
-        chatSessionId: String? = null
-    ): FileAssetRecord = createFileAsset(
-        contentResolver = getApplication<Application>().contentResolver,
-        uri = uri,
-        displayName = displayName,
-        text = text,
-        truncated = truncated,
-        source = source,
-        chatSessionId = chatSessionId
-    )
-
-    private suspend fun importImageAsset(
-        uri: Uri,
-        displayName: String,
-        source: String,
-        prompt: String = "",
-        chatSessionId: String? = null
-    ): ImageAssetRecord = importImageAsset(
-        contentResolver = getApplication<Application>().contentResolver,
-        imageAssetWriteMutex = imageAssetWriteMutex,
-        imageAssetDirectory = imageAssetDirectory,
-        uri = uri,
-        displayName = displayName,
-        source = source,
-        prompt = prompt,
-        chatSessionId = chatSessionId
-    )
 
 
 
-    /** Delegates to [createCloudGeneratedImageAssetsFor]. Signature kept verbatim. */
-    private suspend fun createCloudGeneratedImageAssets(
-        request: CloudImageRequest,
-        config: CloudApiConfig,
-        chatSessionId: String? = null,
-        generationMetadata: ImageGenerationHistoryMetadata
-    ): List<ImageAssetRecord> =
-        createCloudGeneratedImageAssetsFor(
-            cloudImageProvider,
-            imageAssetWriteMutex,
-            imageAssetDirectory,
-            request,
-            config,
-            chatSessionId,
-            generationMetadata
-        )
-
-    // R3-S30：本地生图资产生成端口的具名适配器（真实客户端经网关注入；worker 代际经 holder）。
-    private val createLocalGeneratedImageAssetPort: CreateLocalGeneratedImageAssetPort =
-        container.createCreateLocalGeneratedImageAssetPort(uiStateStore, application)
-
-    private suspend fun createLocalGeneratedImageAsset(
-        requestId: String,
-        prompt: String,
-        model: LocalImageModelRecord,
-        options: LocalImageGenerationOptions = LocalImageGenerationOptions(),
-        inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
-        chatSessionId: String? = null,
-        generationMetadata: ImageGenerationHistoryMetadata,
-        batchLineage: ImageGenerationBatchLineage? = null,
-        outputLineages: List<ImageGenerationBatchLineage>,
-        onProgress: (LocalImageProgress) -> Unit = {}
-    ): List<ImageAssetRecord> =
-        CreateLocalGeneratedImageAssetOperations.createLocalGeneratedImageAsset(
-            port = createLocalGeneratedImageAssetPort,
-            requestId = requestId,
-            prompt = prompt,
-            model = model,
-            options = options,
-            inputDraft = inputDraft,
-            chatSessionId = chatSessionId,
-            generationMetadata = generationMetadata,
-            batchLineage = batchLineage,
-            outputLineages = outputLineages,
-            onProgress = onProgress
-        )
 
     private val localApiImageGenerationPort: LocalApiImageGenerationPort =
         container.createLocalApiImageGenerationPort(
@@ -5484,14 +5304,6 @@ class MainViewModel @JvmOverloads constructor(
             port = localApiImageGenerationPort
         )
 
-    /** Records actual worker execution only; this evidence is never an admission certificate. */
-    /** Delegates to [recordLocalImageExecutionOutcomeFor]. Signature kept verbatim. */
-    private fun recordLocalImageExecutionOutcome(
-        model: LocalImageModelRecord,
-        failureMessage: String?
-    ) = recordLocalImageExecutionOutcomeFor(
-        localImageModelStore, managedRuntimeReadinessRefreshGate, uiStateStore, model, failureMessage
-    )
 
     /**
      * Thin forwarders to [GenerationPreferences] and the two pure helpers beside it. The store is a
@@ -5599,12 +5411,6 @@ class MainViewModel @JvmOverloads constructor(
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")
 
 
-    private fun mergeUserRequestedExecutionProfile(
-        base: ModelExecutionProfile,
-        requested: ModelExecutionProfile,
-        authoritativeFields: Set<String>
-    ): ModelExecutionProfile =
-        mergeUserRequestedIntoProfile(base, requested, authoritativeFields)
 
     private suspend fun timedLoadModel(
         model: ModelManifest,
@@ -5636,239 +5442,6 @@ class MainViewModel @JvmOverloads constructor(
     private suspend fun recoverInterruptedRuntimeProfiles() =
         recoverInterruptedRuntimeProfilesFor(runtimeProfileStore, pendingRuntimeRecoveries, uiStateStore)
 
-
-
-
-    /** Delegates to [persistBootstrapProfileFor]. Signature kept verbatim. */
-    private suspend fun persistBootstrapProfile(
-        profile: ModelExecutionProfile,
-        sourceSummary: String
-    ) = persistBootstrapProfileFor(runtimeProfileStore, engine, profile, sourceSummary)
-
-    /** Delegates to [stageBootstrapProfileFor]. Signature kept verbatim. */
-    private suspend fun stageBootstrapProfile(
-        transactionId: String,
-        profile: ModelExecutionProfile,
-        rollbackTargetProfileId: String?
-    ) = stageBootstrapProfileFor(runtimeProfileStore, transactionId, profile, rollbackTargetProfileId)
-
-    /** Delegates to [recordBootstrapProbeMeasurementFor]. Signature kept verbatim. */
-    private suspend fun recordBootstrapProbeMeasurement(
-        result: TuningProbeWorkerProtocol.Result
-    ) = recordBootstrapProbeMeasurementFor(runtimeProfileStore, result)
-
-
-
-
-
-
-
-
-
-
-    private fun localApiModelMatches(
-        requestedModel: String,
-        state: MainUiState,
-        model: ModelManifest
-    ): Boolean {
-        val requested = requestedModel.trim()
-        return requested.isNotEmpty() && (
-            requested == state.loadedModelId ||
-                requested == state.loadedModelName ||
-                requested == model.id ||
-                requested == model.fileName ||
-                requested == model.displayName ||
-                requested == localApiPublicModelId(model.displayName, model.id)
-            )
-    }
-
-    /**
-     * Durable, app-owned idempotency journal for Local API control mutations.
-     *
-     * Only a SHA-256 of the caller key, the server-supplied request fingerprint, and the already
-     * redacted structured response are persisted. A crash after the pending marker is committed
-     * fails closed on replay instead of executing a possibly completed lifecycle mutation twice.
-     */
-    private fun runDurableLocalApiControl(
-        idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext,
-        operation: () -> com.muyuchat.api.local.LocalApiControlResult
-    ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControlFor(
-        preferences = getApplication<Application>().getSharedPreferences(
-            "mca_local_api_idempotency_journal",
-            Context.MODE_PRIVATE
-        ),
-        lock = localApiIdempotencyJournalLock,
-        idempotency = idempotency,
-        localApiTuningRejected = ::localApiTuningRejected,
-        operation = operation
-    )
-
-
-    private fun localApiPerformancePreference(value: String?): UserPreference? {
-        if (value.isNullOrBlank()) return null
-        val mode = when (value.trim().lowercase(Locale.ROOT).replace("-", "_").replace(" ", "_")) {
-            "balanced" -> PerformanceMode.Balanced
-            "speed" -> PerformanceMode.Speed
-            "quality" -> PerformanceMode.Quality
-            "long_context", "longcontext" -> PerformanceMode.LongContext
-            "power", "power_save", "powersave" -> PerformanceMode.PowerSave
-            else -> return null
-        }
-        return _uiState.value.preference.copy(mode = mode)
-    }
-
-    private fun localApiExclusiveLifecycleConflict(
-        action: String,
-        allowedStagedJobId: String? = null
-    ): com.muyuchat.api.local.LocalApiControlResult.Rejected? {
-        val state = _uiState.value
-        val selectedStagedJobIsAllowed = allowedStagedJobId != null &&
-            (activeTuningJobId == null || activeTuningJobId == allowedStagedJobId) &&
-            state.tuningJobState in setOf(AgentTuningJobState.PAUSED, AgentTuningJobState.RUNNING) &&
-            adaptiveTuningJob?.isActive != true
-        val tuningConflict = !selectedStagedJobIsAllowed && (
-            adaptiveTuningJob?.isActive == true ||
-                state.tuningJobState in setOf(
-                    AgentTuningJobState.QUEUED,
-                    AgentTuningJobState.RUNNING,
-                    AgentTuningJobState.PAUSED,
-                    AgentTuningJobState.CANCELING,
-                    AgentTuningJobState.VALIDATING,
-                    AgentTuningJobState.RECOVERING
-                )
-            )
-        val engineConflict = state.engineLifecycle != AgentEngineLifecycle.READY ||
-            state.busy ||
-            state.isGenerating
-        if (!tuningConflict && !engineConflict) return null
-        return localApiTuningConflict(
-            action = action,
-            activeJobId = activeTuningJobId,
-            message = "运行时正在执行独占生命周期操作，不能并发执行 tuning $action。"
-        )
-    }
-
-    private fun localApiTuningConflict(
-        action: String,
-        activeJobId: String?,
-        message: String
-    ): com.muyuchat.api.local.LocalApiControlResult.Rejected = localApiTuningRejected(
-        httpStatus = 409,
-        code = "tuning_${action}_conflict",
-        message = message,
-        details = JSONObject()
-            .put("activeJobId", activeJobId)
-            .put("tuningJobState", _uiState.value.tuningJobState.name.lowercase())
-            .put("engineLifecycle", _uiState.value.engineLifecycle.name.lowercase())
-            .put("activeProfileId", engine.activeExecutionProfile()?.profileId)
-    )
-
-    private fun localApiTuningRejected(
-        httpStatus: Int,
-        code: String,
-        message: String,
-        details: JSONObject = JSONObject()
-    ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
-        com.muyuchat.api.local.LocalApiControlResult.Rejected(
-            httpStatus = httpStatus,
-            code = code,
-            message = message,
-            detailsJson = details.toString(),
-            retryAfterMs = if (httpStatus == 409) 1_000L else 0L
-        )
-
-    private fun tuningJobPublicJson(job: TuningJobEntity): JSONObject = JSONObject()
-        .put("jobId", job.jobId)
-        .put("state", job.state.lowercase(Locale.ROOT))
-        .put("phase", job.phase)
-        .put("candidateProfileId", job.candidateProfileId)
-        .put("autoApply", job.autoApplyLoadChanges)
-        .put("cancellationRequested", job.cancellationRequested)
-        .put("failureCode", job.failureCode)
-        .put("failureSummary", job.failureSummary)
-        .put("createdAt", job.createdAt)
-        .put("updatedAt", job.updatedAt)
-        .put("lastHeartbeatAt", job.lastHeartbeatAt)
-
-    private suspend fun cancelPersistedTuningJob(jobId: String): TuningJobEntity {
-        var canceled = runtimeProfileStore.requestTuningJobCancellation(jobId)
-        engine.stopGeneration()
-        if (adaptiveTuningJob?.isActive != true) {
-            val pending = runCatching { runtimeProfileStore.pendingTransaction(canceled.identityKey) }.getOrNull()
-            if (pending?.journal?.jobId == jobId) {
-                val recovery = runtimeProfileStore.rejectCandidate(
-                    transactionId = pending.journal.transactionId,
-                    failureStage = "USER_CANCEL",
-                    failureCode = "USER_CANCELED",
-                    failureSummary = "用户取消了等待应用的 staged candidate。"
-                )
-                recovery.rollbackProfileId?.let { rollbackProfileId ->
-                    runtimeProfileStore.completeRecovery(
-                        transactionId = pending.journal.transactionId,
-                        restoredProfileId = rollbackProfileId
-                    )
-                }
-                canceled = runtimeProfileStore.tuningJob(jobId) ?: canceled
-                uiStateStore.update { it.copy(pendingProfile = null) }
-            } else if (canceled.state !in setOf(
-                    PersistedTuningJobState.SUCCEEDED.name,
-                    PersistedTuningJobState.FAILED.name
-                )
-            ) {
-                canceled = runtimeProfileStore.transitionTuningJob(
-                    jobId = jobId,
-                    state = PersistedTuningJobState.FAILED,
-                    phase = "USER_CANCELED",
-                    failureCode = "USER_CANCELED",
-                    failureSummary = "用户取消了调优任务。"
-                )
-            }
-            if (activeTuningJobId == jobId) activeTuningJobId = null
-        }
-        return canceled
-    }
-
-    /**
-     * The ViewModel side of [LocalApiPayloadPort]. Eight members: the state the projections render,
-     * the tuning flags they report, the two engine reads, the profile document, and the persisted
-     * runtime summaries. No mutex, job, scope or atomics cross this boundary -- the request flags are
-     * read through functions at render time.
-     */
-    // R3/C3-S2（插队裁定 2）：Local API payload 端口具名化——容器工厂构造（真实依赖），匿名实现删除。
-    private val localApiPayloadPort = container.createLocalApiPayloadPort(uiStateStore, engine, tuningOwner)
-
-
-
-
-    /**
-     * Delegates to [localApiModelRuntimeStatesJson]. The blocking hop stays here: the projection is a
-     * suspend function, and how the store is entered is the caller's decision.
-     */
-    private fun modelRuntimeStatesJson(): String = runBlocking(Dispatchers.IO) {
-        localApiModelRuntimeStatesJson(localApiPayloadPort)
-    }
-
-    private fun runTuningControl(
-        jobId: String,
-        action: String,
-        operation: suspend () -> TuningJobEntity
-    ): com.muyuchat.api.local.LocalApiControlResult = runCatching {
-        val job = runBlocking(Dispatchers.IO) { operation() }
-        uiStateStore.update { state ->
-            state.copy(
-                tuningJobState = agentJobState(job),
-                tuningPhase = job.phase,
-                statusMessage = "Local API 已请求调优任务 ${action}。"
-            )
-        }
-        com.muyuchat.api.local.LocalApiControlResult.Success(localApiTuningStateJson(localApiPayloadPort))
-    }.getOrElse { error ->
-        com.muyuchat.api.local.LocalApiControlResult.Rejected(
-            httpStatus = 409,
-            code = "tuning_${action}_rejected",
-            message = error.message ?: "调优任务操作失败"
-        )
-    }
 
 
 
