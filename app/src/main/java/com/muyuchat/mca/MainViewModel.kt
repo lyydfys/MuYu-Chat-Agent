@@ -7985,144 +7985,29 @@ class MainViewModel @JvmOverloads constructor(
 
 
     private val localApiAuxProviderPort: LocalApiAuxProviderPort =
-        object : LocalApiAuxProviderPort {
-            override fun analysisParamsJson(): String = engineApiGenerationParams(engine, _uiState.value).toJson()
-
-            override fun analysisGenerationParams(): GenerationParams = engineApiGenerationParams(engine, _uiState.value)
-
-            override fun modelsJsonText(): String = localApiModelsJson(localApiPayloadPort)
-
-            override fun textualInversionsJsonText(): String = JSONArray().apply {
-                _uiState.value.localImageTextualInversions.forEach { artifact ->
-                    put(artifact.toJson(includePath = false))
-                }
-            }.toString()
-
-            override fun modelRuntimeStatesJsonText(): String = modelRuntimeStatesJson()
-
-            override fun deviceProfileJsonText(): String =
-                currentDeviceProfile().toJson().toString()
-
-            override fun recommendationJsonText(requestJson: String): String {
-                val preference = UserPreference.fromJson(requestJson)
-                return buildRecommendation(preference).toJson().toString()
-            }
-
-            override suspend fun benchmarkJsonText(): String =
-                benchmarkRunner.runCurrentParamsBenchmark(_uiState.value.params)
-                    .toJson()
-                    .toString()
-
-            override suspend fun generateImage(requestId: String, body: String): String =
-                generateLocalApiImage(requestId, body)
-        }
+        container.createLocalApiAuxProviderPort(
+            store = uiStateStore,
+            engine = engine,
+            localApiPayloadPortProvider = { localApiPayloadPort },
+            benchmarkRunner = benchmarkRunner,
+            buildRecommendationAction = ::buildRecommendation,
+            generateLocalApiImageAction = ::generateLocalApiImage,
+        )
 
     private val localApiTuningControlPort: LocalApiTuningControlPort =
-        object : LocalApiTuningControlPort {
-            override fun activeRuntimeIdentity(): ModelRuntimeIdentity? =
-                this@MainViewModel.activeRuntimeIdentity
-
-            override fun activeModelForRuntimeProfile(): ModelManifest? =
-                this@MainViewModel.activeModelForRuntimeProfile
-
-            override fun localApiModelMatches(
-                requestedModel: String,
-                state: MainUiState,
-                model: ModelManifest
-            ): Boolean = this@MainViewModel.localApiModelMatches(requestedModel, state, model)
-
-            override fun localApiDebugMode(value: String): AgentDebugMode? =
-                agentDebugModeFromLocalApiValue(value)
-
-            override fun localApiPerformancePreference(value: String?): UserPreference? =
-                this@MainViewModel.localApiPerformancePreference(value)
-
-            override fun localApiTuningRejected(
-                httpStatus: Int,
-                code: String,
-                message: String,
-                details: JSONObject
-            ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
-                this@MainViewModel.localApiTuningRejected(httpStatus, code, message, details)
-
-            override fun localApiTuningConflict(
-                action: String,
-                activeJobId: String?,
-                message: String
-            ): com.muyuchat.api.local.LocalApiControlResult.Rejected =
-                this@MainViewModel.localApiTuningConflict(action, activeJobId, message)
-
-            override fun localApiExclusiveLifecycleConflict(
-                action: String,
-                allowedStagedJobId: String?
-            ): com.muyuchat.api.local.LocalApiControlResult.Rejected? =
-                this@MainViewModel.localApiExclusiveLifecycleConflict(action, allowedStagedJobId)
-
-            override fun assignActiveTuningJobId(jobId: String?) {
-                activeTuningJobId = jobId
-            }
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                uiStateStore.update(transform)
-            }
-
-            override fun tuningJobPublicJson(job: TuningJobEntity): JSONObject =
-                this@MainViewModel.tuningJobPublicJson(job)
-
-            override fun startAgentTuning(
-                debugMode: AgentDebugMode,
-                autoApply: Boolean,
-                precreatedJob: TuningJobEntity?,
-                preferenceOverride: UserPreference?
-            ): Boolean = this@MainViewModel.tuningOwner.startAgentTuning(
-                debugMode = debugMode,
-                autoApply = autoApply,
-                precreatedJob = precreatedJob,
-                preferenceOverride = preferenceOverride
-            )
-
-            override suspend fun activeTuningJob(identityKey: String): TuningJobEntity? =
-                runtimeProfileStore.activeTuningJob(identityKey)
-
-            override suspend fun createTuningJob(
-                identityKey: String,
-                autoApplyLoadChanges: Boolean,
-                phase: String
-            ): TuningJobEntity = runtimeProfileStore.createTuningJob(
-                identityKey = identityKey,
-                autoApplyLoadChanges = autoApplyLoadChanges,
-                phase = phase
-            )
-
-            override suspend fun transitionTuningJob(
-                jobId: String,
-                state: PersistedTuningJobState,
-                phase: String,
-                failureCode: String?,
-                failureSummary: String?
-            ): TuningJobEntity? = runtimeProfileStore.transitionTuningJob(
-                jobId = jobId,
-                state = state,
-                phase = phase,
-                failureCode = failureCode,
-                failureSummary = failureSummary
-            )
-
-            override suspend fun tuningJob(jobId: String): TuningJobEntity? =
-                runtimeProfileStore.tuningJob(jobId)
-
-            override suspend fun pendingTransaction(identityKey: String): PendingRuntimeProfileTransaction? =
-                runtimeProfileStore.pendingTransaction(identityKey)
-
-            override fun setTuningCancelRequested(value: Boolean) {
-                adaptiveTuningCancelRequested.set(value)
-            }
-
-            override fun setTuningPauseRequested(value: Boolean) {
-                adaptiveTuningPauseRequested.set(value)
-            }
-
-            override fun launchTuningApply(pending: PendingRuntimeProfileTransaction) {
+        container.createLocalApiTuningControlPort(
+            store = uiStateStore,
+            tuningOwner = tuningOwner,
+            localApiModelMatchesRef = ::localApiModelMatches,
+            localApiPerformancePreferenceRef = ::localApiPerformancePreference,
+            localApiTuningRejectedRef = ::localApiTuningRejected,
+            localApiTuningConflictRef = ::localApiTuningConflict,
+            localApiExclusiveLifecycleConflictRef = ::localApiExclusiveLifecycleConflict,
+            assignActiveTuningJobIdRef = { activeTuningJobId = it },
+            tuningJobPublicJsonRef = ::tuningJobPublicJson,
+            setTuningCancelRequestedRef = { adaptiveTuningCancelRequested.set(it) },
+            setTuningPauseRequestedRef = { adaptiveTuningPauseRequested.set(it) },
+            launchTuningApplyRef = { pending ->
                 adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
                     try {
                         applyPendingRuntimeTransaction(pending)
@@ -8133,12 +8018,8 @@ class MainViewModel @JvmOverloads constructor(
                         adaptiveTuningPauseRequested.set(false)
                     }
                 }
-            }
-
-            override suspend fun currentRuntimeState(identityKey: String): CurrentRuntimeProfileState? =
-                runtimeProfileStore.currentRuntimeState(identityKey)
-
-            override fun launchTuningRollback(identity: ModelRuntimeIdentity, model: ModelManifest) {
+            },
+            launchTuningRollbackRef = { identity, model ->
                 adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
                     try {
                         rollbackCommittedRuntimeProfile(identity, model)
@@ -8147,7 +8028,7 @@ class MainViewModel @JvmOverloads constructor(
                     }
                 }
             }
-        }
+        )
 
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
         object : ChatLocalApiProviderPort {

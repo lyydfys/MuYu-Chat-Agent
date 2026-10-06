@@ -59,6 +59,8 @@ import com.muyuchat.mca.ChatImagePromptBridge
 import com.muyuchat.mca.CloudApiConfig
 import com.muyuchat.mca.ImageGenerationJobSpec
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.core.engine.ModelRuntimeIdentity
+import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.mca.OfflinePromptTranslationService
 import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
@@ -121,6 +123,17 @@ import com.muyuchat.mca.WebSearchStore
 import com.muyuchat.mca.WorldBookStore
 import com.muyuchat.mca.RuntimeProfileTransactionPort
 import com.muyuchat.mca.RuntimeProfileTransactionPortAdapter
+import com.muyuchat.core.benchmark.BenchmarkRunner
+import com.muyuchat.core.tuning.UserPreference
+import com.muyuchat.core.advisor.AgentRecommendation
+import com.muyuchat.mca.LocalApiAuxProviderPort
+import com.muyuchat.mca.LocalApiAuxProviderPortAdapter
+import com.muyuchat.mca.LocalApiTuningControlPort
+import com.muyuchat.mca.LocalApiTuningControlPortAdapter
+import com.muyuchat.mca.TuningJobEntity
+import com.muyuchat.mca.PendingRuntimeProfileTransaction
+import com.muyuchat.api.local.LocalApiControlResult
+import org.json.JSONObject
 
 /**
  * R2：组合根骨架（方案 §9 / §14.4）。
@@ -735,6 +748,57 @@ internal class McaAppContainer(private val application: Application) {
             runtimeAdmission = runtimeAdmission,
             tuningOwner = tuningOwner,
             showStatusAction = showStatusAction
+        )
+
+    fun createLocalApiAuxProviderPort(
+        store: UiStateStore,
+        engine: McaInferenceService,
+        localApiPayloadPortProvider: () -> LocalApiPayloadPort,
+        benchmarkRunner: BenchmarkRunner,
+        buildRecommendationAction: (UserPreference) -> AgentRecommendation,
+        generateLocalApiImageAction: suspend (String, String) -> String,
+    ): LocalApiAuxProviderPort =
+        LocalApiAuxProviderPortAdapter(
+            store = store,
+            engine = engine,
+            localApiPayloadPortProvider = localApiPayloadPortProvider,
+            deviceProfileReader = deviceProfileReader,
+            buildRecommendationAction = buildRecommendationAction,
+            benchmarkRunner = benchmarkRunner,
+            generateLocalApiImageAction = generateLocalApiImageAction,
+        )
+
+    fun createLocalApiTuningControlPort(
+        store: UiStateStore,
+        tuningOwner: TuningOwner,
+        localApiModelMatchesRef: (String, MainUiState, ModelManifest) -> Boolean,
+        localApiPerformancePreferenceRef: (String?) -> UserPreference?,
+        localApiTuningRejectedRef: (Int, String, String, JSONObject) -> LocalApiControlResult.Rejected,
+        localApiTuningConflictRef: (String, String?, String) -> LocalApiControlResult.Rejected,
+        localApiExclusiveLifecycleConflictRef: (String, String?) -> LocalApiControlResult.Rejected?,
+        assignActiveTuningJobIdRef: (String?) -> Unit,
+        tuningJobPublicJsonRef: (TuningJobEntity) -> JSONObject,
+        setTuningCancelRequestedRef: (Boolean) -> Unit,
+        setTuningPauseRequestedRef: (Boolean) -> Unit,
+        launchTuningApplyRef: (PendingRuntimeProfileTransaction) -> Unit,
+        launchTuningRollbackRef: (ModelRuntimeIdentity, ModelManifest) -> Unit,
+    ): LocalApiTuningControlPort =
+        LocalApiTuningControlPortAdapter(
+            runtimeAdmission = runtimeAdmission,
+            store = store,
+            runtimeProfileStore = runtimeProfileStore,
+            tuningOwner = tuningOwner,
+            localApiModelMatchesRef = localApiModelMatchesRef,
+            localApiPerformancePreferenceRef = localApiPerformancePreferenceRef,
+            localApiTuningRejectedRef = localApiTuningRejectedRef,
+            localApiTuningConflictRef = localApiTuningConflictRef,
+            localApiExclusiveLifecycleConflictRef = localApiExclusiveLifecycleConflictRef,
+            assignActiveTuningJobIdRef = assignActiveTuningJobIdRef,
+            tuningJobPublicJsonRef = tuningJobPublicJsonRef,
+            setTuningCancelRequestedRef = setTuningCancelRequestedRef,
+            setTuningPauseRequestedRef = setTuningPauseRequestedRef,
+            launchTuningApplyRef = launchTuningApplyRef,
+            launchTuningRollbackRef = launchTuningRollbackRef,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
