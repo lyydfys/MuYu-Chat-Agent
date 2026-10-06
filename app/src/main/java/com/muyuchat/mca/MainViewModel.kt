@@ -7165,11 +7165,6 @@ class MainViewModel @JvmOverloads constructor(
         apiUrl(detectLanIpAddress() ?: "本机局域网IP")
 
 
-    private fun <T> java.util.Enumeration<T>.asSequence(): Sequence<T> = sequence {
-        while (hasMoreElements()) yield(nextElement())
-    }
-
-
     private fun mergeUserRequestedExecutionProfile(
         base: ModelExecutionProfile,
         requested: ModelExecutionProfile,
@@ -7181,85 +7176,22 @@ class MainViewModel @JvmOverloads constructor(
         model: ModelManifest,
         runtime: LocalChatRuntime,
         loadParams: LoadParams
-    ): Long {
-        // Stability smoke reloads must use the same identity/profile as the
-        // formal model-page load. Falling back to McaInferenceService's legacy
-        // identity builder here would key the reload by mtime/length and make
-        // a tuning candidate appear to belong to a different model.
-        val activeProfile = engine.activeExecutionProfile()
-            ?.takeIf {
-                it.runtimeIdentity.modelId == model.id &&
-                    it.runtimeIdentity.runtime == runtime
-            }
-        val activeIdentity = activeRuntimeIdentity
-            ?.takeIf {
-                it.modelId == model.id && it.runtime == runtime
-            }
-        val identity = activeIdentity
-            ?: activeProfile?.runtimeIdentity
-            ?: RuntimeIdentityFactory.create(
-                context = getApplication(),
-                model = model,
-                runtime = runtime,
-                device = currentDeviceProfile(),
-                installationScopeId = installationScopeId,
-                qairtAdmissionPassed = model.runtime == ChatModelRuntime.GENIEX_QAIRT &&
-                    model.id in currentQairtVerifiedLocalModelIds(getApplication(), modelStore.listModels())
-            )
-        val profile = activeProfile
-            ?.takeIf { it.runtimeIdentity.identityHash == identity.identityHash }
-        val started = android.os.SystemClock.elapsedRealtime()
-        engine.loadModel(
-            modelPath = model.path,
-            runtime = runtime,
-            params = loadParams,
-            qairtBundleSha256 = currentQairtBundleSha256(
-                requested = model,
-                persistedModels = modelStore.listModels()
-            ),
-            runtimeIdentity = identity,
-            executionProfile = profile
-        ).getOrThrow()
-        return (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
-    }
+    ): Long = timedLoadModelFor(
+        engine = engine,
+        activeRuntimeIdentity = activeRuntimeIdentity,
+        modelStore = modelStore,
+        context = getApplication(),
+        device = currentDeviceProfile(),
+        installationScopeId = installationScopeId,
+        model = model,
+        runtime = runtime,
+        loadParams = loadParams,
+        currentQairtBundleSha256 = ::currentQairtBundleSha256,
+        currentQairtVerifiedLocalModelIds = ::currentQairtVerifiedLocalModelIds
+    )
 
-    private suspend fun runLocalGenerationSmoke(params: GenerationParams): LocalGenerationSmokeResult {
-        val smokeParams = params.copy(
-            nPredict = 32,
-            reasoningMode = ReasoningMode.OFF,
-            hideReasoning = true,
-            systemPrompt = "你是 MCA 稳定性自检助手。请只输出简短中文结果。"
-        )
-        val text = StringBuilder()
-        var finalStats = RuntimeStats()
-        var errorMessage: String? = null
-        withTimeout(60_000L) {
-            engine.streamChat(
-                ChatRequest(
-                    messages = listOf(ChatMessage(Role.USER, "用一句中文回答：稳定性自检完成。")),
-                    params = smokeParams
-                )
-            ).collect { event ->
-                when (event) {
-                    is GenerateEvent.Phase -> finalStats = event.stats
-                    is GenerateEvent.Persist -> Unit
-                    is GenerateEvent.Chunk -> {
-                        text.append(event.text)
-                        finalStats = event.stats
-                    }
-                    is GenerateEvent.Done -> finalStats = event.stats
-                    is GenerateEvent.Error -> errorMessage = event.message
-                }
-            }
-        }
-        errorMessage?.let { error(it) }
-        if (text.isBlank()) error("短流式生成没有产生可见正文")
-        return LocalGenerationSmokeResult(
-            visibleChars = text.length,
-            completionTokens = finalStats.completionTokens,
-            decodeTps = finalStats.decodeTps
-        )
-    }
+    private suspend fun runLocalGenerationSmoke(params: GenerationParams): LocalGenerationSmokeResult =
+        runLocalGenerationSmokeFor(engine, params)
 
     private suspend fun runLoopbackApiStreamSmoke(): LocalApiStreamSmokeResult =
         runLoopbackApiStreamSmokeFor()
@@ -7267,41 +7199,9 @@ class MainViewModel @JvmOverloads constructor(
     private suspend fun runLoopbackEngineStreamSmoke(params: GenerationParams): LocalApiStreamSmokeResult =
         runLoopbackEngineStreamSmokeFor(params)
 
+    private suspend fun recoverInterruptedRuntimeProfiles() =
+        recoverInterruptedRuntimeProfilesFor(runtimeProfileStore, pendingRuntimeRecoveries, uiStateStore)
 
-
-    private suspend fun recoverInterruptedRuntimeProfiles() {
-        runCatching {
-            val plans = runtimeProfileStore.recoverInterruptedTransactions()
-            synchronized(pendingRuntimeRecoveries) {
-                pendingRuntimeRecoveries.clear()
-                plans.forEach { plan -> pendingRuntimeRecoveries[plan.identityKey] = plan }
-            }
-            runtimeProfileStore.pruneRejectedProfiles()
-            runtimeProfileStore.pruneTerminalHistory()
-            if (plans.isNotEmpty()) {
-                uiStateStore.update { state ->
-                    state.copy(
-                        tuningJobState = AgentTuningJobState.RECOVERING,
-                        engineLifecycle = if (state.loadedModelId == null) {
-                            AgentEngineLifecycle.UNLOADED
-                        } else {
-                            state.engineLifecycle
-                        },
-                        tuningPhase = "等待对应模型加载后恢复 LKG",
-                        statusMessage = "检测到 ${plans.size} 个中断的调参事务；加载对应模型时将最多回滚一次。"
-                    )
-                }
-            }
-        }.onFailure { error ->
-            uiStateStore.update { state ->
-                state.copy(
-                    tuningJobState = AgentTuningJobState.FAILED,
-                    tuningPhase = "启动恢复检查失败",
-                    statusMessage = "运行配置恢复检查失败：${error.message ?: "未知错误"}"
-                )
-            }
-        }
-    }
 
 
 
