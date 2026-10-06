@@ -8039,94 +8039,32 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     private val chatExecutionPort: ChatGenerationExecutionPort =
-        object : ChatGenerationExecutionPort {
-            override val uiState: StateFlow<MainUiState> = this@MainViewModel.uiState
-            // R3/S27: 写入经 store 具名方法（端口不再暴露可变流）。
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-            override val engine: McaInferenceService = this@MainViewModel.engine
-            override val chatRuns: ChatRunOwnership = this@MainViewModel.chatRuns
-            override val chatSessionStore: ChatSessionStore = this@MainViewModel.chatSessionStore
-            override val chatContextComposer: ChatContextComposer = this@MainViewModel.chatContextComposer
-            override val cloudChatProvider: OpenAiCompatibleChatProvider = this@MainViewModel.cloudChatProvider
-            override val webSearchProvider: WebSearchProvider = this@MainViewModel.webSearchProvider
-            override val manualContextCompressionRequests: ContextCompressionRequestStore = this@MainViewModel.manualContextCompressionRequests
-            override val localConversationContextInvalidationSequence: AtomicLong = this@MainViewModel.localConversationContextInvalidationSequence
-            override var activeWebSearchDeferred:  Deferred<WebSearchResult>?
-                get() = this@MainViewModel.activeWebSearchDeferred
-                set(value) { this@MainViewModel.activeWebSearchDeferred = value }
-            override var activeWebSearchTaskId:  String?
-                get() = this@MainViewModel.activeWebSearchTaskId
-                set(value) { this@MainViewModel.activeWebSearchTaskId = value }
-            override var localConversationContextNeedsInvalidation:  Boolean
-                get() = this@MainViewModel.localConversationContextNeedsInvalidation
-                set(value) { this@MainViewModel.localConversationContextNeedsInvalidation = value }
-            override val foregroundRecoveryJob: Job? = this@MainViewModel.foregroundRecoveryJob
-
-            override fun persistChatSessions(sessions: List<ChatSessionRecord>?, knowledgeBinding: Pair<String, Set<String>>?, generationRunId: Long?) = this@MainViewModel.persistChatSessions(sessions, knowledgeBinding, generationRunId)
-
-            override fun appendAssistant(delta: String, reasoningDelta: String, reasoningDurationMs: Long, forcePublish: Boolean, generationRunId: Long?) = this@MainViewModel.appendAssistant(delta, reasoningDelta, reasoningDurationMs, forcePublish, generationRunId)
-
-            override fun flushPendingAssistantOutput(generationRunId: Long?) = this@MainViewModel.flushPendingAssistantOutput(generationRunId)
-
-            override fun removePendingAssistantPlaceholder(generationRunId: Long?) = this@MainViewModel.removePendingAssistantPlaceholder(generationRunId)
-
-            override fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long?) = this@MainViewModel.ensureVisibleAssistantReplyAfterCompletion(generationRunId)
-
-            override fun applyWebSearchAnswerGuardsToLastAssistant(generationRunId: Long?) = this@MainViewModel.applyWebSearchAnswerGuardsToLastAssistant(generationRunId)
-
-            override fun recordWebSearchCitationAudit(recordId: String?, audit: WebSearchCitationAudit, generationRunId: Long?) = this@MainViewModel.recordWebSearchCitationAudit(recordId, audit, generationRunId)
-
-            override fun attachWebSearchEvidenceToPendingAssistant(sources: List<ChatSourceReference>, trace: ChatWebSearchTrace?, generationRunId: Long?) = this@MainViewModel.attachWebSearchEvidenceToPendingAssistant(sources, trace, generationRunId)
-
-            override fun attachContextAssemblyTrace(traceJson: String?, generationRunId: Long, sessionId: String?, assistantMessageId: String?) = this@MainViewModel.attachContextAssemblyTrace(traceJson, generationRunId, sessionId, assistantMessageId)
-
-            override fun promptContextUsageFor(plan: ChatRuntimeContextPlan, admission: ContextWindowAdmission, params: GenerationParams) = this@MainViewModel.promptContextUsageFor(plan, admission, params)
-
-            override fun appendWebSearchDiagnostic(record: WebSearchDiagnosticRecord) = this@MainViewModel.appendWebSearchDiagnostic(record)
-
-            override fun recordCompletedCharacterMemoryTurn(assistantId: String, sessionId: String, assistantSnapshot: AssistantConversationSnapshot, user: ChatMessage, assistant: ChatMessage, conversationPersistJob: Job?, backend: ChatBackend, params: GenerationParams, cloudConfig: CloudApiConfig?, localIdentity: String?) = this@MainViewModel.recordCompletedCharacterMemoryTurn(assistantId, sessionId, assistantSnapshot, user, assistant, conversationPersistJob, backend, params, cloudConfig, localIdentity)
-
-            override suspend fun summarizeContextForGeneration(request: ChatRequest, settings: ContextCompressionSettings, trigger: ContextCompressionTrigger, initialState: MainUiState, effectiveBackend: ChatBackend, cloudModelIdOverride: String?, generationRunId: Long, useModel: Boolean) = this@MainViewModel.summarizeContextForGeneration(request, settings, trigger, initialState, effectiveBackend, cloudModelIdOverride, generationRunId, useModel)
-
-            override suspend fun ensureLocalConversationContextInvalidated() = this@MainViewModel.ensureLocalConversationContextInvalidated()
-
-            override fun loadContextCompressionThreshold() = this@MainViewModel.loadContextCompressionThreshold()
-
-            override suspend fun handleAssistantImageToolCalls(calls: List<ChatToolCall>, originalRequestMessages: List<ChatMessage>, paramsBeforeAssistant: GenerationParams, chatSessionId: String?, cloudModelId: String?, chatModelIdentity: String?, imageModelBinding: AssistantImageModelBinding?, chatConfig: CloudApiConfig?) = this@MainViewModel.handleAssistantImageToolCalls(calls, originalRequestMessages, paramsBeforeAssistant, chatSessionId, cloudModelId, chatModelIdentity, imageModelBinding, chatConfig)
-
-            override fun finishAssistantImageContinuation(requestId: String, completed: Boolean, failureMessage: String) = this@MainViewModel.finishAssistantImageContinuation(requestId, completed, failureMessage)
-
-            override fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?) = com.muyuchat.mca.chatImageToolChatModelIdentity(modelId, config)
-
-            override suspend fun localVisionRunnerAvailable() = isLocalVisionRunnerAvailable(visionAttachmentPort)
-
-            override fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile) = mergedExecutionProfile(generation, profile)
-
-            override fun persistGenerationParams(params: GenerationParams) = GenerationPreferences.persistGenerationParams(getApplication(), params)
-
-            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean = state.canWriteToActiveAssistantSession()
-
-            override fun selectedAssistant(state: MainUiState): AssistantRecord? = state.selectedAssistant()
-
-            override fun selectedChatCloudConfig(state: MainUiState): CloudApiConfig? = state.selectedChatCloudConfig()
-
-            override fun currentChatModelId(state: MainUiState): String? = state.currentChatModelId()
-
-            override fun chatImageModelBinding(state: MainUiState): AssistantImageModelBinding? = state.chatImageModelBinding()
-
-            override val activeRuntimeIdentity: ModelRuntimeIdentity? = this@MainViewModel.activeRuntimeIdentity
-
-            override fun localVisionUnavailableMessage(state: MainUiState): String = localVisionUnavailableReason(state, runCatching { engine.nativeStatsJson() }.getOrNull())
-
-            override fun chatContextSnapshot(state: MainUiState, assistantId: String, fileContextEnabled: Boolean): ChatContextSnapshot = state.chatContextSnapshot(assistantId, fileContextEnabled)
-
-            override fun isConfigurationActionError(event: GenerateEvent.Error): Boolean = event.isConfigurationActionError()
-
-            override suspend fun withInlineImageDataForCloud(messages: List<ChatMessage>): List<ChatMessage> = messages.preparedForCloudVision(visionAttachmentPort)
-
-            override suspend fun withLocalImageFilesForVision(messages: List<ChatMessage>, createdFiles: MutableList<File>): List<ChatMessage> = messages.preparedForLocalVision(visionAttachmentPort, createdFiles)
-        }
+        container.createChatGenerationExecutionPort(
+            store = uiStateStore,
+            engine = engine,
+            chatContextComposer = chatContextComposer,
+            visionAttachmentPort = visionAttachmentPort,
+            getActiveWebSearchTaskIdRef = { activeWebSearchTaskId },
+            setActiveWebSearchTaskIdRef = { activeWebSearchTaskId = it },
+            getForegroundRecoveryJobRef = { foregroundRecoveryJob },
+            persistChatSessionsRef = ::persistChatSessions,
+            appendAssistantRef = ::appendAssistant,
+            flushPendingAssistantOutputRef = ::flushPendingAssistantOutput,
+            removePendingAssistantPlaceholderRef = ::removePendingAssistantPlaceholder,
+            ensureVisibleAssistantReplyAfterCompletionRef = ::ensureVisibleAssistantReplyAfterCompletion,
+            applyWebSearchAnswerGuardsToLastAssistantRef = ::applyWebSearchAnswerGuardsToLastAssistant,
+            recordWebSearchCitationAuditRef = ::recordWebSearchCitationAudit,
+            attachWebSearchEvidenceToPendingAssistantRef = ::attachWebSearchEvidenceToPendingAssistant,
+            attachContextAssemblyTraceRef = ::attachContextAssemblyTrace,
+            promptContextUsageForRef = ::promptContextUsageFor,
+            appendWebSearchDiagnosticRef = ::appendWebSearchDiagnostic,
+            recordCompletedCharacterMemoryTurnRef = ::recordCompletedCharacterMemoryTurn,
+            summarizeContextForGenerationRef = ::summarizeContextForGeneration,
+            ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
+            loadContextCompressionThresholdRef = ::loadContextCompressionThreshold,
+            handleAssistantImageToolCallsRef = ::handleAssistantImageToolCalls,
+            finishAssistantImageContinuationRef = ::finishAssistantImageContinuation,
+        )
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
     private val chatImagePromptBridgePort: ChatImagePromptBridgePort =

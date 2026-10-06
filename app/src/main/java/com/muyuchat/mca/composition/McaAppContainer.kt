@@ -68,6 +68,7 @@ import com.muyuchat.mca.ImageGenerationHostAdapter
 import com.muyuchat.mca.CloudImageProvider
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
+import kotlinx.coroutines.Job
 import java.io.File
 import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
@@ -79,6 +80,24 @@ import com.muyuchat.mca.ChatStreamAccumulator
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.ChatLocalApiProviderPort
 import com.muyuchat.mca.ChatLocalApiProviderPortAdapter
+import com.muyuchat.mca.ChatGenerationExecutionPort
+import com.muyuchat.mca.ChatGenerationExecutionPortAdapter
+import com.muyuchat.mca.ChatContextComposer
+import com.muyuchat.mca.ChatRuntimeContextPlan
+import com.muyuchat.mca.WebSearchCitationAudit
+import com.muyuchat.mca.WebSearchDiagnosticRecord
+import com.muyuchat.mca.AssistantConversationSnapshot
+import com.muyuchat.mca.AssistantImageModelBinding
+import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.ContextCompressionSettings
+import com.muyuchat.core.engine.ContextCompressionTrigger
+import com.muyuchat.core.engine.ContextCompressionResult
+import com.muyuchat.core.engine.ContextCompressionThreshold
+import com.muyuchat.core.engine.ContextWindowAdmission
+import com.muyuchat.core.engine.PromptContextUsage
+import com.muyuchat.core.engine.ChatToolCall
+import com.muyuchat.core.engine.ChatSourceReference
+import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.mca.ChatSessionRecord
 import com.muyuchat.mca.ChatSessionPersistenceState
 import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
@@ -815,6 +834,66 @@ internal class McaAppContainer(private val application: Application) {
             store = store,
             cancelActiveLocalApiImageGenerationAction = cancelActiveLocalApiImageGenerationAction,
             localApiPayloadPortProvider = localApiPayloadPortProvider,
+        )
+
+    fun createChatGenerationExecutionPort(
+        store: UiStateStore,
+        engine: McaInferenceService,
+        chatContextComposer: ChatContextComposer,
+        visionAttachmentPort: VisionAttachmentPort,
+        getActiveWebSearchTaskIdRef: () -> String?,
+        setActiveWebSearchTaskIdRef: (String?) -> Unit,
+        getForegroundRecoveryJobRef: () -> Job?,
+        persistChatSessionsRef: (List<ChatSessionRecord>?, Pair<String, Set<String>>?, Long?) -> Job?,
+        appendAssistantRef: (String, String, Long, Boolean, Long?) -> Unit,
+        flushPendingAssistantOutputRef: (Long?) -> Boolean,
+        removePendingAssistantPlaceholderRef: (Long?) -> Unit,
+        ensureVisibleAssistantReplyAfterCompletionRef: (Long?) -> Unit,
+        applyWebSearchAnswerGuardsToLastAssistantRef: (Long?) -> WebSearchCitationAudit?,
+        recordWebSearchCitationAuditRef: (String?, WebSearchCitationAudit, Long?) -> Unit,
+        attachWebSearchEvidenceToPendingAssistantRef: (List<ChatSourceReference>, ChatWebSearchTrace?, Long?) -> Unit,
+        attachContextAssemblyTraceRef: (String?, Long, String?, String?) -> Unit,
+        promptContextUsageForRef: (ChatRuntimeContextPlan, ContextWindowAdmission, GenerationParams) -> PromptContextUsage,
+        appendWebSearchDiagnosticRef: (WebSearchDiagnosticRecord) -> List<WebSearchDiagnosticRecord>,
+        recordCompletedCharacterMemoryTurnRef: (String, String, AssistantConversationSnapshot, ChatMessage, ChatMessage, Job?, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,
+        summarizeContextForGenerationRef: suspend (ChatRequest, ContextCompressionSettings, ContextCompressionTrigger, MainUiState, ChatBackend, String?, Long, Boolean) -> ContextCompressionResult,
+        ensureLocalConversationContextInvalidatedRef: suspend () -> Boolean,
+        loadContextCompressionThresholdRef: () -> ContextCompressionThreshold,
+        handleAssistantImageToolCallsRef: suspend (List<ChatToolCall>, List<ChatMessage>, GenerationParams, String?, String?, String?, AssistantImageModelBinding?, CloudApiConfig?) -> Boolean,
+        finishAssistantImageContinuationRef: (String, Boolean, String) -> Unit,
+    ): ChatGenerationExecutionPort =
+        ChatGenerationExecutionPortAdapter(
+            application = application,
+            store = store,
+            engine = engine,
+            chatRuns = chatRuns,
+            chatSessionStore = chatSessionStore,
+            chatContextComposer = chatContextComposer,
+            cloudChatProvider = cloudChatProvider,
+            webSearchProvider = webSearchProvider,
+            manualContextCompressionRequests = manualContextCompressionRequests,
+            runtimeAdmission = runtimeAdmission,
+            visionAttachmentPort = visionAttachmentPort,
+            getActiveWebSearchTaskIdRef = getActiveWebSearchTaskIdRef,
+            setActiveWebSearchTaskIdRef = setActiveWebSearchTaskIdRef,
+            getForegroundRecoveryJobRef = getForegroundRecoveryJobRef,
+            persistChatSessionsRef = persistChatSessionsRef,
+            appendAssistantRef = appendAssistantRef,
+            flushPendingAssistantOutputRef = flushPendingAssistantOutputRef,
+            removePendingAssistantPlaceholderRef = removePendingAssistantPlaceholderRef,
+            ensureVisibleAssistantReplyAfterCompletionRef = ensureVisibleAssistantReplyAfterCompletionRef,
+            applyWebSearchAnswerGuardsToLastAssistantRef = applyWebSearchAnswerGuardsToLastAssistantRef,
+            recordWebSearchCitationAuditRef = recordWebSearchCitationAuditRef,
+            attachWebSearchEvidenceToPendingAssistantRef = attachWebSearchEvidenceToPendingAssistantRef,
+            attachContextAssemblyTraceRef = attachContextAssemblyTraceRef,
+            promptContextUsageForRef = promptContextUsageForRef,
+            appendWebSearchDiagnosticRef = appendWebSearchDiagnosticRef,
+            recordCompletedCharacterMemoryTurnRef = recordCompletedCharacterMemoryTurnRef,
+            summarizeContextForGenerationRef = summarizeContextForGenerationRef,
+            ensureLocalConversationContextInvalidatedRef = ensureLocalConversationContextInvalidatedRef,
+            loadContextCompressionThresholdRef = loadContextCompressionThresholdRef,
+            handleAssistantImageToolCallsRef = handleAssistantImageToolCallsRef,
+            finishAssistantImageContinuationRef = finishAssistantImageContinuationRef,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
