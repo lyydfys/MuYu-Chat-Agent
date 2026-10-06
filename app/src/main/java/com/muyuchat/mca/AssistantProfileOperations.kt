@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import android.net.Uri
+import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatExecutionContext
@@ -834,4 +836,182 @@ internal fun scheduleCharacterMemorySummaryFor(
         job.start()
     }
 }
+
+internal class CharacterMemorySummaryCoordinator(
+    private val jobs: MutableMap<String, Job> = mutableMapOf(),
+    private val reschedule: MutableSet<String> = mutableSetOf()
+) {
+    fun schedule(
+        scope: CoroutineScope,
+        summarizeCharacterMemory: suspend (String, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,
+        assistantId: String,
+        backend: ChatBackend,
+        params: GenerationParams,
+        cloudConfig: CloudApiConfig?,
+        localIdentity: String?
+    ) {
+        scheduleCharacterMemorySummaryFor(
+            scope = scope,
+            characterMemorySummaryJobs = jobs,
+            characterMemorySummaryReschedule = reschedule,
+            summarizeCharacterMemory = summarizeCharacterMemory,
+            assistantId = assistantId,
+            backend = backend,
+            params = params,
+            cloudConfig = cloudConfig,
+            localIdentity = localIdentity
+        )
+    }
+
+    fun recordReschedule(id: String) {
+        synchronized(jobs) {
+            reschedule.add(id)
+        }
+    }
+}
+
+internal fun updatedAssistantsWithParams(
+    assistants: List<AssistantRecord>,
+    selectedAssistantId: String?,
+    params: GenerationParams
+): List<AssistantRecord> = assistants.map { assistant ->
+    if (assistant.id == selectedAssistantId) {
+        assistant.copy(
+            paramsJson = params.toAssistantGenerationJson()
+                .withAssistantPromptProvenance(assistant.systemPromptProvenance),
+            updatedAt = System.currentTimeMillis()
+        )
+    } else {
+        assistant
+    }
+}
+
+internal fun applyAssistantDefaultModelFor(
+    store: UiStateStore,
+    showStatus: (String) -> Unit,
+    selectCloudChatModel: (String) -> Unit,
+    loadModel: (ModelManifest) -> Unit,
+    assistant: AssistantRecord
+) {
+    val modelId = assistant.defaultModelId?.trim().orEmpty()
+    val state = store.state.value
+    when (assistant.defaultModelMode.normalizedAssistantModelMode()) {
+        ASSISTANT_MODEL_MODE_CLOUD -> {
+            if (modelId.isBlank()) {
+                showStatus("已切换助手：${assistant.name}，但该助手未绑定云端模型。")
+                return
+            }
+            val model = state.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
+            if (model == null) {
+                showStatus("已切换助手：${assistant.name}，但绑定的云端模型已不可用。")
+                return
+            }
+            selectCloudChatModel(model.id)
+        }
+        ASSISTANT_MODEL_MODE_LOCAL -> {
+            if (modelId.isBlank()) {
+                showStatus("已切换助手：${assistant.name}，但该助手未绑定本地模型。")
+                return
+            }
+            val model = state.models.firstOrNull { it.id == modelId }
+            if (model == null) {
+                showStatus("已切换助手：${assistant.name}，但绑定的本地模型已不可用。")
+                return
+            }
+            if (state.selectedChatBackend != ChatBackend.LOCAL || state.loadedModelId != model.id) {
+                loadModel(model)
+            }
+        }
+    }
+}
+
+internal fun finishSelectingNewAssistantFor(
+    store: UiStateStore,
+    assistantStore: AssistantStore,
+    modelGenerationProfileStore: ModelGenerationProfileStore,
+    application: Application,
+    invalidatePendingChatImagePreparation: () -> Unit,
+    contentImportSelectionRevision: AtomicLong,
+    markLocalConversationContextInvalid: () -> Unit,
+    applyAssistantDefaultModel: (AssistantRecord) -> Unit,
+    currentModelGenerationProfileKey: () -> String?,
+    assistant: AssistantRecord
+) {
+    invalidatePendingChatImagePreparation()
+    contentImportSelectionRevision.incrementAndGet()
+    assistantStore.saveSelectedAssistantId(assistant.id)
+    val current = store.state.value
+    val assistantParams = assistant.toGenerationParams(current.params)
+    val updatedParams = currentModelGenerationProfileKey()
+        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
+        ?: assistantParams
+    GenerationPreferences.persistGenerationParams(application, updatedParams)
+    store.update {
+        it.copy(
+            selectedAssistantId = assistant.id,
+            params = updatedParams,
+            statusMessage = "已切换助手：${assistant.name}"
+        )
+    }
+    markLocalConversationContextInvalid()
+    applyAssistantDefaultModel(assistant)
+}
+
+internal fun importAssistantCardFor(
+    store: UiStateStore,
+    scope: CoroutineScope,
+    showStatus: (String) -> Unit,
+    captureContentImportOwner: () -> ContentImportOwner,
+    finishCharacterCardImport: suspend (CharacterCardParseResult, ContentImportOwner) -> Boolean,
+    rawJson: String
+) {
+    if (store.state.value.isGenerating) {
+        showStatus("请先停止当前生成，再导入角色卡")
+        return
+    }
+    val owner = captureContentImportOwner()
+    scope.launch {
+        val result = withContext(Dispatchers.Default) {
+            CharacterCardCodec.parseJson(rawJson)
+        }
+        finishCharacterCardImport(result, owner)
+    }
+}
+
+internal fun importAssistantCardFileFor(
+    store: UiStateStore,
+    scope: CoroutineScope,
+    application: Application,
+    showStatus: (String) -> Unit,
+    captureContentImportOwner: () -> ContentImportOwner,
+    finishCharacterCardImport: suspend (CharacterCardParseResult, ContentImportOwner) -> Boolean,
+    uriString: String,
+    importOwner: ContentImportOwner? = null
+) {
+    if (store.state.value.isGenerating) {
+        showStatus("请先停止当前生成，再导入角色卡")
+        return
+    }
+    val owner = importOwner ?: captureContentImportOwner()
+    scope.launch {
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val uri = Uri.parse(uriString)
+                val stream = application.contentResolver.openInputStream(uri)
+                    ?: error("无法打开所选文件")
+                stream.use(CharacterCardCodec::parse)
+            }.getOrElse { error ->
+                CharacterCardParseResult.Failure(
+                    CharacterCardParseError(
+                        code = CharacterCardParseErrorCode.IO_ERROR,
+                        message = error.message ?: "无法读取所选文件",
+                        cause = error
+                    )
+                )
+            }
+        }
+        finishCharacterCardImport(result, owner)
+    }
+}
+
 

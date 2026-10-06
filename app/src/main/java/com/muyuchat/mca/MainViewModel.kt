@@ -454,8 +454,7 @@ class MainViewModel @JvmOverloads constructor(
     private var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
     private val chatSessionStore = container.chatSessionStore
-    private val characterMemorySummaryJobs = mutableMapOf<String, Job>()
-    private val characterMemorySummaryReschedule = mutableSetOf<String>()
+    private val characterMemorySummaryCoordinator = CharacterMemorySummaryCoordinator()
     private val chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore
     private val worldBookStore = container.worldBookStore
     private val knowledgeBaseStore = container.knowledgeBaseStore
@@ -2280,7 +2279,7 @@ class MainViewModel @JvmOverloads constructor(
         // recording this edit against the active model so switching models does
         // not make users repeat the same tuning work.
         persistModelGenerationParams(state, scopedParams)
-        val updatedAssistants = updatedAssistantsWithParams(scopedParams)
+        val updatedAssistants = updatedAssistantsWithParams(state.assistants, state.selectedAssistantId, scopedParams)
         val hasLoadedModel = _uiState.value.loadedModelId != null
         val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
         uiStateStore.update { state ->
@@ -2349,69 +2348,34 @@ class MainViewModel @JvmOverloads constructor(
         memorySummaryInterval: Int,
         webSearchEnabled: Boolean,
         fileContextEnabled: Boolean
-    ) {
-        saveAssistantProfileFor(
-            store = uiStateStore,
-            assistantStore = assistantStore,
-            application = getApplication(),
-            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
-            showStatus = ::showStatus,
-            persistModelGenerationParams = ::persistModelGenerationParams,
-            persistAssistantsAsync = ::persistAssistantsAsync,
-            persistChatSessions = ::persistChatSessions,
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            selectAssistant = ::selectAssistant,
-            applyAssistantDefaultModel = ::applyAssistantDefaultModel,
-            id = id,
-            name = name,
-            avatar = avatar,
-            tag = tag,
-            systemPrompt = systemPrompt,
-            defaultModelMode = defaultModelMode,
-            defaultModelId = defaultModelId,
-            temperature = temperature,
-            topP = topP,
-            nPredict = nPredict,
-            topK = topK,
-            minP = minP,
-            repeatPenalty = repeatPenalty,
-            presencePenalty = presencePenalty,
-            frequencyPenalty = frequencyPenalty,
-            stopWords = stopWords,
-            reasoningMode = reasoningMode,
-            memoryEnabled = memoryEnabled,
-            memorySummaryInterval = memorySummaryInterval,
-            webSearchEnabled = webSearchEnabled,
-            fileContextEnabled = fileContextEnabled
-        )
-    }
+    ) = saveAssistantProfileFor(
+        store = uiStateStore,
+        assistantStore = assistantStore,
+        application = getApplication(),
+        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        showStatus = ::showStatus,
+        persistModelGenerationParams = ::persistModelGenerationParams,
+        persistAssistantsAsync = ::persistAssistantsAsync,
+        persistChatSessions = ::persistChatSessions,
+        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+        selectAssistant = ::selectAssistant,
+        applyAssistantDefaultModel = ::applyAssistantDefaultModel,
+        id = id, name = name, avatar = avatar, tag = tag, systemPrompt = systemPrompt,
+        defaultModelMode = defaultModelMode, defaultModelId = defaultModelId,
+        temperature = temperature, topP = topP, nPredict = nPredict, topK = topK,
+        minP = minP, repeatPenalty = repeatPenalty, presencePenalty = presencePenalty,
+        frequencyPenalty = frequencyPenalty, stopWords = stopWords,
+        reasoningMode = reasoningMode, memoryEnabled = memoryEnabled,
+        memorySummaryInterval = memorySummaryInterval, webSearchEnabled = webSearchEnabled,
+        fileContextEnabled = fileContextEnabled
+    )
 
-    fun upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) {
-        upsertAssistantMemoryFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            chatSessionStore = chatSessionStore,
-            showStatus = ::showStatus,
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            assistantId = assistantId,
-            id = id,
-            scopeKind = scope,
-            content = content
-        )
-    }
+    fun upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) =
+        upsertAssistantMemoryFor(uiStateStore, viewModelScope, chatSessionStore, ::showStatus, ::markLocalConversationContextInvalid, assistantId, id, scope, content)
 
-    fun deleteAssistantMemory(assistantId: String, id: String) {
-        deleteAssistantMemoryFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            chatSessionStore = chatSessionStore,
-            showStatus = ::showStatus,
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            assistantId = assistantId,
-            id = id
-        )
-    }
+    fun deleteAssistantMemory(assistantId: String, id: String) =
+        deleteAssistantMemoryFor(uiStateStore, viewModelScope, chatSessionStore, ::showStatus, ::markLocalConversationContextInvalid, assistantId, id)
 
     private fun recordCompletedCharacterMemoryTurn(
         assistantId: String,
@@ -2424,24 +2388,13 @@ class MainViewModel @JvmOverloads constructor(
         params: GenerationParams,
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
-    ) {
-        recordCompletedCharacterMemoryTurnFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            chatSessionStore = chatSessionStore,
-            scheduleCharacterMemorySummary = ::scheduleCharacterMemorySummary,
-            assistantId = assistantId,
-            sessionId = sessionId,
-            assistantSnapshot = assistantSnapshot,
-            user = user,
-            assistant = assistant,
-            conversationPersistJob = conversationPersistJob,
-            backend = backend,
-            params = params,
-            cloudConfig = cloudConfig,
-            localIdentity = localIdentity
-        )
-    }
+    ) = recordCompletedCharacterMemoryTurnFor(
+        store = uiStateStore, scope = viewModelScope, chatSessionStore = chatSessionStore,
+        scheduleCharacterMemorySummary = ::scheduleCharacterMemorySummary,
+        assistantId = assistantId, sessionId = sessionId, assistantSnapshot = assistantSnapshot,
+        user = user, assistant = assistant, conversationPersistJob = conversationPersistJob,
+        backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
+    )
 
     private fun scheduleCharacterMemorySummary(
         assistantId: String,
@@ -2449,19 +2402,10 @@ class MainViewModel @JvmOverloads constructor(
         params: GenerationParams,
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
-    ) {
-        scheduleCharacterMemorySummaryFor(
-            scope = viewModelScope,
-            characterMemorySummaryJobs = characterMemorySummaryJobs,
-            characterMemorySummaryReschedule = characterMemorySummaryReschedule,
-            summarizeCharacterMemory = ::summarizeCharacterMemory,
-            assistantId = assistantId,
-            backend = backend,
-            params = params,
-            cloudConfig = cloudConfig,
-            localIdentity = localIdentity
-        )
-    }
+    ) = characterMemorySummaryCoordinator.schedule(
+        scope = viewModelScope, summarizeCharacterMemory = ::summarizeCharacterMemory,
+        assistantId = assistantId, backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
+    )
 
     private suspend fun summarizeCharacterMemory(
         assistantId: String,
@@ -2469,31 +2413,18 @@ class MainViewModel @JvmOverloads constructor(
         params: GenerationParams,
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
-    ) {
-        summarizeCharacterMemoryFor(
-            store = uiStateStore,
-            chatSessionStore = chatSessionStore,
-            cloudChatProvider = cloudChatProvider,
-            engine = engine,
-            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-            activeRuntimeIdentity = { activeRuntimeIdentity },
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            onLocalConversationContextNeedsInvalidation = {
-                localConversationContextNeedsInvalidation = true
-                localConversationContextInvalidationSequence.incrementAndGet()
-            },
-            recordReschedule = { id ->
-                synchronized(characterMemorySummaryJobs) {
-                    characterMemorySummaryReschedule.add(id)
-                }
-            },
-            assistantId = assistantId,
-            backend = backend,
-            params = params,
-            cloudConfig = cloudConfig,
-            localIdentity = localIdentity
-        )
-    }
+    ) = summarizeCharacterMemoryFor(
+        store = uiStateStore, chatSessionStore = chatSessionStore, cloudChatProvider = cloudChatProvider,
+        engine = engine, chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+        activeRuntimeIdentity = { activeRuntimeIdentity },
+        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+        onLocalConversationContextNeedsInvalidation = {
+            localConversationContextNeedsInvalidation = true
+            localConversationContextInvalidationSequence.incrementAndGet()
+        },
+        recordReschedule = characterMemorySummaryCoordinator::recordReschedule,
+        assistantId = assistantId, backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
+    )
 
     /** Delegates to [persistWebSearchConfig]. */
     fun saveWebSearchConfig(
@@ -2691,26 +2622,19 @@ class MainViewModel @JvmOverloads constructor(
         finishSelectingNewAssistant(assistant)
     }
 
-    private fun finishSelectingNewAssistant(assistant: AssistantRecord) {
-        invalidatePendingChatImagePreparation()
-        contentImportSelectionRevision.incrementAndGet()
-        assistantStore.saveSelectedAssistantId(assistant.id)
-        val current = _uiState.value
-        val assistantParams = assistant.toGenerationParams(current.params)
-        val updatedParams = current.modelGenerationProfileKey()
-            ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
-            ?: assistantParams
-        GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
-        uiStateStore.update {
-            it.copy(
-                selectedAssistantId = assistant.id,
-                params = updatedParams,
-                statusMessage = "已切换助手：${assistant.name}"
-            )
-        }
-        markLocalConversationContextInvalid()
-        applyAssistantDefaultModel(assistant)
-    }
+    private fun finishSelectingNewAssistant(assistant: AssistantRecord) =
+        finishSelectingNewAssistantFor(
+            store = uiStateStore,
+            assistantStore = assistantStore,
+            modelGenerationProfileStore = modelGenerationProfileStore,
+            application = getApplication(),
+            invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
+            contentImportSelectionRevision = contentImportSelectionRevision,
+            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+            applyAssistantDefaultModel = ::applyAssistantDefaultModel,
+            currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
+            assistant = assistant
+        )
 
     fun importChatBackground(scope: ChatAppearanceScope, uriString: String) {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull()
@@ -2893,41 +2817,28 @@ class MainViewModel @JvmOverloads constructor(
     private fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
         cleanupPendingWorldBooksAfterOwnerCommitFor(container.chatSessionPersistenceState, worldBookStore, uiStateStore, scope, retainedOwnerIds)
 
-    fun deleteAssistant(assistantId: String) {
-        deleteAssistantFor(
-            store = uiStateStore,
-            assistantStore = assistantStore,
-            modelGenerationProfileStore = modelGenerationProfileStore,
-            chatSessionStore = chatSessionStore,
-            application = getApplication(),
-            scope = viewModelScope,
-            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
-            showStatus = ::showStatus,
-            queueWorldBookCleanup = ::queueWorldBookCleanup,
-            cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
-            selectAssistant = ::selectAssistant,
-            persistChatSessions = ::persistChatSessions,
-            chatAppearanceMutex = chatAppearanceMutex,
-            cleanupUnusedChatBackgrounds = ::cleanupUnusedChatBackgrounds,
-            currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
-            assistantId = assistantId
-        )
-    }
+    fun deleteAssistant(assistantId: String) = deleteAssistantFor(
+        store = uiStateStore,
+        assistantStore = assistantStore,
+        modelGenerationProfileStore = modelGenerationProfileStore,
+        chatSessionStore = chatSessionStore,
+        application = getApplication(),
+        scope = viewModelScope,
+        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        showStatus = ::showStatus,
+        queueWorldBookCleanup = ::queueWorldBookCleanup,
+        cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
+        selectAssistant = ::selectAssistant,
+        persistChatSessions = ::persistChatSessions,
+        chatAppearanceMutex = chatAppearanceMutex,
+        cleanupUnusedChatBackgrounds = ::cleanupUnusedChatBackgrounds,
+        currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
+        assistantId = assistantId
+    )
 
-    fun importAssistantCard(rawJson: String) {
-        if (_uiState.value.isGenerating) {
-            showStatus("请先停止当前生成，再导入角色卡")
-            return
-        }
-        val owner = captureContentImportOwner()
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.Default) {
-                CharacterCardCodec.parseJson(rawJson)
-            }
-            finishCharacterCardImport(result, owner)
-        }
-    }
+    fun importAssistantCard(rawJson: String) =
+        importAssistantCardFor(uiStateStore, viewModelScope, ::showStatus, ::captureContentImportOwner, ::finishCharacterCardImport, rawJson)
 
     internal fun restorePendingContentImportPreview() {
         viewModelScope.launch {
@@ -3029,58 +2940,32 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) {
-        if (_uiState.value.isGenerating) {
-            showStatus("请先停止当前生成，再导入角色卡")
-            return
-        }
-        val owner = importOwner ?: captureContentImportOwner()
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val uri = Uri.parse(uriString)
-                    val stream = getApplication<Application>().contentResolver.openInputStream(uri)
-                        ?: error("无法打开所选文件")
-                    stream.use(CharacterCardCodec::parse)
-                }.getOrElse { error ->
-                    CharacterCardParseResult.Failure(
-                        CharacterCardParseError(
-                            code = CharacterCardParseErrorCode.IO_ERROR,
-                            message = error.message ?: "无法读取所选文件",
-                            cause = error
-                        )
-                    )
-                }
-            }
-            finishCharacterCardImport(result, owner)
-        }
-    }
+    fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) =
+        importAssistantCardFileFor(uiStateStore, viewModelScope, getApplication(), ::showStatus, ::captureContentImportOwner, ::finishCharacterCardImport, uriString, importOwner)
 
     private suspend fun finishCharacterCardImport(
         result: CharacterCardParseResult,
         owner: ContentImportOwner,
         commitId: String? = null
-    ): Boolean {
-        return finishCharacterCardImportFor(
-            store = uiStateStore,
-            assistantStore = assistantStore,
-            worldBookStore = worldBookStore,
-            chatSessionStore = chatSessionStore,
-            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-            chatSessionPersistenceSequence = chatSessionPersistenceSequence,
-            getPendingKnowledgeBindings = { pendingKnowledgeBindings },
-            setDurableChatSessions = { durableChatSessions = it },
-            chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
-            stageContentImportPreview = { stageContentImportPreview(it) },
-            conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
-            hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
-            currentOwnerIsCurrent = { owner.isCurrent(_uiState.value) },
-            selectAssistant = ::selectAssistant,
-            result = result,
-            owner = owner,
-            commitId = commitId
-        )
-    }
+    ): Boolean = finishCharacterCardImportFor(
+        store = uiStateStore,
+        assistantStore = assistantStore,
+        worldBookStore = worldBookStore,
+        chatSessionStore = chatSessionStore,
+        chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+        chatSessionPersistenceSequence = chatSessionPersistenceSequence,
+        getPendingKnowledgeBindings = { pendingKnowledgeBindings },
+        setDurableChatSessions = { durableChatSessions = it },
+        chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
+        stageContentImportPreview = { stageContentImportPreview(it) },
+        conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
+        hasActiveAssistantImageExecution = ::hasActiveAssistantImageExecution,
+        currentOwnerIsCurrent = { owner.isCurrent(_uiState.value) },
+        selectAssistant = ::selectAssistant,
+        result = result,
+        owner = owner,
+        commitId = commitId
+    )
 
     fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
         val owner = captureContentImportOwner()
@@ -6718,63 +6603,8 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    private fun updatedAssistantsWithParams(params: GenerationParams): List<AssistantRecord> {
-        val state = _uiState.value
-        val selectedId = state.selectedAssistantId
-        return state.assistants.map { assistant ->
-            if (assistant.id == selectedId) {
-                assistant.copy(
-                    paramsJson = params.toAssistantGenerationJson()
-                        .withAssistantPromptProvenance(assistant.systemPromptProvenance),
-                    updatedAt = System.currentTimeMillis()
-                )
-            } else {
-                assistant
-            }
-        }
-    }
-
-    private fun applyAssistantDefaultModel(assistant: AssistantRecord) {
-        val modelId = assistant.defaultModelId?.trim().orEmpty()
-        when (assistant.defaultModelMode.normalizedAssistantModelMode()) {
-            ASSISTANT_MODEL_MODE_CLOUD -> {
-                if (modelId.isBlank()) {
-                    showStatus("已切换助手：${assistant.name}，但该助手未绑定云端模型。")
-                    return
-                }
-                val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
-                if (model == null) {
-                    showStatus("已切换助手：${assistant.name}，但绑定的云端模型已不可用。")
-                    return
-                }
-                selectCloudChatModel(model.id)
-            }
-            ASSISTANT_MODEL_MODE_LOCAL -> {
-                if (modelId.isBlank()) {
-                    showStatus("已切换助手：${assistant.name}，但该助手未绑定本地模型。")
-                    return
-                }
-                val model = _uiState.value.models.firstOrNull { it.id == modelId }
-                if (model == null) {
-                    showStatus("已切换助手：${assistant.name}，但绑定的本地模型已不可用。")
-                    return
-                }
-                if (_uiState.value.selectedChatBackend != ChatBackend.LOCAL || _uiState.value.loadedModelId != model.id) {
-                    loadModel(model)
-                }
-            }
-        }
-    }
-
-    private fun String.normalizedAssistantModelMode(): String =
-        when (trim().lowercase()) {
-            ASSISTANT_MODEL_MODE_LOCAL -> ASSISTANT_MODEL_MODE_LOCAL
-            ASSISTANT_MODEL_MODE_CLOUD -> ASSISTANT_MODEL_MODE_CLOUD
-            else -> ASSISTANT_MODEL_MODE_FOLLOW_CURRENT
-        }
-
-    private fun AssistantRecord.toGenerationParams(defaults: GenerationParams): GenerationParams =
-        assistantGenerationParamsFromJson(paramsJson, defaults, systemPrompt)
+    private fun applyAssistantDefaultModel(assistant: AssistantRecord) =
+        applyAssistantDefaultModelFor(uiStateStore, ::showStatus, ::selectCloudChatModel, ::loadModel, assistant)
 
     private fun apiUrl(host: String): String =
         "http://$host:$REST_PORT/v1"
