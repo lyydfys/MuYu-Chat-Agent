@@ -2488,29 +2488,11 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
     }
-    private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease {
-        // Wait for a genuine in-flight chat/load to finish; never stop another request here.
-        val lease = engine.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
-        try {
-            val hadLoadedModel = engine.stats.value.loaded || _uiState.value.loadedModelId != null
-            val releasedIdentity = activeRuntimeIdentity
-            engine.unloadModel(lease = lease)
-            if (hadLoadedModel) {
-                clearNativeRuntimeSessionState(
-                    lifecycle = AgentEngineLifecycle.UNLOADED,
-                    statusMessage = "已释放聊天模型内存，正在准备本地生图；聊天模型可在生图结束后重新加载。"
-                )
-                clearPendingRuntimeTransactionForLifecycle(
-                    reason = "LOCAL_IMAGE_MEMORY_RECLAIM",
-                    identity = releasedIdentity
-                )
-            }
-            return lease
-        } catch (error: Throwable) {
-            withContext(NonCancellable) { lease.release() }
-            throw error
-        }
-    }
+    /** Delegates to [prepareLocalImageRuntimeMemoryFor]. Signature kept verbatim. */
+    private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease =
+        prepareLocalImageRuntimeMemoryFor(
+            uiStateStore, container.runtimeAdmission, runtimeProfileStore, engine
+        )
 
     /** Delegates to [startLocalImageGenerationWatchdogFor]. Signature kept verbatim. */
     private fun startLocalImageGenerationWatchdog(jobId: String) =
@@ -6332,34 +6314,14 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Delegates to [clearNativeRuntimeSessionStateFor]. Signature kept verbatim. */
     private fun clearNativeRuntimeSessionState(
         lifecycle: AgentEngineLifecycle,
         statusMessage: String,
         busy: Boolean = false
-    ) {
-        directParameterStageGeneration.incrementAndGet()
-        directParameterStageJob?.cancel()
-        activeRuntimeIdentity = null
-        activeVisionProjectorStamp = null
-        activeModelForRuntimeProfile = null
-        activeAdaptiveRecommendation = null
-        pendingAdaptiveRecommendation = null
-        pendingProfileTransactionId = null
-        activeProfileTransactionId = null
-        val nativeStats = engine.nativeStatsJsonOrEmpty()
-        val recentLogs = engine.recentEngineLogsOrEmpty()
-        uiStateStore.update { state ->
-            state.afterNativeRuntimeReleased(
-                lifecycle = lifecycle,
-                statusMessage = statusMessage,
-                stats = engine.stats.value,
-                busy = busy
-            ).copy(
-                nativeStatsJson = nativeStats,
-                logs = recentLogs
-            )
-        }
-    }
+    ) = clearNativeRuntimeSessionStateFor(
+        uiStateStore, container.runtimeAdmission, engine, lifecycle, statusMessage, busy
+    )
 
     private suspend fun restoreLoadedRuntimeSnapshot(
         snapshot: LoadedRuntimeSnapshot,
@@ -6585,26 +6547,13 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Delegates to [clearPendingRuntimeTransactionForLifecycleFor]. Signature kept verbatim. */
     private suspend fun clearPendingRuntimeTransactionForLifecycle(
         reason: String,
         identity: ModelRuntimeIdentity? = activeRuntimeIdentity
-    ) {
-        identity ?: return
-        val pending = runtimeProfileStore.pendingTransaction(identity.identityHash) ?: return
-        val recovery = runtimeProfileStore.rejectCandidate(
-            transactionId = pending.journal.transactionId,
-            failureStage = reason,
-            failureCode = "LIFECYCLE_CLOSED",
-            failureSummary = "模型生命周期结束，未应用候选已安全撤销。"
-        )
-        runtimeProfileStore.completeRecovery(
-            transactionId = pending.journal.transactionId,
-            restoredProfileId = recovery.rollbackProfileId
-        )
-        if (pendingProfileTransactionId == pending.journal.transactionId) {
-            pendingProfileTransactionId = null
-        }
-    }
+    ) = clearPendingRuntimeTransactionForLifecycleFor(
+        runtimeProfileStore, container.runtimeAdmission, reason, identity
+    )
 
     fun sendMessage() {
         val state = _uiState.value

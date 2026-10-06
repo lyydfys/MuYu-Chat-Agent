@@ -429,15 +429,21 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun runtimeSessionClearerDropsUiAndNonUiOwners() {
-        val body = functionBody(mainViewModelSource(), "private fun clearNativeRuntimeSessionState(")
+        // R3/C3-S19: the clearer moved verbatim to RuntimeReleaseOperations.kt; the seven facts are
+        // unchanged -- they are read where the clearer now lives, with the holder-qualified
+        // spellings the move introduced (`admission.` prefix, same fields, same nulls).
+        val body = functionBody(
+            runtimeReleaseOperationsSource(),
+            "internal fun clearNativeRuntimeSessionStateFor("
+        )
 
         listOf(
-            "activeRuntimeIdentity = null",
-            "activeModelForRuntimeProfile = null",
-            "activeAdaptiveRecommendation = null",
-            "pendingAdaptiveRecommendation = null",
-            "pendingProfileTransactionId = null",
-            "activeProfileTransactionId = null",
+            "admission.activeRuntimeIdentity = null",
+            "admission.activeModelForRuntimeProfile = null",
+            "admission.activeAdaptiveRecommendation = null",
+            "admission.pendingAdaptiveRecommendation = null",
+            "admission.pendingProfileTransactionId = null",
+            "admission.activeProfileTransactionId = null",
             "afterNativeRuntimeReleased("
         ).forEach { required ->
             assertTrue("Missing cleanup: $required", body.contains(required))
@@ -591,9 +597,23 @@ class MainViewModelCompletionFallbackTest {
         error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
     }
 
-    /** R3/S18: the runtime engine-read seam that now hosts apiGenerationParams. */
-    private fun runtimeEngineReadsSource(): String {
+    /** R3/C3-S19: the runtime release family (clearNativeRuntimeSessionStateFor etc.). */
+    private fun runtimeReleaseOperationsSource(): String {
         var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/RuntimeReleaseOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/RuntimeReleaseOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("RuntimeReleaseOperations.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** R3/S18: the runtime engine-read seam that now hosts apiGenerationParams. */
+    private fun runtimeEngineReadsSource(): String {        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
