@@ -1192,5 +1192,94 @@ internal class AssistantImageToolTurnPortAdapter(
     }
 }
 
+/**
+ * R3-S35：聊天生图审批端口具名适配器（A 族第 4 端口）。
+ */
+internal class ChatImageRequestApprovalPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val imageGenerationOwnerProvider: () -> ImageGenerationOwner,
+    private val chatImageRequestPortProvider: () -> ChatImageRequestPort,
+    private val buildChatImageRetrySnapshotRef: (
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ) -> ImageGenerationJobSpec?,
+    private val continueAssistantImageToolTurnRef: (requestId: String, outputJson: String) -> Unit
+) : ChatImageRequestApprovalPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val imageGenerationJob: Job?
+        get() = admission.imageGenerationJob
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
+
+    override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
+        state.canWriteToActiveAssistantSession()
+
+    override fun findChatGeneratedImageRequest(
+        requestId: String
+    ): Pair<String, ChatGeneratedImageRequest>? =
+        findChatGeneratedImageRequestIn(store.current, requestId)
+
+    override fun buildChatImageRetrySnapshot(
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ): ImageGenerationJobSpec? = buildChatImageRetrySnapshotRef(request, chatSessionId)
+
+    override fun enqueueImageGeneration(
+        prompt: String,
+        inputDraft: LocalImageInputDraft,
+        options: LocalImageGenerationOptions,
+        jobSnapshot: ImageGenerationJobSpec?,
+        requestedJobId: String?,
+        requestedChatSessionId: String?,
+        requestedChatMessageId: String?
+    ): Boolean = imageGenerationOwnerProvider().submit(
+        prompt = prompt,
+        inputDraft = inputDraft,
+        options = options,
+        jobSnapshot = jobSnapshot,
+        requestedJobId = requestedJobId,
+        requestedChatSessionId = requestedChatSessionId,
+        requestedChatMessageId = requestedChatMessageId
+    )
+
+    override fun updateChatGeneratedImageRequest(
+        chatSessionId: String,
+        requestId: String,
+        request: ChatGeneratedImageRequest
+    ) {
+        applyChatGeneratedImageRequest(
+            chatImageRequestPortProvider(),
+            chatSessionId,
+            requestId,
+            request
+        )
+    }
+
+    override fun updateChatImageRequestFromJob(
+        chatSessionId: String,
+        requestId: String,
+        jobId: String
+    ) {
+        applyChatImageRequestFromJob(
+            chatImageRequestPortProvider(),
+            chatSessionId,
+            requestId,
+            jobId
+        )
+    }
+
+    override fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
+        continueAssistantImageToolTurnRef(requestId, outputJson)
+    }
+}
+
 
 

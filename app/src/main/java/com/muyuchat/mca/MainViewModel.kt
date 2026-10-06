@@ -6586,81 +6586,15 @@ class MainViewModel @JvmOverloads constructor(
             jobId
         )
 
-    /**
-     * The ViewModel side of [ChatImageRequestApprovalPort]: one route per member, no logic of its
-     * own. The three decisions moved to [ChatImageRequestApprovalOperations], which is now the only
-     * place an approval, a rejection or a retry is decided.
-     *
-     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
-     * their name with the ViewModel member they forward to, and an unqualified call would recurse.
-     */
+    /** R3-S35：聊天生图审批端口具名适配器（容器工厂装配，出清 66 行匿名类与 9 处 this@VM）。 */
     private val chatImageRequestApprovalPort: ChatImageRequestApprovalPort =
-        object : ChatImageRequestApprovalPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val imageGenerationJob: Job?
-                get() = this@MainViewModel.imageGenerationJob
-
-            override fun showStatus(message: String?) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
-                with(this@MainViewModel) { state.canWriteToActiveAssistantSession() }
-
-            override fun findChatGeneratedImageRequest(
-                requestId: String
-            ): Pair<String, ChatGeneratedImageRequest>? =
-                this@MainViewModel.findChatGeneratedImageRequest(requestId)
-
-            override fun buildChatImageRetrySnapshot(
-                request: ChatGeneratedImageRequest,
-                chatSessionId: String
-            ): ImageGenerationJobSpec? =
-                this@MainViewModel.buildChatImageRetrySnapshot(request, chatSessionId)
-
-            override fun enqueueImageGeneration(
-                prompt: String,
-                inputDraft: LocalImageInputDraft,
-                options: LocalImageGenerationOptions,
-                jobSnapshot: ImageGenerationJobSpec?,
-                requestedJobId: String?,
-                requestedChatSessionId: String?,
-                requestedChatMessageId: String?
-            ): Boolean = this@MainViewModel.imageGenerationOwner.submit(
-                prompt = prompt,
-                inputDraft = inputDraft,
-                options = options,
-                jobSnapshot = jobSnapshot,
-                requestedJobId = requestedJobId,
-                requestedChatSessionId = requestedChatSessionId,
-                requestedChatMessageId = requestedChatMessageId
-            )
-
-            override fun updateChatGeneratedImageRequest(
-                chatSessionId: String,
-                requestId: String,
-                request: ChatGeneratedImageRequest
-            ) {
-                applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
-            }
-
-            override fun updateChatImageRequestFromJob(
-                chatSessionId: String,
-                requestId: String,
-                jobId: String
-            ) {
-                applyChatImageRequestFromJob(chatImageRequestPort, chatSessionId, requestId, jobId)
-            }
-
-            override fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
-                this@MainViewModel.continueAssistantImageToolTurn(requestId, outputJson)
-            }
-        }
+        container.createChatImageRequestApprovalPort(
+            store = uiStateStore,
+            imageGenerationOwnerProvider = { imageGenerationOwner },
+            chatImageRequestPortProvider = { chatImageRequestPort },
+            buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
+            continueAssistantImageToolTurn = { reqId, json -> continueAssistantImageToolTurn(reqId, json) }
+        )
 
     fun retryChatImageGeneration(requestId: String) {
         retryChatImageGeneration(port = chatImageRequestApprovalPort, requestId = requestId)

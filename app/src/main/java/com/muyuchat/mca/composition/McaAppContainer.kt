@@ -40,6 +40,8 @@ import com.muyuchat.mca.ImagePromptTranslationPreviewPort
 import com.muyuchat.mca.ImagePromptTranslationPreviewPortAdapter
 import com.muyuchat.mca.AssistantImageToolTurnPort
 import com.muyuchat.mca.AssistantImageToolTurnPortAdapter
+import com.muyuchat.mca.ChatImageRequestApprovalPort
+import com.muyuchat.mca.ChatImageRequestApprovalPortAdapter
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -617,6 +619,23 @@ internal class McaAppContainer(private val application: Application) {
             buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
             attachAssistantImageRequestToTimelineRef = attachAssistantImageRequestToTimeline,
             approveChatImageRequestRef = approveChatImageRequest
+        )
+
+    /** R3-S35：聊天生图审批端口工厂（A 族第 4 端口）。 */
+    fun createChatImageRequestApprovalPort(
+        store: UiStateStore,
+        imageGenerationOwnerProvider: () -> ImageGenerationOwner,
+        chatImageRequestPortProvider: () -> ChatImageRequestPort,
+        buildChatImageRetrySnapshot: (ChatGeneratedImageRequest, String) -> ImageGenerationJobSpec?,
+        continueAssistantImageToolTurn: (String, String) -> Unit
+    ): ChatImageRequestApprovalPort =
+        ChatImageRequestApprovalPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            imageGenerationOwnerProvider = imageGenerationOwnerProvider,
+            chatImageRequestPortProvider = chatImageRequestPortProvider,
+            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
+            continueAssistantImageToolTurnRef = continueAssistantImageToolTurn
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
