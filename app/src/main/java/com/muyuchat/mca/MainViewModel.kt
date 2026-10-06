@@ -791,8 +791,7 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.imageLibraryBackupJob = value
         }
-    private val imageLibraryBackupSequence = AtomicLong(0L)
-    private val imageLibraryBackupLifecycleLock = Any()
+    private val imageLibraryBackupCoordinator = ImageLibraryBackupCoordinator()
     private var adaptiveTuningJob: Job? = null
     private val adaptiveTuningPauseRequested = AtomicBoolean(false)
     private val adaptiveTuningCancelRequested = AtomicBoolean(false)
@@ -1772,53 +1771,27 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Delegates to [importLocalImageLoraAdapter]. */
-    fun importLocalImageLora(uriString: String) {
-        importLocalImageLoraAdapter(
-            port = localImageAdapterPort,
-            scope = viewModelScope,
-            uriString = uriString
-        )
-    }
+    fun importLocalImageLora(uriString: String) =
+        importLocalImageLoraAdapter(localImageAdapterPort, viewModelScope, uriString)
 
     /** Delegates to [deleteLocalImageLoraAdapter]. */
-    fun deleteLocalImageLora(id: String) {
-        deleteLocalImageLoraAdapter(
-            port = localImageAdapterPort,
-            scope = viewModelScope,
-            id = id
-        )
-    }
+    fun deleteLocalImageLora(id: String) =
+        deleteLocalImageLoraAdapter(localImageAdapterPort, viewModelScope, id)
 
     /** Delegates to [importLocalImageTextualInversionArtifact]. Signature copied verbatim. */
-    fun importLocalImageTextualInversion(uriString: String, trigger: String) {
-        importLocalImageTextualInversionArtifact(
-            port = localImageAdapterPort,
-            scope = viewModelScope,
-            uriString = uriString,
-            trigger = trigger
-        )
-    }
+    fun importLocalImageTextualInversion(uriString: String, trigger: String) =
+        importLocalImageTextualInversionArtifact(localImageAdapterPort, viewModelScope, uriString, trigger)
 
     /** Delegates to [deleteLocalImageTextualInversionArtifact]. */
-    fun deleteLocalImageTextualInversion(id: String) {
-        deleteLocalImageTextualInversionArtifact(
-            port = localImageAdapterPort,
-            scope = viewModelScope,
-            id = id
-        )
-    }
+    fun deleteLocalImageTextualInversion(id: String) =
+        deleteLocalImageTextualInversionArtifact(localImageAdapterPort, viewModelScope, id)
 
     /** Downloads the publisher-pinned Viggle v0.2.1 adapter into the same
      * private store used by user-imported LoRAs. Unknown device profiles do not
      * affect visibility or access; the store's byte and SHA checks are the
      * acceptance gate. */
-    fun downloadOfficialViggleLora() {
-        downloadOfficialViggleLoraFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            localImageLoraStore = localImageLoraStore
-        )
-    }
+    fun downloadOfficialViggleLora() =
+        downloadOfficialViggleLoraFor(uiStateStore, viewModelScope, localImageLoraStore)
 
     fun reportMissingLocalImageLoraSelection() {
         uiStateStore.update { it.copy(chatImageLoraSelections = null) }
@@ -1829,8 +1802,6 @@ class MainViewModel @JvmOverloads constructor(
             )
         }
     }
-
-
 
     fun reportMissingLocalImageTextualInversionSelection() {
         uiStateStore.update {
@@ -1850,27 +1821,16 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     /** Delegates to [importLocalImageUpscalerModel]. */
-    fun importLocalImageUpscaler(uriString: String) {
-        importLocalImageUpscalerModel(
-            port = localImageUpscalerPort,
-            scope = viewModelScope,
-            uriString = uriString
-        )
-    }
+    fun importLocalImageUpscaler(uriString: String) =
+        importLocalImageUpscalerModel(localImageUpscalerPort, viewModelScope, uriString)
 
     /** Delegates to [selectLocalImageUpscalerModel]. */
-    fun selectLocalImageUpscaler(id: String) {
-        selectLocalImageUpscalerModel(port = localImageUpscalerPort, id = id)
-    }
+    fun selectLocalImageUpscaler(id: String) =
+        selectLocalImageUpscalerModel(localImageUpscalerPort, id)
 
     /** Delegates to [deleteLocalImageUpscalerModel]. */
-    fun deleteLocalImageUpscaler(id: String) {
-        deleteLocalImageUpscalerModel(
-            port = localImageUpscalerPort,
-            scope = viewModelScope,
-            id = id
-        )
-    }
+    fun deleteLocalImageUpscaler(id: String) =
+        deleteLocalImageUpscalerModel(localImageUpscalerPort, viewModelScope, id)
 
 
 
@@ -2037,42 +1997,34 @@ class MainViewModel @JvmOverloads constructor(
     private fun cleanupLocalImagePreviews(jobId: String) =
         cleanupLocalImagePreviewsFor(getApplication(), jobId)
 
-    fun deleteImageAsset(imageId: String) {
-        deleteImageAssets(listOf(imageId))
-    }
+    fun deleteImageAsset(imageId: String) = deleteImageAssets(listOf(imageId))
 
-    fun deleteImageAssets(imageIds: List<String>) {
+    fun deleteImageAssets(imageIds: List<String>) =
         deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
-    }
 
-    fun setImageAssetFavorite(imageId: String, favorite: Boolean) {
+    fun setImageAssetFavorite(imageId: String, favorite: Boolean) =
         setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)
-    }
 
-    fun clearImageLibrary() {
+    fun clearImageLibrary() =
         clearImageLibraryOperation(imageAssetDeletionPort)
-    }
 
-    fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) {
-        exportImageLibraryBackupFor(
+    fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) =
+        imageLibraryBackupCoordinator.exportBackup(
             store = uiStateStore,
             scope = viewModelScope,
             application = getApplication(),
             imageLibraryBackup = imageLibraryBackup,
             imageLibraryMutationMutex = imageLibraryMutationMutex,
             awaitStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
-            lifecycleLock = imageLibraryBackupLifecycleLock,
-            sequence = imageLibraryBackupSequence,
             getActiveJob = { imageLibraryBackupJob },
             setActiveJob = { imageLibraryBackupJob = it },
             showStatus = ::showStatus,
             uriString = uriString,
             favoritesOnly = favoritesOnly
         )
-    }
 
-    fun importImageLibraryBackup(uriString: String) {
-        importImageLibraryBackupFor(
+    fun importImageLibraryBackup(uriString: String) =
+        imageLibraryBackupCoordinator.importBackup(
             store = uiStateStore,
             scope = viewModelScope,
             application = getApplication(),
@@ -2081,21 +2033,14 @@ class MainViewModel @JvmOverloads constructor(
             imageAssetWriteMutex = imageAssetWriteMutex,
             imageLibraryMutationMutex = imageLibraryMutationMutex,
             awaitStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
-            lifecycleLock = imageLibraryBackupLifecycleLock,
-            sequence = imageLibraryBackupSequence,
             getActiveJob = { imageLibraryBackupJob },
             setActiveJob = { imageLibraryBackupJob = it },
             showStatus = ::showStatus,
             uriString = uriString
         )
-    }
 
-    fun cancelImageLibraryBackup() {
-        cancelImageLibraryBackupFor(
-            lifecycleLock = imageLibraryBackupLifecycleLock,
-            getActiveJob = { imageLibraryBackupJob }
-        )
-    }
+    fun cancelImageLibraryBackup() =
+        imageLibraryBackupCoordinator.cancelBackup { imageLibraryBackupJob }
 
     fun importLocalImageModel(uri: Uri) {
         launchModelOperation("模型操作未完成") {
@@ -2225,23 +2170,13 @@ class MainViewModel @JvmOverloads constructor(
             }
             val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
-            val models = localImageModelStore.loadModels()
-            val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), models)
-            val selectedId = selectedReadyLocalImageModelId(
-                models = models,
-                qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                preferredId = localImageModelStore.loadSelectedModelId()
+            settleAndApplyLocalImageModelCatalogUpdate(
+                store = uiStateStore,
+                localImageModelStore = localImageModelStore,
+                context = getApplication(),
+                managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
+                statusMessage = if (success) "已删除本地图像生成引擎：${removed?.displayName ?: "模型"}" else "未找到本地图像生成引擎"
             )
-            managedRuntimeReadinessRefreshGate.invalidate()
-            uiStateStore.update {
-                it.copy(
-                    localImageModels = models,
-                    qnnImageVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
-                    selectedLocalImageModelId = selectedId,
-                    selectedImageBackend = if (selectedId == null && it.selectedImageBackend == ImageBackend.LOCAL) ImageBackend.CLOUD else it.selectedImageBackend,
-                    statusMessage = if (success) "已删除本地图像生成引擎：${removed?.displayName ?: "模型"}" else "未找到本地图像生成引擎"
-                )
-            }
         }
     }
 
@@ -2857,23 +2792,14 @@ class MainViewModel @JvmOverloads constructor(
             }
             val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = localImageModelStore.removeModelRecord(modelId)
-            val models = localImageModelStore.loadModels()
-            val verification = currentQnnImageVerificationByModelId(getApplication(), models)
-            val selectedId = selectedReadyLocalImageModelId(
-                models = models,
-                qnnVerificationCurrentByModelId = verification,
-                preferredId = localImageModelStore.loadSelectedModelId()
-            )
-            managedRuntimeReadinessRefreshGate.invalidate()
-            uiStateStore.update { state -> state.copy(
-                localImageModels = models,
-                qnnImageVerificationCurrentByModelId = verification,
-                selectedLocalImageModelId = selectedId,
-                selectedImageBackend = if (selectedId == null && state.selectedImageBackend == ImageBackend.LOCAL)
-                    ImageBackend.CLOUD else state.selectedImageBackend,
+            settleAndApplyLocalImageModelCatalogUpdate(
+                store = uiStateStore,
+                localImageModelStore = localImageModelStore,
+                context = getApplication(),
+                managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
                 statusMessage = if (success) "已移除目录记录：${removed?.displayName ?: "模型"}；文件仍保留。"
                     else "未找到本地图像模型记录。"
-            ) }
+            )
         }
     }
 
@@ -3141,35 +3067,16 @@ class MainViewModel @JvmOverloads constructor(
     fun showCloudReasoningModeLocked() =
         showStatus(CLOUD_REASONING_LOCKED_MESSAGE)
 
-    fun updateCloudApiEnabled(enabled: Boolean) =
-        applyCloudApiEnabled(cloudModelConfigPort, enabled)
-
-    fun updateCloudApiFormat(value: String) =
-        applyCloudApiFormat(cloudModelConfigPort, value)
-
-    fun updateCloudImageApiFormat(value: String) =
-        applyCloudImageApiFormat(cloudModelConfigPort, value)
-
-    fun applyCloudProviderPreset(value: String) =
-        applyCloudProviderPreset(cloudModelConfigPort, value)
-
-    fun beginAddCloudModel(kind: String) =
-        applyBeginAddCloudModel(cloudModelConfigPort, kind)
-
-    fun editCloudModel(modelId: String) =
-        applyEditCloudModel(cloudModelConfigPort, modelId)
-
-    fun updateCloudBaseUrl(value: String) =
-        applyCloudBaseUrl(cloudModelConfigPort, value)
-
-    fun updateCloudApiKey(value: String) =
-        applyCloudApiKey(cloudModelConfigPort, value)
-
-    fun updateCloudChatModel(value: String) =
-        applyCloudChatModel(cloudModelConfigPort, value)
-
-    fun updateCloudSupportsVision(value: Boolean) =
-        applyCloudSupportsVision(cloudModelConfigPort, value)
+    fun updateCloudApiEnabled(enabled: Boolean) = applyCloudApiEnabled(cloudModelConfigPort, enabled)
+    fun updateCloudApiFormat(value: String) = applyCloudApiFormat(cloudModelConfigPort, value)
+    fun updateCloudImageApiFormat(value: String) = applyCloudImageApiFormat(cloudModelConfigPort, value)
+    fun applyCloudProviderPreset(value: String) = applyCloudProviderPreset(cloudModelConfigPort, value)
+    fun beginAddCloudModel(kind: String) = applyBeginAddCloudModel(cloudModelConfigPort, kind)
+    fun editCloudModel(modelId: String) = applyEditCloudModel(cloudModelConfigPort, modelId)
+    fun updateCloudBaseUrl(value: String) = applyCloudBaseUrl(cloudModelConfigPort, value)
+    fun updateCloudApiKey(value: String) = applyCloudApiKey(cloudModelConfigPort, value)
+    fun updateCloudChatModel(value: String) = applyCloudChatModel(cloudModelConfigPort, value)
+    fun updateCloudSupportsVision(value: Boolean) = applyCloudSupportsVision(cloudModelConfigPort, value)
 
     /**
      * Persists a GGUF backend choice against the target model before it is loaded.
@@ -3229,65 +3136,16 @@ class MainViewModel @JvmOverloads constructor(
 /** Delegates to [cloudChatModelGenerationParams]. Signature kept verbatim. */
     fun generationParamsForChatModel(modelId: String): GenerationParams = cloudChatModelGenerationParams(port = cloudModelConfigPort, modelId = modelId)
 
-/** Delegates to [applyCloudSupportsTools]. Signature kept verbatim. */
-    fun updateCloudSupportsTools(value: Boolean) {
-        applyCloudSupportsTools(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [applyCloudImageModel]. Signature kept verbatim. */
-    fun updateCloudImageModel(value: String) {
-        applyCloudImageModel(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [applyCloudResponsesReasoning]. Signature kept verbatim. */
-    fun updateCloudResponsesReasoning(value: Boolean) {
-        applyCloudResponsesReasoning(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [applyCloudImageSize]. Signature kept verbatim. */
-    fun updateCloudImageSize(value: String) {
-        applyCloudImageSize(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [applyCloudImageEndpointPath]. Signature kept verbatim. */
-    fun updateCloudImageEndpointPath(value: String) {
-        applyCloudImageEndpointPath(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [applyCloudDisplayName]. Signature kept verbatim. */
-    fun updateCloudDisplayName(value: String) {
-        applyCloudDisplayName(port = cloudModelConfigPort, value = value)
-    }
-
-/** Delegates to [persistCloudApiConfig]. Signature kept verbatim. */
-    fun saveCloudApiConfig() {
-        persistCloudApiConfig(port = cloudModelConfigPort)
-    }
-
-/** Delegates to [saveCloudChatModelConfig]. Signature kept verbatim. */
-    fun saveCloudChatModel() {
-        saveCloudChatModelConfig(port = cloudModelConfigPort)
-    }
-
-/** Delegates to [saveCloudImageModelConfig]. Signature kept verbatim. */
-    fun saveCloudImageModel() {
-        saveCloudImageModelConfig(port = cloudModelConfigPort)
-    }
-
-/** Delegates to [runCloudApiConfigTest]. Signature kept verbatim. */
-    fun testCloudApiConfig() {
-        runCloudApiConfigTest(port = cloudModelConfigPort, scope = viewModelScope)
-    }
-
-
-
-
-
-
-
-
-
-
+    fun updateCloudSupportsTools(value: Boolean) = applyCloudSupportsTools(port = cloudModelConfigPort, value = value)
+    fun updateCloudImageModel(value: String) = applyCloudImageModel(port = cloudModelConfigPort, value = value)
+    fun updateCloudResponsesReasoning(value: Boolean) = applyCloudResponsesReasoning(port = cloudModelConfigPort, value = value)
+    fun updateCloudImageSize(value: String) = applyCloudImageSize(port = cloudModelConfigPort, value = value)
+    fun updateCloudImageEndpointPath(value: String) = applyCloudImageEndpointPath(port = cloudModelConfigPort, value = value)
+    fun updateCloudDisplayName(value: String) = applyCloudDisplayName(port = cloudModelConfigPort, value = value)
+    fun saveCloudApiConfig() = persistCloudApiConfig(port = cloudModelConfigPort)
+    fun saveCloudChatModel() = saveCloudChatModelConfig(port = cloudModelConfigPort)
+    fun saveCloudImageModel() = saveCloudImageModelConfig(port = cloudModelConfigPort)
+    fun testCloudApiConfig() = runCloudApiConfigTest(port = cloudModelConfigPort, scope = viewModelScope)
 
     fun selectCloudImageModel(modelId: String) {
         if (rejectImageModelSwitchWhileGenerationIsActive()) return
@@ -3349,9 +3207,7 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun importModel(uri: Uri) {
-        importModel(listOf(uri))
-    }
+    fun importModel(uri: Uri) = importModel(listOf(uri))
 
     fun importModel(uris: List<Uri>, textOnly: Boolean = false, persistentAccess: Boolean = false) {
         if (uris.isEmpty()) return
@@ -4804,44 +4660,23 @@ class MainViewModel @JvmOverloads constructor(
             continueAssistantImageToolTurn = { reqId, json -> continueAssistantImageToolTurn(reqId, json) }
         )
 
-    fun retryChatImageGeneration(requestId: String) {
+    fun retryChatImageGeneration(requestId: String) =
         retryChatImageGeneration(port = chatImageRequestApprovalPort, requestId = requestId)
-    }
 
-    fun approveChatImageRequest(requestId: String) {
+    fun approveChatImageRequest(requestId: String) =
         approveChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
-    }
 
-    fun rejectChatImageRequest(requestId: String) {
+    fun rejectChatImageRequest(requestId: String) =
         rejectChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
-    }
 
     /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
-    fun continueAssistantImageTurn(requestId: String) {
-        if (!_uiState.value.canWriteToActiveAssistantSession()) return
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (_, request) = owner
-        if (!request.canContinueAssistantImageTurn()) return
-        val status = when (request.status) {
-            ChatGeneratedImageStatus.DONE -> "completed"
-            ChatGeneratedImageStatus.FAILED -> "failed"
-            ChatGeneratedImageStatus.CANCELLED -> "cancelled"
-            ChatGeneratedImageStatus.INTERRUPTED -> "interrupted"
-            ChatGeneratedImageStatus.AWAITING_APPROVAL,
-            ChatGeneratedImageStatus.QUEUED,
-            ChatGeneratedImageStatus.GENERATING -> return
-        }
-        val output = request.toolOutputJson ?: toolResultJson(
-            status,
-            when (status) {
-                "completed" -> "Image generated successfully."
-                "cancelled" -> "Image generation was cancelled."
-                "interrupted" -> "Image generation was interrupted."
-                else -> "Image generation failed."
-            }
+    fun continueAssistantImageTurn(requestId: String) =
+        continueAssistantImageTurnFor(
+            store = uiStateStore,
+            findRequest = ::findChatGeneratedImageRequest,
+            continueTurn = ::continueAssistantImageToolTurn,
+            requestId = requestId
         )
-        continueAssistantImageToolTurn(requestId, output)
-    }
 
     /** Delegates to [cancelChatImageGenerationFor]. Signature kept verbatim. */
     fun cancelChatImageGeneration(requestId: String) =

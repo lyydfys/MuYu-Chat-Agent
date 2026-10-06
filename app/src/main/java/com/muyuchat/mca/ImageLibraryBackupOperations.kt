@@ -335,3 +335,70 @@ internal fun cancelImageLibraryBackupFor(
 ) {
     synchronized(lifecycleLock) { getActiveJob() }?.cancel()
 }
+
+internal class ImageLibraryBackupCoordinator(
+    private val sequence: AtomicLong = AtomicLong(0L),
+    private val lifecycleLock: Any = Any()
+) {
+    fun exportBackup(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        application: Application,
+        imageLibraryBackup: ImageLibraryBackup,
+        imageLibraryMutationMutex: Mutex,
+        awaitStartupReconciliation: suspend () -> Unit,
+        getActiveJob: () -> Job?,
+        setActiveJob: (Job?) -> Unit,
+        showStatus: (String) -> Unit,
+        uriString: String,
+        favoritesOnly: Boolean
+    ) = exportImageLibraryBackupFor(
+        store = store,
+        scope = scope,
+        application = application,
+        imageLibraryBackup = imageLibraryBackup,
+        imageLibraryMutationMutex = imageLibraryMutationMutex,
+        awaitStartupReconciliation = awaitStartupReconciliation,
+        lifecycleLock = lifecycleLock,
+        sequence = sequence,
+        getActiveJob = getActiveJob,
+        setActiveJob = setActiveJob,
+        showStatus = showStatus,
+        uriString = uriString,
+        favoritesOnly = favoritesOnly
+    )
+
+    fun importBackup(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        application: Application,
+        imageLibraryBackup: ImageLibraryBackup,
+        chatSessionStore: ChatSessionStore,
+        imageAssetWriteMutex: Mutex,
+        imageLibraryMutationMutex: Mutex,
+        awaitStartupReconciliation: suspend () -> Unit,
+        getActiveJob: () -> Job?,
+        setActiveJob: (Job?) -> Unit,
+        showStatus: (String) -> Unit,
+        uriString: String
+    ) = importImageLibraryBackupFor(
+        store = store,
+        scope = scope,
+        application = application,
+        imageLibraryBackup = imageLibraryBackup,
+        chatSessionStore = chatSessionStore,
+        imageAssetWriteMutex = imageAssetWriteMutex,
+        imageLibraryMutationMutex = imageLibraryMutationMutex,
+        awaitStartupReconciliation = awaitStartupReconciliation,
+        lifecycleLock = lifecycleLock,
+        sequence = sequence,
+        getActiveJob = getActiveJob,
+        setActiveJob = setActiveJob,
+        showStatus = showStatus,
+        uriString = uriString
+    )
+
+    fun cancelBackup(getActiveJob: () -> Job?) =
+        cancelImageLibraryBackupFor(lifecycleLock, getActiveJob)
+}
+

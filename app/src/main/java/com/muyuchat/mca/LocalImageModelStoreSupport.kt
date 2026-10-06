@@ -473,3 +473,31 @@ internal fun String.isPrimaryImageModelName(): Boolean {
         "encoder" !in lower
 }
 internal const val QWEN_IMAGE_21_RECOMMENDATION_ID = "qwen_image_21_mnn_opencl"
+
+internal fun settleAndApplyLocalImageModelCatalogUpdate(
+    store: UiStateStore,
+    localImageModelStore: LocalImageModelStore,
+    context: Context,
+    managedRuntimeReadinessRefreshGate: ManagedRuntimeReadinessRefreshGate,
+    statusMessage: String
+) {
+    val models = localImageModelStore.loadModels()
+    val verification = currentQnnImageVerificationByModelId(context, models)
+    val selectedId = selectedReadyLocalImageModelId(
+        models = models,
+        qnnVerificationCurrentByModelId = verification,
+        preferredId = localImageModelStore.loadSelectedModelId()
+    )
+    managedRuntimeReadinessRefreshGate.invalidate()
+    store.update { state ->
+        state.copy(
+            localImageModels = models,
+            qnnImageVerificationCurrentByModelId = verification,
+            selectedLocalImageModelId = selectedId,
+            selectedImageBackend = if (selectedId == null && state.selectedImageBackend == ImageBackend.LOCAL)
+                ImageBackend.CLOUD else state.selectedImageBackend,
+            statusMessage = statusMessage
+        )
+    }
+}
+

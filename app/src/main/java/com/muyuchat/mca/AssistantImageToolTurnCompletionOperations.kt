@@ -31,3 +31,35 @@ internal fun completeAssistantImageToolTurnForJobFor(
     applyChatGeneratedImageRequest(requestPort, sessionId, requestId, request.copy(toolOutputJson = output))
     continueTurn(requestId, output)
 }
+
+internal fun continueAssistantImageTurnFor(
+    store: UiStateStore,
+    findRequest: (String) -> Pair<String, ChatGeneratedImageRequest>?,
+    continueTurn: (String, String) -> Unit,
+    requestId: String
+) {
+    if (!store.current.canWriteToActiveAssistantSession()) return
+    val owner = findRequest(requestId) ?: return
+    val (_, request) = owner
+    if (!request.canContinueAssistantImageTurn()) return
+    val status = when (request.status) {
+        ChatGeneratedImageStatus.DONE -> "completed"
+        ChatGeneratedImageStatus.FAILED -> "failed"
+        ChatGeneratedImageStatus.CANCELLED -> "cancelled"
+        ChatGeneratedImageStatus.INTERRUPTED -> "interrupted"
+        ChatGeneratedImageStatus.AWAITING_APPROVAL,
+        ChatGeneratedImageStatus.QUEUED,
+        ChatGeneratedImageStatus.GENERATING -> return
+    }
+    val output = request.toolOutputJson ?: toolResultJson(
+        status,
+        when (status) {
+            "completed" -> "Image generated successfully."
+            "cancelled" -> "Image generation was cancelled."
+            "interrupted" -> "Image generation was interrupted."
+            else -> "Image generation failed."
+        }
+    )
+    continueTurn(requestId, output)
+}
+
