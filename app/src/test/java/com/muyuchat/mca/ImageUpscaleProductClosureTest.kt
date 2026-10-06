@@ -79,7 +79,13 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             "fun submit("
         )
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
-        val previewPublish = functionBody(viewModel, "private fun publishLocalImagePreview(")
+        // R3/C3-S17: the preview publisher moved verbatim to LocalImagePreviewOperations.kt; the
+        // assertions are unchanged (the mutex param keeps its original name) -- they are read where
+        // the publisher now lives.
+        val previewPublish = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImagePreviewOperations.kt"),
+            "internal fun publishLocalImagePreviewTo("
+        )
         // P5: deleteImageAssets / clearImageLibrary moved to ImageAssetDeletionOperations; the
         // assertions are unchanged -- the bodies are read where they now live.
         val deleteImages = functionBody(

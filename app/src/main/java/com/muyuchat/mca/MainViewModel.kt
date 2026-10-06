@@ -406,9 +406,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val LOCAL_API_FOREGROUND_READY_TIMEOUT_MS = 3_000L
         private const val LOCAL_API_FOREGROUND_READY_ATTEMPTS = 2
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
-        private const val LOCAL_IMAGE_GENERATION_WATCHDOG_MS = 8 * 60 * 1000L
-        private const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
-        private const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
         private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
@@ -2497,23 +2494,9 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun startLocalImageGenerationWatchdog(jobId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            delay(LOCAL_IMAGE_GENERATION_WATCHDOG_MS)
-            uiStateStore.update { state ->
-                val job = state.imageJobs.firstOrNull { it.id == jobId }
-                if (job?.status == ImageGenerationStatusRecord.QUEUED || job?.status == ImageGenerationStatusRecord.GENERATING) {
-                    val message = "本地生图耗时超过 8 分钟，native 后端仍在运行。可点击停止，当前图执行结束后会退出。"
-                    state.copy(
-                        imageJobs = state.imageJobs.updateImageJob(jobId, ImageGenerationStatusRecord.GENERATING, message),
-                        statusMessage = message
-                    )
-                } else {
-                    state
-                }
-            }
-        }
-    }
+    /** Delegates to [startLocalImageGenerationWatchdogFor]. Signature kept verbatim. */
+    private fun startLocalImageGenerationWatchdog(jobId: String) =
+        startLocalImageGenerationWatchdogFor(uiStateStore, viewModelScope, jobId)
 
     fun cancelImageGeneration() = cancelImageGenerationForJob(expectedJobId = null)
 
@@ -2594,101 +2577,26 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    /** Delegates to [publishLocalImagePreviewTo]. Signature kept verbatim. */
     private fun publishLocalImagePreview(
         jobId: String,
         progress: LocalImageProgress
-    ): PublishedLocalImagePreview? = runCatching {
-        if (!canPublishLocalImagePreview(jobId)) return@runCatching null
-        if (progress.previewRevision <= 0L || progress.previewPath.isBlank()) return@runCatching null
-        require(progress.previewMimeType == "image/png") {
-            "Native image preview must be a PNG."
-        }
-        require(progress.previewMode in setOf("projection", "tae", "vae")) {
-            "Native image preview reported an unknown mode."
-        }
-        require(
-            progress.previewStep > 0 && progress.previewWidth > 0 &&
-                progress.previewHeight > 0 && progress.previewFrameCount > 0 &&
-                !progress.previewNoisy
-        ) { "Native image preview metadata is incomplete." }
+    ): PublishedLocalImagePreview? = publishLocalImagePreviewTo(
+        uiStateStore,
+        container.runtimeAdmission,
+        getApplication(),
+        imageAssetWriteMutex,
+        jobId,
+        progress
+    )
 
-        val app = getApplication<Application>()
-        val cacheRoot = app.cacheDir.canonicalFile
-        val source = validatedLocalImagePreviewSource(
-            cacheRoot = cacheRoot,
-            previewPath = progress.previewPath,
-            coordinatedRevision = progress.previewRevision
-        )
-        require(
-            source.isFile && source.length() in 1..MAX_LOCAL_IMAGE_PREVIEW_BYTES
-        ) { "Native image preview path is not a bounded app-cache file." }
-        val bytes = source.readBytes()
-        require(bytes.size.toLong() == source.length()) {
-            "Native image preview changed while it was being copied."
-        }
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        require(
-            bounds.outWidth == progress.previewWidth && bounds.outHeight == progress.previewHeight
-        ) { "Native image preview dimensions do not match the decoded PNG." }
-
-        // Copying and decoding can take long enough for a cancellation to win. Do not create a
-        // new UI-cache artifact once the job has left the only state that may show previews.
-        if (!canPublishLocalImagePreview(jobId)) return@runCatching null
-
-        val root = File(cacheRoot, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY).canonicalFile
-        require(root.isDirectory || root.mkdirs()) { "Unable to create the image preview directory." }
-        val requestToken = jobId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
-        val requestDir = File(root, requestToken).canonicalFile
-        require(requestDir.parentFile == root && (requestDir.isDirectory || requestDir.mkdirs())) {
-            "Unable to create the request preview directory."
-        }
-        val fileName = "preview-${progress.previewRevision}.png"
-        var createdForThisPublication = false
-        val published = File(requestDir, fileName).takeIf(File::isFile)
-            ?: run {
-                if (!imageAssetWriteMutex.tryLock()) return@runCatching null
-                try {
-                    if (!canPublishLocalImagePreview(jobId)) return@runCatching null
-                    val created = writeImageAssetBytesAtomically(requestDir, fileName, bytes)
-                    createdForThisPublication = true
-                    created
-                } finally {
-                    imageAssetWriteMutex.unlock()
-                }
-            }
-        if (!canPublishLocalImagePreview(jobId)) {
-            if (createdForThisPublication) {
-                published.delete()
-            }
-            return@runCatching null
-        }
-        PublishedLocalImagePreview(
-            uriString = Uri.fromFile(published).toString(),
-            mode = progress.previewMode,
-            step = progress.previewStep,
-            revision = progress.previewRevision,
-            width = progress.previewWidth,
-            height = progress.previewHeight
-        )
-    }.getOrNull()
-
+    /** Delegates to [canPublishLocalImagePreviewFor]. Signature kept verbatim. */
     private fun canPublishLocalImagePreview(jobId: String): Boolean =
-        activeImageGenerationJobId == jobId &&
-            _uiState.value.imageJobs.firstOrNull { job -> job.id == jobId }?.status ==
-            ImageGenerationStatusRecord.GENERATING
+        canPublishLocalImagePreviewFor(uiStateStore, container.runtimeAdmission, jobId)
 
-    private fun cleanupLocalImagePreviews(jobId: String) {
-        runCatching {
-            val cacheRoot = getApplication<Application>().cacheDir.canonicalFile
-            val root = File(cacheRoot, LOCAL_IMAGE_UI_PREVIEW_DIRECTORY).canonicalFile
-            val requestToken = jobId.replace(Regex("[^A-Za-z0-9._-]"), "_").take(64)
-            val requestDir = File(root, requestToken).canonicalFile
-            if (requestDir.parentFile == root && requestDir.exists()) {
-                requestDir.deleteRecursively()
-            }
-        }
-    }
+    /** Delegates to [cleanupLocalImagePreviewsFor]. Signature kept verbatim. */
+    private fun cleanupLocalImagePreviews(jobId: String) =
+        cleanupLocalImagePreviewsFor(getApplication(), jobId)
 
     fun deleteImageAsset(imageId: String) {
         deleteImageAssets(listOf(imageId))
