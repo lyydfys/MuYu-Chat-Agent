@@ -4,6 +4,7 @@ import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatGeneratedImageStatus
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
+import java.io.File
 import java.util.UUID
 
 /**
@@ -294,4 +295,91 @@ internal object SendChatImageRequestOperations {
             port.updateChatImageRequestFromJob(chatSessionId, requestId, jobId)
         }
     }
+}
+
+/**
+ * R3/C3-S14：发送族三个顶层助手（自 MainViewModel 迁出；体逐字，仅依赖替换为参数/顶层函数）。
+ *
+ * [resolveCurrentLocalImageLorasFor] 是原 VM `resolveCurrentLocalImageLoras` 的实现体（records 默认值
+ * 留在 VM 薄委托上，保持原调用点语义）；[chatImageOptionsForCurrentSelectionFor]与
+ * [chatImageSubmissionBlockMessageFor] 同理。目的：图片发送/重试两个具名适配器不再需要 VM。
+ */
+internal fun resolveCurrentLocalImageLorasFor(
+    selections: List<Pair<String, Double>>,
+    records: List<LocalImageLoraRecord>
+): List<LocalImagePreparedLora> {
+    require(selections.size <= LocalImagePreparedLora.MAX_COUNT) {
+        "单次最多使用 ${LocalImagePreparedLora.MAX_COUNT} 个 LoRA。"
+    }
+    require(selections.map { it.first }.distinct().size == selections.size) {
+        "同一个 LoRA 不能重复选择。"
+    }
+    val recordsById = records.associateBy(LocalImageLoraRecord::id)
+    return selections.map { (id, multiplier) ->
+        val record = recordsById[id]
+            ?: throw LocalImageProductContractException(
+                "image_lora_not_found",
+                "所选 LoRA 已删除或不可用：$id"
+            )
+        record.toPrepared(multiplier)
+    }
+}
+
+/** Captures the selected image model's default conditioning for chat-triggered images. */
+internal fun chatImageOptionsForCurrentSelectionFor(state: MainUiState): LocalImageGenerationOptions {
+    val base = LocalImageGenerationOptions(batchCount = 1)
+    if (state.selectedImageBackend != ImageBackend.LOCAL) return base
+    // A null selection is a state the writers produce on purpose:
+    // `reportMissingLocalImageLoraSelection()` and `updateChatImageLoraSelection()` both store
+    // null to mean "the stored LoRA selection is no longer usable, ask the user to re-select".
+    // Treating it as impossible crashed the app during composition (McaApp -> chatImageToolPermissionUiState).
+    // Fall back to `base` (no LoRA conditioning) instead; the user-facing prompt lives in
+    // `localImageLoraMessage` and is unaffected by this path.
+    val selections = state.usableChatImageLoraSelections() ?: return base
+    val resolvedLoras = resolveCurrentLocalImageLorasFor(selections, state.localImageLoras)
+    val model = state.selectedLocalImageModel() ?: return base
+    val bundleRoot = model.bundleRoot
+        ?.takeIf(String::isNotBlank)
+        ?.let(::File)
+        ?.takeIf(File::isDirectory)
+        ?: File(model.path).parentFile?.takeIf(File::isDirectory)
+    val defaultNegative = runCatching {
+        val profile = resolveLocalImageExecutionProfile(
+            model = model,
+            options = base.normalizedForPromptExecutionProfile(model.runtime),
+            bundleRoot = bundleRoot
+        ).profile
+        chatImageDefaultNegativePromptForProfile(profile)
+    }.getOrElse {
+        chatImageFallbackNegativePromptForModel(model.family, model.runtime)
+    }
+    return base.copy(negativePrompt = defaultNegative, loras = resolvedLoras)
+}
+
+internal fun chatImageSubmissionBlockMessageFor(
+    state: MainUiState,
+    admission: RuntimeAdmissionState,
+    coordinator: LocalImageGenerationCoordinator
+): String? {
+    val modelMessage = when (state.selectedImageBackend) {
+        ImageBackend.LOCAL -> {
+            val model = state.selectedLocalImageModel()
+                ?: return "尚未选择可用的本地图像模型，请前往模型管理选择并配置一个模型。"
+            model.localImageStructuralReadinessMessage()?.let { "本地图像模型暂不可用：$it" }
+        }
+        ImageBackend.CLOUD -> {
+            val config = state.selectedImageCloudConfig()
+                ?: return "尚未选择云端生图模型，请先在模型管理中添加并配置一个模型。"
+            if (!config.imageConfigured) {
+                "当前云端生图模型尚未配置完整，请检查接口地址、模型名称和认证信息。"
+            } else null
+        }
+    }
+    if (modelMessage != null) return modelMessage
+    if (admission.imageGenerationJob?.isActive == true || admission.activeImageGenerationJobId != null ||
+        admission.activeLocalApiImageModelId != null || coordinator.activeRequestId() != null
+    ) {
+        return "已有图片任务正在运行，请等它完成或取消后再发送新的生图请求。"
+    }
+    return null
 }

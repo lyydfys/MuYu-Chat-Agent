@@ -1082,7 +1082,11 @@ class MainViewModel @JvmOverloads constructor(
             container.runtimeAdmission.activeImageGenerationModelId = value
         }
     @Volatile private var activeLocalImageWorkerRequestId: String? = null
-    @Volatile private var activeLocalApiImageModelId: String? = null
+    private var activeLocalApiImageModelId: String?
+        get() = container.runtimeAdmission.activeLocalApiImageModelId
+        set(value) {
+            container.runtimeAdmission.activeLocalApiImageModelId = value
+        }
     private val localImageGenerationCoordinator: LocalImageGenerationCoordinator
         get() = container.localImageGenerationCoordinator
     private val localImageGenerationCoordinatorObservationLock: Any
@@ -1097,52 +1101,6 @@ class MainViewModel @JvmOverloads constructor(
     private suspend fun awaitImageLibraryStartupReconciliation() {
         imageLibraryStartupReconciliation.await()
     }
-
-    /** The ViewModel side of [ChatImageRetryPort]. */
-    private val chatImageRetryPort: ChatImageRetryPort =
-        object : ChatImageRetryPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val cloudApiStore: CloudApiStore
-                get() = this@MainViewModel.cloudApiStore
-
-            override val localImageModelStore: LocalImageModelStore
-                get() = this@MainViewModel.localImageModelStore
-
-            override val chatImageCommitJournal: ChatImageCommitJournal
-                get() = this@MainViewModel.chatImageCommitJournal
-
-            override val chatSessionStore: ChatSessionStore
-                get() = this@MainViewModel.chatSessionStore
-
-            override fun showStatus(message: String?) =
-                this@MainViewModel.showStatus(message = message)
-
-            override fun invalidatePendingChatImagePreparation() =
-                this@MainViewModel.invalidatePendingChatImagePreparation()
-
-            override fun sendChatImageRequest(
-visibleUserText: String,
-prompt: String,
-optionsOverride: LocalImageGenerationOptions?,
-promptEnvelope: PromptEnvelope?,
-contextTraceJson: String?
-) =
-                this@MainViewModel.sendChatImageRequest(visibleUserText = visibleUserText, prompt = prompt, optionsOverride = optionsOverride, promptEnvelope = promptEnvelope, contextTraceJson = contextTraceJson)
-
-            override fun pendingImageTranslation(): PendingImageTranslation? =
-                this@MainViewModel.pendingImageTranslation
-
-
-            override fun setPendingImageTranslation(value: PendingImageTranslation?) {
-                this@MainViewModel.pendingImageTranslation = value
-            }
-
-        }
 
 /** Delegates to [deleteCloudModelRecord]. Signature kept verbatim. */
     fun deleteCloudModel(modelId: String) {
@@ -2465,26 +2423,11 @@ contextTraceJson: String?
         )
     }
 
+    /** Delegates to [resolveCurrentLocalImageLorasFor]. Signature kept verbatim. */
     private fun resolveCurrentLocalImageLoras(
         selections: List<Pair<String, Double>>,
         records: List<LocalImageLoraRecord> = _uiState.value.localImageLoras
-    ): List<LocalImagePreparedLora> {
-        require(selections.size <= LocalImagePreparedLora.MAX_COUNT) {
-            "单次最多使用 ${LocalImagePreparedLora.MAX_COUNT} 个 LoRA。"
-        }
-        require(selections.map { it.first }.distinct().size == selections.size) {
-            "同一个 LoRA 不能重复选择。"
-        }
-        val recordsById = records.associateBy(LocalImageLoraRecord::id)
-        return selections.map { (id, multiplier) ->
-            val record = recordsById[id]
-                ?: throw LocalImageProductContractException(
-                    "image_lora_not_found",
-                    "所选 LoRA 已删除或不可用：$id"
-                )
-            record.toPrepared(multiplier)
-        }
-    }
+    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasFor(selections, records)
 
     private fun resolveCurrentLocalImageTextualInversionIds(
         ids: List<String>,
@@ -7530,13 +7473,8 @@ contextTraceJson: String?
     }
 
     /**
-     * The ViewModel side of [SendChatImageRequestPort]: one route per member, no logic of its own.
-     * The decision body moved to [SendChatImageRequestOperations.sendChatImageRequest], which is now
-     * the only place the send path is decided.
-     *
-     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
-     * their name and signature with the ViewModel member they forward to, and an unqualified call
-     * would recurse into the override instead of reaching the original implementation.
+     * R3/C3-S14：端口具名化后，本成员只把参数交给容器适配器；决策体仍在
+     * [SendChatImageRequestOperations.sendChatImageRequest]。
      */
     private fun sendChatImageRequest(
         visibleUserText: String,
@@ -7545,111 +7483,8 @@ contextTraceJson: String?
         promptEnvelope: PromptEnvelope? = null,
         contextTraceJson: String? = null
     ) {
-        val port = object : SendChatImageRequestPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun showStatus(message: String) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override fun rejectWhileConversationMutationInProgress(): Boolean =
-                this@MainViewModel.rejectWhileConversationMutationInProgress()
-
-            override fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
-                this@MainViewModel.chatImageSubmissionBlockMessage(state)
-
-            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
-                with(this@MainViewModel) { state.canWriteToActiveAssistantSession() }
-
-            override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot? =
-                with(this@MainViewModel) { state.activeAssistantSnapshot() }
-
-            override fun selectedAssistant(state: MainUiState): AssistantRecord? =
-                with(this@MainViewModel) { state.selectedAssistant() }
-
-            override fun selectedLocalImageModel(state: MainUiState): LocalImageModelRecord? =
-                with(this@MainViewModel) { state.selectedLocalImageModel() }
-
-            override fun selectedImageCloudConfig(state: MainUiState): CloudApiConfig? =
-                with(this@MainViewModel) { state.selectedImageCloudConfig() }
-
-            override fun currentChatModelId(state: MainUiState): String? =
-                with(this@MainViewModel) { state.currentChatModelId() }
-
-            override fun chatImageOptionsForCurrentSelection(
-                state: MainUiState
-            ): LocalImageGenerationOptions =
-                this@MainViewModel.chatImageOptionsForCurrentSelection(state)
-
-            override fun upsertSession(
-                sessions: List<ChatSessionRecord>,
-                sessionId: String,
-                messages: List<ChatMessage>,
-                assistantId: String?,
-                assistantSnapshot: AssistantConversationSnapshot?,
-                modelMode: String?,
-                modelId: String?
-            ): List<ChatSessionRecord> = with(this@MainViewModel) {
-                sessions.upsertSession(
-                    sessionId = sessionId,
-                    messages = messages,
-                    assistantId = assistantId,
-                    assistantSnapshot = assistantSnapshot,
-                    modelMode = modelMode,
-                    modelId = modelId
-                )
-            }
-
-            override fun persistChatSessions(
-                sessions: List<ChatSessionRecord>?,
-                knowledgeBinding: Pair<String, Set<String>>?
-            ) {
-                this@MainViewModel.persistChatSessions(
-                    sessions = sessions,
-                    knowledgeBinding = knowledgeBinding
-                )
-            }
-
-            override fun enqueueImageGeneration(
-                prompt: String,
-                inputDraft: LocalImageInputDraft,
-                options: LocalImageGenerationOptions,
-                jobSnapshot: ImageGenerationJobSpec?,
-                requestedJobId: String?,
-                requestedChatSessionId: String?,
-                requestedChatMessageId: String?
-            ): Boolean = this@MainViewModel.imageGenerationOwner.submit(
-                prompt = prompt,
-                inputDraft = inputDraft,
-                options = options,
-                jobSnapshot = jobSnapshot,
-                requestedJobId = requestedJobId,
-                requestedChatSessionId = requestedChatSessionId,
-                requestedChatMessageId = requestedChatMessageId
-            )
-
-            override fun updateChatGeneratedImageRequest(
-                chatSessionId: String,
-                requestId: String,
-                request: ChatGeneratedImageRequest
-            ) {
-                applyChatGeneratedImageRequest(chatImageRequestPort, chatSessionId, requestId, request)
-            }
-
-            override fun updateChatImageRequestFromJob(
-                chatSessionId: String,
-                requestId: String,
-                jobId: String
-            ) {
-                applyChatImageRequestFromJob(chatImageRequestPort, chatSessionId, requestId, jobId)
-            }
-        }
         SendChatImageRequestOperations.sendChatImageRequest(
-            port = port,
+            port = sendChatImageRequestPort,
             visibleUserText = visibleUserText,
             prompt = prompt,
             optionsOverride = optionsOverride,
@@ -7658,29 +7493,9 @@ contextTraceJson: String?
         )
     }
 
-    private fun chatImageSubmissionBlockMessage(state: MainUiState): String? {
-        val modelMessage = when (state.selectedImageBackend) {
-            ImageBackend.LOCAL -> {
-                val model = state.selectedLocalImageModel()
-                    ?: return "尚未选择可用的本地图像模型，请前往模型管理选择并配置一个模型。"
-                model.localImageStructuralReadinessMessage()?.let { "本地图像模型暂不可用：$it" }
-            }
-            ImageBackend.CLOUD -> {
-                val config = state.selectedImageCloudConfig()
-                    ?: return "尚未选择云端生图模型，请先在模型管理中添加并配置一个模型。"
-                if (!config.imageConfigured) {
-                    "当前云端生图模型尚未配置完整，请检查接口地址、模型名称和认证信息。"
-                } else null
-            }
-        }
-        if (modelMessage != null) return modelMessage
-        if (imageGenerationJob?.isActive == true || activeImageGenerationJobId != null ||
-            activeLocalApiImageModelId != null || localImageGenerationCoordinator.activeRequestId() != null
-        ) {
-            return "已有图片任务正在运行，请等它完成或取消后再发送新的生图请求。"
-        }
-        return null
-    }
+    /** Delegates to [chatImageSubmissionBlockMessageFor]. Signature kept verbatim. */
+    private fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
+        chatImageSubmissionBlockMessageFor(state, container.runtimeAdmission, localImageGenerationCoordinator)
 
     private suspend fun handleAssistantImageToolCalls(
         calls: List<ChatToolCall>,
@@ -10011,6 +9826,16 @@ contextTraceJson: String?
     // R3/C3-S12：图片请求簿记端口的具名适配器。
     private val chatImageRequestPort: ChatImageRequestPort =
         container.createChatImageRequestPort(uiStateStore, chatSessionPersistencePort)
+
+    // R3/C3-S14：图片发送/重试两端口的具名适配器（owner/admission/coordinator 均为真实对象）。
+    private val sendChatImageRequestPort: SendChatImageRequestPort =
+        container.createSendChatImageRequestPort(
+            uiStateStore, chatSessionPersistencePort, chatImageRequestPort, imageGenerationOwner
+        )
+    private val chatImageRetryPort: ChatImageRetryPort =
+        container.createChatImageRetryPort(
+            uiStateStore, sendChatImageRequestPort, { chatImageCommitJournal }
+        )
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         object : ImageLibraryCommitPort {
             override val uiState get() = this@MainViewModel.uiState
@@ -10827,36 +10652,9 @@ contextTraceJson: String?
         }
     }
 
-    /** Captures the selected image model's default conditioning for chat-triggered images. */
-    internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions {
-        val base = LocalImageGenerationOptions(batchCount = 1)
-        if (state.selectedImageBackend != ImageBackend.LOCAL) return base
-        // A null selection is a state the writers produce on purpose:
-        // `reportMissingLocalImageLoraSelection()` and `updateChatImageLoraSelection()` both store
-        // null to mean "the stored LoRA selection is no longer usable, ask the user to re-select".
-        // Treating it as impossible crashed the app during composition (McaApp -> chatImageToolPermissionUiState).
-        // Fall back to `base` (no LoRA conditioning) instead; the user-facing prompt lives in
-        // `localImageLoraMessage` and is unaffected by this path.
-        val selections = state.usableChatImageLoraSelections() ?: return base
-        val resolvedLoras = resolveCurrentLocalImageLoras(selections, state.localImageLoras)
-        val model = state.selectedLocalImageModel() ?: return base
-        val bundleRoot = model.bundleRoot
-            ?.takeIf(String::isNotBlank)
-            ?.let(::File)
-            ?.takeIf(File::isDirectory)
-            ?: File(model.path).parentFile?.takeIf(File::isDirectory)
-        val defaultNegative = runCatching {
-            val profile = resolveLocalImageExecutionProfile(
-                model = model,
-                options = base.normalizedForPromptExecutionProfile(model.runtime),
-                bundleRoot = bundleRoot
-            ).profile
-            chatImageDefaultNegativePromptForProfile(profile)
-        }.getOrElse {
-            chatImageFallbackNegativePromptForModel(model.family, model.runtime)
-        }
-        return base.copy(negativePrompt = defaultNegative, loras = resolvedLoras)
-    }
+    /** Delegates to [chatImageOptionsForCurrentSelectionFor]. Signature kept verbatim. */
+    internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
+        chatImageOptionsForCurrentSelectionFor(state)
 
 
     private fun displayNameForUri(uri: Uri): String {
@@ -11416,23 +11214,6 @@ contextTraceJson: String?
 
     private fun AssistantRecord.toGenerationParams(defaults: GenerationParams): GenerationParams =
         assistantGenerationParamsFromJson(paramsJson, defaults, systemPrompt)
-
-    private fun MainUiState.activeAssistantSnapshot(): AssistantConversationSnapshot? =
-        activeChatSessionId
-            ?.let { sessionId -> chatSessions.firstOrNull { it.id == sessionId } }
-            ?.assistantSnapshot
-
-    private fun MainUiState.canWriteToActiveAssistantSession(): Boolean {
-        val sessionId = activeChatSessionId ?: return false
-        val session = chatSessions.firstOrNull { it.id == sessionId } ?: return false
-        val owner = session.assistantId ?: return false
-        return !session.mixedAssistantHistory && owner == selectedAssistantId &&
-            session.assistantSnapshot?.assistantId == owner &&
-            assistants.any { it.id == owner }
-    }
-
-    private fun MainUiState.selectedAssistant(): AssistantRecord? =
-        assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()
 
     private fun apiUrl(host: String): String =
         "http://$host:$REST_PORT/v1"

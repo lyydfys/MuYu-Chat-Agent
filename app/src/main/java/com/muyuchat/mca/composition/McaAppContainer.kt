@@ -16,6 +16,11 @@ import com.muyuchat.mca.ChatImageCommitRecoveryPort
 import com.muyuchat.mca.ChatImageCommitRecoveryPortAdapter
 import com.muyuchat.mca.ChatImageRequestPort
 import com.muyuchat.mca.ChatImageRequestPortAdapter
+import com.muyuchat.mca.ChatImageRetryPort
+import com.muyuchat.mca.ChatImageRetryPortAdapter
+import com.muyuchat.mca.SendChatImageRequestPort
+import com.muyuchat.mca.SendChatImageRequestPortAdapter
+import com.muyuchat.mca.ImageGenerationOwner
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
 import java.io.File
@@ -351,6 +356,38 @@ internal class McaAppContainer(private val application: Application) {
             imageAssetDirectory = imageAssetDirectory,
             knowledgeBaseStore = knowledgeBaseStore,
             initialKnowledgeBases = initialKnowledgeBases
+        )
+
+    /** R3/C3-S14：图片发送端口工厂（owner 以真实对象注入；admission/coordinator 容器自持）。 */
+    fun createSendChatImageRequestPort(
+        store: UiStateStore,
+        persistencePort: ChatSessionPersistencePort,
+        requestPort: ChatImageRequestPort,
+        imageGenerationOwner: ImageGenerationOwner
+    ): SendChatImageRequestPort =
+        SendChatImageRequestPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            persistencePort = persistencePort,
+            requestPort = requestPort,
+            imageGenerationOwner = imageGenerationOwner,
+            coordinator = localImageGenerationCoordinator
+        )
+
+    /** R3/C3-S14：图片重试/清理端口工厂（journal 以 provider 传入，保持原 lazy 时机）。 */
+    fun createChatImageRetryPort(
+        store: UiStateStore,
+        sendPort: SendChatImageRequestPort,
+        journalProvider: () -> ChatImageCommitJournal
+    ): ChatImageRetryPort =
+        ChatImageRetryPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            cloudApiStoreRef = cloudApiStore,
+            localImageModelStoreRef = localImageModelStore,
+            journalProvider = journalProvider,
+            chatSessionStoreRef = chatSessionStore,
+            sendPortRef = sendPort
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

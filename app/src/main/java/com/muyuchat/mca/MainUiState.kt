@@ -213,3 +213,22 @@ internal fun MainUiState.usableChatImageLoraSelections(): List<Pair<String, Doub
     if (selectedImageBackend != ImageBackend.LOCAL) return null
     return chatImageLoraSelections
 }
+
+// R3/C3-S14：三个会话写入门 guard 自 MainViewModel 顶层化（体逐字；VM 内调用点零改动）。
+
+internal fun MainUiState.activeAssistantSnapshot(): AssistantConversationSnapshot? =
+    activeChatSessionId
+        ?.let { sessionId -> chatSessions.firstOrNull { it.id == sessionId } }
+        ?.assistantSnapshot
+
+internal fun MainUiState.canWriteToActiveAssistantSession(): Boolean {
+    val sessionId = activeChatSessionId ?: return false
+    val session = chatSessions.firstOrNull { it.id == sessionId } ?: return false
+    val owner = session.assistantId ?: return false
+    return !session.mixedAssistantHistory && owner == selectedAssistantId &&
+        session.assistantSnapshot?.assistantId == owner &&
+        assistants.any { it.id == owner }
+}
+
+internal fun MainUiState.selectedAssistant(): AssistantRecord? =
+    assistants.firstOrNull { it.id == selectedAssistantId } ?: assistants.firstOrNull()

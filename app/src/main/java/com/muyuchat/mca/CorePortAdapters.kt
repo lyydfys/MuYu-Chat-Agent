@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
 /**
@@ -309,4 +310,172 @@ internal class ChatImageCommitRecoveryPortAdapter(
 
     override val chatSessionStore: ChatSessionStore
         get() = sessionStoreRef
+}
+
+/** R3/C3-S14：图片发送端口具名化（真实依赖：store/holder/持久化端口/请求端口/owner/协调器）。 */
+internal class SendChatImageRequestPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val persistencePort: ChatSessionPersistencePort,
+    private val requestPort: ChatImageRequestPort,
+    private val imageGenerationOwner: ImageGenerationOwner,
+    private val coordinator: LocalImageGenerationCoordinator
+) : SendChatImageRequestPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun showStatus(message: String) {
+        store.showStatus(message)
+    }
+
+    override fun rejectWhileConversationMutationInProgress(): Boolean =
+        rejectWhileConversationMutationInProgressInto(store, admission)
+
+    override fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
+        chatImageSubmissionBlockMessageFor(state, admission, coordinator)
+
+    override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
+        state.canWriteToActiveAssistantSession()
+
+    override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot? =
+        state.activeAssistantSnapshot()
+
+    override fun selectedAssistant(state: MainUiState): AssistantRecord? =
+        state.selectedAssistant()
+
+    override fun selectedLocalImageModel(state: MainUiState): LocalImageModelRecord? =
+        state.selectedLocalImageModel()
+
+    override fun selectedImageCloudConfig(state: MainUiState): CloudApiConfig? =
+        state.selectedImageCloudConfig()
+
+    override fun currentChatModelId(state: MainUiState): String? =
+        state.currentChatModelId()
+
+    override fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
+        chatImageOptionsForCurrentSelectionFor(state)
+
+    override fun upsertSession(
+        sessions: List<ChatSessionRecord>,
+        sessionId: String,
+        messages: List<ChatMessage>,
+        assistantId: String?,
+        assistantSnapshot: AssistantConversationSnapshot?,
+        modelMode: String?,
+        modelId: String?
+    ): List<ChatSessionRecord> = sessions.upsertSessionFor(
+        state = store.current,
+        sessionId = sessionId,
+        messages = messages,
+        assistantId = assistantId,
+        assistantSnapshot = assistantSnapshot,
+        modelMode = modelMode,
+        modelId = modelId
+    )
+
+    override fun persistChatSessions(
+        sessions: List<ChatSessionRecord>?,
+        knowledgeBinding: Pair<String, Set<String>>?
+    ) {
+        runChatSessionPersistence(
+            port = persistencePort,
+            sessions = sessions,
+            knowledgeBinding = knowledgeBinding,
+            generationRunId = null
+        )
+    }
+
+    override fun enqueueImageGeneration(
+        prompt: String,
+        inputDraft: LocalImageInputDraft,
+        options: LocalImageGenerationOptions,
+        jobSnapshot: ImageGenerationJobSpec?,
+        requestedJobId: String?,
+        requestedChatSessionId: String?,
+        requestedChatMessageId: String?
+    ): Boolean = imageGenerationOwner.submit(
+        prompt = prompt,
+        inputDraft = inputDraft,
+        options = options,
+        jobSnapshot = jobSnapshot,
+        requestedJobId = requestedJobId,
+        requestedChatSessionId = requestedChatSessionId,
+        requestedChatMessageId = requestedChatMessageId
+    )
+
+    override fun updateChatGeneratedImageRequest(
+        chatSessionId: String,
+        requestId: String,
+        request: ChatGeneratedImageRequest
+    ) {
+        applyChatGeneratedImageRequest(requestPort, chatSessionId, requestId, request)
+    }
+
+    override fun updateChatImageRequestFromJob(chatSessionId: String, requestId: String, jobId: String) {
+        applyChatImageRequestFromJob(requestPort, chatSessionId, requestId, jobId)
+    }
+}
+
+/** R3/C3-S14：图片重试/清理端口具名化（journal 以 provider 传入，保持原 lazy 时机）。 */
+internal class ChatImageRetryPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val cloudApiStoreRef: CloudApiStore,
+    private val localImageModelStoreRef: LocalImageModelStore,
+    private val journalProvider: () -> ChatImageCommitJournal,
+    private val chatSessionStoreRef: ChatSessionStore,
+    private val sendPortRef: SendChatImageRequestPort
+) : ChatImageRetryPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val cloudApiStore: CloudApiStore
+        get() = cloudApiStoreRef
+
+    override val localImageModelStore: LocalImageModelStore
+        get() = localImageModelStoreRef
+
+    override val chatImageCommitJournal: ChatImageCommitJournal
+        get() = journalProvider()
+
+    override val chatSessionStore: ChatSessionStore
+        get() = chatSessionStoreRef
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
+
+    override fun invalidatePendingChatImagePreparation() {
+        invalidatePendingChatImagePreparationInto(store, admission)
+    }
+
+    override fun sendChatImageRequest(
+        visibleUserText: String,
+        prompt: String,
+        optionsOverride: LocalImageGenerationOptions?,
+        promptEnvelope: PromptEnvelope?,
+        contextTraceJson: String?
+    ) {
+        SendChatImageRequestOperations.sendChatImageRequest(
+            port = sendPortRef,
+            visibleUserText = visibleUserText,
+            prompt = prompt,
+            optionsOverride = optionsOverride,
+            promptEnvelope = promptEnvelope,
+            contextTraceJson = contextTraceJson
+        )
+    }
+
+    override fun pendingImageTranslation(): PendingImageTranslation? =
+        admission.pendingImageTranslation
+
+    override fun setPendingImageTranslation(value: PendingImageTranslation?) {
+        admission.pendingImageTranslation = value
+    }
 }

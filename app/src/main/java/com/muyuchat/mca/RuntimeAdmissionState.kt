@@ -41,6 +41,10 @@ internal class RuntimeAdmissionState(
     @Volatile
     var activeImageGenerationModelId: String? = null
 
+    // R3/C3-S14：自 VM 迁出的 Local API 图像模型身份（@Volatile 随迁）。
+    @Volatile
+    var activeLocalApiImageModelId: String? = null
+
     var imageGenerationJob: Job? = null
 
     @Volatile

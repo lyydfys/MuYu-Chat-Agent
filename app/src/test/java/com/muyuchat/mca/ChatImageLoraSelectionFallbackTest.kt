@@ -81,14 +81,20 @@ class ChatImageLoraSelectionFallbackTest {
 
     @Test
     fun theViewModelNoLongerAssertsThatTheSelectionIsPresent() {
+        // R3/C3-S14: the degraded decision moved verbatim to chatImageOptionsForCurrentSelectionFor
+        // in SendChatImageRequestOperations.kt. The assertions keep their strength: the no-assert
+        // guard now scans BOTH files (the buggy shape must not come back anywhere on this path) and
+        // the positive half reads where the decision now lives.
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val sendOperations = sourceFile("app/src/main/java/com/muyuchat/mca/SendChatImageRequestOperations.kt")
         assertFalse(
             "chatImageOptionsForCurrentSelection() must degrade on a null LoRA selection, not assert",
-            source.contains("requireNotNull(state.chatImageLoraSelections)")
+            source.contains("requireNotNull(state.chatImageLoraSelections)") ||
+                sendOperations.contains("requireNotNull(state.chatImageLoraSelections)")
         )
         assertTrue(
             "the degraded path must go through the extracted decision",
-            source.contains("state.usableChatImageLoraSelections() ?: return base")
+            sendOperations.contains("state.usableChatImageLoraSelections() ?: return base")
         )
     }
 
