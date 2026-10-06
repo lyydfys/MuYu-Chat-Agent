@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
+import android.app.Application
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.ReasoningMode
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -362,3 +364,216 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
                 }
         }
     }
+
+internal fun applyCloudApiEnabled(
+    port: CloudModelConfigPort,
+    enabled: Boolean
+) {
+    port.updateUiState { state ->
+        state.copy(cloudApiConfig = state.cloudApiConfig.copy(enabled = enabled))
+    }
+}
+
+internal fun applyCloudApiFormat(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    val format = CloudApiFormat.entries
+        .firstOrNull { it.name == value || it.label == value }
+        ?: CloudApiFormat.OPENAI_COMPATIBLE
+    val defaultBaseUrls = CloudApiFormat.entries.map { it.defaultBaseUrl }.filter { it.isNotBlank() }
+    val defaultChatModels = CloudApiFormat.entries.map { it.defaultModel }.filter { it.isNotBlank() }
+    port.updateUiState { state ->
+        val current = state.cloudApiConfig
+        state.copy(
+            cloudApiConfig = current.copy(
+                apiFormat = format,
+                providerName = format.label,
+                displayName = current.displayName.takeUnless {
+                    it == current.apiFormat.label || it == current.chatModel || it == "自定义推理引擎"
+                }.orEmpty(),
+                baseUrl = current.baseUrl.takeUnless { it in defaultBaseUrls }.orEmpty(),
+                chatModel = current.chatModel.takeUnless { it in defaultChatModels }.orEmpty()
+            )
+        )
+    }
+}
+
+internal fun applyCloudImageApiFormat(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    val format = CloudImageApiFormat.from(value)
+    val defaultBaseUrls = CloudImageApiFormat.entries.map { it.defaultBaseUrl }.filter { it.isNotBlank() }
+    val defaultImageModels = CloudImageApiFormat.entries.map { it.defaultImageModel }.filter { it.isNotBlank() }
+    val defaultImagePaths = CloudImageApiFormat.entries.map { it.defaultEndpointPath }.filter { it.isNotBlank() }
+    port.updateUiState { state ->
+        val current = state.cloudApiConfig
+        state.copy(
+            cloudApiConfig = current.copy(
+                imageApiFormat = format,
+                providerName = format.label,
+                baseUrl = current.baseUrl.takeUnless { it in defaultBaseUrls }.orEmpty(),
+                imageModel = current.imageModel.takeUnless { it in defaultImageModels }.orEmpty(),
+                imageEndpointPath = current.imageEndpointPath.takeUnless { it.trim().trim('/') in defaultImagePaths }.orEmpty(),
+                imageSize = current.imageSize.takeUnless { it == "1024x1024" }.orEmpty()
+            )
+        )
+    }
+}
+
+internal fun applyCloudProviderPreset(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    val preset = findCloudProviderPreset(value) ?: return
+    port.updateUiState { state ->
+        state.copy(
+            cloudApiConfig = state.cloudApiConfig.copy(
+                enabled = true,
+                apiFormat = preset.format,
+                providerName = preset.providerName,
+                displayName = preset.displayName,
+                baseUrl = preset.baseUrl,
+                chatModel = preset.chatModel
+            ),
+            statusMessage = "已选择 ${preset.providerName}，请填写自定义 Base URL、模型名和 API Key。"
+        )
+    }
+}
+
+internal fun applyBeginAddCloudModel(
+    port: CloudModelConfigPort,
+    kind: String
+) {
+    val modelKind = runCatching { CloudModelKind.valueOf(kind) }.getOrDefault(CloudModelKind.CHAT)
+    val current = port.uiState().cloudApiConfig
+    port.updateUiState { state ->
+        state.copy(
+            editingCloudModelId = null,
+            cloudApiConfig = CloudApiConfig(
+                enabled = true,
+                apiFormat = current.apiFormat,
+                imageApiFormat = current.imageApiFormat,
+                displayName = "",
+                providerName = if (modelKind == CloudModelKind.IMAGE) current.imageApiFormat.label else current.apiFormat.label,
+                baseUrl = "",
+                apiKey = "",
+                chatModel = "",
+                imageModel = "",
+                imageEndpointPath = "",
+                imageSize = ""
+            )
+        )
+    }
+}
+
+internal fun applyEditCloudModel(
+    port: CloudModelConfigPort,
+    modelId: String
+) {
+    val model = port.uiState().cloudModels.firstOrNull { it.id == modelId } ?: return
+    port.updateUiState { state ->
+        state.copy(
+            editingCloudModelId = model.id,
+            cloudApiConfig = when (model.kind) {
+                CloudModelKind.CHAT -> model.toChatConfig()
+                CloudModelKind.IMAGE -> model.toImageConfig()
+            },
+            statusMessage = "正在编辑：${model.displayName}"
+        )
+    }
+}
+
+internal fun applyCloudBaseUrl(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    port.updateUiState { state ->
+        state.copy(cloudApiConfig = state.cloudApiConfig.copy(baseUrl = value))
+    }
+}
+
+internal fun applyCloudApiKey(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    port.updateUiState { state ->
+        state.copy(cloudApiConfig = state.cloudApiConfig.copy(apiKey = value))
+    }
+}
+
+internal fun applyCloudChatModel(
+    port: CloudModelConfigPort,
+    value: String
+) {
+    port.updateUiState { state ->
+        state.copy(cloudApiConfig = state.cloudApiConfig.copy(chatModel = value))
+    }
+}
+
+internal fun applyCloudSupportsVision(
+    port: CloudModelConfigPort,
+    value: Boolean
+) {
+    port.updateUiState { state ->
+        state.copy(cloudApiConfig = state.cloudApiConfig.copy(supportsVision = value))
+    }
+}
+
+internal fun selectCloudImageModelFor(
+    port: CloudModelConfigPort,
+    modelId: String
+) {
+    val model = port.uiState().cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.IMAGE }
+    if (model == null) {
+        port.showStatus("未找到图像生成模型")
+        return
+    }
+    port.cloudApiStore.saveSelectedCloudImageModelId(model.id)
+    port.localImageModelStore.saveSelectedBackend(ImageBackend.CLOUD)
+    port.updateUiState {
+        it.copy(
+            selectedCloudImageModelId = model.id,
+            selectedImageBackend = ImageBackend.CLOUD,
+            cloudApiConfig = model.toImageConfig(),
+            statusMessage = "图片页已切换到：${model.modelName}"
+        )
+    }
+}
+
+internal const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
+
+internal fun updateReasoningModeFor(
+    state: MainUiState,
+    application: Application,
+    modelGenerationProfileStore: ModelGenerationProfileStore,
+    uiStateStore: UiStateStore,
+    showStatus: (String) -> Unit,
+    mode: ReasoningMode
+) {
+    if (state.selectedChatBackend == ChatBackend.CLOUD) {
+        showStatus(CLOUD_REASONING_LOCKED_MESSAGE)
+        return
+    }
+    val updatedParams = state.params.copy(
+        reasoningMode = mode,
+        hideReasoning = mode == ReasoningMode.OFF
+    ).let { params ->
+        params.copy(nPredict = params.effectiveNPredict())
+    }
+    GenerationPreferences.persistGenerationParams(application, updatedParams)
+    GenerationPreferences.persistModelGenerationParams(
+        profileStore = modelGenerationProfileStore,
+        backend = state.selectedChatBackend,
+        modelId = state.currentChatModelId(),
+        params = updatedParams
+    )
+    uiStateStore.update {
+        it.copy(
+            params = updatedParams,
+            statusMessage = "思考模式已切换为：${mode.label}"
+        )
+    }
+}
+
