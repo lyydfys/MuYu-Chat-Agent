@@ -294,7 +294,7 @@ private data class LocalApiApplyResult(
 )
 private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
-private const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
+internal const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 // `internal`, not `private`: the vision preparation that enforces this cap moved to
 // VisionAttachmentSupport.kt, and one shared cap is safer than two copies drifting apart.
 internal const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
@@ -372,7 +372,7 @@ class MainViewModel @JvmOverloads constructor(
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
         private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
-        private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
+        internal const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
         private const val ASSISTANT_MODEL_MODE_CLOUD = "cloud"
@@ -490,29 +490,6 @@ class MainViewModel @JvmOverloads constructor(
     private val chatAppearanceMutex = Mutex()
     private val cloudApiStore = container.cloudApiStore
     private val cloudChatProvider = container.cloudChatProvider
-    private fun offlineTranslationBundleReadyStatus(bundle: VerifiedOfflinePromptTranslationBundle): String =
-        com.muyuchat.mca.offlineTranslationBundleReadyStatus(bundle)
-
-    private suspend fun cacheVerifiedOfflineTranslationBundle(bundle: VerifiedOfflinePromptTranslationBundle) {
-        cacheVerifiedOfflineTranslationBundleFor(container.runtimeAdmission, bundle)
-    }
-
-    private suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? =
-        verifiedOfflineTranslationBundleFor(
-            store = uiStateStore,
-            admission = container.runtimeAdmission,
-            downloader = container.offlineTranslationDownloader
-        )
-    private var pendingImageTranslation: PendingImageTranslation?
-        get() = container.runtimeAdmission.pendingImageTranslation
-        set(value) {
-            container.runtimeAdmission.pendingImageTranslation = value
-        }
-    private var pendingChatImageAction: PendingChatImageAction?
-        get() = container.runtimeAdmission.pendingChatImageAction
-        set(value) {
-            container.runtimeAdmission.pendingChatImageAction = value
-        }
     private val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OfflinePromptTranslationService(AppOfflinePromptTranslationRuntimeProvider(application))
     }
@@ -748,15 +725,6 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.imageGenerationJob = value
         }
-    /** Serializes the optional chat-model prompt bridge used by chat-page image requests. */
-    private var chatImagePromptBridgeJob: Job?
-        get() = container.runtimeAdmission.chatImagePromptBridgeJob
-        set(value) {
-            container.runtimeAdmission.chatImagePromptBridgeJob = value
-        }
-    /** Invalidates a cancelled bridge before a slow provider can enqueue its stale result. */
-    private val chatImagePromptBridgeGeneration: AtomicLong
-        get() = container.runtimeAdmission.chatImagePromptBridgeGeneration
     private val contentImportPreviewStore = ContentImportPreviewStore(application)
     private val contentImportCommitMutex = Mutex()
     private val contentImportSelectionRevision: AtomicLong
@@ -1158,6 +1126,21 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
+    private val offlinePromptTranslationAndChatImageCoordinator = OfflinePromptTranslationAndChatImageCoordinator(
+        store = uiStateStore,
+        admission = container.runtimeAdmission,
+        scope = viewModelScope,
+        installer = container.offlineTranslationInstaller,
+        downloader = container.offlineTranslationDownloader,
+        chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
+        prepareChatInput = { it.prepareChatInput() },
+        showStatus = ::showStatus,
+        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+        hasUnresolvedAssistantImageToolTurn = ::hasUnresolvedAssistantImageToolTurn,
+        sendChatImageRequestWithPromptBridge = ::sendChatImageRequestWithPromptBridge,
+        sendPreparedMessage = ::sendPreparedMessage
+    )
+
     init {
         if (!deferStartup) startAfterConstruction()
     }
@@ -1168,12 +1151,12 @@ class MainViewModel @JvmOverloads constructor(
         observeManagedDownloads()
         modelImportAndDownloadCoordinator.observeManagedImports()
         viewModelScope.launch {
-            verifiedOfflineTranslationBundle()?.let { bundle ->
+            offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle()?.let { bundle ->
                 uiStateStore.update { state ->
                     if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
                     else state.copy(
                         offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
-                        offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle)
+                        offlineTranslationStatus = offlinePromptTranslationAndChatImageCoordinator.offlineTranslationBundleReadyStatus(bundle)
                     )
                 }
             }
@@ -1431,7 +1414,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun onInputChange(value: String) {
         if (value != _uiState.value.input &&
-            (pendingImageTranslation != null || pendingChatImageAction != null)
+            (container.runtimeAdmission.pendingImageTranslation != null || container.runtimeAdmission.pendingChatImageAction != null)
         ) invalidatePendingChatImagePreparation()
         val bounded = value.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES)
         uiStateStore.update {
@@ -3596,7 +3579,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 ChatImageIntentRoute.AMBIGUOUS -> {
                     val actionId = UUID.randomUUID().toString()
-                    pendingChatImageAction = PendingChatImageAction(
+                    container.runtimeAdmission.pendingChatImageAction = PendingChatImageAction(
                         id = actionId,
                         kind = com.muyuchat.feature.chat.ChatImageActionKind.AMBIGUOUS,
                         visibleUserText = preparedInput.text,
@@ -3790,62 +3773,16 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     private fun invalidatePendingChatImagePreparation() =
-        invalidatePendingChatImagePreparationInto(uiStateStore, container.runtimeAdmission)
+        offlinePromptTranslationAndChatImageCoordinator.invalidatePendingChatImagePreparation()
 
-    fun resolveChatImageActionDraft(id: String, primary: Boolean, editedText: String) {
-        val pending = pendingChatImageAction?.takeIf { it.id == id } ?: return
-        if (!pending.stillOwned()) {
-            invalidatePendingChatImagePreparation()
-            showStatus("会话、模型或原始草稿已变化，请重新发送。")
-            return
-        }
-        val text = editedText.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES).text
-        invalidatePendingChatImagePreparation()
-        uiStateStore.update { it.copy(input = text) }
-        when (pending.kind) {
-            com.muyuchat.feature.chat.ChatImageActionKind.AMBIGUOUS -> {
-                if (primary) {
-                    val prompt = parseExplicitChatImageIntent(text)?.sourceText ?: text
-                    sendChatImageRequestWithPromptBridge(
-                        visibleUserText = text,
-                        prompt = prompt,
-                        requestedOutputCount = classifyChatImageIntent(text).requestedOutputCount
-                            ?: pending.requestedOutputCount
-                    )
-                } else {
-                    val current = _uiState.value
-                    sendPreparedMessage(current, current.prepareChatInput())
-                }
-            }
-            com.muyuchat.feature.chat.ChatImageActionKind.CLOUD_TRANSLATION -> {
-                if (primary) {
-                    sendChatImageRequestWithPromptBridge(
-                        visibleUserText = text,
-                        prompt = parseExplicitChatImageIntent(text)?.sourceText ?: text,
-                        requestedOutputCount = classifyChatImageIntent(text).requestedOutputCount
-                            ?: pending.requestedOutputCount,
-                        allowCloudTranslationFallback = true
-                    )
-                } else {
-                    showStatus("已取消云端整理，原始描述仍在输入框。")
-                }
-            }
-        }
-    }
+    fun resolveChatImageActionDraft(id: String, primary: Boolean, editedText: String) =
+        offlinePromptTranslationAndChatImageCoordinator.resolveChatImageActionDraft(id, primary, editedText)
 
-    fun importOfflinePromptTranslationBundle(uri: Uri) {
-        importOfflinePromptTranslationBundleFor(
-            store = uiStateStore,
-            admission = container.runtimeAdmission,
-            scope = viewModelScope,
-            installer = container.offlineTranslationInstaller,
-            uri = uri
-        )
-    }
+    fun importOfflinePromptTranslationBundle(uri: Uri) =
+        offlinePromptTranslationAndChatImageCoordinator.importOfflinePromptTranslationBundle(uri)
 
-    fun cancelOfflinePromptTranslationInstall() {
-        cancelOfflinePromptTranslationInstallFor(container.runtimeAdmission)
-    }
+    fun cancelOfflinePromptTranslationInstall() =
+        offlinePromptTranslationAndChatImageCoordinator.cancelOfflinePromptTranslationInstall()
 
     // R3-S33：提示词翻译预览端口具名适配器（容器工厂装配，真实依赖注入）。
     private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
@@ -3869,68 +3806,18 @@ class MainViewModel @JvmOverloads constructor(
         fieldLabel = fieldLabel
     )
 
-    fun downloadOfflinePromptTranslationBundle() {
-        downloadOfflinePromptTranslationBundleFor(
-            store = uiStateStore,
-            admission = container.runtimeAdmission,
-            scope = viewModelScope,
-            downloader = container.offlineTranslationDownloader
-        )
-    }
+    fun downloadOfflinePromptTranslationBundle() =
+        offlinePromptTranslationAndChatImageCoordinator.downloadOfflinePromptTranslationBundle()
 
-    fun cancelOfflinePromptTranslationDownload() {
-        cancelOfflinePromptTranslationDownloadFor(container.runtimeAdmission)
-    }
+    fun cancelOfflinePromptTranslationDownload() =
+        offlinePromptTranslationAndChatImageCoordinator.cancelOfflinePromptTranslationDownload()
 
-    fun cancelChatImageTranslationDraft(id: String) {
-        if (pendingImageTranslation?.id != id) return
-        invalidatePendingChatImagePreparation()
-        showStatus("译文草稿已取消，原文已保留。")
-    }
-
+    fun cancelChatImageTranslationDraft(id: String) =
+        offlinePromptTranslationAndChatImageCoordinator.cancelChatImageTranslationDraft(id)
 
     /** Sends the composer contents straight to the selected image backend. */
-    fun sendChatImagePrompt() {
-        val state = _uiState.value
-        // A second tap or a switch to an English prompt must cancel an older bridge job before
-        // it can enqueue a stale image request after the newer request.
-        invalidatePendingChatImagePreparation()
-        if (rejectWhileConversationMutationInProgress()) return
-        if (hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            showStatus("请先处理上一张角色请求的图片，再开始新的聊天生图。")
-            return
-        }
-        if (state.isGenerating) {
-            uiStateStore.update {
-                it.copy(statusMessage = "当前对话仍在生成，结束或停止本轮后再发送生图请求。")
-            }
-            return
-        }
-        val preparedInput = state.prepareChatInput()
-        if (preparedInput.imageAttachments.isNotEmpty() ||
-            preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
-        ) {
-            uiStateStore.update {
-                it.copy(statusMessage = "聊天内生图暂不使用上传附件作为参考图。请移除附件后重试，或在图片页使用图生图。")
-            }
-            return
-        }
-        val prompt = preparedInput.text.trim()
-        if (prompt.isBlank()) {
-            showStatus("先写下图片描述，再点击生成图片。")
-            return
-        }
-        val imagePrompt = parseExplicitChatImageIntent(prompt)?.sourceText ?: prompt
-        val requestedOutputCount = classifyChatImageIntent(
-            prompt,
-            ChatImageIntentContext(imageSkillSelected = true)
-        ).requestedOutputCount
-        sendChatImageRequestWithPromptBridge(
-            visibleUserText = preparedInput.text,
-            prompt = imagePrompt,
-            requestedOutputCount = requestedOutputCount
-        )
-    }
+    fun sendChatImagePrompt() =
+        offlinePromptTranslationAndChatImageCoordinator.sendChatImagePrompt()
 
     /** Delegates to [runChatImagePromptBridge]. Signature kept verbatim. */
     private fun sendChatImageRequestWithPromptBridge(
@@ -3955,51 +3842,11 @@ class MainViewModel @JvmOverloads constructor(
     private fun chatImageNegativePromptSupported(state: MainUiState): Boolean =
         chatImageNegativePromptSupportedFor(state)
 
-    internal fun chatImageToolPermissionUiState(): ChatImageToolPermissionUiState {
-        val state = _uiState.value
-        val cloudModelId = state.selectedCloudChatModelId
-        val config = state.selectedChatCloudConfig()?.normalized()
-        val imageModelBinding = state.chatImageModelBinding()
-        val chatModelIdentity = chatImageToolChatModelIdentity(cloudModelId, config)
-        val imageModelIdentity = imageModelBinding?.authorizationIdentity()
-        val unavailableReason = when {
-            state.selectedChatBackend != ChatBackend.CLOUD ->
-                "角色自主生图目前仅支持 OpenAI Responses 云端聊天；本地模型可用输入框的聊天内生图。"
-            cloudModelId.isNullOrBlank() || config == null || !config.configured ->
-                "请先配置并选择一个云端聊天模型。"
-            config.apiFormat != CloudApiFormat.OPENAI_RESPONSES ->
-                "当前聊天协议不支持角色生图工具调用，请切换到 OpenAI Responses。"
-            !config.supportsTools ->
-                "当前 Responses 模型尚未启用工具调用，请到模型管理 > 云端编辑该模型并开启“支持工具调用”。"
-            imageModelBinding == null ->
-                "请先选择一个可用的本地或云端生图模型。"
-            else -> ""
-        }
-        val sessionId = state.activeChatSessionId
-        val authorizationMode = chatImageToolAuthorizationStore.getMode(
-            sessionId,
-            chatModelIdentity,
-            imageModelIdentity
-        )
-        return ChatImageToolPermissionUiState(
-            available = unavailableReason.isBlank(),
-            unavailableReason = unavailableReason,
-            autoApproval = unavailableReason.isBlank() &&
-                authorizationMode == ChatImageToolAuthorizationMode.AUTO_APPROVE,
-            canChange = unavailableReason.isBlank() && !sessionId.isNullOrBlank()
-        )
-    }
+    internal fun chatImageToolPermissionUiState(): ChatImageToolPermissionUiState =
+        offlinePromptTranslationAndChatImageCoordinator.chatImageToolPermissionUiState()
 
-    fun setAssistantImageToolAutoApproval(enabled: Boolean) {
-        setAssistantImageToolAutoApprovalFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
-            chatImageToolPermissionUiState = ::chatImageToolPermissionUiState,
-            showStatus = ::showStatus,
-            enabled = enabled
-        )
-    }
+    fun setAssistantImageToolAutoApproval(enabled: Boolean) =
+        offlinePromptTranslationAndChatImageCoordinator.setAssistantImageToolAutoApproval(enabled)
 
     /**
      * R3/C3-S14：端口具名化后，本成员只把参数交给容器适配器；决策体仍在
@@ -4822,7 +4669,7 @@ class MainViewModel @JvmOverloads constructor(
      */
     fun onAppForegrounded() {
         // A file removed or replaced while backgrounded must restore the download action.
-        viewModelScope.launch { verifiedOfflineTranslationBundle() }
+        viewModelScope.launch { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() }
         chatRuns.foreground()
         // R3/S22: 前后台写入经 UiStateStore。
         uiStateStore.update { state ->
@@ -5166,7 +5013,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     override fun onCleared() {
-        chatImagePromptBridgeJob?.cancel()
+        container.runtimeAdmission.chatImagePromptBridgeJob?.cancel()
         LocalApiRuntime.releaseOwner(localApiRuntimeOwner)
         retireLocalApiListener(
             stopForegroundService = false,
@@ -5476,13 +5323,13 @@ class MainViewModel @JvmOverloads constructor(
             store = uiStateStore,
             chatContextComposer = chatContextComposer,
             engine = engine,
-            currentBridgeGenerationRef = { chatImagePromptBridgeGeneration.get() },
-            incrementBridgeGenerationRef = { chatImagePromptBridgeGeneration.incrementAndGet() },
-            cancelBridgeJobRef = { chatImagePromptBridgeJob?.cancel() },
-            setBridgeJobRef = { chatImagePromptBridgeJob = it },
+            currentBridgeGenerationRef = { container.runtimeAdmission.chatImagePromptBridgeGeneration.get() },
+            incrementBridgeGenerationRef = { container.runtimeAdmission.chatImagePromptBridgeGeneration.incrementAndGet() },
+            cancelBridgeJobRef = { container.runtimeAdmission.chatImagePromptBridgeJob?.cancel() },
+            setBridgeJobRef = { container.runtimeAdmission.chatImagePromptBridgeJob = it },
             bridgeScopeRef = { viewModelScope },
             setPendingChatImageActionRef = { id, kind, visibleUserText, requestedOutputCount, stillOwned ->
-                pendingChatImageAction = PendingChatImageAction(
+                container.runtimeAdmission.pendingChatImageAction = PendingChatImageAction(
                     id = id,
                     kind = kind,
                     visibleUserText = visibleUserText,
@@ -5490,11 +5337,11 @@ class MainViewModel @JvmOverloads constructor(
                     stillOwned = stillOwned
                 )
             },
-            setPendingImageTranslationRef = { pendingImageTranslation = it },
+            setPendingImageTranslationRef = { container.runtimeAdmission.pendingImageTranslation = it },
             showStatusRef = { showStatus(it) },
             chatImageOptionsForCurrentSelectionRef = { chatImageOptionsForCurrentSelection(it) },
             offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
-            verifiedOfflineTranslationBundleRef = { verifiedOfflineTranslationBundle() },
+            verifiedOfflineTranslationBundleRef = { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() },
             sendChatImageRequestRef = { visibleUserText, prompt, optionsOverride, promptEnvelope, contextTraceJson ->
                 sendChatImageRequest(
                     visibleUserText = visibleUserText,
