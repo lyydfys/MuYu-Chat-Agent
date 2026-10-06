@@ -7753,117 +7753,12 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private suspend fun runLoopbackApiStreamSmoke(): LocalApiStreamSmokeResult = withContext(Dispatchers.IO) {
-        val previousStreamProvider = LocalApiRuntime.streamChatProvider
-        val previousStopProvider = LocalApiRuntime.stopGenerationProvider
-        val stopCalls = AtomicInteger(0)
-        val port = freeLoopbackPort()
-        val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = "")
-        try {
-            LocalApiRuntime.streamChatProvider = {
-                flowOf(
-                    GenerateEvent.Chunk(
-                        text = "",
-                        stats = RuntimeStats(completionTokens = 128),
-                        hiddenReasoning = true
-                    ),
-                    GenerateEvent.Chunk(
-                        text = "visible answer",
-                        stats = RuntimeStats(completionTokens = 130)
-                    ),
-                )
-            }
-            LocalApiRuntime.stopGenerationProvider = { stopCalls.incrementAndGet() }
-            server.start()
-            val body = """{"messages":[{"role":"user","content":"hi"}],"stream":true,"hide_reasoning":true}"""
-            val response = rawHttp(
-                port = port,
-                request = "POST /v1/chat/completions HTTP/1.1\r\n" +
-                    "Host: 127.0.0.1\r\n" +
-                    "Content-Type: application/json\r\n" +
-                    "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
-                    body
-            )
-            val visibleSeen = response.contains("visible answer")
-            val doneSeen = response.contains("data: [DONE]")
-            if (!response.startsWith("HTTP/1.1 200 OK")) error("本机 API smoke 返回异常")
-            if (!visibleSeen) error("本机 API smoke 未收到可见正文")
-            if (!doneSeen) error("本机 API smoke 未收到 [DONE] 终止帧")
-            if (response.contains("[MCA 提示]")) error("本机 API smoke 仍出现隐藏思考占位提示")
-            if (stopCalls.get() != 0) error("本机 API smoke 触发了 stopGeneration")
-            LocalApiStreamSmokeResult(
-                visibleContentSeen = true,
-                doneSeen = true,
-                stopCalls = stopCalls.get()
-            )
-        } finally {
-            server.shutdown()
-            LocalApiRuntime.streamChatProvider = previousStreamProvider
-            LocalApiRuntime.stopGenerationProvider = previousStopProvider
-        }
-    }
+    private suspend fun runLoopbackApiStreamSmoke(): LocalApiStreamSmokeResult =
+        runLoopbackApiStreamSmokeFor()
 
-    private suspend fun runLoopbackEngineStreamSmoke(params: GenerationParams): LocalApiStreamSmokeResult = withContext(Dispatchers.IO) {
-        val port = freeLoopbackPort()
-        val server = McaLoopbackServer(port = port, bindHost = "127.0.0.1", apiKey = "")
-        try {
-            server.start()
-            val body = JSONObject()
-                .put("model", "mca-local")
-                .put("stream", true)
-                .put("hide_reasoning", true)
-                .put("reasoning_mode", "off")
-                .put("max_tokens", 32)
-                .put("n_ctx", params.nCtx)
-                .put("temperature", 0)
-                .put(
-                    "messages",
-                    JSONArray().put(
-                        JSONObject()
-                            .put("role", "user")
-                            .put("content", "用一句中文回答：本机 API 实流自检完成。")
-                    )
-                )
-                .toString()
-            val response = withTimeout(90_000L) {
-                rawHttp(
-                    port = port,
-                    request = "POST /v1/chat/completions HTTP/1.1\r\n" +
-                        "Host: 127.0.0.1\r\n" +
-                        "Content-Type: application/json\r\n" +
-                        "Content-Length: ${body.toByteArray(Charsets.UTF_8).size}\r\n\r\n" +
-                        body,
-                    readTimeoutMs = 90_000
-                )
-            }
-            if (!response.startsWith("HTTP/1.1 200 OK")) {
-                error("本机 API 实流 smoke 返回异常：${response.lineSequence().firstOrNull().orEmpty()}")
-            }
-            if (!response.contains("data: [DONE]")) error("本机 API 实流 smoke 未收到 [DONE] 终止帧")
-            if (response.contains("[MCA 提示]")) error("本机 API 实流 smoke 仍出现隐藏思考占位提示")
-            val visibleSeen = Regex(""""content"\s*:\s*"(?!")""").containsMatchIn(response)
-            if (!visibleSeen) error("本机 API 实流 smoke 未收到可见正文")
-            LocalApiStreamSmokeResult(
-                visibleContentSeen = true,
-                doneSeen = true,
-                stopCalls = 0
-            )
-        } finally {
-            server.shutdown()
-        }
-    }
+    private suspend fun runLoopbackEngineStreamSmoke(params: GenerationParams): LocalApiStreamSmokeResult =
+        runLoopbackEngineStreamSmokeFor(params)
 
-    private fun freeLoopbackPort(): Int =
-        ServerSocket(0).use { it.localPort }
-
-    private fun rawHttp(port: Int, request: String, readTimeoutMs: Int = 15_000): String =
-        Socket("127.0.0.1", port).use { socket ->
-            socket.soTimeout = readTimeoutMs
-            socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
-            socket.getOutputStream().flush()
-            socket.shutdownOutput()
-            socket.getInputStream().readBytes().toString(Charsets.UTF_8)
-        }
 
 
     private suspend fun recoverInterruptedRuntimeProfiles() {
@@ -7955,117 +7850,17 @@ class MainViewModel @JvmOverloads constructor(
     private fun runDurableLocalApiControl(
         idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext,
         operation: () -> com.muyuchat.api.local.LocalApiControlResult
-    ): com.muyuchat.api.local.LocalApiControlResult = synchronized(localApiIdempotencyJournalLock) {
-        if (idempotency.key.isBlank() || idempotency.requestFingerprint.isBlank()) {
-            return@synchronized localApiTuningRejected(
-                httpStatus = 400,
-                code = "invalid_idempotency_context",
-                message = "Idempotency-Key 或请求指纹无效。"
-            )
-        }
-        val preferences = getApplication<Application>().getSharedPreferences(
+    ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControlFor(
+        preferences = getApplication<Application>().getSharedPreferences(
             "mca_local_api_idempotency_journal",
             Context.MODE_PRIVATE
-        )
-        val storageKey = "entry_${localApiIdempotencyKeyHash(idempotency.key)}"
-        preferences.getString(storageKey, null)?.let { persisted ->
-            val entry = runCatching { JSONObject(persisted) }.getOrNull()
-                ?: return@synchronized localApiTuningRejected(
-                    409,
-                    "idempotency_journal_corrupt",
-                    "该 Idempotency-Key 的持久记录不可读；为避免重复执行，已拒绝重放。"
-                )
-            if (entry.optString("requestFingerprint") != idempotency.requestFingerprint) {
-                return@synchronized localApiTuningRejected(
-                    409,
-                    "idempotency_key_conflict",
-                    "同一 Idempotency-Key 不能用于不同请求。"
-                )
-            }
-            if (entry.optString("state") == "completed") {
-                return@synchronized decodeDurableLocalApiResult(entry)
-            }
-            return@synchronized localApiTuningRejected(
-                409,
-                "idempotency_recovery_required",
-                "该写操作曾开始但未持久化最终响应；请先查询任务/profile 状态，系统不会自动重复执行。"
-            )
-        }
-        val pending = JSONObject()
-            .put("formatVersion", 1)
-            .put("requestFingerprint", idempotency.requestFingerprint)
-            .put("state", "pending")
-            .put("updatedAt", System.currentTimeMillis())
-        if (!preferences.edit().putString(storageKey, pending.toString()).commit()) {
-            return@synchronized localApiTuningRejected(
-                503,
-                "idempotency_journal_unavailable",
-                "无法持久化幂等事务，写操作未执行。"
-            )
-        }
-        val result = runCatching(operation).getOrElse {
-            com.muyuchat.api.local.LocalApiControlResult.Rejected(
-                httpStatus = 500,
-                code = "control_plane_failure",
-                message = "本地运行时控制面执行失败。"
-            )
-        }
-        val completed = encodeDurableLocalApiResult(idempotency.requestFingerprint, result)
-        // The pending marker is already durable. If this replacement fails, returning the actual
-        // response is safe; a later retry fails closed with recovery_required instead of mutating
-        // the runtime twice.
-        preferences.edit().putString(storageKey, completed.toString()).commit()
-        result
-    }
+        ),
+        lock = localApiIdempotencyJournalLock,
+        idempotency = idempotency,
+        localApiTuningRejected = ::localApiTuningRejected,
+        operation = operation
+    )
 
-    private fun encodeDurableLocalApiResult(
-        requestFingerprint: String,
-        result: com.muyuchat.api.local.LocalApiControlResult
-    ): JSONObject = JSONObject()
-        .put("formatVersion", 1)
-        .put("requestFingerprint", requestFingerprint)
-        .put("state", "completed")
-        .put("updatedAt", System.currentTimeMillis())
-        .apply {
-            when (result) {
-                is com.muyuchat.api.local.LocalApiControlResult.Success -> {
-                    put("resultType", "success")
-                    put("httpStatus", result.httpStatus)
-                    put("retryAfterMs", result.retryAfterMs)
-                    put("json", result.json)
-                }
-                is com.muyuchat.api.local.LocalApiControlResult.Rejected -> {
-                    put("resultType", "rejected")
-                    put("httpStatus", result.httpStatus)
-                    put("retryAfterMs", result.retryAfterMs)
-                    put("code", result.code)
-                    put("message", result.message)
-                    put("detailsJson", result.detailsJson)
-                }
-            }
-        }
-
-    private fun decodeDurableLocalApiResult(
-        entry: JSONObject
-    ): com.muyuchat.api.local.LocalApiControlResult = when (entry.optString("resultType")) {
-        "success" -> com.muyuchat.api.local.LocalApiControlResult.Success(
-            json = entry.optString("json", "{}"),
-            httpStatus = entry.optInt("httpStatus", 200),
-            retryAfterMs = entry.optLong("retryAfterMs", 0L).coerceAtLeast(0L)
-        )
-        "rejected" -> com.muyuchat.api.local.LocalApiControlResult.Rejected(
-            httpStatus = entry.optInt("httpStatus", 409),
-            code = entry.optString("code", "control_plane_rejected"),
-            message = entry.optString("message", "本地运行时控制面拒绝了该请求。"),
-            detailsJson = entry.optString("detailsJson", "{}"),
-            retryAfterMs = entry.optLong("retryAfterMs", 0L).coerceAtLeast(0L)
-        )
-        else -> localApiTuningRejected(
-            409,
-            "idempotency_journal_corrupt",
-            "该 Idempotency-Key 的最终响应记录不可读；为避免重复执行，已拒绝重放。"
-        )
-    }
 
     private fun localApiPerformancePreference(value: String?): UserPreference? {
         if (value.isNullOrBlank()) return null
