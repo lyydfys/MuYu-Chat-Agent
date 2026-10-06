@@ -452,9 +452,14 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun loadedModelDeletionClearsRuntimeBeforeFileDeletionCanFail() {
-        val body = functionBody(mainViewModelSource(), "fun deleteModel(")
+        // R3-S23: 删除体逐字迁至 RuntimeLifecycleOperations.kt；顺序合同不变——读新落点，
+        // 调用拼写随迁（clearNativeRuntimeSessionStateFor）。
+        val body = functionBody(
+            runtimeLifecycleOperationsSource(),
+            "internal fun deleteModelFor("
+        )
         val unload = body.indexOf("engine.unloadModel()")
-        val clear = body.indexOf("clearNativeRuntimeSessionState(", unload)
+        val clear = body.indexOf("clearNativeRuntimeSessionStateFor(", unload)
         val deleteFiles = body.indexOf("modelStore.deleteModel(model.id)", unload)
 
         assertTrue(unload >= 0)
@@ -495,16 +500,18 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun failedLifecycleOperationsReleaseCancelledGeneration() {
-        val source = mainViewModelSource()
-        val unload = functionBody(source, "fun unloadModel(")
-        val delete = functionBody(source, "fun deleteModel(")
+        // R3-S23: 两体迁至 RuntimeLifecycleOperations.kt（cancelGeneration 以函数参数注入，
+        // 传参 lambda 在 VM 委托上保留 cancelGenerationJob 调用）；顺序合同不变——读新落点。
+        val source = runtimeLifecycleOperationsSource()
+        val unload = functionBody(source, "internal fun unloadModelFor(")
+        val delete = functionBody(source, "internal fun deleteModelFor(")
 
-        val unloadCancel = unload.indexOf("cancelGenerationJob()")
+        val unloadCancel = unload.indexOf("cancelGeneration()")
         val unloadRelease = unload.indexOf("afterGenerationTerminated(")
         assertTrue(unloadCancel >= 0)
         assertTrue(unloadRelease > unloadCancel)
 
-        val deleteCancel = delete.indexOf("cancelGenerationJob()")
+        val deleteCancel = delete.indexOf("cancelGeneration()")
         val deleteFailure = delete.indexOf("wasLoaded && !nativeReleased")
         val deleteRelease = delete.indexOf("afterGenerationTerminated(", deleteFailure)
         assertTrue(deleteCancel >= 0)
@@ -550,19 +557,21 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun unloadAndDeleteClearPendingOnlyAfterNativeOwnershipIsGone() {
-        val unloadBody = functionBody(mainViewModelSource(), "fun unloadModel(")
+        // R3-S23: 两体迁至 RuntimeLifecycleOperations.kt；两个 For 调用拼写随迁，顺序合同不变。
+        val source = runtimeLifecycleOperationsSource()
+        val unloadBody = functionBody(source, "internal fun unloadModelFor(")
         val unloadNative = unloadBody.indexOf("engine.unloadModel()")
-        val unloadProjection = unloadBody.indexOf("clearNativeRuntimeSessionState(", unloadNative)
-        val unloadPending = unloadBody.indexOf("clearPendingRuntimeTransactionForLifecycle(", unloadProjection)
+        val unloadProjection = unloadBody.indexOf("clearNativeRuntimeSessionStateFor(", unloadNative)
+        val unloadPending = unloadBody.indexOf("clearPendingRuntimeTransactionForLifecycleFor(", unloadProjection)
 
         assertTrue(unloadNative >= 0)
         assertTrue(unloadProjection > unloadNative)
         assertTrue(unloadPending > unloadProjection)
 
-        val deleteBody = functionBody(mainViewModelSource(), "fun deleteModel(")
+        val deleteBody = functionBody(source, "internal fun deleteModelFor(")
         val deleteNative = deleteBody.indexOf("engine.unloadModel()")
-        val deleteProjection = deleteBody.indexOf("clearNativeRuntimeSessionState(", deleteNative)
-        val deletePending = deleteBody.indexOf("clearPendingRuntimeTransactionForLifecycle(", deleteProjection)
+        val deleteProjection = deleteBody.indexOf("clearNativeRuntimeSessionStateFor(", deleteNative)
+        val deletePending = deleteBody.indexOf("clearPendingRuntimeTransactionForLifecycleFor(", deleteProjection)
 
         assertTrue(deleteNative >= 0)
         assertTrue(deleteProjection > deleteNative)
@@ -595,6 +604,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** R3/C3-S23: the load/unload/delete vertical (restoreLoadedRuntimeSnapshotFor etc.). */
+    private fun runtimeLifecycleOperationsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("RuntimeLifecycleOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     /** R3/C3-S19: the runtime release family (clearNativeRuntimeSessionStateFor etc.). */

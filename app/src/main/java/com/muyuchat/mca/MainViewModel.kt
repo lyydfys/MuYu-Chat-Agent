@@ -6300,229 +6300,44 @@ class MainViewModel @JvmOverloads constructor(
         uiStateStore, container.runtimeAdmission, engine, lifecycle, statusMessage, busy
     )
 
+    /** Delegates to [restoreLoadedRuntimeSnapshotFor]. Signature kept verbatim. */
     private suspend fun restoreLoadedRuntimeSnapshot(
         snapshot: LoadedRuntimeSnapshot,
         statusMessage: String
-    ): Boolean {
-        if (!tuningOwner.restoreExactRuntimeProfile(snapshot.model, snapshot.profile)) return false
-        val activeProfile = engine.activeExecutionProfile() ?: snapshot.profile
-        val profileState = runtimeProfileStore.currentRuntimeState(activeProfile.runtimeIdentity.identityHash)
-        activeRuntimeIdentity = activeProfile.runtimeIdentity
-        activeVisionProjectorStamp = loadedVisionProjectorStamp(snapshot.model, activeProfile.runtimeIdentity)
-        activeModelForRuntimeProfile = snapshot.model
-        activeAdaptiveRecommendation = snapshot.adaptiveRecommendation
-        pendingAdaptiveRecommendation = null
-        pendingProfileTransactionId = null
-        activeProfileTransactionId = null
-        val nativeStats = engine.nativeStatsJsonOrEmpty()
-        val recentLogs = engine.recentEngineLogsOrEmpty()
-        managedRuntimeReadinessRefreshGate.invalidate()
-        uiStateStore.update { state ->
-            state.copy(
-                models = modelStore.listModels(),
-                loadedModelId = snapshot.model.id,
-                loadedModelName = snapshot.model.displayName,
-                selectedChatBackend = snapshot.uiState.selectedChatBackend,
-                busy = false,
-                isGenerating = false,
-                params = mergedExecutionProfile(snapshot.uiState.params, activeProfile),
-                stats = engine.stats.value,
-                autoTuningInProgress = false,
-                rollbackParams = null,
-                profileId = activeProfile.profileId,
-                revision = activeProfile.revision,
-                profileRecordState = if (profileState?.activeProfile != null) {
-                    AgentProfileRecordState.COMMITTED
-                } else {
-                    AgentProfileRecordState.NONE
-                },
-                verification = profileState?.activeProfile?.verificationLevel
-                    ?.let(::agentVerification)
-                    ?: snapshot.uiState.verification,
-                engineLifecycle = AgentEngineLifecycle.READY,
-                tuningJobState = AgentTuningJobState.IDLE,
-                reloadRequired = false,
-                pendingProfile = null,
-                rollbackProfile = snapshot.uiState.rollbackProfile,
-                tuningEtaSeconds = null,
-                tuningPhase = null,
-                tuningCandidateProgress = AgentCandidateProgress(),
-                nativeStatsJson = nativeStats,
-                logs = recentLogs,
-                statusMessage = statusMessage
-            )
-        }
-        return true
-    }
+    ): Boolean = restoreLoadedRuntimeSnapshotFor(
+        uiStateStore,
+        container.runtimeAdmission,
+        engine,
+        runtimeProfileStore,
+        modelStore,
+        tuningOwner,
+        managedRuntimeReadinessRefreshGate,
+        snapshot,
+        statusMessage
+    )
 
-    fun unloadModel(model: ModelManifest) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (_uiState.value.loadedModelId != model.id) return@launch
-            directParameterStageJob?.cancel()
-            cancelGenerationJob()
-            val releasedIdentity = activeRuntimeIdentity
-            uiStateStore.update {
-                it.copy(
-                    busy = true,
-                    engineLifecycle = AgentEngineLifecycle.STOPPING,
-                    statusMessage = "正在卸载 ${model.displayName}…"
-                )
-            }
-            val nativeRelease = runCatching {
-                engine.stopGeneration()
-                engine.unloadModel()
-            }
-            if (nativeRelease.isFailure &&
-                !engine.nativeRuntimeReleaseObservedNow()
-            ) {
-                val error = nativeRelease.exceptionOrNull()
-                val message = "卸载失败：${error?.message ?: "未知错误"}"
-                val stats = engine.stats.value
-                uiStateStore.update {
-                    it.afterGenerationTerminated(
-                        stats = stats,
-                        statusMessage = message
-                    ).copy(busy = false)
-                }
-                return@launch
-            }
-            // Native ownership is gone. Clear every active projection before
-            // transaction cleanup, which may independently fail.
-            clearNativeRuntimeSessionState(
-                lifecycle = AgentEngineLifecycle.UNLOADED,
-                statusMessage = "已卸载：${model.displayName}。模型文件和自定义参数已保留。"
-            )
-            val cleanupError = runCatching {
-                clearPendingRuntimeTransactionForLifecycle(
-                    reason = "USER_UNLOAD",
-                    identity = releasedIdentity
-                )
-            }.exceptionOrNull()
-            if (cleanupError != null || nativeRelease.isFailure) {
-                uiStateStore.update {
-                    it.copy(
-                        statusMessage = buildString {
-                            append("已卸载：${model.displayName}。模型文件和自定义参数已保留")
-                            nativeRelease.exceptionOrNull()?.let { error ->
-                                append("；原生销毁返回异常但已确认 handle 释放：${error.message}")
-                            }
-                            cleanupError?.let { error ->
-                                append("；待应用参数清理失败，将在下次加载时恢复：${error.message}")
-                            }
-                        }
-                    )
-                }
-            }
-        }
-    }
+    /** Delegates to [unloadModelFor]. Signature kept verbatim. */
+    fun unloadModel(model: ModelManifest) = unloadModelFor(
+        viewModelScope,
+        uiStateStore,
+        container.runtimeAdmission,
+        engine,
+        runtimeProfileStore,
+        model
+    ) { cancelGenerationJob() }
 
-    fun deleteModel(model: ModelManifest) {
-        viewModelScope.launch(Dispatchers.IO) {
-            directParameterStageJob?.cancel()
-            val wasLoaded = _uiState.value.loadedModelId == model.id
-            var nativeReleased = false
-            var lifecycleWarning: String? = null
-            val releasedIdentity = activeRuntimeIdentity
-            uiStateStore.update { it.copy(busy = true, statusMessage = "正在删除 ${model.displayName}…") }
-            runCatching {
-                if (wasLoaded) {
-                    cancelGenerationJob()
-                    engine.stopGeneration()
-                    val release = runCatching { engine.unloadModel() }
-                    if (release.isFailure &&
-                        !engine.nativeRuntimeReleaseObservedNow()
-                    ) {
-                        throw requireNotNull(release.exceptionOrNull())
-                    }
-                    nativeReleased = true
-                    // Native ownership is gone now. Clear the public runtime
-                    // projection before pending/file cleanup, either of which
-                    // may fail independently.
-                    clearNativeRuntimeSessionState(
-                        lifecycle = AgentEngineLifecycle.UNLOADED,
-                        statusMessage = "已卸载 ${model.displayName}，正在删除模型文件…",
-                        busy = true
-                    )
-                    val cleanupError = runCatching {
-                        clearPendingRuntimeTransactionForLifecycle(
-                            reason = "USER_DELETE",
-                            identity = releasedIdentity
-                        )
-                    }.exceptionOrNull()
-                    lifecycleWarning = buildList {
-                        release.exceptionOrNull()?.let { error ->
-                            add("原生销毁返回异常但已确认 handle 释放：${error.message}")
-                        }
-                        cleanupError?.let { error ->
-                            add("待应用参数清理失败，将在下次加载时恢复：${error.message}")
-                        }
-                    }.joinToString("；").takeIf { it.isNotBlank() }
-                }
-                check(modelStore.deleteModel(model.id)) { "模型文件或记录未能删除" }
-            }.onSuccess {
-                val remainingModels = modelStore.listModels()
-                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), remainingModels)
-                managedRuntimeReadinessRefreshGate.invalidate()
-                uiStateStore.update {
-                    it.copy(
-                        models = remainingModels,
-                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = remainingModels,
-                            verifiedLocalModelIds = qairtVerifiedIds,
-                            recommendations = it.recommendedRemoteModels
-                        ),
-                        loadedModelId = it.loadedModelId?.takeUnless { id -> id == model.id },
-                        loadedModelName = if (wasLoaded) null else it.loadedModelName,
-                        busy = false,
-                        isGenerating = if (wasLoaded) false else it.isGenerating,
-                        engineLifecycle = if (wasLoaded) AgentEngineLifecycle.UNLOADED else it.engineLifecycle,
-                        reloadRequired = if (wasLoaded) false else it.reloadRequired,
-                        pendingProfile = if (wasLoaded) null else it.pendingProfile,
-                        statusMessage = buildString {
-                            append("已删除：${model.displayName}")
-                            lifecycleWarning?.let { append("；").append(it) }
-                        }
-                    )
-                }
-            }.onFailure { error ->
-                val currentModels = modelStore.listModels()
-                val qairtVerifiedIds = currentQairtVerifiedLocalModelIds(getApplication(), currentModels)
-                val failureMessage = if (nativeReleased) {
-                    buildString {
-                        append("删除失败，但模型已安全卸载：")
-                        append(error.message ?: "请检查文件权限或存储状态")
-                        lifecycleWarning?.let { append("；").append(it) }
-                    }
-                } else {
-                    "删除失败：${error.message ?: "请检查文件权限或存储状态"}"
-                }
-                val stats = engine.stats.value
-                managedRuntimeReadinessRefreshGate.invalidate()
-                uiStateStore.update { state ->
-                    val releasedGeneration = if (wasLoaded && !nativeReleased) {
-                        state.afterGenerationTerminated(
-                            stats = stats,
-                            statusMessage = failureMessage
-                        )
-                    } else {
-                        state
-                    }
-                    releasedGeneration.copy(
-                        models = currentModels,
-                        qairtVerifiedLocalModelIds = qairtVerifiedIds,
-                        qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds(
-                            models = currentModels,
-                            verifiedLocalModelIds = qairtVerifiedIds,
-                            recommendations = releasedGeneration.recommendedRemoteModels
-                        ),
-                        busy = false,
-                        statusMessage = failureMessage
-                    )
-                }
-            }
-        }
-    }
+    /** Delegates to [deleteModelFor]. Signature kept verbatim. */
+    fun deleteModel(model: ModelManifest) = deleteModelFor(
+        viewModelScope,
+        uiStateStore,
+        container.runtimeAdmission,
+        engine,
+        runtimeProfileStore,
+        modelStore,
+        managedRuntimeReadinessRefreshGate,
+        getApplication(),
+        model
+    ) { cancelGenerationJob() }
 
     /** Delegates to [clearPendingRuntimeTransactionForLifecycleFor]. Signature kept verbatim. */
     private suspend fun clearPendingRuntimeTransactionForLifecycle(

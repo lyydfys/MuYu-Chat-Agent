@@ -87,6 +87,13 @@ import org.junit.Test
  * (`runPersistConversationMutation`); its failure-path rollback carries exactly one raw
  * `isGenerating = false` reset, so that write left `MainViewModel` (4 -> 3) and the accounting
  * now scans the persistence owner file (1 reset). The write itself is unchanged.
+ *
+ * ## Re-derivation recorded (R3-S23)
+ *
+ * The load/unload/delete vertical moved to `RuntimeLifecycleOperations.kt`; the restore
+ * projection carries exactly one raw `isGenerating = false` reset, so that write left
+ * `MainViewModel` (3 -> 2) and the accounting now also scans the lifecycle owner file (1 reset).
+ * The writes are unchanged, only their file.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -108,6 +115,10 @@ class GenerationFlagAccountingContractTest {
     private val chatSessionPersistence: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt")
     }
+    /** R3-S23：装载恢复投影携带一处 `isGenerating = false` 随 delete/unload/restore 体迁出。 */
+    private val runtimeLifecycle: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt")
+    }
 
     /**
      * Measured baseline across the four files that own the flag's transitions.
@@ -115,7 +126,7 @@ class GenerationFlagAccountingContractTest {
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
     private val expectedTrueInViewModel = 3
-    private val expectedFalseInViewModel = 3
+    private val expectedFalseInViewModel = 2
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
     private val expectedTrueInPublisher = 0
@@ -123,6 +134,7 @@ class GenerationFlagAccountingContractTest {
     private val expectedTrueInStopOperations = 0
     private val expectedFalseInStopOperations = 1
     private val expectedFalseInChatSessionPersistence = 1
+    private val expectedFalseInRuntimeLifecycle = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -225,6 +237,7 @@ class GenerationFlagAccountingContractTest {
         val trueInStopOperations = assignments(stopOperations).count { it.second == "true" }
         val falseInStopOperations = assignments(stopOperations).count { it.second == "false" }
         val falseInChatSessionPersistence = assignments(chatSessionPersistence).count { it.second == "false" }
+        val falseInRuntimeLifecycle = assignments(runtimeLifecycle).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -236,6 +249,11 @@ class GenerationFlagAccountingContractTest {
             "ChatSessionPersistenceOperations resets changed",
             expectedFalseInChatSessionPersistence,
             falseInChatSessionPersistence
+        )
+        assertEquals(
+            "RuntimeLifecycleOperations resets changed",
+            expectedFalseInRuntimeLifecycle,
+            falseInRuntimeLifecycle
         )
     }
 
