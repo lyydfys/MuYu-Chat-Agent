@@ -9708,70 +9708,15 @@ class MainViewModel @JvmOverloads constructor(
         container.createChatImageRetryPort(
             uiStateStore, sendChatImageRequestPort, { chatImageCommitJournal }
         )
+
+    // R3/C3-S16：图片库提交/删除两端口的具名适配器（依赖全部对象化；journal 保持 lazy）。
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
-        object : ImageLibraryCommitPort {
-            override val uiState get() = this@MainViewModel.uiState
-            // R3/S25: 写入经 store 具名方法（端口不再暴露可变流）。
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-            override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
-            override val chatSessionPersistenceMutex get() = this@MainViewModel.chatSessionPersistenceMutex
-            override val chatSessionPersistenceSequence get() = this@MainViewModel.chatSessionPersistenceSequence
-            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
-            override var durableChatSessions: List<ChatSessionRecord>
-                get() = this@MainViewModel.durableChatSessions
-                set(value) { this@MainViewModel.durableChatSessions = value }
-            override val activeImageGenerationJobId get() = this@MainViewModel.activeImageGenerationJobId
-            override val chatImageCommitJournal get() = this@MainViewModel.chatImageCommitJournal
-
-            override fun buildChatImageCommitSnapshot(job: ImageGenerationJobRecord, images: List<ImageAssetRecord>): ChatImageCommitSnapshot? =
-                chatImageCommitSnapshot(chatImageRequestPort, job, images)
-
-            override fun chatImageCommitJournalJobId(jobId: String, imageId: String): String =
-                chatImageCommitJournalJobId(jobId, imageId)
-
-            override fun updateImageJob(
-                jobs: List<ImageGenerationJobRecord>,
-                jobId: String,
-                status: ImageGenerationStatusRecord,
-                message: String,
-                imageAssetId: String?,
-                preview: PublishedLocalImagePreview?,
-                imageAssetIds: List<String>
-            ): List<ImageGenerationJobRecord> = with(this@MainViewModel) {
-                jobs.updateImageJob(
-                    jobId = jobId,
-                    status = status,
-                    message = message,
-                    imageAssetId = imageAssetId,
-                    preview = preview,
-                    imageAssetIds = imageAssetIds
-                )
-            }
-        }
-
+        container.createImageLibraryCommitPort(uiStateStore, chatImageRequestPort)
     private val imageAssetDeletionPort: ImageAssetDeletionPort =
-        object : ImageAssetDeletionPort {
-            override val uiState get() = this@MainViewModel.uiState
-            // R3/S25: 写入经 store 具名方法（端口不再暴露可变流）。
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-            override val scope get() = this@MainViewModel.viewModelScope
-            override val imageLibraryMutationMutex get() = this@MainViewModel.imageLibraryMutationMutex
-            override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner
-            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
-            override val latestImageFavoriteMutations get() = this@MainViewModel.latestImageFavoriteMutations
-            override val imageFavoriteMutationSequence get() = this@MainViewModel.imageFavoriteMutationSequence
-            override val imageAssetDirectory get() = this@MainViewModel.imageAssetDirectory
+        container.createImageAssetDeletionPort(
+            uiStateStore, viewModelScope, imageUpscaleOwner, imageLibraryStartupReconciliation
+        )
 
-            override suspend fun awaitImageLibraryStartupReconciliation() {
-                this@MainViewModel.awaitImageLibraryStartupReconciliation()
-            }
-
-            override fun showStatus(message: String?) {
-                this@MainViewModel.showStatus(message)
-            }
-        }
 
     private val localApiAuxProviderPort: LocalApiAuxProviderPort =
         object : LocalApiAuxProviderPort {

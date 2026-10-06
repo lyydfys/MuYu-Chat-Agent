@@ -22,6 +22,11 @@ import com.muyuchat.mca.SendChatImageRequestPort
 import com.muyuchat.mca.SendChatImageRequestPortAdapter
 import com.muyuchat.mca.ImageAssetCreationPort
 import com.muyuchat.mca.ImageAssetCreationPortAdapter
+import com.muyuchat.mca.ImageAssetDeletionPort
+import com.muyuchat.mca.ImageAssetDeletionPortAdapter
+import com.muyuchat.mca.ImageLibraryCommitPort
+import com.muyuchat.mca.ImageLibraryCommitPortAdapter
+import com.muyuchat.mca.ImageUpscaleOwner
 import com.muyuchat.mca.ImageUpscalePort
 import com.muyuchat.mca.ImageUpscalePortAdapter
 import com.muyuchat.mca.ImageGenerationOwner
@@ -429,6 +434,38 @@ internal class McaAppContainer(private val application: Application) {
             upscalerStoreRef = localImageUpscalerStore,
             assetDirectory = imageAssetDirectory,
             mutationMutex = imageLibraryMutationMutex
+        )
+
+    /** R3/C3-S16：图片库提交/删除端口工厂。 */
+    fun createImageLibraryCommitPort(
+        store: UiStateStore,
+        requestPort: ChatImageRequestPort
+    ): ImageLibraryCommitPort =
+        ImageLibraryCommitPortAdapter(
+            store = store,
+            persistenceState = chatSessionPersistenceState,
+            chatSessionStoreRef = chatSessionStore,
+            journalProvider = { chatImageCommitJournal },
+            admissionRef = runtimeAdmission,
+            requestPortRef = requestPort,
+            imageLibraryMutationMutexRef = imageLibraryMutationMutex
+        )
+
+    fun createImageAssetDeletionPort(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        imageUpscaleOwner: ImageUpscaleOwner,
+        startupReconciliation: ImageLibraryStartupReconciliation
+    ): ImageAssetDeletionPort =
+        ImageAssetDeletionPortAdapter(
+            store = store,
+            scopeRef = scope,
+            admissionRef = runtimeAdmission,
+            imageUpscaleOwnerRef = imageUpscaleOwner,
+            chatSessionStoreRef = chatSessionStore,
+            mutationMutex = imageLibraryMutationMutex,
+            assetDirectory = imageAssetDirectory,
+            startupReconciliation = startupReconciliation
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

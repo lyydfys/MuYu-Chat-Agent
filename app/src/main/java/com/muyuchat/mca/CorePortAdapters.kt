@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
+import java.util.concurrent.atomic.AtomicLong
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ModelRuntimeIdentity
@@ -618,4 +619,119 @@ internal class ImageUpscalePortAdapter(
         lease: LocalImageGenerationCoordinator.Lease
     ): Boolean =
         releaseObservedImageGenerationLeaseFor(store, coordinator, observationLock, lease)
+}
+
+/** R3/C3-S16：图片库提交端口具名化（journal 以 provider 传入，保持原 lazy 时机）。 */
+internal class ImageLibraryCommitPortAdapter(
+    private val store: UiStateStore,
+    private val persistenceState: ChatSessionPersistenceState,
+    private val chatSessionStoreRef: ChatSessionStore,
+    private val journalProvider: () -> ChatImageCommitJournal,
+    private val admissionRef: RuntimeAdmissionState,
+    private val requestPortRef: ChatImageRequestPort,
+    private val imageLibraryMutationMutexRef: Mutex
+) : ImageLibraryCommitPort {
+    override val uiState: StateFlow<MainUiState>
+        get() = store.state
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val imageLibraryMutationMutex: Mutex
+        get() = imageLibraryMutationMutexRef
+
+    override val chatSessionPersistenceMutex: Mutex
+        get() = persistenceState.persistenceMutex
+
+    override val chatSessionPersistenceSequence: AtomicLong
+        get() = persistenceState.persistenceSequence
+
+    override val chatSessionStore: ChatSessionStore
+        get() = chatSessionStoreRef
+
+    override var durableChatSessions: List<ChatSessionRecord>
+        get() = persistenceState.durableChatSessions
+        set(value) {
+            persistenceState.durableChatSessions = value
+        }
+
+    override val activeImageGenerationJobId: String?
+        get() = admissionRef.activeImageGenerationJobId
+
+    override val chatImageCommitJournal: ChatImageCommitJournal
+        get() = journalProvider()
+
+    override fun buildChatImageCommitSnapshot(
+        job: ImageGenerationJobRecord,
+        images: List<ImageAssetRecord>
+    ): ChatImageCommitSnapshot? = chatImageCommitSnapshot(requestPortRef, job, images)
+
+    override fun chatImageCommitJournalJobId(jobId: String, imageId: String): String =
+        chatImageCommitJournalJobId(jobId, imageId)
+
+    override fun updateImageJob(
+        jobs: List<ImageGenerationJobRecord>,
+        jobId: String,
+        status: ImageGenerationStatusRecord,
+        message: String,
+        imageAssetId: String?,
+        preview: PublishedLocalImagePreview?,
+        imageAssetIds: List<String>
+    ): List<ImageGenerationJobRecord> = jobs.updateImageJob(
+        jobId = jobId,
+        status = status,
+        message = message,
+        imageAssetId = imageAssetId,
+        preview = preview,
+        imageAssetIds = imageAssetIds
+    )
+}
+
+/** R3/C3-S16：图片删除端口具名化（放大 owner 与 S13 对账 owner 均真实对象注入）。 */
+internal class ImageAssetDeletionPortAdapter(
+    private val store: UiStateStore,
+    private val scopeRef: CoroutineScope,
+    private val admissionRef: RuntimeAdmissionState,
+    private val imageUpscaleOwnerRef: ImageUpscaleOwner,
+    private val chatSessionStoreRef: ChatSessionStore,
+    private val mutationMutex: Mutex,
+    private val assetDirectory: File,
+    private val startupReconciliation: ImageLibraryStartupReconciliation
+) : ImageAssetDeletionPort {
+    override val uiState: StateFlow<MainUiState>
+        get() = store.state
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val scope: CoroutineScope
+        get() = scopeRef
+
+    override val imageLibraryMutationMutex: Mutex
+        get() = mutationMutex
+
+    override val imageUpscaleOwner: ImageUpscaleOwner
+        get() = imageUpscaleOwnerRef
+
+    override val chatSessionStore: ChatSessionStore
+        get() = chatSessionStoreRef
+
+    override val latestImageFavoriteMutations: MutableMap<String, Pair<Long, Boolean>>
+        get() = admissionRef.latestImageFavoriteMutations
+
+    override val imageFavoriteMutationSequence: AtomicLong
+        get() = admissionRef.imageFavoriteMutationSequence
+
+    override val imageAssetDirectory: File
+        get() = assetDirectory
+
+    override suspend fun awaitImageLibraryStartupReconciliation() {
+        startupReconciliation.await()
+    }
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
 }
