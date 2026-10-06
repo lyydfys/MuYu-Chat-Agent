@@ -506,7 +506,7 @@ class MainViewModel @JvmOverloads constructor(
     private val backgroundImageStore = container.backgroundImageStore
     private val chatAppearanceMutex = Mutex()
     private val cloudApiStore = container.cloudApiStore
-    private val cloudChatProvider = OpenAiCompatibleChatProvider()
+    private val cloudChatProvider = container.cloudChatProvider
     private fun offlineTranslationBundleReadyStatus(bundle: VerifiedOfflinePromptTranslationBundle): String =
         com.muyuchat.mca.offlineTranslationBundleReadyStatus(bundle)
 
@@ -4583,59 +4583,17 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Read a target model's persisted generation profile for the model selector UI. */
-    /**
-     * The ViewModel side of [CloudModelConfigPort].
-     */
+    /** R3-S38：云模型配置端口具名适配器（容器工厂装配，出清 50 行匿名实现与 11 处 this@VM）。 */
     private val cloudModelConfigPort: CloudModelConfigPort =
-        object : CloudModelConfigPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
+        container.createCloudModelConfigPort(
+            store = uiStateStore,
+            loadModelGenerationParams = { backend, modelId, defaults ->
+                loadModelGenerationParams(backend, modelId, defaults)
+            },
+            persistChatSessions = { sessions, binding ->
+                persistChatSessions(sessions, binding)
             }
-
-            override val cloudApiStore: CloudApiStore
-                get() = this@MainViewModel.cloudApiStore
-
-            override val cloudChatProvider: OpenAiCompatibleChatProvider
-                get() = this@MainViewModel.cloudChatProvider
-
-            override val localImageModelStore: LocalImageModelStore
-                get() = this@MainViewModel.localImageModelStore
-
-            override fun loadModelGenerationParams(
-                backend: ChatBackend,
-                modelId: String?,
-                defaults: GenerationParams
-            ): GenerationParams =
-                this@MainViewModel.loadModelGenerationParams(backend, modelId, defaults)
-
-            override fun persistChatSessions(
-                sessions: List<ChatSessionRecord>?,
-                knowledgeBinding: Pair<String, Set<String>>?
-            ) {
-                this@MainViewModel.persistChatSessions(
-                    sessions = sessions,
-                    knowledgeBinding = knowledgeBinding
-                )
-            }
-
-            override fun persistGenerationParams(params: GenerationParams) {
-                GenerationPreferences.persistGenerationParams(getApplication(), params)
-            }
-
-            override fun showStatus(message: String?) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override fun busy(message: String) {
-                this@MainViewModel.busy(message)
-            }
-
-            override fun fail(message: String) {
-                this@MainViewModel.fail(message)
-            }
-        }
+        )
 
 
 /** Delegates to [cloudChatModelGenerationParams]. Signature kept verbatim. */

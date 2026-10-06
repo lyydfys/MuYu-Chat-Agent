@@ -1352,5 +1352,53 @@ internal class AppUpdatePortAdapter(
     }
 }
 
+/**
+ * R3-S38：云模型配置端口具名适配器（B 族第 3 端口）。
+ */
+internal class CloudModelConfigPortAdapter(
+    private val application: Application,
+    private val store: UiStateStore,
+    override val cloudApiStore: CloudApiStore,
+    override val cloudChatProvider: OpenAiCompatibleChatProvider,
+    override val localImageModelStore: LocalImageModelStore,
+    private val loadModelGenerationParamsRef: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+    private val persistChatSessionsRef: (List<ChatSessionRecord>?, Pair<String, Set<String>>?) -> Unit
+) : CloudModelConfigPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun loadModelGenerationParams(
+        backend: ChatBackend,
+        modelId: String?,
+        defaults: GenerationParams
+    ): GenerationParams = loadModelGenerationParamsRef(backend, modelId, defaults)
+
+    override fun persistChatSessions(
+        sessions: List<ChatSessionRecord>?,
+        knowledgeBinding: Pair<String, Set<String>>?
+    ) {
+        persistChatSessionsRef(sessions, knowledgeBinding)
+    }
+
+    override fun persistGenerationParams(params: GenerationParams) {
+        GenerationPreferences.persistGenerationParams(application, params)
+    }
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
+
+    override fun busy(message: String) {
+        store.update { it.copy(busy = true, statusMessage = message) }
+    }
+
+    override fun fail(message: String) {
+        store.update { it.copy(busy = false, statusMessage = message) }
+    }
+}
+
 
 

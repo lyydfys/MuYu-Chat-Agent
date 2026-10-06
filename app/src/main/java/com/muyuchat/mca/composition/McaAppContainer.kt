@@ -46,6 +46,10 @@ import com.muyuchat.mca.ManagedRuntimeReadinessPort
 import com.muyuchat.mca.ManagedRuntimeReadinessPortAdapter
 import com.muyuchat.mca.AppUpdatePort
 import com.muyuchat.mca.AppUpdatePortAdapter
+import com.muyuchat.mca.CloudModelConfigPort
+import com.muyuchat.mca.CloudModelConfigPortAdapter
+import com.muyuchat.mca.ChatBackend
+import com.muyuchat.mca.OpenAiCompatibleChatProvider
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -148,6 +152,8 @@ internal class McaAppContainer(private val application: Application) {
     val backgroundImageStore = BackgroundImageStore(application)
 
     val cloudApiStore = CloudApiStore(application)
+
+    val cloudChatProvider = OpenAiCompatibleChatProvider()
 
     val offlineTranslationInstaller = OfflinePromptTranslationBundleInstaller(application)
 
@@ -665,6 +671,22 @@ internal class McaAppContainer(private val application: Application) {
         AppUpdatePortAdapter(
             context = application,
             storeProvider = storeProvider
+        )
+
+    /** R3-S38：云模型配置端口工厂（B 族第 3 端口）。 */
+    fun createCloudModelConfigPort(
+        store: UiStateStore,
+        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+        persistChatSessions: (List<ChatSessionRecord>?, Pair<String, Set<String>>?) -> Unit
+    ): CloudModelConfigPort =
+        CloudModelConfigPortAdapter(
+            application = application,
+            store = store,
+            cloudApiStore = cloudApiStore,
+            cloudChatProvider = cloudChatProvider,
+            localImageModelStore = localImageModelStore,
+            loadModelGenerationParamsRef = loadModelGenerationParams,
+            persistChatSessionsRef = persistChatSessions
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
