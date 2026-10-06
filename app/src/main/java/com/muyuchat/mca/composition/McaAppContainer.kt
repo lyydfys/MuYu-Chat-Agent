@@ -16,6 +16,8 @@ import com.muyuchat.mca.ChatImageCommitRecoveryPort
 import com.muyuchat.mca.ChatImageCommitRecoveryPortAdapter
 import com.muyuchat.mca.ChatImageRequestPort
 import com.muyuchat.mca.ChatImageRequestPortAdapter
+import com.muyuchat.mca.ImageLibraryStartupReconciliation
+import com.muyuchat.mca.KnowledgeBaseRecord
 import java.io.File
 import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
@@ -330,6 +332,26 @@ internal class McaAppContainer(private val application: Application) {
         sessionStore: ChatSessionStore
     ): ChatImageCommitRecoveryPort =
         ChatImageCommitRecoveryPortAdapter(journalProvider = journalProvider, sessionStoreRef = sessionStore)
+
+    /** R3/C3-S13：启动对账 owner 工厂（真实依赖全对象化；lazy async 与 start/await 契约不变）。 */
+    fun createImageLibraryStartupReconciliation(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        recoveryPort: ChatImageCommitRecoveryPort,
+        initialKnowledgeBases: List<KnowledgeBaseRecord>
+    ): ImageLibraryStartupReconciliation =
+        ImageLibraryStartupReconciliation(
+            scope = scope,
+            store = store,
+            chatSessionStore = chatSessionStore,
+            recoveryPort = recoveryPort,
+            persistenceState = chatSessionPersistenceState,
+            imageLibraryMutationMutex = imageLibraryMutationMutex,
+            imageLibraryBackup = imageLibraryBackup,
+            imageAssetDirectory = imageAssetDirectory,
+            knowledgeBaseStore = knowledgeBaseStore,
+            initialKnowledgeBases = initialKnowledgeBases
+        )
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

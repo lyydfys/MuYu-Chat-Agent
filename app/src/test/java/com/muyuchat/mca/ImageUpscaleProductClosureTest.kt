@@ -196,8 +196,12 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         val backupMutationLock = importBackup.indexOf("imageLibraryMutationMutex.withLock")
         assertTrue(backupWriteLock >= 0 && backupMutationLock > backupWriteLock)
         assertTrue(startBackup.contains("imageLibraryBackupJob?.isCompleted == false"))
-        assertTrue(viewModel.contains("imageLibraryBackup.reconcile(initialImages)"))
-        assertTrue(viewModel.contains(
+        // R3/C3-S13: the startup reconciliation (both reconcile calls) moved verbatim to
+        // ImageLibraryStartupReconciliation.kt; the assertions are unchanged -- they are read
+        // where the block now lives.
+        val startupReconciliation = sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryStartupReconciliation.kt")
+        assertTrue(startupReconciliation.contains("imageLibraryBackup.reconcile(initialImages)"))
+        assertTrue(startupReconciliation.contains(
             "reconcileImageAssetDirectory(imageAssetDirectory, initialImages)"
         ))
         assertTrue(localApiGeneration.contains("tryAcquireObservedImageGenerationLease(requestId)"))

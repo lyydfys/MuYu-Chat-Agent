@@ -522,6 +522,9 @@ class MainViewModel @JvmOverloads constructor(
     // R3/C3-S12：提交日志迁至容器（lazy 语义与构造参数逐字保留），此处为零抖动别名。
     private val chatImageCommitJournal: ChatImageCommitJournal
         get() = container.chatImageCommitJournal
+    // R3/C3-S12：提交恢复窄端口（在 init/startAfterConstruction 之前初始化，与旧字段同序）。
+    private val chatImageCommitRecoveryPort: ChatImageCommitRecoveryPort =
+        container.createChatImageCommitRecoveryPort({ chatImageCommitJournal }, chatSessionStore)
     private val assistantStore = container.assistantStore
     private val assistantSaveMutex = Mutex()
 
@@ -927,41 +930,6 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.imageAssetWriteMutex
     private val imageLibraryMutationMutex: Mutex
         get() = container.imageLibraryMutationMutex
-    private val imageLibraryStartupReconciliation = viewModelScope.async(Dispatchers.IO, start = CoroutineStart.LAZY) {
-        try {
-            val loadedImages = chatSessionStore.loadImages()
-            val files = chatSessionStore.loadFiles()
-            val (recoveredSessions, initialImages) = recoverPendingImageCommits(
-                port = chatImageCommitRecoveryPort,
-                sessions = durableChatSessions,
-                images = loadedImages
-            )
-            durableChatSessions = recoveredSessions
-            uiStateStore.update { state ->
-                val activeMessages = recoveredSessions.firstOrNull { it.id == state.activeChatSessionId }?.messages
-                state.copy(
-                    chatSessions = recoveredSessions,
-                    messages = activeMessages ?: state.messages,
-                    images = initialImages,
-                    files = files
-                )
-            }
-            imageLibraryMutationMutex.withLock {
-                imageLibraryBackup.reconcile(initialImages)
-                val report = reconcileImageAssetDirectory(imageAssetDirectory, initialImages)
-                check(report.failed == 0) { "Image asset startup reconciliation was incomplete." }
-            }
-            val counts = initialKnowledgeBases.associate { knowledgeBase ->
-                knowledgeBase.id to knowledgeBaseStore.documents(knowledgeBase.id).size
-            }
-            uiStateStore.update { state -> state.copy(knowledgeDocumentCounts = counts) }
-            null
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            error
-        }
-    }
     private val imageFavoriteMutationSequence: AtomicLong
         get() = container.runtimeAdmission.imageFavoriteMutationSequence
     private val latestImageFavoriteMutations: java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>
@@ -1127,11 +1095,7 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.localImageTextualInversionLifecycleLock
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
-        if (imageLibraryStartupReconciliation.await() != null) {
-            uiStateStore.update { state ->
-                state.copy(statusMessage = "图片库启动清理未完全完成，将在下次启动重试。")
-            }
-        }
+        imageLibraryStartupReconciliation.await()
     }
 
     /** The ViewModel side of [ChatImageRetryPort]. */
@@ -1305,6 +1269,12 @@ contextTraceJson: String?
     )
     // R3/C3-S5：chatRuns/流缓冲累加器入容器；terminalSettlement 端口具名化。
     private val chatStreamAccumulatorInit = container.initializeChatStreamAccumulator(uiStateStore, viewModelScope)
+
+    // R3/C3-S13：启动对账 owner（lazy async + await 状态写随 body 移出；start() 调用点不变；
+    // 声明位于 init/startAfterConstruction 之前，保持与旧字段等价的初始化序）。
+    private val imageLibraryStartupReconciliation = container.createImageLibraryStartupReconciliation(
+        uiStateStore, viewModelScope, chatImageCommitRecoveryPort, initialKnowledgeBases
+    )
     private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
@@ -10038,11 +10008,9 @@ contextTraceJson: String?
     // R3/C3-S11：会话持久化端口具名化——容器工厂构造（真实依赖全对象化）。
     private val chatSessionPersistencePort = container.createChatSessionPersistencePort(uiStateStore, viewModelScope, engine)
 
-    // R3/C3-S12：图片请求簿记 / 提交恢复两端口的具名适配器（后者拆 retry -> owner -> recovery 构造环）。
+    // R3/C3-S12：图片请求簿记端口的具名适配器。
     private val chatImageRequestPort: ChatImageRequestPort =
         container.createChatImageRequestPort(uiStateStore, chatSessionPersistencePort)
-    private val chatImageCommitRecoveryPort: ChatImageCommitRecoveryPort =
-        container.createChatImageCommitRecoveryPort({ chatImageCommitJournal }, chatSessionStore)
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         object : ImageLibraryCommitPort {
             override val uiState get() = this@MainViewModel.uiState
