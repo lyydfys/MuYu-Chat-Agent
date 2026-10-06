@@ -77,6 +77,8 @@ import java.util.UUID
 import com.muyuchat.mca.ChatTerminalSettlementPort
 import com.muyuchat.mca.ChatStreamAccumulator
 import com.muyuchat.mca.ChatRunOwnership
+import com.muyuchat.mca.ChatLocalApiProviderPort
+import com.muyuchat.mca.ChatLocalApiProviderPortAdapter
 import com.muyuchat.mca.ChatSessionRecord
 import com.muyuchat.mca.ChatSessionPersistenceState
 import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
@@ -799,6 +801,20 @@ internal class McaAppContainer(private val application: Application) {
             setTuningPauseRequestedRef = setTuningPauseRequestedRef,
             launchTuningApplyRef = launchTuningApplyRef,
             launchTuningRollbackRef = launchTuningRollbackRef,
+        )
+
+    fun createChatLocalApiProviderPort(
+        engine: McaInferenceService,
+        store: UiStateStore,
+        cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
+        localApiPayloadPortProvider: () -> LocalApiPayloadPort,
+    ): ChatLocalApiProviderPort =
+        ChatLocalApiProviderPortAdapter(
+            engine = engine,
+            chatRuns = chatRuns,
+            store = store,
+            cancelActiveLocalApiImageGenerationAction = cancelActiveLocalApiImageGenerationAction,
+            localApiPayloadPortProvider = localApiPayloadPortProvider,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

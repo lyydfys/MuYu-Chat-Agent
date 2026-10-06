@@ -1765,5 +1765,31 @@ internal class LocalApiTuningControlPortAdapter(
     }
 }
 
+internal class ChatLocalApiProviderPortAdapter(
+    override val engine: McaInferenceService,
+    override val chatRuns: ChatRunOwnership,
+    private val store: UiStateStore,
+    private val cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
+    private val localApiPayloadPortProvider: () -> LocalApiPayloadPort,
+) : ChatLocalApiProviderPort {
+    override val uiState: StateFlow<MainUiState>
+        get() = store.state
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun mergeExecutionProfile(
+        generation: GenerationParams,
+        profile: ModelExecutionProfile
+    ): GenerationParams = mergedExecutionProfile(generation, profile)
+
+    override fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
+        cancelActiveLocalApiImageGenerationAction(reason)
+
+    override fun loadedModelJson(): String =
+        localApiLoadedModelJson(localApiPayloadPortProvider())
+}
+
 
 

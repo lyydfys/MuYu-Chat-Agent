@@ -8031,24 +8031,12 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
-        object : ChatLocalApiProviderPort {
-            override val engine get() = this@MainViewModel.engine
-            override val chatRuns get() = this@MainViewModel.chatRuns
-            override val uiState get() = this@MainViewModel.uiState
-            // R3/S26: 写入经 store 具名方法（端口不再暴露可变流）。
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-
-            override fun mergeExecutionProfile(
-                generation: GenerationParams,
-                profile: ModelExecutionProfile
-            ): GenerationParams = mergedExecutionProfile(generation, profile)
-
-            override fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
-                this@MainViewModel.cancelActiveLocalApiImageGeneration(reason)
-
-            override fun loadedModelJson(): String = localApiLoadedModelJson(localApiPayloadPort)
-        }
+        container.createChatLocalApiProviderPort(
+            engine = engine,
+            store = uiStateStore,
+            cancelActiveLocalApiImageGenerationAction = ::cancelActiveLocalApiImageGeneration,
+            localApiPayloadPortProvider = { localApiPayloadPort },
+        )
 
     private val chatExecutionPort: ChatGenerationExecutionPort =
         object : ChatGenerationExecutionPort {
