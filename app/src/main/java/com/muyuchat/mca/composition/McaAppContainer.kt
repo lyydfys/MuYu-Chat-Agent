@@ -11,6 +11,12 @@ import android.content.Context
 import kotlinx.coroutines.sync.Mutex
 import com.muyuchat.mca.canonicalImageAssetDirectory
 import com.muyuchat.core.engine.Role
+import com.muyuchat.mca.ChatImageCommitJournal
+import com.muyuchat.mca.ChatImageCommitRecoveryPort
+import com.muyuchat.mca.ChatImageCommitRecoveryPortAdapter
+import com.muyuchat.mca.ChatImageRequestPort
+import com.muyuchat.mca.ChatImageRequestPortAdapter
+import java.io.File
 import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
 import com.muyuchat.mca.bindingValue
@@ -136,6 +142,15 @@ internal class McaAppContainer(private val application: Application) {
     val advisor = AgentAdvisor()
 
     val imageAssetDirectory = canonicalImageAssetDirectory(application.filesDir)
+
+    // R3/C3-S12：提交日志自 VM 迁出；lazy 模式与构造参数逐字保留（构造含 mkdirs/require 副作用，
+    // 不得因迁移改为急切求值）。
+    val chatImageCommitJournal: ChatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        ChatImageCommitJournal(
+            ownedRoot = File(application.filesDir, "pending-chat-image-commits"),
+            assetDirectory = imageAssetDirectory
+        )
+    }
 
     // R3/C3-S7：图像/内容/搜索家族小对象批（自 VM 迁出）。
     val imageLibraryBackup = ImageLibraryBackup(application, chatSessionStore)
@@ -301,6 +316,20 @@ internal class McaAppContainer(private val application: Application) {
             worldStoreRef = worldBookStore,
             admissionRef = runtimeAdmission
         )
+
+    /** R3/C3-S12：图片请求簿记端口的具名适配器工厂。 */
+    fun createChatImageRequestPort(
+        store: UiStateStore,
+        persistencePort: ChatSessionPersistencePort
+    ): ChatImageRequestPort =
+        ChatImageRequestPortAdapter(store = store, persistencePort = persistencePort)
+
+    /** R3/C3-S12：提交恢复窄端口的具名适配器工厂（journal 以 provider 传入，保持原 lazy 时机）。 */
+    fun createChatImageCommitRecoveryPort(
+        journalProvider: () -> ChatImageCommitJournal,
+        sessionStore: ChatSessionStore
+    ): ChatImageCommitRecoveryPort =
+        ChatImageCommitRecoveryPortAdapter(journalProvider = journalProvider, sessionStoreRef = sessionStore)
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

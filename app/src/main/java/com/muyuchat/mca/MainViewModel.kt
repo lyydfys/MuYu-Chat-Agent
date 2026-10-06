@@ -519,12 +519,9 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.imageLibraryBackup
     private val imageAssetDirectory: File
         get() = container.imageAssetDirectory
-    private val chatImageCommitJournal by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        ChatImageCommitJournal(
-            ownedRoot = File(application.filesDir, "pending-chat-image-commits"),
-            assetDirectory = imageAssetDirectory
-        )
-    }
+    // R3/C3-S12：提交日志迁至容器（lazy 语义与构造参数逐字保留），此处为零抖动别名。
+    private val chatImageCommitJournal: ChatImageCommitJournal
+        get() = container.chatImageCommitJournal
     private val assistantStore = container.assistantStore
     private val assistantSaveMutex = Mutex()
 
@@ -934,7 +931,8 @@ class MainViewModel @JvmOverloads constructor(
         try {
             val loadedImages = chatSessionStore.loadImages()
             val files = chatSessionStore.loadFiles()
-            val (recoveredSessions, initialImages) = recoverPendingChatImageCommits(
+            val (recoveredSessions, initialImages) = recoverPendingImageCommits(
+                port = chatImageCommitRecoveryPort,
                 sessions = durableChatSessions,
                 images = loadedImages
             )
@@ -1181,15 +1179,6 @@ contextTraceJson: String?
             }
 
         }
-
-
-/** Delegates to [recoverPendingImageCommits]. Signature kept verbatim. */
-    suspend fun recoverPendingChatImageCommits(
-        sessions: List<ChatSessionRecord>,
-        images: List<ImageAssetRecord>
-    ): Pair<List<ChatSessionRecord>, List<ImageAssetRecord>> {
-        return recoverPendingImageCommits(port = chatImageRetryPort, sessions = sessions, images = images)
-    }
 
 /** Delegates to [deleteCloudModelRecord]. Signature kept verbatim. */
     fun deleteCloudModel(modelId: String) {
@@ -8480,35 +8469,6 @@ contextTraceJson: String?
             ChatGeneratedImageStatus.GENERATING
         ) || request.toolContinuationStatus == ChatImageToolContinuationStatus.RUNNING
 
-
-    /**
-     * The ViewModel side of [ChatImageRequestPort].
-     */
-    private val chatImageRequestPort: ChatImageRequestPort =
-        object : ChatImageRequestPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun persistChatSessions(
-                sessions: List<ChatSessionRecord>?,
-                knowledgeBinding: Pair<String, Set<String>>?
-            ) {
-                this@MainViewModel.persistChatSessions(
-                    sessions = sessions,
-                    knowledgeBinding = knowledgeBinding
-                )
-            }
-        }
-
-
-
-
-
-
-
     fun regenerateLastResponse() {
         val state = _uiState.value
         if (rejectWhileConversationMutationInProgress()) return
@@ -10077,6 +10037,12 @@ contextTraceJson: String?
 
     // R3/C3-S11：会话持久化端口具名化——容器工厂构造（真实依赖全对象化）。
     private val chatSessionPersistencePort = container.createChatSessionPersistencePort(uiStateStore, viewModelScope, engine)
+
+    // R3/C3-S12：图片请求簿记 / 提交恢复两端口的具名适配器（后者拆 retry -> owner -> recovery 构造环）。
+    private val chatImageRequestPort: ChatImageRequestPort =
+        container.createChatImageRequestPort(uiStateStore, chatSessionPersistencePort)
+    private val chatImageCommitRecoveryPort: ChatImageCommitRecoveryPort =
+        container.createChatImageCommitRecoveryPort({ chatImageCommitJournal }, chatSessionStore)
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         object : ImageLibraryCommitPort {
             override val uiState get() = this@MainViewModel.uiState

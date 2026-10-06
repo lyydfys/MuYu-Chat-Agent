@@ -19,7 +19,22 @@ internal data class PendingImageTranslation(
         val stillOwned: () -> Boolean
     )
 
-internal interface ChatImageRetryPort {
+/**
+ * The narrow port for commit recovery: the only two objects [recoverPendingImageCommits] reads.
+ *
+ * Extracted so the recovery path does not need the full retry port -- whose `sendChatImageRequest`
+ * leads back into the chat request flow and the image owner, closing a construction circle
+ * (retry port -> owner -> startup reconciliation -> recovery -> retry port). With this seam the
+ * container can build a recovery-only adapter and the circle is broken.
+ */
+internal interface ChatImageCommitRecoveryPort {
+
+    val chatImageCommitJournal: ChatImageCommitJournal
+
+    val chatSessionStore: ChatSessionStore
+}
+
+internal interface ChatImageRetryPort : ChatImageCommitRecoveryPort {
 
     fun uiState(): MainUiState
 
@@ -29,9 +44,9 @@ internal interface ChatImageRetryPort {
 
     val localImageModelStore: LocalImageModelStore
 
-    val chatImageCommitJournal: ChatImageCommitJournal
+    override val chatImageCommitJournal: ChatImageCommitJournal
 
-    val chatSessionStore: ChatSessionStore
+    override val chatSessionStore: ChatSessionStore
 
     fun showStatus(message: String?)
 
@@ -51,7 +66,7 @@ contextTraceJson: String? = null
 }
 
     internal suspend fun recoverPendingImageCommits(
-    port: ChatImageRetryPort,
+    port: ChatImageCommitRecoveryPort,
         sessions: List<ChatSessionRecord>,
         images: List<ImageAssetRecord>
     ): Pair<List<ChatSessionRecord>, List<ImageAssetRecord>> {

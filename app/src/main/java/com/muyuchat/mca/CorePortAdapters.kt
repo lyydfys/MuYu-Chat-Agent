@@ -268,3 +268,45 @@ internal class ChatSessionPersistencePortAdapter(
             admissionRef.localConversationContextInvalidationJob = value
         }
 }
+
+/** R3/C3-S12：图片请求簿记端口的具名适配器（真实依赖：store + 已容器化的持久化端口）。 */
+internal class ChatImageRequestPortAdapter(
+    private val store: UiStateStore,
+    private val persistencePort: ChatSessionPersistencePort
+) : ChatImageRequestPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun persistChatSessions(
+        sessions: List<ChatSessionRecord>?,
+        knowledgeBinding: Pair<String, Set<String>>?
+    ) {
+        runChatSessionPersistence(
+            port = persistencePort,
+            sessions = sessions,
+            knowledgeBinding = knowledgeBinding,
+            generationRunId = null
+        )
+    }
+}
+
+/**
+ * R3/C3-S12：提交恢复窄端口的具名适配器（拆 retry -> owner -> recovery 构造环）。
+ *
+ * The journal is taken as a provider because the owning lazy keeps its original construction
+ * timing: forcing it here would move the `mkdirs`/`require` checks from first journal use to
+ * ViewModel construction.
+ */
+internal class ChatImageCommitRecoveryPortAdapter(
+    private val journalProvider: () -> ChatImageCommitJournal,
+    private val sessionStoreRef: ChatSessionStore
+) : ChatImageCommitRecoveryPort {
+    override val chatImageCommitJournal: ChatImageCommitJournal
+        get() = journalProvider()
+
+    override val chatSessionStore: ChatSessionStore
+        get() = sessionStoreRef
+}

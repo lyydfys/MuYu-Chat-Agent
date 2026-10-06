@@ -248,6 +248,27 @@ class ChatImageRetryOperationsContractTest {
     }
 
     @Test
+    fun `recovery runs through a two-member port that never mentions the retry surface`() = runBlocking {
+        val sessions = emptyList<ChatSessionRecord>()
+        val images = emptyList<ImageAssetRecord>()
+        // Circle-break contract: recovery needs only the journal and the session store, never the
+        // full retry port (whose sendChatImageRequest leads back into the image owner). The fake
+        // retry port above stays valid because ChatImageRetryPort extends this narrow port, and the
+        // container builds its recovery adapter from exactly these two members.
+        val narrow = object : ChatImageCommitRecoveryPort {
+            override val chatImageCommitJournal: ChatImageCommitJournal
+                get() = error("No image commit journal is available.")
+            override val chatSessionStore: ChatSessionStore
+                get() = error("This recovery must not touch the chat session store.")
+        }
+
+        val recovered = recoverPendingImageCommits(narrow, sessions, images)
+
+        assertSame(sessions, recovered.first)
+        assertSame(images, recovered.second)
+    }
+
+    @Test
     fun `recovery with an empty journal changes nothing and touches no store`() = runBlocking {
         withTemporaryBundle { root ->
             val assets = root.resolve("assets").apply { mkdirs() }
