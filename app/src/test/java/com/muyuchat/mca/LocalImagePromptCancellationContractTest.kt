@@ -77,9 +77,14 @@ class LocalImagePromptCancellationContractTest {
         // preparation reaches translation only through the port, and the port is still the single
         // shared service. Checking just one half would let a second translation path slip in.
         assertTrue(prepare.contains("port.translate("))
+        // R3-S27: the port became a named adapter; the shared service is reached through a provider.
+        // Both halves are checked where they live: the adapter calls the provider, and the only
+        // provider argument is the single lazy service field.
+        val translationAdapter = sourceFile("CorePortAdapters.kt")
         assertTrue(
             "the port must still be the one shared translation service",
-            mainViewModelSource().contains("offlinePromptTranslationService.translate(bundle, request)")
+            translationAdapter.contains("serviceProvider().translate(bundle, request)") &&
+                mainViewModelSource().contains("{ offlinePromptTranslationService }")
         )
         assertTrue(prepare.contains("catch (error: OfflinePromptTranslationCleanupException)"))
         assertTrue(prepare.contains("LOCAL_IMAGE_PROMPT_TRANSLATION_RELEASE_UNCONFIRMED_STATUS"))

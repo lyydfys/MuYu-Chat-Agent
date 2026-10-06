@@ -2427,32 +2427,14 @@ class MainViewModel @JvmOverloads constructor(
         captured = captured
     )
 
-    private val imagePromptTranslationPort = object : ImagePromptTranslationPort {
-        override suspend fun verifiedBundle(): VerifiedOfflinePromptTranslationBundle? =
-            this@MainViewModel.verifiedOfflineTranslationBundle()
-
-        override suspend fun translate(
-            bundle: VerifiedOfflinePromptTranslationBundle?,
-            request: OfflinePromptTranslationRequest
-        ): OfflinePromptTranslationResolution = offlinePromptTranslationService.translate(bundle, request)
-
-        override fun publishTranslationStatus(status: String, taskMessage: String) {
-            uiStateStore.update { state ->
-                val activeJobId = activeImageGenerationJobId
-                state.copy(
-                    offlineTranslationStatus = status,
-                    imageJobs = if (activeJobId.isNullOrBlank()) state.imageJobs else {
-                        state.imageJobs.map { job ->
-                            if (job.id == activeJobId &&
-                                job.status == ImageGenerationStatusRecord.GENERATING
-                            ) job.copy(message = taskMessage) else job
-                        }
-                    },
-                    statusMessage = taskMessage
-                )
-            }
-        }
-    }
+    // R3-S27：translation 端口的具名适配器（service 以 provider 保 lazy 时机；verifiedBundle 为过渡
+    // 注入——offline-translation 家族批落地后改为直接调用并删除该 lambda）。
+    private val imagePromptTranslationPort: ImagePromptTranslationPort =
+        container.createImagePromptTranslationPort(
+            uiStateStore,
+            { offlinePromptTranslationService },
+            { verifiedOfflineTranslationBundle() }
+        )
     /** Delegates to [prepareLocalImageRuntimeMemoryFor]. Signature kept verbatim. */
     private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease =
         prepareLocalImageRuntimeMemoryFor(

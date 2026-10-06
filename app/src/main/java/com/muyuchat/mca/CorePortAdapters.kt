@@ -735,3 +735,36 @@ internal class ImageAssetDeletionPortAdapter(
         store.showStatus(message)
     }
 }
+
+/** R3/C3-S27：图片提示词翻译端口具名化（service 经 provider 保 lazy；verifiedBundle 为过渡注入）。 */
+internal class ImagePromptTranslationPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val serviceProvider: () -> OfflinePromptTranslationService,
+    private val verifiedBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?
+) : ImagePromptTranslationPort {
+    override suspend fun verifiedBundle(): VerifiedOfflinePromptTranslationBundle? =
+        verifiedBundleRef()
+
+    override suspend fun translate(
+        bundle: VerifiedOfflinePromptTranslationBundle?,
+        request: OfflinePromptTranslationRequest
+    ): OfflinePromptTranslationResolution = serviceProvider().translate(bundle, request)
+
+    override fun publishTranslationStatus(status: String, taskMessage: String) {
+        store.update { state ->
+            val activeJobId = admission.activeImageGenerationJobId
+            state.copy(
+                offlineTranslationStatus = status,
+                imageJobs = if (activeJobId.isNullOrBlank()) state.imageJobs else {
+                    state.imageJobs.map { job ->
+                        if (job.id == activeJobId &&
+                            job.status == ImageGenerationStatusRecord.GENERATING
+                        ) job.copy(message = taskMessage) else job
+                    }
+                },
+                statusMessage = taskMessage
+            )
+        }
+    }
+}

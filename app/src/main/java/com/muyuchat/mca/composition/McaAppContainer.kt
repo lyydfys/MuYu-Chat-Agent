@@ -29,6 +29,10 @@ import com.muyuchat.mca.ImageLibraryCommitPortAdapter
 import com.muyuchat.mca.ImageUpscaleOwner
 import com.muyuchat.mca.ImageUpscalePort
 import com.muyuchat.mca.ImageUpscalePortAdapter
+import com.muyuchat.mca.ImagePromptTranslationPort
+import com.muyuchat.mca.ImagePromptTranslationPortAdapter
+import com.muyuchat.mca.OfflinePromptTranslationService
+import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
@@ -466,6 +470,19 @@ internal class McaAppContainer(private val application: Application) {
             mutationMutex = imageLibraryMutationMutex,
             assetDirectory = imageAssetDirectory,
             startupReconciliation = startupReconciliation
+        )
+
+    /** R3/C3-S27：图片提示词翻译端口工厂。 */
+    fun createImagePromptTranslationPort(
+        store: UiStateStore,
+        serviceProvider: () -> OfflinePromptTranslationService,
+        verifiedBundle: suspend () -> VerifiedOfflinePromptTranslationBundle?
+    ): ImagePromptTranslationPort =
+        ImagePromptTranslationPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            serviceProvider = serviceProvider,
+            verifiedBundleRef = verifiedBundle
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
