@@ -13,6 +13,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.sync.Mutex
 import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
@@ -29,6 +30,19 @@ internal class RuntimeAdmissionState(
     var activeModelForRuntimeProfile: ModelManifest? = null
 
     var activeAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
+
+    // R3/C3-S18：运行期参数 staging 族字段（自 VM 迁出；VM 以零抖动别名共享同一实例）。
+    var directParameterStageJob: Job? = null
+
+    val directParameterStageMutex = Mutex()
+
+    val directParameterStageGeneration = AtomicLong(0L)
+
+    var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
+
+    var pendingProfileTransactionId: String? = null
+
+    var activeProfileTransactionId: String? = null
 
     var activeVisionProjectorStamp: LoadedVisionProjectorStamp? = null
 

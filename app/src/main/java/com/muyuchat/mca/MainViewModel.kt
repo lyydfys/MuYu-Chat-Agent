@@ -919,9 +919,15 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.chatSessionPersistenceState.pendingKnowledgeBindings
     private val pendingWorldBookCleanupOwners: MutableMap<WorldBookScope, MutableSet<String>>
         get() = container.chatSessionPersistenceState.pendingWorldBookCleanupOwners
-    private var directParameterStageJob: Job? = null
-    private val directParameterStageMutex = Mutex()
-    private val directParameterStageGeneration = AtomicLong(0L)
+    private var directParameterStageJob: Job?
+        get() = container.runtimeAdmission.directParameterStageJob
+        set(value) {
+            container.runtimeAdmission.directParameterStageJob = value
+        }
+    private val directParameterStageMutex: Mutex
+        get() = container.runtimeAdmission.directParameterStageMutex
+    private val directParameterStageGeneration: AtomicLong
+        get() = container.runtimeAdmission.directParameterStageGeneration
     private val managedRuntimeReadinessRefreshGate = container.readinessRefreshGate
     private val imageAssetWriteMutex: Mutex
         get() = container.imageAssetWriteMutex
@@ -996,9 +1002,21 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.activeAdaptiveRecommendation = value
         }
-    private var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation? = null
-    private var pendingProfileTransactionId: String? = null
-    private var activeProfileTransactionId: String? = null
+    private var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation?
+        get() = container.runtimeAdmission.pendingAdaptiveRecommendation
+        set(value) {
+            container.runtimeAdmission.pendingAdaptiveRecommendation = value
+        }
+    private var pendingProfileTransactionId: String?
+        get() = container.runtimeAdmission.pendingProfileTransactionId
+        set(value) {
+            container.runtimeAdmission.pendingProfileTransactionId = value
+        }
+    private var activeProfileTransactionId: String?
+        get() = container.runtimeAdmission.activeProfileTransactionId
+        set(value) {
+            container.runtimeAdmission.activeProfileTransactionId = value
+        }
     private var activeTuningJobId: String? = null
     private var activeModelForRuntimeProfile: ModelManifest?
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
