@@ -3648,62 +3648,38 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun fetchRemoteFiles() {
-        val input = _uiState.value.repoInput
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在查询 ModelScope 本地推理文件...")
-            runCatching {
-                modelScopeClient.listEngineFiles(input)
-            }.onSuccess { files ->
-                uiStateStore.update {
-                    it.copy(remoteFiles = files, busy = false, statusMessage = "找到 ${files.size} 个本地推理文件")
-                }
-            }.onFailure { error ->
-                fail("查询失败：${error.message}")
-            }
-        }
-    }
+    fun fetchRemoteFiles() =
+        fetchRemoteFilesFor(
+            viewModelScope,
+            uiStateStore,
+            modelScopeClient,
+            ::busy,
+            ::fail,
+            _uiState.value.repoInput
+        )
 
-    fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) {
-        recommendedDownloadBlockReason(model)?.let { reason ->
-            showStatus(reason)
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在读取推荐模型：${model.title}...")
-            runCatching {
-                modelScopeClient.listRecommendedFiles(
-                    model = model,
-                    preferredQairtChipsets = preferredQairtChipsets(currentDeviceProfile())
-                )
-            }.onSuccess { files ->
-                uiStateStore.update {
-                    it.copy(
-                        repoInput = model.repoId,
-                        remoteFiles = files,
-                        busy = false,
-                        statusMessage = "已列出 ${model.title} 的 ${files.size} 个模型组件"
-                    )
-                }
-            }.onFailure { error ->
-                fail("推荐模型读取失败：${error.message}")
-            }
-        }
-    }
+    fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) =
+        fetchRecommendedFilesFor(
+            viewModelScope,
+            uiStateStore,
+            modelScopeClient,
+            ::busy,
+            ::fail,
+            ::showStatus,
+            currentDeviceProfile(),
+            model
+        )
 
-    fun downloadRecommended(model: ModelScopeRecommendedModel) {
+    fun downloadRecommended(model: ModelScopeRecommendedModel) =
         downloadRecommended(model, useAfterDownload = false)
-    }
 
-    fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean) {
-        val blocked = recommendedDownloadBlockReason(model)
-        if (blocked != null) { fail(blocked); return }
-        enqueueManagedDownload(ManagedDownloadRequest.recommended(model), useAfterDownload)
-    }
-
-    private fun recommendedDownloadBlockReason(model: ModelScopeRecommendedModel): String? {
-        return if (model.downloadable) null else model.downloadBlockReason ?: "该模型暂不提供下载。"
-    }
+    fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean) =
+        downloadRecommendedFor(
+            model,
+            useAfterDownload,
+            ::fail,
+            ::enqueueManagedDownload
+        )
 
     fun attachVisionProjector(modelId: String, uri: Uri) {
         launchModelOperation("模型操作未完成") {
@@ -3743,61 +3719,35 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    fun searchHubModels(reset: Boolean = true) {
-        val state = _uiState.value
-        val query = state.hubQuery.ifBlank { "MNN Qwen3.5" }
-        val nextPage = if (reset) 1 else state.hubPage + 1
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在从魔塔 API 拉取模型列表...")
-            runCatching {
-                modelScopeClient.searchModels(query = query, pageNumber = nextPage)
-            }.onSuccess { result ->
-                uiStateStore.update {
-                    it.copy(
-                        hubModels = if (reset) result.models else it.hubModels + result.models,
-                        hubPage = result.pageNumber,
-                        hubTotalCount = result.totalCount,
-                        busy = false,
-                        statusMessage = "魔塔模型：第 ${result.pageNumber} 页，已显示 ${if (reset) result.models.size else it.hubModels.size + result.models.size}/${result.totalCount}"
-                    )
-                }
-            }.onFailure { error ->
-                fail("魔塔模型搜索失败：${error.message}")
-            }
-        }
-    }
+    fun searchHubModels(reset: Boolean = true) =
+        searchHubModelsFor(
+            viewModelScope,
+            uiStateStore,
+            modelScopeClient,
+            ::busy,
+            ::fail,
+            _uiState.value.hubQuery,
+            _uiState.value.hubPage,
+            _uiState.value.hubModels,
+            reset
+        )
 
-    fun fetchHubModelFiles(model: ModelScopeHubModel) {
-        uiStateStore.update { it.copy(repoInput = model.id) }
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("正在读取 ${model.displayName} 的本地推理文件...")
-            runCatching {
-                modelScopeClient.listEngineFiles(model.id)
-            }.onSuccess { files ->
-                uiStateStore.update {
-                    it.copy(
-                        repoInput = model.id,
-                        remoteFiles = files,
-                        busy = false,
-                        statusMessage = "已列出 ${model.displayName} 的 ${files.size} 个本地推理文件"
-                    )
-                }
-            }.onFailure { error ->
-                fail("读取模型文件失败：${error.message}")
-            }
-        }
-    }
+    fun fetchHubModelFiles(model: ModelScopeHubModel) =
+        fetchHubModelFilesFor(
+            viewModelScope,
+            uiStateStore,
+            modelScopeClient,
+            ::busy,
+            ::fail,
+            model
+        )
 
-    fun openModelScopePage(url: String) {
-        runCatching {
-            val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            getApplication<Application>().startActivity(intent)
-        }.onFailure { error ->
-            fail("无法打开浏览器：${error.message}")
-        }
-    }
+    fun openModelScopePage(url: String) =
+        openModelScopePageFor(
+            getApplication(),
+            ::fail,
+            url
+        )
 
     fun download(remote: RemoteModelFile) {
         enqueueManagedDownload(ManagedDownloadRequest(remote = remote,
