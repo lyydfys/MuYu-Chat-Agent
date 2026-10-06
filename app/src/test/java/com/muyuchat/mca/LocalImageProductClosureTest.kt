@@ -406,7 +406,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
     fun `LoRA crosses UI and Local API by id while native success requires applied tensors`() {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
-        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + // P9/B1: 头部类型与常量簇移出 ChatScreen.kt，拼接表随迁。
+sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadTypes.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
         val api = sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt")
         val bridge = sourceFile("core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp")
         val uiItemStart = chat.indexOf("data class ImageLoraUiItem(")
