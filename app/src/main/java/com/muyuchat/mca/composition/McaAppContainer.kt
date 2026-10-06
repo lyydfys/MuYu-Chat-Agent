@@ -86,6 +86,7 @@ import com.muyuchat.mca.LocalImageModelStore
 import com.muyuchat.mca.LocalImageUpscalerStore
 import com.muyuchat.mca.ModelGenerationProfileStore
 import com.muyuchat.mca.ModelRuntimeProfileStore
+import com.muyuchat.mca.OfflinePromptTranslationBundleDownloader
 import com.muyuchat.mca.OfflinePromptTranslationBundleInstaller
 import com.muyuchat.mca.TextualInversionStore
 import com.muyuchat.mca.WebSearchDiagnosticStore
@@ -128,6 +129,8 @@ internal class McaAppContainer(private val application: Application) {
     val cloudApiStore = CloudApiStore(application)
 
     val offlineTranslationInstaller = OfflinePromptTranslationBundleInstaller(application)
+
+    val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
 
     val webSearchStore = WebSearchStore(application)
 
@@ -475,17 +478,16 @@ internal class McaAppContainer(private val application: Application) {
             startupReconciliation = startupReconciliation
         )
 
-    /** R3/C3-S27：图片提示词翻译端口工厂。 */
+    /** R3/C3-S27/S31：图片提示词翻译端口工厂（verifiedBundle 直调 operations，删除过渡 lambda）。 */
     fun createImagePromptTranslationPort(
         store: UiStateStore,
-        serviceProvider: () -> OfflinePromptTranslationService,
-        verifiedBundle: suspend () -> VerifiedOfflinePromptTranslationBundle?
+        serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPort =
         ImagePromptTranslationPortAdapter(
             store = store,
             admission = runtimeAdmission,
-            serviceProvider = serviceProvider,
-            verifiedBundleRef = verifiedBundle
+            downloader = offlineTranslationDownloader,
+            serviceProvider = serviceProvider
         )
 
     /** R3-S30：本地生图资产生成端口工厂（worker 代际经 holder；网关包真实客户端）。 */

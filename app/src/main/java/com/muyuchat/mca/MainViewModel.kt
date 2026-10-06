@@ -519,61 +519,19 @@ class MainViewModel @JvmOverloads constructor(
     private val chatAppearanceMutex = Mutex()
     private val cloudApiStore = container.cloudApiStore
     private val cloudChatProvider = OpenAiCompatibleChatProvider()
-    /** Optional, independently verified Hy-MT2 bundle. A missing bundle stays an explicit
-     * fallback state and never masquerades as a completed translation. */
-    @Volatile private var offlinePromptTranslationBundle: VerifiedOfflinePromptTranslationBundle? = null
-    private val offlineTranslationBundleMutex = Mutex()
-
     private fun offlineTranslationBundleReadyStatus(bundle: VerifiedOfflinePromptTranslationBundle): String =
-        if (bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2) {
-            "Hy-MT2 已安装；可预览英文译文，英文模型自动翻译"
-        } else {
-            "翻译包已安装，但当前 runtime 尚未接入该模型；可下载 Hy-MT2。"
-        }
+        com.muyuchat.mca.offlineTranslationBundleReadyStatus(bundle)
 
     private suspend fun cacheVerifiedOfflineTranslationBundle(bundle: VerifiedOfflinePromptTranslationBundle) {
-        offlineTranslationBundleMutex.withLock { offlinePromptTranslationBundle = bundle }
+        cacheVerifiedOfflineTranslationBundleFor(container.runtimeAdmission, bundle)
     }
 
-    private suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? = withContext(Dispatchers.IO) {
-        offlineTranslationBundleMutex.withLock {
-            val cached = offlinePromptTranslationBundle
-            if (cached?.matchesVerifiedFiles() == true) return@withLock cached
-            offlinePromptTranslationBundle = null
-            val verification = try {
-                offlineTranslationDownloader.verifyInstalledOrRecoverCompleteDownload()
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                OfflinePromptTranslationBundleVerification.Rejected(
-                    OfflinePromptTranslationBundleRejectionCode.ROOT_UNAVAILABLE,
-                    error.message ?: "离线翻译包无法校验或启用"
-                )
-            }
-            val bundle = (verification as? OfflinePromptTranslationBundleVerification.Verified)?.bundle
-            offlinePromptTranslationBundle = bundle
-            uiStateStore.update { state ->
-                val wasInstalled = cached != null || state.offlineTranslationInstalled
-                state.copy(
-                    offlineTranslationInstalled = bundle?.identity?.translatorFamily == OfflineTranslatorFamily.HY_MT2,
-                    offlineTranslationStatus = when {
-                        bundle != null -> offlineTranslationBundleReadyStatus(bundle)
-                        wasInstalled -> {
-                            val reason = (verification as? OfflinePromptTranslationBundleVerification.Rejected)?.message
-                                ?: "模型文件或清单已丢失"
-                            "Hy-MT2 安装已失效：$reason。请重新导入或下载。"
-                        }
-                        else -> state.offlineTranslationStatus
-                    }
-                )
-            }
-            bundle
-        }
-    }
-    private val offlineTranslationInstaller = container.offlineTranslationInstaller
-    private val offlineTranslationDownloader = OfflinePromptTranslationBundleDownloader(application)
-    private var offlineTranslationInstallJob: Job? = null
-    private var offlineTranslationDownloadJob: Job? = null
+    private suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? =
+        verifiedOfflineTranslationBundleFor(
+            store = uiStateStore,
+            admission = container.runtimeAdmission,
+            downloader = container.offlineTranslationDownloader
+        )
     private var pendingImageTranslation: PendingImageTranslation?
         get() = container.runtimeAdmission.pendingImageTranslation
         set(value) {
@@ -2429,11 +2387,11 @@ class MainViewModel @JvmOverloads constructor(
 
     // R3-S27：translation 端口的具名适配器（service 以 provider 保 lazy 时机；verifiedBundle 为过渡
     // 注入——offline-translation 家族批落地后改为直接调用并删除该 lambda）。
+    // R3-S27/S31：translation 端口的具名适配器（service 以 provider 保 lazy 时机；verifiedBundle 直调 operations）。
     private val imagePromptTranslationPort: ImagePromptTranslationPort =
         container.createImagePromptTranslationPort(
             uiStateStore,
-            { offlinePromptTranslationService },
-            { verifiedOfflineTranslationBundle() }
+            { offlinePromptTranslationService }
         )
     /** Delegates to [prepareLocalImageRuntimeMemoryFor]. Signature kept verbatim. */
     private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease =
@@ -5987,30 +5945,17 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun importOfflinePromptTranslationBundle(uri: Uri) {
-        if (offlineTranslationInstallJob?.isActive == true || offlineTranslationDownloadJob?.isActive == true) return
-        offlineTranslationInstallJob = viewModelScope.launch {
-            uiStateStore.update { it.copy(offlineTranslationInstalling = true, offlineTranslationStatus = "正在导入并校验 Hy-MT2") }
-            try {
-                val bundle = offlineTranslationInstaller.install(uri)
-                cacheVerifiedOfflineTranslationBundle(bundle)
-                uiStateStore.update { it.copy(
-                    offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
-                    offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
-                    statusMessage = "离线翻译包已导入。"
-                ) }
-            } catch (cancelled: CancellationException) {
-                uiStateStore.update { it.copy(offlineTranslationStatus = "导入已取消") }
-                throw cancelled
-            } catch (error: Exception) {
-                uiStateStore.update { it.copy(offlineTranslationStatus = error.message ?: "离线翻译包导入失败") }
-            } finally {
-                uiStateStore.update { it.copy(offlineTranslationInstalling = false) }
-            }
-        }
+        importOfflinePromptTranslationBundleFor(
+            store = uiStateStore,
+            admission = container.runtimeAdmission,
+            scope = viewModelScope,
+            installer = container.offlineTranslationInstaller,
+            uri = uri
+        )
     }
 
     fun cancelOfflinePromptTranslationInstall() {
-        offlineTranslationInstallJob?.cancel()
+        cancelOfflinePromptTranslationInstallFor(container.runtimeAdmission)
     }
 
     /**
@@ -6050,47 +5995,16 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     fun downloadOfflinePromptTranslationBundle() {
-        if (offlineTranslationDownloadJob?.isActive == true || offlineTranslationInstallJob?.isActive == true) return
-        offlineTranslationDownloadJob = viewModelScope.launch {
-            uiStateStore.update { it.copy(
-                offlineTranslationDownloading = true,
-                offlineTranslationDownloadBytes = 0L,
-                offlineTranslationDownloadTotalBytes = 0L,
-                offlineTranslationDownloadProgress = null,
-                offlineTranslationStatus = "正在准备下载 Hy-MT2"
-            ) }
-            try {
-                val bundle = offlineTranslationDownloader.download { progress ->
-                    uiStateStore.update { state -> state.copy(
-                        offlineTranslationDownloadBytes = progress.downloadedBytes,
-                        offlineTranslationDownloadTotalBytes = progress.totalBytes,
-                        offlineTranslationDownloadProgress =
-                            (progress.downloadedBytes.toDouble() / progress.totalBytes.coerceAtLeast(1L)).toFloat().coerceIn(0f, 1f),
-                        offlineTranslationStatus = progress.detail?.takeIf { it != "LICENSE" && it != "LICENSE.txt" && it != HyMt2PromptTranslationContract.MODEL_FILE }
-                            ?: "正在下载并校验 Hy-MT2：${progress.downloadedBytes / 1_000_000} / ${progress.totalBytes / 1_000_000} MB"
-                    ) }
-                }
-                cacheVerifiedOfflineTranslationBundle(bundle)
-                uiStateStore.update { it.copy(
-                    offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
-                    offlineTranslationStatus = offlineTranslationBundleReadyStatus(bundle),
-                    statusMessage = "Hy-MT2 已下载并安装。"
-                ) }
-            } catch (cancelled: CancellationException) {
-                uiStateStore.update { it.copy(offlineTranslationStatus = "下载已暂停，可继续下载") }
-                throw cancelled
-            } catch (error: Exception) {
-                uiStateStore.update { it.copy(
-                    offlineTranslationStatus = "Hy-MT2 下载失败：${error.message ?: "请重试"}"
-                ) }
-            } finally {
-                uiStateStore.update { it.copy(offlineTranslationDownloading = false) }
-            }
-        }
+        downloadOfflinePromptTranslationBundleFor(
+            store = uiStateStore,
+            admission = container.runtimeAdmission,
+            scope = viewModelScope,
+            downloader = container.offlineTranslationDownloader
+        )
     }
 
     fun cancelOfflinePromptTranslationDownload() {
-        offlineTranslationDownloadJob?.cancel()
+        cancelOfflinePromptTranslationDownloadFor(container.runtimeAdmission)
     }
 
     fun cancelChatImageTranslationDraft(id: String) {

@@ -736,15 +736,15 @@ internal class ImageAssetDeletionPortAdapter(
     }
 }
 
-/** R3/C3-S27：图片提示词翻译端口具名化（service 经 provider 保 lazy；verifiedBundle 为过渡注入）。 */
+/** R3/C3-S27/S31：图片提示词翻译端口具名化（service 经 provider 保 lazy；verifiedBundle 直调 operations，删除过渡 lambda）。 */
 internal class ImagePromptTranslationPortAdapter(
     private val store: UiStateStore,
     private val admission: RuntimeAdmissionState,
-    private val serviceProvider: () -> OfflinePromptTranslationService,
-    private val verifiedBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?
+    private val downloader: OfflinePromptTranslationBundleDownloader,
+    private val serviceProvider: () -> OfflinePromptTranslationService
 ) : ImagePromptTranslationPort {
     override suspend fun verifiedBundle(): VerifiedOfflinePromptTranslationBundle? =
-        verifiedBundleRef()
+        verifiedOfflineTranslationBundleFor(store, admission, downloader)
 
     override suspend fun translate(
         bundle: VerifiedOfflinePromptTranslationBundle?,

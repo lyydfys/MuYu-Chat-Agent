@@ -73,6 +73,16 @@ internal class RuntimeAdmissionState(
     @Volatile
     var activeLocalApiImageModelId: String? = null
 
+    // R3-S31：离线提示词翻译族状态（自 MainViewModel 迁出；同一实例经组合根共享）。
+    @Volatile
+    var offlinePromptTranslationBundle: VerifiedOfflinePromptTranslationBundle? = null
+
+    val offlineTranslationBundleMutex = Mutex()
+
+    var offlineTranslationInstallJob: Job? = null
+
+    var offlineTranslationDownloadJob: Job? = null
+
     var imageGenerationJob: Job? = null
 
     @Volatile
