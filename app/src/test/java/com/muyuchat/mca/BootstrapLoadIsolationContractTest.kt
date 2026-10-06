@@ -45,13 +45,11 @@ class BootstrapLoadIsolationContractTest {
 
     @Test
     fun mainRunsNewBootstrapProofBeforeFormalLoadAndNeverRunsTheCanaryInProcess() {
+        // R3-S24: the load chain moved verbatim to LoadModelOperations.kt (the ViewModel keeps a
+        // one-line delegate); the section is read where it now lives, with the same assertions.
         val source = sourceFile("MainViewModel.kt")
-        val loadModel = source.substring(
-            source.indexOf("fun CoroutineScope.loadModelBody(requestedModel: ModelManifest)")
-                .also { assertTrue(it >= 0) },
-            source.indexOf("fun verifyModel(model: ModelManifest)")
-                .also { assertTrue(it >= 0) }
-        )
+        val loadModel = sourceFile("LoadModelOperations.kt")
+            .substringAfter("internal suspend fun CoroutineScope.runLoadModelBody(")
         val worker = loadModel.indexOf(
             "probeKind = TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD"
         )
@@ -72,7 +70,8 @@ class BootstrapLoadIsolationContractTest {
     @Test
     fun workerAndFormalLoadShareExactProfileMaterialization() {
         val worker = sourceFile("TuningProbeWorkerService.kt")
-        val main = sourceFile("MainViewModel.kt")
+        // R3-S24: the formal-load half moved to LoadModelOperations.kt; dual-source read.
+        val main = sourceFile("MainViewModel.kt") + sourceFile("LoadModelOperations.kt")
 
         assertTrue(worker.contains("model.loadParamsForExecutionProfile(candidateProfile)"))
         assertTrue(main.contains("model.loadParamsForExecutionProfile(bootstrapProfile)"))

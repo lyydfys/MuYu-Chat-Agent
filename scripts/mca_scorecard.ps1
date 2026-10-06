@@ -10,18 +10,21 @@ $head = (& git show "HEAD:$Vm") -join "`n"
 
 function Get-McaMetric([string]$text) {
     $body = $text.TrimEnd("`n")
-    $lines = ($body -split "`n").Count
-    $noImport = (($body -split "`n") | Where-Object { $_ -notmatch '^import' }) -join "`n"
+    $lines = ($body -split "`n")
+    $noImportLines = $lines | Where-Object { $_ -notmatch '^import' }
+    function Count-Lines([string[]]$ls, [string]$pattern) {
+        ($ls | Where-Object { $_ -match $pattern }).Count
+    }
     [pscustomobject]@{
-        lines      = $lines
-        engine     = ([regex]::Matches($noImport, 'engine\.[a-z]')).Count
-        store      = ([regex]::Matches($text, 'uiStateStore\.update')).Count
-        launch     = ([regex]::Matches($text, 'viewModelScope\.launch')).Count
-        thisvm     = ([regex]::Matches($text, 'this@MainViewModel')).Count
-        anon       = ([regex]::Matches($text, 'object :')).Count
-        atomic     = ([regex]::Matches($text, 'AtomicBoolean|AtomicInteger|AtomicLong|Mutex\(')).Count
-        uiupdate   = ([regex]::Matches($text, '_uiState\.update')).Count
-        runblocking = ([regex]::Matches($text, 'runBlocking')).Count
+        lines       = $lines.Count
+        engine      = Count-Lines $noImportLines 'engine\.[a-z]'
+        store       = Count-Lines $lines 'uiStateStore\.update'
+        launch      = Count-Lines $lines 'viewModelScope\.launch'
+        thisvm      = Count-Lines $lines 'this@MainViewModel'
+        anon        = Count-Lines $lines 'object :'
+        atomic      = Count-Lines $lines 'AtomicBoolean|AtomicInteger|AtomicLong|Mutex\('
+        uiupdate    = Count-Lines $lines '_uiState\.update'
+        runblocking = Count-Lines $lines 'runBlocking'
     }
 }
 

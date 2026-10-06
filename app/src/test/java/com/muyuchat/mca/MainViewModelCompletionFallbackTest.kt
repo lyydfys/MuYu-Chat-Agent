@@ -470,7 +470,11 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun qairtLoadUsesGenericEnginePathWithoutMandatoryDiagnosticCanary() {
-        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
+        // R3-S24: the load chain moved verbatim to LoadModelOperations.kt; read where it lives.
+        val body = functionBody(
+            loadModelOperationsSource(),
+            "internal suspend fun CoroutineScope.runLoadModelBody("
+        )
         val nativeLoad = body.indexOf("val nativeLoad = engine.loadModel(")
 
         assertTrue(nativeLoad >= 0)
@@ -481,13 +485,17 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun failedLoadReleasesCancelledGenerationBeforeReadingDiagnostics() {
-        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
+        // R3-S24: 读新落点；拼写随迁（cancelGeneration() 注入、store.update）。
+        val body = functionBody(
+            loadModelOperationsSource(),
+            "internal suspend fun CoroutineScope.runLoadModelBody("
+        )
         val failStart = body.indexOf("fun failBeforeNativeReplacement")
-        val cancel = body.indexOf("cancelGenerationJob()", failStart)
+        val cancel = body.indexOf("cancelGeneration()", failStart)
         val fail = body.substring(failStart, cancel)
         val release = fail.indexOf("afterGenerationTerminated(")
         // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
-        val uiUpdate = fail.indexOf("uiStateStore.update")
+        val uiUpdate = fail.indexOf("store.update")
         // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；顺序合同不变，锚点随迁。
         val nativeStats = fail.indexOf("engine.nativeStatsJsonOrEmpty()")
 
@@ -540,10 +548,14 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun modelLoadUsesOneCatchBoundaryForNativeCanaryAndPersistenceFailures() {
-        val body = functionBody(mainViewModelSource(), "fun CoroutineScope.loadModelBody(")
+        // R3-S24: 读新落点；persistBootstrapProfile 拼写随迁为 For。
+        val body = functionBody(
+            loadModelOperationsSource(),
+            "internal suspend fun CoroutineScope.runLoadModelBody("
+        )
         val nativeLoad = body.indexOf("val nativeLoad = engine.loadModel(")
         val getOrThrow = body.indexOf("nativeLoad.getOrThrow()", nativeLoad)
-        val persist = body.indexOf("persistBootstrapProfile(", getOrThrow)
+        val persist = body.indexOf("persistBootstrapProfileFor(", getOrThrow)
         val catchBoundary = body.lastIndexOf("catch (error: Throwable)")
         val recovery = body.indexOf("recoverAfterNativeReplacement", catchBoundary)
 
@@ -604,6 +616,21 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    /** R3/C3-S24: the load vertical (runLoadModelBody etc.). */
+    private fun loadModelOperationsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/LoadModelOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/LoadModelOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("LoadModelOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     /** R3/C3-S23: the load/unload/delete vertical (restoreLoadedRuntimeSnapshotFor etc.). */

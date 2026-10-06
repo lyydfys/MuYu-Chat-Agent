@@ -87,18 +87,28 @@ class ManagedRuntimeReadinessRefreshGateTest {
     @Test
     fun `every manifest validating UI path publishes the refreshed catalog before continuing`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val load = section(source, "fun CoroutineScope.loadModelBody(", "fun verifyModel(")
+        // R3-S24: the load chain moved to LoadModelOperations.kt; the load half is read where it
+        // now lives（发布调用拼写随迁 publishChatCatalogSnapshot(readinessPort)），
+        // verify/smoke halves stay on the ViewModel. Same ordering contract.
+        val load = sourceFile("app/src/main/java/com/muyuchat/mca/LoadModelOperations.kt")
+            .substringAfter("internal suspend fun CoroutineScope.runLoadModelBody(")
+            .substringBefore("/** R3-S24：bootstrap")
         // R3/C1: captureLoadedRuntimeSnapshot 声明移出至运行时缝，区段边界标记随迁。
         val verify = section(source, "fun verifyModel(", "private fun clearNativeRuntimeSessionState(")
         val smoke = section(source, "fun runAgentStabilitySmoke(", "fun startAgentTuning()")
-        listOf(load, verify, smoke).forEach { body ->
+        listOf(verify, smoke).forEach { body ->
             val validateIndex = body.indexOf("modelStore.validateForLoad(")
             val publishIndex = body.indexOf("publishManagedChatCatalogAfterValidation()")
             assertTrue(validateIndex >= 0)
             assertTrue(publishIndex > validateIndex)
         }
+        assertTrue(load.indexOf("modelStore.validateForLoad(") >= 0)
         assertTrue(
-            load.indexOf("publishManagedChatCatalogAfterValidation()") <
+            load.indexOf("publishChatCatalogSnapshot(readinessPort)") >
+                load.indexOf("modelStore.validateForLoad(")
+        )
+        assertTrue(
+            load.indexOf("publishChatCatalogSnapshot(readinessPort)") <
                 load.indexOf("if (!preflight.canLoad)")
         )
         assertTrue(
