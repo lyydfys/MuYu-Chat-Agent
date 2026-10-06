@@ -263,12 +263,6 @@ internal fun chatImageCommitJournalJobId(jobId: String, imageId: String): String
     return "${jobId.take(120)}.$safeImageId"
 }
 
-private data class LocalGenerationSmokeResult(
-    val visibleChars: Int,
-    val completionTokens: Int,
-    val decodeTps: Double
-)
-
 /**
  * Widened from `private` so the conversion that builds it can live in its own file; only the
  * modifier changed. The type is still not part of any public surface.
@@ -297,12 +291,6 @@ internal data class LoadedRuntimeSnapshot(
     val uiState: MainUiState,
     val adaptiveRecommendation: AdaptiveTuningRecommendation?
 )
-private data class LocalApiStreamSmokeResult(
-    val visibleContentSeen: Boolean,
-    val doneSeen: Boolean,
-    val stopCalls: Int
-)
-
 
 private data class LocalApiApplyResult(
     val running: Boolean,
@@ -8065,76 +8053,25 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun runAgentStabilitySmoke() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val initialState = _uiState.value
-            if (initialState.isGenerating) {
-                showStatus("请先停止当前生成，再运行稳定性自检")
-                return@launch
-            }
-            val requestedModel = initialState.models.firstOrNull { it.id == initialState.loadedModelId }
-            if (requestedModel == null) {
-                showStatus("请先加载一个本地推理模型，再运行稳定性自检")
-                return@launch
-            }
-            busy("正在运行稳定性自检...")
-            runCatching {
-                cancelGenerationJob()
-                engine.stopGeneration()
-                val preflight = modelStore.validateForLoad(requestedModel.id)
-                val validatedCatalog = publishManagedChatCatalogAfterValidation()
-                if (!preflight.canLoad) error("加载前检查失败：${preflight.message}")
-                val model = validatedCatalog.models.firstOrNull { it.id == requestedModel.id }
-                    ?: requestedModel
-                LocalModelMemoryAdmissionPolicy.evaluate(model, currentDeviceProfile()).blocker
-                    ?.let { error("加载前内存检查失败：$it") }
-
-                val runtime = model.runtime.toLocalChatRuntime()
-                val loadParams = model.buildLoadParamsFor(initialState.params)
-                val firstLoadMs = timedLoadModel(model, runtime, loadParams)
-                val secondLoadMs = timedLoadModel(model, runtime, loadParams)
-                val generation = runLocalGenerationSmoke(initialState.params)
-                val apiGuard = runLoopbackApiStreamSmoke()
-                val apiEngine = runLoopbackEngineStreamSmoke(initialState.params)
-                val nativeStats = engine.nativeStatsJson()
-                val summary = buildString {
-                    append("Reload ").append(firstLoadMs).append("ms / ").append(secondLoadMs).append("ms")
-                    append(" · Stream ").append(generation.visibleChars).append(" 字")
-                    append(" · API 防截断 ").append(if (apiGuard.stopCalls == 0 && apiGuard.visibleContentSeen && apiGuard.doneSeen) "通过" else "需排查")
-                    append(" · HTTP 实流 ").append(if (apiEngine.visibleContentSeen && apiEngine.doneSeen) "通过" else "需排查")
-                    append(" · n_ctx ").append(JSONObject(nativeStats).optInt("nCtx", initialState.params.nCtx))
-                }
-                modelStore.markLoaded(model.id)
-                cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
-                managedRuntimeReadinessRefreshGate.invalidate()
-                uiStateStore.update { state ->
-                    state.copy(
-                        loadedModelId = model.id,
-                        loadedModelName = model.displayName,
-                        selectedChatBackend = ChatBackend.LOCAL,
-                        models = modelStore.listModels(),
-                        busy = false,
-                        nativeStatsJson = nativeStats,
-                        logs = engine.recentLogs(),
-                        localStabilitySmokeSummary = summary,
-                        diagnosticReport = diagnosticsOperations.buildDiagnosticReport(),
-                        statusMessage = "稳定性自检通过：$summary"
-                    )
-                }
-            }.onFailure { error ->
-                val message = "稳定性自检失败：${error.message ?: "未知错误"}"
-                uiStateStore.update {
-                    it.copy(
-                        busy = false,
-                        nativeStatsJson = engine.nativeStatsJson(),
-                        localStabilitySmokeSummary = message,
-                        diagnosticReport = diagnosticsOperations.buildDiagnosticReport(),
-                        statusMessage = message
-                    )
-                }
-            }
-        }
-    }
+    /** Delegates to [runAgentStabilitySmokeFor]. Signature kept verbatim. */
+    fun runAgentStabilitySmoke() =
+        runAgentStabilitySmokeFor(
+            viewModelScope,
+            uiStateStore,
+            engine,
+            modelStore,
+            cloudApiStore,
+            managedRuntimeReadinessRefreshGate,
+            managedRuntimeReadinessPort,
+            deviceProfileReader,
+            diagnosticsOperations,
+            cancelGeneration = { cancelGenerationJob() },
+            busy = { busy(it) },
+            loadSmoke = { model, runtime, params -> timedLoadModel(model, runtime, params) },
+            generationSmoke = { params -> runLocalGenerationSmoke(params) },
+            apiSmoke = { runLoopbackApiStreamSmoke() },
+            engineSmoke = { params -> runLoopbackEngineStreamSmoke(params) }
+        )
 
     fun startAgentTuning() {
         tuningOwner.startAgentTuning(AgentDebugMode.Quick)

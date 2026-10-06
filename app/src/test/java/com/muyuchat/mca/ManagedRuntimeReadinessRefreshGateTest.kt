@@ -95,13 +95,15 @@ class ManagedRuntimeReadinessRefreshGateTest {
             .substringBefore("/** R3-S24：bootstrap")
         // R3/C1: captureLoadedRuntimeSnapshot 声明移出至运行时缝，区段边界标记随迁。
         val verify = section(source, "fun verifyModel(", "private fun clearNativeRuntimeSessionState(")
-        val smoke = section(source, "fun runAgentStabilitySmoke(", "fun startAgentTuning()")
-        listOf(verify, smoke).forEach { body ->
-            val validateIndex = body.indexOf("modelStore.validateForLoad(")
-            val publishIndex = body.indexOf("publishManagedChatCatalogAfterValidation()")
-            assertTrue(validateIndex >= 0)
-            assertTrue(publishIndex > validateIndex)
-        }
+        // R3-S26: the smoke chain moved to ReadinessSmokeOperations.kt; the smoke half is read
+        // where it now lives（发布调用拼写随迁），verify half stays on the ViewModel.
+        val smoke = sourceFile("app/src/main/java/com/muyuchat/mca/ReadinessSmokeOperations.kt")
+            .substringAfter("internal fun runAgentStabilitySmokeFor(")
+        assertTrue(verify.indexOf("modelStore.validateForLoad(") >= 0)
+        assertTrue(
+            verify.indexOf("publishManagedChatCatalogAfterValidation()") >
+                verify.indexOf("modelStore.validateForLoad(")
+        )
         assertTrue(load.indexOf("modelStore.validateForLoad(") >= 0)
         assertTrue(
             load.indexOf("publishChatCatalogSnapshot(readinessPort)") >
@@ -112,7 +114,7 @@ class ManagedRuntimeReadinessRefreshGateTest {
                 load.indexOf("if (!preflight.canLoad)")
         )
         assertTrue(
-            smoke.indexOf("publishManagedChatCatalogAfterValidation()") <
+            smoke.indexOf("publishChatCatalogSnapshot(readinessPort)") <
                 smoke.indexOf("if (!preflight.canLoad)")
         )
         assertTrue(load.contains("var model = persistedModels.firstOrNull { it.id == requestedModel.id }"))
