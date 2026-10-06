@@ -1758,29 +1758,19 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun deleteFileAsset(fileId: String) {
-        var removed: FileAssetRecord? = null
-        var filesToPersist: List<FileAssetRecord> = emptyList()
-        uiStateStore.update { state ->
-            removed = state.files.firstOrNull { it.id == fileId }
-            filesToPersist = state.files.filterNot { it.id == fileId }
-            state.copy(files = filesToPersist, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
-        }
-        persistFiles(filesToPersist)
+        deleteFileAssetFor(
+            store = uiStateStore,
+            persistFiles = ::persistFiles,
+            fileId = fileId
+        )
     }
 
     fun clearFileLibrary() {
-        val filesToRemove = _uiState.value.files
-        if (filesToRemove.isEmpty()) {
-            showStatus("文件库已经为空")
-            return
-        }
-        uiStateStore.update {
-            it.copy(
-                files = emptyList(),
-                statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
-            )
-        }
-        persistFiles(emptyList())
+        clearFileLibraryFor(
+            store = uiStateStore,
+            showStatus = ::showStatus,
+            persistFiles = ::persistFiles
+        )
     }
 
     /** Delegates to [importLocalImageLoraAdapter]. */
@@ -1825,48 +1815,12 @@ class MainViewModel @JvmOverloads constructor(
      * affect visibility or access; the store's byte and SHA checks are the
      * acceptance gate. */
     fun downloadOfficialViggleLora() {
-        if (_uiState.value.localImageLoraImporting) return
-        uiStateStore.update {
-            it.copy(
-                localImageLoraImporting = true,
-                localImageLoraMessage = "正在下载 Viggle v0.2.1 LoRA…"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            var lastReported = -1L
-            runCatching {
-                ViggleV021LoraDownloader.download(localImageLoraStore) { bytes ->
-                    val mb = bytes / (1024L * 1024L)
-                    if (mb != lastReported) {
-                        lastReported = mb
-                        uiStateStore.update {
-                            it.copy(
-                                localImageLoraMessage =
-                                    "正在下载 Viggle v0.2.1 LoRA… ${bytes * 100 / ViggleV021LoraDownloader.EXPECTED_SIZE_BYTES}%"
-                            )
-                        }
-                    }
-                }
-            }.onSuccess { record ->
-                uiStateStore.update {
-                    it.copy(
-                        localImageLoras = localImageLoraStore.load(),
-                        localImageLoraImporting = false,
-                        localImageLoraMessage = "已下载并校验 Viggle v0.2.1 LoRA：${record.name}"
-                    )
-                }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                uiStateStore.update {
-                    it.copy(
-                        localImageLoraImporting = false,
-                        localImageLoraMessage = "Viggle LoRA 下载失败：${error.message ?: "网络或文件校验错误"}"
-                    )
-                }
-            }
-        }
+        downloadOfficialViggleLoraFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            localImageLoraStore = localImageLoraStore
+        )
     }
-
 
     fun reportMissingLocalImageLoraSelection() {
         uiStateStore.update { it.copy(chatImageLoraSelections = null) }
@@ -2435,62 +2389,29 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) {
-        val state = _uiState.value
-        if (state.assistants.none { it.id == assistantId }) return
-        if (scope !in setOf("user_profile", "role_progress")) return
-        val cleanContent = content.trim().take(4_096)
-        if (cleanContent.isBlank()) return
-        val existing = id?.let { memoryId ->
-            state.assistantMemories.firstOrNull { it.id == memoryId && it.assistantId == assistantId }
-        }
-        if (id != null && existing == null) return
-        val record = MemoryRecord(
-            id = existing?.id ?: UUID.randomUUID().toString(),
+        upsertAssistantMemoryFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            chatSessionStore = chatSessionStore,
+            showStatus = ::showStatus,
+            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
             assistantId = assistantId,
-            scope = scope,
-            content = cleanContent,
-            source = "manual",
-            createdAt = existing?.createdAt ?: System.currentTimeMillis()
+            id = id,
+            scopeKind = scope,
+            content = content
         )
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                check(chatSessionStore.upsertMemory(record)) { "记忆与角色不匹配" }
-                val refreshed = chatSessionStore.loadMemories(assistantId)
-                uiStateStore.update { current ->
-                    current.copy(
-                        assistantMemories = current.assistantMemories.filterNot { it.assistantId == assistantId } + refreshed,
-                        statusMessage = "角色记忆已保存"
-                    )
-                }
-                markLocalConversationContextInvalid()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                showStatus("保存角色记忆失败：${error.message ?: "存储错误"}")
-            }
-        }
     }
 
     fun deleteAssistantMemory(assistantId: String, id: String) {
-        if (_uiState.value.assistantMemories.none { it.id == id && it.assistantId == assistantId }) return
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                check(chatSessionStore.deleteMemory(id, assistantId)) { "记忆不存在或不属于该角色" }
-                uiStateStore.update { current ->
-                    current.copy(
-                        assistantMemories = current.assistantMemories.filterNot {
-                            it.id == id && it.assistantId == assistantId
-                        },
-                        statusMessage = "角色记忆已删除"
-                    )
-                }
-                markLocalConversationContextInvalid()
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                showStatus("删除角色记忆失败：${error.message ?: "存储错误"}")
-            }
-        }
+        deleteAssistantMemoryFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            chatSessionStore = chatSessionStore,
+            showStatus = ::showStatus,
+            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+            assistantId = assistantId,
+            id = id
+        )
     }
 
     private fun recordCompletedCharacterMemoryTurn(
@@ -2505,30 +2426,22 @@ class MainViewModel @JvmOverloads constructor(
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
     ) {
-        if (user.content.isBlank() || assistant.content.isBlank()) return
-        val turn = AssistantMemoryTurnRecord(
-            id = assistant.id,
+        recordCompletedCharacterMemoryTurnFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            chatSessionStore = chatSessionStore,
+            scheduleCharacterMemorySummary = ::scheduleCharacterMemorySummary,
             assistantId = assistantId,
             sessionId = sessionId,
-            userText = user.content,
-            assistantText = assistant.content,
-            createdAt = assistant.createdAt
+            assistantSnapshot = assistantSnapshot,
+            user = user,
+            assistant = assistant,
+            conversationPersistJob = conversationPersistJob,
+            backend = backend,
+            params = params,
+            cloudConfig = cloudConfig,
+            localIdentity = localIdentity
         )
-        viewModelScope.launch(Dispatchers.IO) {
-            conversationPersistJob?.join()
-            val state = _uiState.value
-            if (state.assistants.none { it.id == assistantId && it.memoryEnabled } ||
-                state.chatSessions.none { it.id == sessionId && it.assistantSnapshot == assistantSnapshot } ||
-                !state.chatSessions.containsCompletedMemoryTurn(turn)) return@launch
-            val inserted = runCatching { chatSessionStore.appendMemoryTurn(turn) }.getOrDefault(false)
-            if (inserted) {
-                if (_uiState.value.assistants.none { it.id == assistantId }) {
-                    chatSessionStore.deleteAssistantMemoryData(assistantId)
-                } else if (_uiState.value.chatSessions.containsCompletedMemoryTurn(turn)) {
-                    scheduleCharacterMemorySummary(assistantId, backend, params, cloudConfig, localIdentity)
-                }
-            }
-        }
     }
 
     private fun scheduleCharacterMemorySummary(
@@ -2538,29 +2451,17 @@ class MainViewModel @JvmOverloads constructor(
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
     ) {
-        synchronized(characterMemorySummaryJobs) {
-            if (characterMemorySummaryJobs[assistantId]?.isActive == true) {
-                characterMemorySummaryReschedule.add(assistantId)
-                return
-            }
-            lateinit var job: Job
-            job = viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
-                summarizeCharacterMemory(assistantId, backend, params, cloudConfig, localIdentity)
-            }
-            characterMemorySummaryJobs[assistantId] = job
-            job.invokeOnCompletion {
-                val reschedule = synchronized(characterMemorySummaryJobs) {
-                    if (characterMemorySummaryJobs[assistantId] === job) {
-                        characterMemorySummaryJobs.remove(assistantId)
-                    }
-                    characterMemorySummaryReschedule.remove(assistantId)
-                }
-                if (reschedule) {
-                    scheduleCharacterMemorySummary(assistantId, backend, params, cloudConfig, localIdentity)
-                }
-            }
-            job.start()
-        }
+        scheduleCharacterMemorySummaryFor(
+            scope = viewModelScope,
+            characterMemorySummaryJobs = characterMemorySummaryJobs,
+            characterMemorySummaryReschedule = characterMemorySummaryReschedule,
+            summarizeCharacterMemory = ::summarizeCharacterMemory,
+            assistantId = assistantId,
+            backend = backend,
+            params = params,
+            cloudConfig = cloudConfig,
+            localIdentity = localIdentity
+        )
     }
 
     private suspend fun summarizeCharacterMemory(

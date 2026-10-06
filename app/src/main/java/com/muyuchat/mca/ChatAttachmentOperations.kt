@@ -250,3 +250,38 @@ internal fun attachFileFor(
         }
     }
 }
+
+internal fun deleteFileAssetFor(
+    store: UiStateStore,
+    persistFiles: (List<FileAssetRecord>) -> Unit,
+    fileId: String
+) {
+    var removed: FileAssetRecord? = null
+    var filesToPersist: List<FileAssetRecord> = emptyList()
+    store.update { state ->
+        removed = state.files.firstOrNull { it.id == fileId }
+        filesToPersist = state.files.filterNot { it.id == fileId }
+        state.copy(files = filesToPersist, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
+    }
+    persistFiles(filesToPersist)
+}
+
+internal fun clearFileLibraryFor(
+    store: UiStateStore,
+    showStatus: (String) -> Unit,
+    persistFiles: (List<FileAssetRecord>) -> Unit
+) {
+    val filesToRemove = store.state.value.files
+    if (filesToRemove.isEmpty()) {
+        showStatus("文件库已经为空")
+        return
+    }
+    store.update {
+        it.copy(
+            files = emptyList(),
+            statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
+        )
+    }
+    persistFiles(emptyList())
+}
+

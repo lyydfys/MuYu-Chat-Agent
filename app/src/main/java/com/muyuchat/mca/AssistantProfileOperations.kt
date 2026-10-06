@@ -12,6 +12,7 @@ import com.muyuchat.feature.agent.AgentPendingProfile
 import com.muyuchat.feature.agent.AgentTuningJobState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -668,3 +669,169 @@ internal suspend fun summarizeCharacterMemoryFor(
         recordReschedule(assistantId)
     }
 }
+
+internal fun upsertAssistantMemoryFor(
+    store: UiStateStore,
+    scope: CoroutineScope,
+    chatSessionStore: ChatSessionStore,
+    showStatus: (String) -> Unit,
+    markLocalConversationContextInvalid: () -> Unit,
+    assistantId: String,
+    id: String?,
+    scopeKind: String,
+    content: String
+) {
+    val state = store.state.value
+    if (state.assistants.none { it.id == assistantId }) return
+    if (scopeKind !in setOf("user_profile", "role_progress")) return
+    val cleanContent = content.trim().take(4_096)
+    if (cleanContent.isBlank()) return
+    val existing = id?.let { memoryId ->
+        state.assistantMemories.firstOrNull { it.id == memoryId && it.assistantId == assistantId }
+    }
+    if (id != null && existing == null) return
+    val record = MemoryRecord(
+        id = existing?.id ?: UUID.randomUUID().toString(),
+        assistantId = assistantId,
+        scope = scopeKind,
+        content = cleanContent,
+        source = "manual",
+        createdAt = existing?.createdAt ?: System.currentTimeMillis()
+    )
+    scope.launch(Dispatchers.IO) {
+        try {
+            check(chatSessionStore.upsertMemory(record)) { "记忆与角色不匹配" }
+            val refreshed = chatSessionStore.loadMemories(assistantId)
+            store.update { current ->
+                current.copy(
+                    assistantMemories = current.assistantMemories.filterNot { it.assistantId == assistantId } + refreshed,
+                    statusMessage = "角色记忆已保存"
+                )
+            }
+            markLocalConversationContextInvalid()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            showStatus("保存角色记忆失败：${error.message ?: "存储错误"}")
+        }
+    }
+}
+
+internal fun deleteAssistantMemoryFor(
+    store: UiStateStore,
+    scope: CoroutineScope,
+    chatSessionStore: ChatSessionStore,
+    showStatus: (String) -> Unit,
+    markLocalConversationContextInvalid: () -> Unit,
+    assistantId: String,
+    id: String
+) {
+    if (store.state.value.assistantMemories.none { it.id == id && it.assistantId == assistantId }) return
+    scope.launch(Dispatchers.IO) {
+        try {
+            check(chatSessionStore.deleteMemory(id, assistantId)) { "记忆不存在或不属于该角色" }
+            store.update { current ->
+                current.copy(
+                    assistantMemories = current.assistantMemories.filterNot {
+                        it.id == id && it.assistantId == assistantId
+                    },
+                    statusMessage = "角色记忆已删除"
+                )
+            }
+            markLocalConversationContextInvalid()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            showStatus("删除角色记忆失败：${error.message ?: "存储错误"}")
+        }
+    }
+}
+
+internal fun recordCompletedCharacterMemoryTurnFor(
+    store: UiStateStore,
+    scope: CoroutineScope,
+    chatSessionStore: ChatSessionStore,
+    scheduleCharacterMemorySummary: (String, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,
+    assistantId: String,
+    sessionId: String,
+    assistantSnapshot: AssistantConversationSnapshot,
+    user: ChatMessage,
+    assistant: ChatMessage,
+    conversationPersistJob: Job?,
+    backend: ChatBackend,
+    params: GenerationParams,
+    cloudConfig: CloudApiConfig?,
+    localIdentity: String?
+) {
+    if (user.content.isBlank() || assistant.content.isBlank()) return
+    val turn = AssistantMemoryTurnRecord(
+        id = assistant.id,
+        assistantId = assistantId,
+        sessionId = sessionId,
+        userText = user.content,
+        assistantText = assistant.content,
+        createdAt = assistant.createdAt
+    )
+    scope.launch(Dispatchers.IO) {
+        conversationPersistJob?.join()
+        val state = store.state.value
+        if (state.assistants.none { it.id == assistantId && it.memoryEnabled } ||
+            state.chatSessions.none { it.id == sessionId && it.assistantSnapshot == assistantSnapshot } ||
+            !state.chatSessions.containsCompletedMemoryTurn(turn)) return@launch
+        val inserted = runCatching { chatSessionStore.appendMemoryTurn(turn) }.getOrDefault(false)
+        if (inserted) {
+            if (store.state.value.assistants.none { it.id == assistantId }) {
+                chatSessionStore.deleteAssistantMemoryData(assistantId)
+            } else if (store.state.value.chatSessions.containsCompletedMemoryTurn(turn)) {
+                scheduleCharacterMemorySummary(assistantId, backend, params, cloudConfig, localIdentity)
+            }
+        }
+    }
+}
+
+internal fun scheduleCharacterMemorySummaryFor(
+    scope: CoroutineScope,
+    characterMemorySummaryJobs: MutableMap<String, Job>,
+    characterMemorySummaryReschedule: MutableSet<String>,
+    summarizeCharacterMemory: suspend (String, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,
+    assistantId: String,
+    backend: ChatBackend,
+    params: GenerationParams,
+    cloudConfig: CloudApiConfig?,
+    localIdentity: String?
+) {
+    synchronized(characterMemorySummaryJobs) {
+        if (characterMemorySummaryJobs[assistantId]?.isActive == true) {
+            characterMemorySummaryReschedule.add(assistantId)
+            return
+        }
+        lateinit var job: Job
+        job = scope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            summarizeCharacterMemory(assistantId, backend, params, cloudConfig, localIdentity)
+        }
+        characterMemorySummaryJobs[assistantId] = job
+        job.invokeOnCompletion {
+            val reschedule = synchronized(characterMemorySummaryJobs) {
+                if (characterMemorySummaryJobs[assistantId] === job) {
+                    characterMemorySummaryJobs.remove(assistantId)
+                }
+                characterMemorySummaryReschedule.remove(assistantId)
+            }
+            if (reschedule) {
+                scheduleCharacterMemorySummaryFor(
+                    scope = scope,
+                    characterMemorySummaryJobs = characterMemorySummaryJobs,
+                    characterMemorySummaryReschedule = characterMemorySummaryReschedule,
+                    summarizeCharacterMemory = summarizeCharacterMemory,
+                    assistantId = assistantId,
+                    backend = backend,
+                    params = params,
+                    cloudConfig = cloudConfig,
+                    localIdentity = localIdentity
+                )
+            }
+        }
+        job.start()
+    }
+}
+
