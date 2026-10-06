@@ -481,8 +481,13 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(postBeginCancellationCheck > workerBegin)
         assertTrue(nativeBatch > postBeginCancellationCheck)
 
-        val cancel = functionBody(source, "private fun cancelImageGenerationForJob(")
-        val clientCancel = cancel.indexOf("localImageWorkerClient.cancel(")
+        // R3-S25: 取消体逐字迁至 ChatModelCancelAndSwitchOperations.kt；读新落点、拼写随迁
+        // （workerClient.cancel）；顺序合同不变。
+        val cancel = functionBody(
+            sourceFile("ChatModelCancelAndSwitchOperations.kt"),
+            "internal fun cancelImageGenerationForJobFor("
+        )
+        val clientCancel = cancel.indexOf("workerClient.cancel(")
         val callerOwnedBranch = cancel.indexOf("if (!(localGeneration && nativeCancelRequested))")
         val coroutineCancel = cancel.indexOf("?.cancel()", callerOwnedBranch)
         assertTrue(clientCancel >= 0)

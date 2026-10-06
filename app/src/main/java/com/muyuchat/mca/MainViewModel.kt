@@ -2477,82 +2477,16 @@ class MainViewModel @JvmOverloads constructor(
 
     fun cancelImageGeneration() = cancelImageGenerationForJob(expectedJobId = null)
 
-    private fun cancelImageGenerationForJob(expectedJobId: String?) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val jobId = activeImageGenerationJobId
-            if (expectedJobId != null && jobId != expectedJobId) return@launch
-            val localGeneration = activeImageGenerationBackend == ImageBackend.LOCAL
-            if (jobId != null) {
-                uiStateStore.update { state ->
-                    val job = state.imageJobs.firstOrNull { it.id == jobId }
-                    if (job == null || job.status.terminal) return@update state
-                    val message = if (localGeneration) {
-                        "正在停止本地生图，等待 worker 释放本次执行"
-                    } else {
-                        "已停止图片生成"
-                    }
-                    state.copy(
-                        imageJobs = state.imageJobs.updateImageJob(
-                            jobId,
-                            if (localGeneration) {
-                                ImageGenerationStatusRecord.CANCEL_REQUESTED
-                            } else {
-                                ImageGenerationStatusRecord.CANCELLED
-                            },
-                            message
-                        ),
-                        statusMessage = if (localGeneration) "正在停止本地生图…" else message
-                    )
-                }
-                val nativeCancelRequested = if (localGeneration) {
-                    localImageWorkerClient.cancel(activeLocalImageWorkerRequestId ?: jobId)
-                } else {
-                    false
-                }
-                if (!(localGeneration && nativeCancelRequested)) {
-                    uiStateStore.update { state ->
-                        val job = state.imageJobs.firstOrNull { it.id == jobId }
-                        if (job?.status != ImageGenerationStatusRecord.CANCEL_REQUESTED) {
-                            state
-                        } else {
-                            state.copy(
-                                imageJobs = state.imageJobs.updateImageJob(
-                                    jobId,
-                                    ImageGenerationStatusRecord.CANCELLED,
-                                    "已停止图片生成"
-                                ),
-                                statusMessage = "已停止图片生成"
-                            )
-                        }
-                    }
-                    imageGenerationJob
-                        ?.takeIf { activeImageGenerationJobId == jobId }
-                        ?.cancel()
-                }
-            } else {
-                imageGenerationJob?.cancel()
-                uiStateStore.update { state ->
-                    val working = state.imageJobs.firstOrNull {
-                        it.status == ImageGenerationStatusRecord.QUEUED ||
-                            it.status == ImageGenerationStatusRecord.GENERATING ||
-                            it.status == ImageGenerationStatusRecord.CANCEL_REQUESTED
-                    }
-                    if (working != null) {
-                        state.copy(
-                            imageJobs = state.imageJobs.updateImageJob(
-                                working.id,
-                                ImageGenerationStatusRecord.CANCELLED,
-                                "已停止图片生成"
-                            ),
-                            statusMessage = "已停止图片生成"
-                        )
-                    } else {
-                        state.copy(statusMessage = "当前没有正在生成的图片任务")
-                    }
-                }
-            }
-        }
-    }
+    /** Delegates to [cancelImageGenerationForJobFor]. Signature kept verbatim. */
+    private fun cancelImageGenerationForJob(expectedJobId: String?) =
+        cancelImageGenerationForJobFor(
+            viewModelScope,
+            uiStateStore,
+            container.runtimeAdmission,
+            localImageWorkerClient,
+            activeLocalImageWorkerRequestId,
+            expectedJobId
+        )
 
     /** Delegates to [publishLocalImagePreviewTo]. Signature kept verbatim. */
     private fun publishLocalImagePreview(
@@ -5573,60 +5507,22 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun selectChatModel(choiceId: String) {
-        if (choiceId.startsWith(CLOUD_MODEL_CHOICE_PREFIX)) {
-            selectCloudChatModel(choiceId.removePrefix(CLOUD_MODEL_CHOICE_PREFIX))
-            return
-        }
-        if (choiceId == _uiState.value.cloudApiConfig.chatChoiceId) {
-            selectCloudChatModel(_uiState.value.selectedCloudChatModelId)
-            return
-        }
-        _uiState.value.models.firstOrNull { it.id == choiceId }?.let(::loadModel)
-    }
+    /** Delegates to [selectChatModelFor]. Signature kept verbatim. */
+    fun selectChatModel(choiceId: String) =
+        selectChatModelFor(uiStateStore, ::loadModel, { selectCloudChatModel(it) }, choiceId)
 
-    private fun selectCloudChatModel(modelId: String?) {
-        val model = _uiState.value.cloudModels.firstOrNull { it.id == modelId && it.kind == CloudModelKind.CHAT }
-        val config = model?.toChatConfig()?.normalized()
-        if (config == null || !config.configured) {
-            uiStateStore.update {
-                it.copy(statusMessage = "云端推理模型未配置。请到模型管理 > 云端 接入并保存对话推理模型。")
-            }
-            return
-        }
-        cloudApiStore.save(config)
-        cloudApiStore.saveSelectedBackend(ChatBackend.CLOUD)
-        cloudApiStore.saveSelectedCloudChatModelId(model.id)
-        val modelParams = loadModelGenerationParams(
-            backend = ChatBackend.CLOUD,
-            modelId = model.id,
-            defaults = _uiState.value.params
+    /** Delegates to [selectCloudChatModelFor]. Signature kept verbatim. */
+    private fun selectCloudChatModel(modelId: String?) =
+        selectCloudChatModelFor(
+            uiStateStore,
+            cloudApiStore,
+            engine,
+            viewModelScope,
+            getApplication(),
+            modelGenerationProfileStore,
+            { persistChatSessions(it) },
+            modelId
         )
-        GenerationPreferences.persistGenerationParams(getApplication(), modelParams)
-        viewModelScope.launch(Dispatchers.IO) {
-            engine.stopGeneration()
-        }
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        uiStateStore.update {
-            sessionsToPersist = it.chatSessions.bindSession(
-                sessionId = it.activeChatSessionId,
-                assistantId = it.selectedAssistantId,
-                modelMode = ChatBackend.CLOUD.bindingValue(),
-                modelId = model.id
-            )
-            it.copy(
-                cloudApiConfig = config,
-                selectedCloudChatModelId = model.id,
-                selectedChatBackend = ChatBackend.CLOUD,
-                params = modelParams,
-                chatSessions = sessionsToPersist,
-                busy = false,
-                statusMessage = "已切换到云端模型：${config.safeDisplayName()}",
-                tab = AppTab.CHAT
-            )
-        }
-        persistChatSessions(sessionsToPersist)
-    }
 
 
     /** Delegates to [runLoadModelBody]. Signature kept verbatim. */
@@ -7155,22 +7051,15 @@ class MainViewModel @JvmOverloads constructor(
         continueAssistantImageToolTurn(requestId, output)
     }
 
-    fun cancelChatImageGeneration(requestId: String) {
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (chatSessionId, request) = owner
-        val state = _uiState.value
-        if (state.activeChatSessionId != chatSessionId || !state.canWriteToActiveAssistantSession()) return
-        if (request.status == ChatGeneratedImageStatus.AWAITING_APPROVAL) {
-            rejectChatImageRequest(requestId)
-            return
-        }
-        val jobId = request.currentJobId
-        if (jobId.isNullOrBlank()) {
-            showStatus("找不到这条图片任务的执行编号，请刷新聊天后重试。")
-            return
-        }
-        cancelImageGenerationForJob(jobId)
-    }
+    /** Delegates to [cancelChatImageGenerationFor]. Signature kept verbatim. */
+    fun cancelChatImageGeneration(requestId: String) =
+        cancelChatImageGenerationFor(
+            uiStateStore,
+            { findChatGeneratedImageRequest(it) },
+            { rejectChatImageRequest(it) },
+            { cancelImageGenerationForJob(it) },
+            requestId
+        )
 
     private fun findChatGeneratedImageRequest(
         requestId: String
