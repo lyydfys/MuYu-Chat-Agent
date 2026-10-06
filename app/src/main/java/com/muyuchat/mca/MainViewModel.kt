@@ -5,7 +5,6 @@ import com.muyuchat.mca.composition.McaAppContainer
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -13,7 +12,6 @@ import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.os.Build
-import android.util.Base64
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -233,10 +231,7 @@ import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
 import com.muyuchat.mca.presentation.ChatContextOperations
 import com.muyuchat.mca.presentation.chatContextSnapshot
-import com.muyuchat.mca.presentation.LocalApiImageBounds
 import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
-import com.muyuchat.mca.presentation.LocalApiImageLoraGateway
-import com.muyuchat.mca.presentation.LocalApiImageWorkerGateway
 import com.muyuchat.mca.presentation.generateLocalApiImageOperations
 import kotlinx.coroutines.flow.StateFlow
 import com.muyuchat.mca.SelectChatSessionPort
@@ -8529,155 +8524,25 @@ class MainViewModel @JvmOverloads constructor(
             onProgress = onProgress
         )
 
-    /**
-     * The ViewModel side of [LocalApiImageGenerationPort]: one delegate per member, no logic of its
-     * own. The protocol adaptation moved to [generateLocalApiImageOperations], which is now the only
-     * place a Local API image request is decided.
-     *
-     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
-     * their name and signature with the ViewModel member they forward to, and an unqualified call
-     * would recurse into the override instead of reaching the original implementation.
-     */
     private val localApiImageGenerationPort: LocalApiImageGenerationPort =
-        object : LocalApiImageGenerationPort {
-            override val uiState: StateFlow<MainUiState> get() = this@MainViewModel.uiState
-
-            // Delegates to the real MutableStateFlow.update, so the CAS-based atomicity is kept.
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun selectedLocalImageModel(): LocalImageModelRecord? =
-                this@MainViewModel._uiState.value.selectedLocalImageModel()
-
-            override val localImageLoraLifecycleLock: Any
-                get() = this@MainViewModel.localImageLoraLifecycleLock
-
-            override val localImageTextualInversionLifecycleLock: Any
-                get() = this@MainViewModel.localImageTextualInversionLifecycleLock
-
-            override var activeLocalApiImageModelId: String?
-                get() = this@MainViewModel.activeLocalApiImageModelId
-                set(value) {
-                    this@MainViewModel.activeLocalApiImageModelId = value
-                }
-
-            override val localImageWorkerClient: LocalApiImageWorkerGateway =
-                object : LocalApiImageWorkerGateway {
-                    override suspend fun generate(
-                        model: LocalImageModelRecord,
-                        prompt: String,
-                        options: LocalImageGenerationOptions,
-                        inputDraft: LocalImageInputDraft,
-                        requestId: String,
-                        batchLineage: ImageGenerationBatchLineage?
-                    ): LocalImageResult = this@MainViewModel.localImageWorkerClient.generate(
-                        model = model,
-                        prompt = prompt,
-                        options = options,
-                        inputDraft = inputDraft,
-                        requestId = requestId,
-                        batchLineage = batchLineage
-                    )
-
-                    override suspend fun awaitOwnedWorkerRelease() {
-                        this@MainViewModel.localImageWorkerClient.awaitOwnedWorkerRelease()
-                    }
-                }
-
-            override val localImageLoraStore: LocalApiImageLoraGateway =
-                object : LocalApiImageLoraGateway {
-                    override fun load(): List<LocalImageLoraRecord> =
-                        this@MainViewModel.localImageLoraStore.load()
-                }
-
-            override fun tryAcquireObservedImageGenerationLease(
-                requestId: String
-            ): LocalImageGenerationCoordinator.Lease? =
-                this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
-
-            override fun releaseObservedImageGenerationLease(
-                lease: LocalImageGenerationCoordinator.Lease
-            ): Boolean = this@MainViewModel.releaseObservedImageGenerationLease(lease)
-
-            override fun registerLocalApiImageGenerationOwnership(
-                ownership: LocalApiImageGenerationOwnership
-            ) {
-                this@MainViewModel.registerLocalApiImageGenerationOwnership(ownership)
-            }
-
-            override fun unregisterLocalApiImageGenerationOwnership(
-                ownership: LocalApiImageGenerationOwnership
-            ): Boolean = this@MainViewModel.unregisterLocalApiImageGenerationOwnership(ownership)
-
-            override fun cancelOwnedLocalApiImageWorker(
-                ownership: LocalApiImageGenerationOwnership
-            ): Boolean = this@MainViewModel.cancelOwnedLocalApiImageWorker(ownership)
-
-            override fun resolveCurrentLocalImageLoras(
-                selections: List<Pair<String, Double>>
-            ): List<LocalImagePreparedLora> =
-                this@MainViewModel.resolveCurrentLocalImageLoras(selections)
-
-            override fun resolveCurrentLocalImageLoras(
-                selections: List<Pair<String, Double>>,
-                records: List<LocalImageLoraRecord>
-            ): List<LocalImagePreparedLora> =
-                this@MainViewModel.resolveCurrentLocalImageLoras(selections, records)
-
-            override fun resolveCurrentLocalImageTextualInversionIds(
-                ids: List<String>
-            ): List<String> =
-                this@MainViewModel.resolveCurrentLocalImageTextualInversionIds(ids)
-
-            override suspend fun prepareLocalImagePromptExecution(
-                model: LocalImageModelRecord,
-                prompt: String,
-                options: LocalImageGenerationOptions,
-                captured: LocalImagePromptExecution?
-            ): LocalImagePromptExecution = this@MainViewModel.prepareLocalImagePromptExecution(
-                model = model,
-                prompt = prompt,
-                options = options,
-                captured = captured
-            )
-
-            override suspend fun prepareLocalImageRuntimeMemory():
-                com.muyuchat.core.engine.EngineLifecycleLease? =
-                this@MainViewModel.prepareLocalImageRuntimeMemory()
-
-            override fun executionWithQnnVerificationEvidence(
-                model: LocalImageModelRecord,
-                result: LocalImageResult,
-                options: LocalImageGenerationOptions,
-                requestId: String,
-                attemptId: String,
-                entryPoint: QnnImageEvidenceEntryPoint
-            ): String = this@MainViewModel.executionWithQnnVerificationEvidence(
-                model = model,
-                result = result,
-                options = options,
-                requestId = requestId,
-                attemptId = attemptId,
-                entryPoint = entryPoint
-            )
-
-            /**
-             * Platform encoding seam. The production implementation is the two lines that were here
-             * before the move, so the bytes this device produces for a response are unchanged; a plain
-             * JVM unit test cannot reach them because the android.jar stubs throw, which is why they
-             * are behind the port rather than inline.
-             */
-            override fun decodeImageBounds(bytes: ByteArray): LocalApiImageBounds {
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                return LocalApiImageBounds(bounds.outWidth, bounds.outHeight)
-            }
-
-            /** Equivalent to `Base64.encodeToString(bytes, Base64.NO_WRAP)`. */
-            override fun encodeBase64NoWrap(bytes: ByteArray): String =
-                Base64.encodeToString(bytes, Base64.NO_WRAP)
-        }
+        container.createLocalApiImageGenerationPort(
+            store = uiStateStore,
+            getActiveLocalApiImageModelIdRef = { activeLocalApiImageModelId },
+            setActiveLocalApiImageModelIdRef = { activeLocalApiImageModelId = it },
+            tryAcquireObservedImageGenerationLeaseRef = { tryAcquireObservedImageGenerationLease(it) },
+            releaseObservedImageGenerationLeaseRef = { releaseObservedImageGenerationLease(it) },
+            registerLocalApiImageGenerationOwnershipRef = { registerLocalApiImageGenerationOwnership(it) },
+            unregisterLocalApiImageGenerationOwnershipRef = { unregisterLocalApiImageGenerationOwnership(it) },
+            cancelOwnedLocalApiImageWorkerRef = { cancelOwnedLocalApiImageWorker(it) },
+            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLoras(it) },
+            resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLoras(s, r) },
+            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIds(it) },
+            prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(m, p, o, c) },
+            prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemory() },
+            executionWithQnnVerificationEvidenceRef = { m, r, o, req, att, ent ->
+                executionWithQnnVerificationEvidence(m, r, o, req, att, ent)
+            },
+        )
 
     private suspend fun generateLocalApiImage(requestId: String, body: String): String =
         generateLocalApiImageOperations(

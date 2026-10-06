@@ -86,6 +86,18 @@ import com.muyuchat.mca.ChatImagePromptBridgePort
 import com.muyuchat.mca.ChatImagePromptBridgePortAdapter
 import com.muyuchat.mca.ChatStopGenerationPort
 import com.muyuchat.mca.ChatStopGenerationPortAdapter
+import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
+import com.muyuchat.mca.LocalApiImageGenerationPortAdapter
+import com.muyuchat.mca.LocalApiImageWorkerGatewayAdapter
+import com.muyuchat.mca.LocalApiImageLoraGatewayAdapter
+import com.muyuchat.mca.LocalImagePreparedLora
+import com.muyuchat.mca.LocalImagePromptExecution
+import com.muyuchat.mca.LocalApiImageGenerationOwnership
+import com.muyuchat.mca.QnnImageEvidenceEntryPoint
+import com.muyuchat.core.engine.EngineLifecycleLease
+import com.muyuchat.mca.LocalImageModelRecord
+import com.muyuchat.mca.LocalImageResult
+import com.muyuchat.mca.LocalImageLoraRecord
 import com.muyuchat.mca.ReplyGenerationMetrics
 import com.muyuchat.mca.UiGenerationCancellation
 import com.muyuchat.mca.ConversationMutationRollbackState
@@ -971,6 +983,43 @@ internal class McaAppContainer(private val application: Application) {
             cancelGenerationJobRef = cancelGenerationJobRef,
             flushPendingAssistantOutputRef = flushPendingAssistantOutputRef,
             persistConversationMutationRef = persistConversationMutationRef,
+        )
+
+    fun createLocalApiImageGenerationPort(
+        store: UiStateStore,
+        getActiveLocalApiImageModelIdRef: () -> String?,
+        setActiveLocalApiImageModelIdRef: (String?) -> Unit,
+        tryAcquireObservedImageGenerationLeaseRef: (String) -> LocalImageGenerationCoordinator.Lease?,
+        releaseObservedImageGenerationLeaseRef: (LocalImageGenerationCoordinator.Lease) -> Boolean,
+        registerLocalApiImageGenerationOwnershipRef: (LocalApiImageGenerationOwnership) -> Unit,
+        unregisterLocalApiImageGenerationOwnershipRef: (LocalApiImageGenerationOwnership) -> Boolean,
+        cancelOwnedLocalApiImageWorkerRef: (LocalApiImageGenerationOwnership) -> Boolean,
+        resolveCurrentLocalImageLorasRef1: (List<Pair<String, Double>>) -> List<LocalImagePreparedLora>,
+        resolveCurrentLocalImageLorasRef2: (List<Pair<String, Double>>, List<LocalImageLoraRecord>) -> List<LocalImagePreparedLora>,
+        resolveCurrentLocalImageTextualInversionIdsRef: (List<String>) -> List<String>,
+        prepareLocalImagePromptExecutionRef: suspend (LocalImageModelRecord, String, LocalImageGenerationOptions, LocalImagePromptExecution?) -> LocalImagePromptExecution,
+        prepareLocalImageRuntimeMemoryRef: suspend () -> EngineLifecycleLease?,
+        executionWithQnnVerificationEvidenceRef: (LocalImageModelRecord, LocalImageResult, LocalImageGenerationOptions, String, String, QnnImageEvidenceEntryPoint) -> String,
+    ): LocalApiImageGenerationPort =
+        LocalApiImageGenerationPortAdapter(
+            store = store,
+            localImageLoraLifecycleLockRef = localImageLoraLifecycleLock,
+            localImageTextualInversionLifecycleLockRef = localImageTextualInversionLifecycleLock,
+            getActiveLocalApiImageModelIdRef = getActiveLocalApiImageModelIdRef,
+            setActiveLocalApiImageModelIdRef = setActiveLocalApiImageModelIdRef,
+            localImageWorkerClient = LocalApiImageWorkerGatewayAdapter { localImageWorkerClient },
+            localImageLoraStore = LocalApiImageLoraGatewayAdapter { localImageLoraStore },
+            tryAcquireObservedImageGenerationLeaseRef = tryAcquireObservedImageGenerationLeaseRef,
+            releaseObservedImageGenerationLeaseRef = releaseObservedImageGenerationLeaseRef,
+            registerLocalApiImageGenerationOwnershipRef = registerLocalApiImageGenerationOwnershipRef,
+            unregisterLocalApiImageGenerationOwnershipRef = unregisterLocalApiImageGenerationOwnershipRef,
+            cancelOwnedLocalApiImageWorkerRef = cancelOwnedLocalApiImageWorkerRef,
+            resolveCurrentLocalImageLorasRef1 = resolveCurrentLocalImageLorasRef1,
+            resolveCurrentLocalImageLorasRef2 = resolveCurrentLocalImageLorasRef2,
+            resolveCurrentLocalImageTextualInversionIdsRef = resolveCurrentLocalImageTextualInversionIdsRef,
+            prepareLocalImagePromptExecutionRef = prepareLocalImagePromptExecutionRef,
+            prepareLocalImageRuntimeMemoryRef = prepareLocalImageRuntimeMemoryRef,
+            executionWithQnnVerificationEvidenceRef = executionWithQnnVerificationEvidenceRef,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
