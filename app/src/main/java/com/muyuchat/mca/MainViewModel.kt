@@ -3183,101 +3183,45 @@ class MainViewModel @JvmOverloads constructor(
         uiStateStore.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
-    /**
-     * Imports a world book, delegating the decision to [KnowledgeLibraryOperations.importWorldBook].
-     *
-     * What stays here is what only this class can do: read the live selection revision, stage a
-     * preview through [stageContentImportPreview], publish the resulting change atomically, and
-     * invalidate the local conversation context through [markLocalConversationContextInvalid].
-     * Parsing, the owner-existence check, the store write and the message are decided in the use case.
-     */
     private suspend fun importWorldBookOwned(
         rawJson: String,
         scope: WorldBookScope,
         owner: ContentImportOwner,
         commitId: String? = null
-    ): Boolean {
-        val state = _uiState.value
-        val request = WorldBookImportRequest(
-            rawJson = rawJson,
-            scope = scope,
-            owner = owner,
-            commitId = commitId,
-            hasActiveSession = owner.sessionId != null,
-            ownerStillExists = when (scope) {
-                WorldBookScope.GLOBAL -> true
-                WorldBookScope.ASSISTANT -> state.assistants.any { it.id == owner.assistantId }
-                WorldBookScope.CHAT -> state.chatSessions.any { it.id == owner.sessionId }
-            },
-            // Read after the store write, exactly as the original did.
-            ownerIsCurrent = { owner.isCurrent(_uiState.value) }
-        )
-        return when (val outcome = knowledgeLibraryPort.importWorldBook(request)) {
-            is WorldBookImportOutcome.NeedsPreview -> {
-                stageContentImportPreview(outcome.preview)
-                true
-            }
-
-            is WorldBookImportOutcome.Committed -> {
-                uiStateStore.update { it.withKnowledgeLibraryChange(outcome.change) }
-                if (outcome.invalidateContext) markLocalConversationContextInvalid()
-                true
-            }
-
-            is WorldBookImportOutcome.Rejected -> {
-                uiStateStore.update {
-                    it.withKnowledgeLibraryChange(KnowledgeLibraryChange(statusMessage = outcome.statusMessage))
-                }
-                false
-            }
-        }
-    }
+    ): Boolean = importWorldBookOwnedFor(
+        knowledgeLibraryPort = knowledgeLibraryPort,
+        uiStateStore = uiStateStore,
+        currentState = { _uiState.value },
+        stageContentImportPreview = { stageContentImportPreview(it) },
+        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+        ownerIsCurrent = { it.isCurrent(_uiState.value) },
+        rawJson = rawJson,
+        scope = scope,
+        owner = owner,
+        commitId = commitId
+    )
 
     fun importWorldBookFile(
         uriString: String,
         scope: WorldBookScope = WorldBookScope.ASSISTANT,
         importOwner: ContentImportOwner? = null
-    ) {
-        if (_uiState.value.isGenerating) {
-            showStatus("请先停止当前生成，再导入世界书")
-            return
-        }
-        val owner = importOwner ?: captureContentImportOwner()
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching {
-                val (text, truncated) = readAttachmentText(Uri.parse(uriString), maxBytes = 1_048_576)
-                require(!truncated) { "世界书文件超过 1 MiB。" }
-                text
-            } }
-            result.onSuccess { text -> importWorldBookOwned(text, scope, owner) }
-                .onFailure { error ->
-                    showStatus("世界书导入失败：${error.message ?: "无法读取文件"}")
-                }
-        }
-    }
+    ) = importWorldBookFileFor(
+        scope = viewModelScope,
+        isGenerating = { _uiState.value.isGenerating },
+        showStatus = ::showStatus,
+        captureContentImportOwner = ::captureContentImportOwner,
+        importWorldBookOwned = ::importWorldBookOwned,
+        readAttachmentText = ::readAttachmentText,
+        uriString = uriString,
+        scopeKind = scope,
+        importOwner = importOwner
+    )
 
-    fun deleteWorldBook(worldBookId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val change = KnowledgeLibraryOperations.deleteWorldBook(
-                knowledgeLibraryPort,
-                _uiState.value.knowledgeLibrarySnapshot(),
-                worldBookId
-            ) ?: return@launch
-            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
-        }
-    }
+    fun deleteWorldBook(worldBookId: String) =
+        deleteWorldBookFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, worldBookId)
 
-    fun createKnowledgeBase(name: String, description: String = "") {
-        viewModelScope.launch(Dispatchers.IO) {
-            val change = KnowledgeLibraryOperations.createKnowledgeBase(
-                knowledgeLibraryPort,
-                _uiState.value.knowledgeLibrarySnapshot(),
-                name,
-                description
-            )
-            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
-        }
-    }
+    fun createKnowledgeBase(name: String, description: String = "") =
+        createKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, name, description)
 
     fun importKnowledgeDocument(
         knowledgeBaseId: String,
@@ -3383,28 +3327,11 @@ class MainViewModel @JvmOverloads constructor(
         return true
     }
 
-    fun setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) {
-        val state = _uiState.value
-        if (knowledgeBaseId !in state.knowledgeBases.mapTo(mutableSetOf()) { it.id }) return
-        val updatedIds = state.selectedKnowledgeBaseIds.toMutableSet().apply {
-            if (selected) add(knowledgeBaseId) else remove(knowledgeBaseId)
-        }.toSet()
-        uiStateStore.update { it.copy(selectedKnowledgeBaseIds = updatedIds) }
-        state.activeChatSessionId?.let { sessionId ->
-            persistKnowledgeBaseBindings(sessionId, updatedIds)
-        }
-    }
+    fun setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) =
+        setKnowledgeBaseSelectedFor(uiStateStore, { _uiState.value }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
 
-    fun deleteKnowledgeBase(knowledgeBaseId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val change = KnowledgeLibraryOperations.deleteKnowledgeBase(
-                knowledgeLibraryPort,
-                _uiState.value.knowledgeLibrarySnapshot(),
-                knowledgeBaseId
-            ) ?: return@launch
-            uiStateStore.update { it.withKnowledgeLibraryChange(change) }
-        }
-    }
+    fun deleteKnowledgeBase(knowledgeBaseId: String) =
+        deleteKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, knowledgeBaseId)
 
     fun updateReasoningMode(mode: ReasoningMode) {
         val state = _uiState.value
@@ -6791,16 +6718,8 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun persistFiles(files: List<FileAssetRecord> = _uiState.value.files) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { chatSessionStore.saveFiles(files) }
-                .onFailure { error ->
-                    uiStateStore.update {
-                        it.copy(statusMessage = "文件库保存失败：${error.message}")
-                    }
-                }
-        }
-    }
+    private fun persistFiles(files: List<FileAssetRecord> = _uiState.value.files) =
+        persistFilesFor(chatSessionStore, uiStateStore, viewModelScope, files)
 
     private fun busy(message: String) {
         uiStateStore.update { it.copy(busy = true, statusMessage = message) }
