@@ -44,6 +44,8 @@ import com.muyuchat.mca.ChatImageRequestApprovalPort
 import com.muyuchat.mca.ChatImageRequestApprovalPortAdapter
 import com.muyuchat.mca.ManagedRuntimeReadinessPort
 import com.muyuchat.mca.ManagedRuntimeReadinessPortAdapter
+import com.muyuchat.mca.AppUpdatePort
+import com.muyuchat.mca.AppUpdatePortAdapter
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -656,6 +658,13 @@ internal class McaAppContainer(private val application: Application) {
             coordinator = localImageGenerationCoordinator,
             imageLibraryBackupJobActiveProvider = imageLibraryBackupJobActive,
             hasActiveImageUpscaleProvider = hasActiveImageUpscale
+        )
+
+    /** R3-S37：应用更新端口工厂（B 族第 2 端口）。 */
+    fun createAppUpdatePort(storeProvider: () -> UiStateStore): AppUpdatePort =
+        AppUpdatePortAdapter(
+            context = application,
+            storeProvider = storeProvider
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

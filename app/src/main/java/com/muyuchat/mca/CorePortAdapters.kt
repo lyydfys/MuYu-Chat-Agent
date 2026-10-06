@@ -1338,5 +1338,19 @@ internal class ManagedRuntimeReadinessPortAdapter(
         coordinator.activeRequestId() != null
 }
 
+/**
+ * R3-S37：应用更新端口具名适配器（B 族第 2 端口）。
+ */
+internal class AppUpdatePortAdapter(
+    override val context: Application,
+    private val storeProvider: () -> UiStateStore
+) : AppUpdatePort {
+    override fun uiState(): MainUiState = storeProvider().current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        storeProvider().update(transform)
+    }
+}
+
 
 

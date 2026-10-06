@@ -413,20 +413,9 @@ class MainViewModel @JvmOverloads constructor(
     }
     private val modelScopeClient = ModelScopeClient()
     private val downloader = ResumableDownloader()
-    /**
-     * The ViewModel side of [AppUpdatePort]. The three update jobs live in the owner, not here.
-     */
+    /** R3-S37：应用更新端口具名适配器（容器工厂装配，出清 11 行匿名实现与 3 处 this@VM）。 */
     private val appUpdatePort: AppUpdatePort =
-        object : AppUpdatePort {
-            override val context: Application
-                get() = this@MainViewModel.getApplication()
-
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-        }
+        container.createAppUpdatePort { uiStateStore }
 
     /** The single owner of the in-app update flow. */
     private val appUpdateOwner = AppUpdateOwner(appUpdatePort, viewModelScope)
