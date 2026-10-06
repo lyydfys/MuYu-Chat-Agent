@@ -60,3 +60,8 @@ internal fun MainUiState.chatImageModelBinding(): AssistantImageModelBinding? {
     }
     }
 }
+
+internal fun MainUiState.selectedChatCloudConfig(): CloudApiConfig? =
+    cloudModels
+        .firstOrNull { it.id == selectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
+        ?.toChatConfig()

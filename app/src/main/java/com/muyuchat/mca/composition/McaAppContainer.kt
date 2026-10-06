@@ -38,6 +38,15 @@ import com.muyuchat.mca.ImagePromptTranslationPort
 import com.muyuchat.mca.ImagePromptTranslationPortAdapter
 import com.muyuchat.mca.ImagePromptTranslationPreviewPort
 import com.muyuchat.mca.ImagePromptTranslationPreviewPortAdapter
+import com.muyuchat.mca.AssistantImageToolTurnPort
+import com.muyuchat.mca.AssistantImageToolTurnPortAdapter
+import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.mca.ChatImagePromptBridge
+import com.muyuchat.mca.CloudApiConfig
+import com.muyuchat.mca.ImageGenerationJobSpec
+import com.muyuchat.mca.MainUiState
 import com.muyuchat.mca.OfflinePromptTranslationService
 import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
@@ -573,6 +582,41 @@ internal class McaAppContainer(private val application: Application) {
             admission = runtimeAdmission,
             downloader = offlineTranslationDownloader,
             serviceProvider = serviceProvider
+        )
+
+    /** R3-S34：助手生图工具轮次端口工厂（真实依赖注入，聊天操作由 lambda 委托）。 */
+    fun createAssistantImageToolTurnPort(
+        store: UiStateStore,
+        chatImageNegativePromptSupported: (MainUiState) -> Boolean,
+        prepareAssistantImagePrompt: suspend (
+            prompt: String,
+            chatConfig: CloudApiConfig?,
+            params: GenerationParams,
+            conversationContext: List<ChatMessage>
+        ) -> ChatImagePromptBridge.Result,
+        prepareAssistantImageNegativePrompt: suspend (
+            prompt: String,
+            chatConfig: CloudApiConfig?,
+            params: GenerationParams,
+            conversationContext: List<ChatMessage>,
+            preserveAuthoredNegative: Boolean
+        ) -> ChatImagePromptBridge.Result,
+        setPendingAssistantToolFailure: (String) -> Unit,
+        buildChatImageRetrySnapshot: (ChatGeneratedImageRequest, String) -> ImageGenerationJobSpec?,
+        attachAssistantImageRequestToTimeline: (String, ChatGeneratedImageRequest) -> Unit,
+        approveChatImageRequest: (String) -> Unit
+    ): AssistantImageToolTurnPort =
+        AssistantImageToolTurnPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            authorizationStore = chatImageToolAuthorizationStore,
+            chatImageNegativePromptSupportedRef = chatImageNegativePromptSupported,
+            prepareAssistantImagePromptRef = prepareAssistantImagePrompt,
+            prepareAssistantImageNegativePromptRef = prepareAssistantImageNegativePrompt,
+            setPendingAssistantToolFailureRef = setPendingAssistantToolFailure,
+            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
+            attachAssistantImageRequestToTimelineRef = attachAssistantImageRequestToTimeline,
+            approveChatImageRequestRef = approveChatImageRequest
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

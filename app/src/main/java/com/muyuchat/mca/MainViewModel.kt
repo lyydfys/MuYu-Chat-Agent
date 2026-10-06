@@ -6088,100 +6088,21 @@ class MainViewModel @JvmOverloads constructor(
         imageModelBinding: AssistantImageModelBinding?,
         chatConfig: CloudApiConfig?
     ): Boolean {
-        // The decision moved to AssistantImageToolTurnOperations.kt. Every override below keeps the
-        // `this@MainViewModel.` prefix on purpose: each port method shares its name and signature
-        // with the ViewModel member it forwards to, and an unqualified call would recurse into the
-        // override instead of reaching the original implementation.
-        val port = object : AssistantImageToolTurnPort {
-            override fun activeChatSessionId(): String? = _uiState.value.activeChatSessionId
-
-            override fun chatImageNegativePromptSupported(): Boolean =
-                this@MainViewModel.chatImageNegativePromptSupported(_uiState.value)
-
-            override suspend fun prepareAssistantImagePrompt(
-                prompt: String,
-                chatConfig: CloudApiConfig?,
-                params: GenerationParams,
-                conversationContext: List<ChatMessage>
-            ): ChatImagePromptBridge.Result = this@MainViewModel.prepareAssistantImagePrompt(
-                prompt = prompt,
-                chatConfig = chatConfig,
-                params = params,
-                conversationContext = conversationContext
-            )
-
-            override suspend fun prepareAssistantImageNegativePrompt(
-                prompt: String,
-                chatConfig: CloudApiConfig?,
-                params: GenerationParams,
-                conversationContext: List<ChatMessage>,
-                preserveAuthoredNegative: Boolean
-            ): ChatImagePromptBridge.Result = this@MainViewModel.prepareAssistantImageNegativePrompt(
-                prompt = prompt,
-                chatConfig = chatConfig,
-                params = params,
-                conversationContext = conversationContext,
-                preserveAuthoredNegative = preserveAuthoredNegative
-            )
-
-            override fun setPendingAssistantToolFailure(message: String) {
-                this@MainViewModel.setPendingAssistantToolFailure(message)
-            }
-
-            override fun buildChatImageRetrySnapshot(
-                request: ChatGeneratedImageRequest,
-                chatSessionId: String
-            ): ImageGenerationJobSpec? =
-                this@MainViewModel.buildChatImageRetrySnapshot(request, chatSessionId)
-
-            override fun registerPendingAssistantImageToolTurn(turn: AssistantImageToolPendingTurn) {
-                pendingAssistantImageToolTurns[turn.requestId] = PendingAssistantImageToolTurn(
-                    requestId = turn.requestId,
-                    chatSessionId = turn.chatSessionId,
-                    originalRequestMessages = turn.originalRequestMessages,
-                    params = turn.params,
-                    cloudModelId = turn.cloudModelId,
-                    toolCalls = turn.toolCalls,
-                    primaryToolCallId = turn.primaryToolCallId,
-                    initialToolOutputs = turn.initialToolOutputs
-                )
-            }
-
-            override fun attachAssistantImageRequestToTimeline(
-                chatSessionId: String,
-                request: ChatGeneratedImageRequest
-            ) {
-                this@MainViewModel.attachAssistantImageRequestToTimeline(chatSessionId, request)
-            }
-
-            /** One `_uiState.value` read, like the original `val currentState = _uiState.value`. */
-            override fun currentTurnSelectionSnapshot(): AssistantImageToolTurnSelection {
-                val state = _uiState.value
-                return AssistantImageToolTurnSelection(
-                    activeChatSessionId = state.activeChatSessionId,
-                    selectedCloudChatModelId = state.selectedCloudChatModelId,
-                    chatModelIdentity = chatImageToolChatModelIdentity(
-                        state.selectedCloudChatModelId,
-                        state.selectedChatCloudConfig()?.normalized()
-                    ),
-                    imageAuthorizationIdentity = state.chatImageModelBinding()?.authorizationIdentity()
-                )
-            }
-
-            override fun chatImageToolAuthorizationMode(
-                chatSessionId: String?,
-                chatModelIdentity: String?,
-                imageModelIdentity: String?
-            ): ChatImageToolAuthorizationMode = chatImageToolAuthorizationStore.getMode(
-                chatSessionId,
-                chatModelIdentity,
-                imageModelIdentity
-            )
-
-            override fun approveChatImageRequest(requestId: String) {
-                this@MainViewModel.approveChatImageRequest(requestId)
-            }
-        }
+        // R3-S34：助手生图工具轮次端口具名适配器（容器工厂装配，出清 94 行局部匿名类与 7 处 this@VM）。
+        val port = container.createAssistantImageToolTurnPort(
+            store = uiStateStore,
+            chatImageNegativePromptSupported = { chatImageNegativePromptSupported(it) },
+            prepareAssistantImagePrompt = { prompt, config, params, ctx ->
+                prepareAssistantImagePrompt(prompt, config, params, ctx)
+            },
+            prepareAssistantImageNegativePrompt = { prompt, config, params, ctx, preserve ->
+                prepareAssistantImageNegativePrompt(prompt, config, params, ctx, preserve)
+            },
+            setPendingAssistantToolFailure = { setPendingAssistantToolFailure(it) },
+            buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
+            attachAssistantImageRequestToTimeline = { sId, req -> attachAssistantImageRequestToTimeline(sId, req) },
+            approveChatImageRequest = { approveChatImageRequest(it) }
+        )
         return handleAssistantImageToolTurn(
             port = port,
             calls = calls,
@@ -9016,13 +8937,6 @@ class MainViewModel @JvmOverloads constructor(
             "备份文件格式无效：${message ?: "清单或文件校验失败"}"
         else -> "图片库备份失败：${message ?: "未知错误"}"
     }
-
-
-
-    private fun MainUiState.selectedChatCloudConfig(): CloudApiConfig? =
-        cloudModels
-            .firstOrNull { it.id == selectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
-            ?.toChatConfig()
 
     /** Secret-free identity for the exact Responses chat endpoint and model configuration. */
     private fun attachContextAssemblyTrace(

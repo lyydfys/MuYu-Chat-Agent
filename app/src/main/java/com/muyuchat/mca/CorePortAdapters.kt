@@ -14,6 +14,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
+import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
 /**
@@ -1077,5 +1078,119 @@ internal class ImagePromptTranslationPreviewPortAdapter(
     override suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? =
         verifiedOfflineTranslationBundleFor(store, admission, downloader)
 }
+
+/**
+ * R3-S34：助手生图工具轮次端口具名适配器（运行态注册直调 holder；授权直查 store；聊天操作由 lambda 委托）。
+ */
+internal class AssistantImageToolTurnPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val authorizationStore: ChatImageToolAuthorizationStore,
+    private val chatImageNegativePromptSupportedRef: (MainUiState) -> Boolean,
+    private val prepareAssistantImagePromptRef: suspend (
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage>
+    ) -> ChatImagePromptBridge.Result,
+    private val prepareAssistantImageNegativePromptRef: suspend (
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage>,
+        preserveAuthoredNegative: Boolean
+    ) -> ChatImagePromptBridge.Result,
+    private val setPendingAssistantToolFailureRef: (String) -> Unit,
+    private val buildChatImageRetrySnapshotRef: (
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ) -> ImageGenerationJobSpec?,
+    private val attachAssistantImageRequestToTimelineRef: (
+        chatSessionId: String,
+        request: ChatGeneratedImageRequest
+    ) -> Unit,
+    private val approveChatImageRequestRef: (String) -> Unit
+) : AssistantImageToolTurnPort {
+    override fun activeChatSessionId(): String? = store.current.activeChatSessionId
+
+    override fun chatImageNegativePromptSupported(): Boolean =
+        chatImageNegativePromptSupportedRef(store.current)
+
+    override suspend fun prepareAssistantImagePrompt(
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage>
+    ): ChatImagePromptBridge.Result = prepareAssistantImagePromptRef(
+        prompt, chatConfig, params, conversationContext
+    )
+
+    override suspend fun prepareAssistantImageNegativePrompt(
+        prompt: String,
+        chatConfig: CloudApiConfig?,
+        params: GenerationParams,
+        conversationContext: List<ChatMessage>,
+        preserveAuthoredNegative: Boolean
+    ): ChatImagePromptBridge.Result = prepareAssistantImageNegativePromptRef(
+        prompt, chatConfig, params, conversationContext, preserveAuthoredNegative
+    )
+
+    override fun setPendingAssistantToolFailure(message: String) {
+        setPendingAssistantToolFailureRef(message)
+    }
+
+    override fun buildChatImageRetrySnapshot(
+        request: ChatGeneratedImageRequest,
+        chatSessionId: String
+    ): ImageGenerationJobSpec? = buildChatImageRetrySnapshotRef(request, chatSessionId)
+
+    override fun registerPendingAssistantImageToolTurn(turn: AssistantImageToolPendingTurn) {
+        admission.pendingAssistantImageToolTurns[turn.requestId] = PendingAssistantImageToolTurn(
+            requestId = turn.requestId,
+            chatSessionId = turn.chatSessionId,
+            originalRequestMessages = turn.originalRequestMessages,
+            params = turn.params,
+            cloudModelId = turn.cloudModelId,
+            toolCalls = turn.toolCalls,
+            primaryToolCallId = turn.primaryToolCallId,
+            initialToolOutputs = turn.initialToolOutputs
+        )
+    }
+
+    override fun attachAssistantImageRequestToTimeline(
+        chatSessionId: String,
+        request: ChatGeneratedImageRequest
+    ) {
+        attachAssistantImageRequestToTimelineRef(chatSessionId, request)
+    }
+
+    override fun currentTurnSelectionSnapshot(): AssistantImageToolTurnSelection {
+        val state = store.current
+        return AssistantImageToolTurnSelection(
+            activeChatSessionId = state.activeChatSessionId,
+            selectedCloudChatModelId = state.selectedCloudChatModelId,
+            chatModelIdentity = chatImageToolChatModelIdentity(
+                state.selectedCloudChatModelId,
+                state.selectedChatCloudConfig()?.normalized()
+            ),
+            imageAuthorizationIdentity = state.chatImageModelBinding()?.authorizationIdentity()
+        )
+    }
+
+    override fun chatImageToolAuthorizationMode(
+        chatSessionId: String?,
+        chatModelIdentity: String?,
+        imageModelIdentity: String?
+    ): ChatImageToolAuthorizationMode = authorizationStore.getMode(
+        chatSessionId,
+        chatModelIdentity,
+        imageModelIdentity
+    )
+
+    override fun approveChatImageRequest(requestId: String) {
+        approveChatImageRequestRef(requestId)
+    }
+}
+
 
 
