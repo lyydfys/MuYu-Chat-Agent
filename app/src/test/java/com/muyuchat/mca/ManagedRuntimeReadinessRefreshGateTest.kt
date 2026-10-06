@@ -139,18 +139,16 @@ class ManagedRuntimeReadinessRefreshGateTest {
         assertTrue(publisher.contains("qairtVerifiedRecommendationIds = verifiedQairtRecommendationIds("))
 
         val backupStarter = section(
-            source,
-            "private fun startImageLibraryBackupJob(",
-            // R1/S10: 状态源声明改为 UiStateStore 持有，区段边界标记随迁；区段内更新仍经 _uiState 过渡访问器。
-            "private val uiStateStore = UiStateStore("
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryBackupOperations.kt"),
+            "internal fun startImageLibraryBackupJobFor(",
+            "internal fun exportImageLibraryBackupFor("
         )
         assertTrue(
-            // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
-            backupStarter.indexOf("imageLibraryBackupJob = launchedJob") <
-                backupStarter.indexOf("uiStateStore.update")
+            backupStarter.indexOf("setActiveJob(launchedJob)") <
+                backupStarter.indexOf("store.update")
         )
         assertTrue(
-            backupStarter.indexOf("uiStateStore.update") < backupStarter.indexOf("launchedJob.start()")
+            backupStarter.indexOf("store.update") < backupStarter.indexOf("launchedJob.start()")
         )
     }
 

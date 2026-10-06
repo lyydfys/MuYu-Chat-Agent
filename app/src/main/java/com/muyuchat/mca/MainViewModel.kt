@@ -302,15 +302,6 @@ internal const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
 // VisionAttachmentSupport.kt, and one shared bound is safer than two copies drifting apart.
 internal const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
 
-data class ImageLibraryBackupState(
-    val running: Boolean = false,
-    val importing: Boolean = false,
-    val done: Int = 0,
-    val total: Int = 0,
-    val message: String = "",
-    val failed: Boolean = false
-)
-
 internal data class LocalImagePromptTokenizerDescriptor(
     val modelKey: String,
     val bundleRoot: File,
@@ -899,36 +890,6 @@ class MainViewModel @JvmOverloads constructor(
     ): ImageGenerationJobSpec? {
         return chatImageRetrySnapshot(port = chatImageRetryPort, request = request, chatSessionId = chatSessionId)
     }
-
-    private fun startImageLibraryBackupJob(
-        reservation: ImageLibraryBackupState,
-        operation: suspend () -> Unit
-    ): Boolean =
-        synchronized(imageLibraryBackupLifecycleLock) {
-            if (imageLibraryBackupJob?.isCompleted == false) return@synchronized false
-            val epoch = imageLibraryBackupSequence.incrementAndGet()
-            lateinit var launchedJob: Job
-            launchedJob = viewModelScope.launch(
-                context = Dispatchers.IO,
-                start = CoroutineStart.LAZY
-            ) {
-                try {
-                    operation()
-                } finally {
-                    synchronized(imageLibraryBackupLifecycleLock) {
-                        if (imageLibraryBackupSequence.get() == epoch &&
-                            imageLibraryBackupJob === launchedJob
-                        ) {
-                            imageLibraryBackupJob = null
-                        }
-                    }
-                }
-            }
-            imageLibraryBackupJob = launchedJob
-            uiStateStore.update { state -> state.copy(imageLibraryBackup = reservation) }
-            launchedJob.start()
-            true
-        }
 
     private val uiStateStore = UiStateStore(
         MainUiState(
@@ -2238,222 +2199,47 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) {
-        val destination = runCatching { Uri.parse(uriString) }
-            .getOrNull()
-            ?.takeIf { !it.scheme.isNullOrBlank() }
-        if (destination == null) {
-            uiStateStore.update {
-                it.copy(
-                    imageLibraryBackup = ImageLibraryBackupState(
-                        message = "备份目标无效",
-                        failed = true
-                    )
-                )
-            }
-            return
-        }
-        val started = startImageLibraryBackupJob(
-            reservation = ImageLibraryBackupState(
-                running = true,
-                importing = false,
-                total = 0
-            )
-        ) {
-            try {
-                awaitImageLibraryStartupReconciliation()
-                val result = imageLibraryMutationMutex.withLock {
-                    val snapshot = _uiState.value.images
-                    val total = snapshot.count { !favoritesOnly || it.favorite }
-                    uiStateStore.update { state ->
-                        state.copy(
-                            imageLibraryBackup = state.imageLibraryBackup.copy(total = total)
-                        )
-                    }
-                    imageLibraryBackup.export(
-                        destination = destination,
-                        images = snapshot,
-                        favoritesOnly = favoritesOnly
-                    ) { done, progressTotal ->
-                        uiStateStore.update { state ->
-                            state.copy(
-                                imageLibraryBackup = state.imageLibraryBackup.copy(
-                                    done = done,
-                                    total = progressTotal
-                                )
-                            )
-                        }
-                    }
-                }
-                val message = buildString {
-                    append("已导出 ")
-                    append(result.exported)
-                    append(" 张图片")
-                    if (result.skipped > 0) {
-                        append("；跳过 ")
-                        append(result.skipped)
-                        append(" 个缺失或无效文件")
-                    }
-                }
-                uiStateStore.update {
-                    it.copy(
-                        imageLibraryBackup = ImageLibraryBackupState(message = message),
-                        statusMessage = message
-                    )
-                }
-            } catch (error: CancellationException) {
-                val deleted = withContext(NonCancellable + Dispatchers.IO) {
-                    deleteIncompleteImageLibraryBackup(destination)
-                }
-                uiStateStore.update {
-                    it.copy(
-                        imageLibraryBackup = ImageLibraryBackupState(
-                            message = if (deleted) {
-                                "已取消导出"
-                            } else {
-                                "已取消导出；未能删除不完整的备份文件"
-                            },
-                            failed = !deleted
-                        )
-                    )
-                }
-                throw error
-            } catch (error: Throwable) {
-                val deleted = withContext(Dispatchers.IO) {
-                    deleteIncompleteImageLibraryBackup(destination)
-                }
-                val message = buildString {
-                    append(error.imageLibraryBackupFailureMessage())
-                    if (!deleted) append("；未能删除不完整的备份文件")
-                }
-                uiStateStore.update {
-                    it.copy(
-                        imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
-                        statusMessage = message
-                    )
-                }
-            }
-        }
-        if (!started) {
-            showStatus("图片库备份任务正在进行")
-        }
+        exportImageLibraryBackupFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            application = getApplication(),
+            imageLibraryBackup = imageLibraryBackup,
+            imageLibraryMutationMutex = imageLibraryMutationMutex,
+            awaitStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
+            lifecycleLock = imageLibraryBackupLifecycleLock,
+            sequence = imageLibraryBackupSequence,
+            getActiveJob = { imageLibraryBackupJob },
+            setActiveJob = { imageLibraryBackupJob = it },
+            showStatus = ::showStatus,
+            uriString = uriString,
+            favoritesOnly = favoritesOnly
+        )
     }
 
-    private fun deleteIncompleteImageLibraryBackup(destination: Uri): Boolean =
-        runCatching {
-            DocumentsContract.deleteDocument(
-                getApplication<Application>().contentResolver,
-                destination
-            )
-        }.getOrDefault(false)
-
     fun importImageLibraryBackup(uriString: String) {
-        val source = runCatching { Uri.parse(uriString) }
-            .getOrNull()
-            ?.takeIf { !it.scheme.isNullOrBlank() }
-        if (source == null) {
-            uiStateStore.update {
-                it.copy(
-                    imageLibraryBackup = ImageLibraryBackupState(
-                        message = "备份文件无效",
-                        failed = true
-                    )
-                )
-            }
-            return
-        }
-        val started = startImageLibraryBackupJob(
-            reservation = ImageLibraryBackupState(
-                running = true,
-                importing = true
-            )
-        ) {
-            try {
-                awaitImageLibraryStartupReconciliation()
-                val installedModelIds = _uiState.value.localImageModels.mapTo(mutableSetOf()) { it.id }
-                    .apply {
-                        addAll(
-                            _uiState.value.cloudModels
-                                .filter { it.kind == CloudModelKind.IMAGE }
-                                .map { it.id }
-                        )
-                    }
-                val result = imageAssetWriteMutex.withLock {
-                    imageLibraryMutationMutex.withLock {
-                        val imported = imageLibraryBackup.import(
-                            source = source,
-                            existingImages = _uiState.value.images,
-                            installedModelIds = installedModelIds
-                        ) { done, total ->
-                            uiStateStore.update { state ->
-                                state.copy(
-                                    imageLibraryBackup = state.imageLibraryBackup.copy(
-                                        done = done,
-                                        total = total
-                                    )
-                                )
-                            }
-                        }
-                        val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
-                        uiStateStore.update { it.copy(images = restoredImages) }
-                        imported
-                    }
-                }
-                val message = buildString {
-                    append("已恢复 ")
-                    append(result.imported)
-                    append(" 张图片")
-                    if (result.duplicates > 0) {
-                        append("；跳过重复 ")
-                        append(result.duplicates)
-                        append(" 张")
-                    }
-                    if (result.failed > 0) {
-                        append("；失败 ")
-                        append(result.failed)
-                        append(" 张")
-                    }
-                    if (result.missingModelIds.isNotEmpty()) {
-                        append("；")
-                        append(result.missingModelIds.size)
-                        append(" 个原模型当前未安装，历史仍已保留")
-                    }
-                }
-                uiStateStore.update {
-                    it.copy(
-                        imageLibraryBackup = ImageLibraryBackupState(message = message),
-                        statusMessage = message
-                    )
-                }
-            } catch (error: CancellationException) {
-                withContext(NonCancellable + Dispatchers.IO) {
-                    val restoredImages = chatSessionStore.loadImages().sortedImagesForLibrary()
-                    uiStateStore.update {
-                        it.copy(
-                            images = restoredImages,
-                            imageLibraryBackup = ImageLibraryBackupState(
-                                message = "已取消恢复；已完成提交的图片仍会保留"
-                            )
-                        )
-                    }
-                }
-                throw error
-            } catch (error: Throwable) {
-                val message = error.imageLibraryBackupFailureMessage()
-                uiStateStore.update {
-                    it.copy(
-                        imageLibraryBackup = ImageLibraryBackupState(message = message, failed = true),
-                        statusMessage = message
-                    )
-                }
-            }
-        }
-        if (!started) {
-            showStatus("图片库备份任务正在进行")
-        }
+        importImageLibraryBackupFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            application = getApplication(),
+            imageLibraryBackup = imageLibraryBackup,
+            chatSessionStore = chatSessionStore,
+            imageAssetWriteMutex = imageAssetWriteMutex,
+            imageLibraryMutationMutex = imageLibraryMutationMutex,
+            awaitStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
+            lifecycleLock = imageLibraryBackupLifecycleLock,
+            sequence = imageLibraryBackupSequence,
+            getActiveJob = { imageLibraryBackupJob },
+            setActiveJob = { imageLibraryBackupJob = it },
+            showStatus = ::showStatus,
+            uriString = uriString
+        )
     }
 
     fun cancelImageLibraryBackup() {
-        synchronized(imageLibraryBackupLifecycleLock) { imageLibraryBackupJob }?.cancel()
+        cancelImageLibraryBackupFor(
+            lifecycleLock = imageLibraryBackupLifecycleLock,
+            getActiveJob = { imageLibraryBackupJob }
+        )
     }
 
     fun importLocalImageModel(uri: Uri) {
@@ -8253,12 +8039,6 @@ class MainViewModel @JvmOverloads constructor(
         modelMode = modelMode,
         modelId = modelId
     )
-
-    private fun Throwable.imageLibraryBackupFailureMessage(): String = when (this) {
-        is ImageLibraryBackupFormatException ->
-            "备份文件格式无效：${message ?: "清单或文件校验失败"}"
-        else -> "图片库备份失败：${message ?: "未知错误"}"
-    }
 
     /** Secret-free identity for the exact Responses chat endpoint and model configuration. */
     private fun attachContextAssemblyTrace(

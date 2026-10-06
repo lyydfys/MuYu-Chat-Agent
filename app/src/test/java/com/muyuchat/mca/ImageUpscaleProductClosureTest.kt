@@ -96,7 +96,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetDeletionOperations.kt"),
             "fun clearImageLibraryOperation("
         )
-        val exportImages = functionBody(viewModel, "fun exportImageLibraryBackup(")
+        val backupOperationsSource = sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryBackupOperations.kt")
+        val exportImages = functionBody(backupOperationsSource, "internal fun exportImageLibraryBackupFor(")
         val attachFile = functionBody(viewModel, "fun attachFile(")
         val importImage = functionBody(viewModel, "private suspend fun importImageAsset(")
         val atomicImport = functionBody(
@@ -126,8 +127,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"),
             "suspend fun createLocalGeneratedImageAsset("
         )
-        val importBackup = functionBody(viewModel, "fun importImageLibraryBackup(")
-        val startBackup = functionBody(viewModel, "private fun startImageLibraryBackupJob(")
+        val importBackup = functionBody(backupOperationsSource, "internal fun importImageLibraryBackupFor(")
+        val startBackup = functionBody(backupOperationsSource, "internal fun startImageLibraryBackupJobFor(")
         // R3/C3-S15: the two lease helpers moved verbatim to ImageGenerationOwner.kt; the ordering
         // and identity-check contracts are unchanged -- they are read where the helpers now live,
         // with the call spelling updated to the parameterized form (defer -> ...Into(store, ...)).
