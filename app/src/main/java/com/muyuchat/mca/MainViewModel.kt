@@ -83,11 +83,8 @@ import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.ContextCompressionSettings
 import com.muyuchat.core.engine.ContextCompressionThreshold
 import com.muyuchat.core.engine.ContextCompressionTrigger
-import com.muyuchat.core.engine.ContextSummarizationService
 import com.muyuchat.core.engine.ContextWindowAdmission
 import com.muyuchat.mca.presentation.ChatContextSnapshot
-import com.muyuchat.core.engine.ContextSummaryModel
-import com.muyuchat.core.engine.ContextSummarySource
 import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.AuthorizedPendingSignatureVerification
 import com.muyuchat.core.engine.CanonicalParameterSet
@@ -95,7 +92,6 @@ import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LoadParams
-import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
 import com.muyuchat.core.engine.LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
@@ -116,7 +112,6 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.QairtExecutionVerificationStore
 import com.muyuchat.core.engine.localContextWindowAdmission
-import com.muyuchat.core.engine.estimateLocalPromptTokens
 import com.muyuchat.core.engine.qairtRuntimeIdentityFor
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
@@ -370,8 +365,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val LOCAL_API_FOREGROUND_READY_ATTEMPTS = 2
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
-        private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
-        private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
         internal const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
@@ -516,7 +509,6 @@ class MainViewModel @JvmOverloads constructor(
     )
     private val manualContextCompressionRequests: ContextCompressionRequestStore
         get() = container.manualContextCompressionRequests
-    private val contextSummarizationService = ContextSummarizationService()
     private val localImageWorkerClient: LocalImageWorkerClient
         get() = container.localImageWorkerClient
     private val deviceProfileReader = container.deviceProfileReader
@@ -925,9 +917,8 @@ class MainViewModel @JvmOverloads constructor(
             webSearchConfig = initialWebSearchConfig,
             webSearchDiagnostics = initialWebSearchDiagnostics,
             persistentPrefixCacheEnabled = initialPersistentPrefixCacheEnabled,
-            contextCompressionThresholdPercent = loadContextCompressionThreshold().percent,
-            contextSummaryModelSelection = contextCompressionPreferences
-                .getString(CONTEXT_SUMMARY_MODEL_KEY, "current") ?: "current",
+            contextCompressionThresholdPercent = ContextCompressionCoordinator.loadThreshold(contextCompressionPreferences).percent,
+            contextSummaryModelSelection = ContextCompressionCoordinator.loadSummaryModelSelection(contextCompressionPreferences),
             appUpdate = initialAppUpdateState
         )
     )
@@ -1167,6 +1158,25 @@ class MainViewModel @JvmOverloads constructor(
         idempotencyJournalLock = localApiIdempotencyJournalLock,
         application = getApplication(),
         scope = viewModelScope
+    )
+
+    private val contextCompressionCoordinator = ContextCompressionCoordinator(
+        store = uiStateStore,
+        engine = engine,
+        cloudChatProvider = cloudChatProvider,
+        modelGenerationProfileStore = modelGenerationProfileStore,
+        hasActiveImageRequest = { localImageGenerationCoordinator.activeRequestId() != null },
+        manualContextCompressionRequests = manualContextCompressionRequests,
+        preferences = contextCompressionPreferences,
+        chatRuns = container.chatRuns,
+        getActiveRuntimeIdentity = { activeRuntimeIdentity },
+        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+        persistChatSessions = { persistChatSessions() },
+        showStatus = ::showStatus,
+        onLocalInferenceStarted = {
+            localConversationContextNeedsInvalidation = true
+            localConversationContextInvalidationSequence.incrementAndGet()
+        }
     )
 
     init {
@@ -1419,242 +1429,21 @@ class MainViewModel @JvmOverloads constructor(
      * request is deliberately consumed by startGeneration so the stored
      * conversation is never rewritten behind the user's back.
      */
-    fun requestContextCompression() {
-        val state = _uiState.value
-        if (!state.canWriteToActiveAssistantSession()) return
-        if (state.isGenerating) {
-            showStatus("当前正在生成，请完成或停止后再压缩上下文。")
-            return
-        }
-        if (state.messages.isEmpty()) {
-            showStatus("当前对话还没有可压缩的内容。")
-            return
-        }
-        val sessionId = state.activeChatSessionId
-        if (sessionId.isNullOrBlank()) {
-            showStatus("当前对话尚未保存，暂时无法安排压缩。")
-            return
-        }
-        manualContextCompressionRequests.request(sessionId)
-        uiStateStore.update {
-            it.copy(
-                contextCompressionPending = true,
-                statusMessage = "已安排压缩；下一次发送时会保留角色设定和最近消息。"
-            )
-        }
-    }
+    fun requestContextCompression() = contextCompressionCoordinator.requestContextCompression()
 
-    fun toggleMessagePinned(messageId: String) {
-        val owner = _uiState.value
-        val sessionId = owner.activeChatSessionId ?: return
-        if (owner.isGenerating || !owner.canWriteToActiveAssistantSession()) return
-        var changed = false
-        uiStateStore.update { state ->
-            if (state.isGenerating || state.activeChatSessionId != sessionId ||
-                !state.canWriteToActiveAssistantSession() ||
-                state.messages.none { it.id == messageId }
-            ) return@update state
-            val messages = state.messages.map { message ->
-                if (message.id == messageId) message.copy(pinned = !message.pinned) else message
-            }
-            changed = true
-            state.copy(
-                messages = messages,
-                chatSessions = state.chatSessions.upsertSession(sessionId, messages).map { session ->
-                    if (session.id != sessionId) session else session.copy(
-                        contextSummaries = revokeContextSummaries(session.contextSummaries)
-                    )
-                }
-            )
-        }
-        if (changed) {
-            markLocalConversationContextInvalid()
-            persistChatSessions()
-        }
-    }
+    fun toggleMessagePinned(messageId: String) = contextCompressionCoordinator.toggleMessagePinned(messageId)
 
-    fun undoContextSummary() {
-        val state = _uiState.value
-        if (state.isGenerating || !state.canWriteToActiveAssistantSession()) return
-        val sessionId = state.activeChatSessionId ?: return
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val summaryScope = (assistantSnapshot?.applyTo(state.params) ?: state.params).systemPrompt +
-            "\n" + assistantSnapshot?.toJsonString().orEmpty()
-        uiStateStore.update { current ->
-            current.copy(
-                chatSessions = current.chatSessions.map { session ->
-                    if (session.id != sessionId) session else session.copy(
-                        contextSummaries = restorePreviousContextSummaryRevision(
-                            session.contextSummaries, session.messages, summaryScope
-                        )
-                    )
-                },
-                statusMessage = "已撤销当前摘要并恢复可用的上一版本；原始消息保留。"
-            )
-        }
-        markLocalConversationContextInvalid()
-        persistChatSessions()
-    }
+    fun undoContextSummary() = contextCompressionCoordinator.undoContextSummary()
 
-    fun contextSummaryEvidenceForQuery(query: String): List<com.muyuchat.feature.chat.ContextSummaryEvidenceUiItem> {
-        val state = _uiState.value
-        val session = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
-            ?: return emptyList()
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val scope = (assistantSnapshot?.applyTo(state.params) ?: state.params).systemPrompt +
-            "\n" + assistantSnapshot?.toJsonString().orEmpty()
-        return ContextSummarySourceIndex.fromActiveRevision(
-            session.contextSummaries, session.messages, scope
-        ).search(query).map { hit ->
-            com.muyuchat.feature.chat.ContextSummaryEvidenceUiItem(
-                kind = hit.kind.name,
-                text = hit.text,
-                sourceMessageId = hit.sourceMessageId,
-                sourceOffset = hit.sourceOffset
-            )
-        }
-    }
+    fun contextSummaryEvidenceForQuery(query: String): List<com.muyuchat.feature.chat.ContextSummaryEvidenceUiItem> =
+        contextCompressionCoordinator.contextSummaryEvidenceForQuery(query)
 
     /** Persists one of the supported automatic thresholds and updates the UI. */
-    fun setContextCompressionThreshold(percent: Int) {
-        val threshold = ContextCompressionThreshold.values()
-            .firstOrNull { it.percent == percent }
-            ?: ContextCompressionThreshold.EIGHTY
-        contextCompressionPreferences.edit()
-            .putInt(CONTEXT_COMPRESSION_THRESHOLD_KEY, threshold.percent)
-            .apply()
-        uiStateStore.update {
-            it.copy(
-                contextCompressionThresholdPercent = threshold.percent,
-                statusMessage = "自动压缩阈值已设为 ${threshold.percent}%。"
-            )
-        }
-    }
+    fun setContextCompressionThreshold(percent: Int) =
+        contextCompressionCoordinator.setContextCompressionThreshold(percent)
 
-    private fun loadContextCompressionThreshold(): ContextCompressionThreshold =
-        ContextCompressionThreshold.values()
-            .firstOrNull {
-                it.percent == contextCompressionPreferences.getInt(
-                    CONTEXT_COMPRESSION_THRESHOLD_KEY,
-                    ContextCompressionThreshold.EIGHTY.percent
-                )
-            }
-            ?: ContextCompressionThreshold.EIGHTY
-
-    fun setContextSummaryModel(selection: String) {
-        val state = _uiState.value
-        if (state.isGenerating) return
-        val valid = selection in setOf("current", "deterministic", "local") ||
-            state.cloudModels.any {
-                selection == "cloud:${it.id}" && it.kind == CloudModelKind.CHAT && it.configured
-            }
-        if (!valid) return
-        contextCompressionPreferences.edit().putString(CONTEXT_SUMMARY_MODEL_KEY, selection).apply()
-        uiStateStore.update { it.copy(contextSummaryModelSelection = selection) }
-    }
-
-    private suspend fun summarizeContextForGeneration(
-        request: ChatRequest,
-        settings: ContextCompressionSettings,
-        trigger: ContextCompressionTrigger,
-        initialState: MainUiState,
-        effectiveBackend: ChatBackend,
-        cloudModelIdOverride: String?,
-        generationRunId: Long,
-        useModel: Boolean
-    ): com.muyuchat.core.engine.ContextCompressionResult {
-        fun ownerCurrent(): Boolean {
-            val current = _uiState.value
-            val expectedSession = initialState.chatSessions.firstOrNull {
-                it.id == initialState.activeChatSessionId
-            }
-            val actualSession = current.chatSessions.firstOrNull {
-                it.id == initialState.activeChatSessionId
-            }
-            return chatRuns.matches(generationRunId) &&
-                current.activeChatSessionId == initialState.activeChatSessionId &&
-                current.messages == initialState.messages &&
-                expectedSession != null && actualSession != null &&
-                !actualSession.mixedAssistantHistory &&
-                actualSession.assistantId == expectedSession.assistantId &&
-                actualSession.assistantSnapshot == expectedSession.assistantSnapshot
-        }
-        val selection = initialState.contextSummaryModelSelection
-        val local = selection == "local" || selection == "current" && effectiveBackend == ChatBackend.LOCAL
-        val localIdentity = activeRuntimeIdentity
-        val cloudId = if (selection.startsWith("cloud:")) selection.removePrefix("cloud:")
-            else cloudModelIdOverride ?: initialState.selectedCloudChatModelId
-        val cloudConfig = initialState.cloudModels.firstOrNull {
-            it.id == cloudId && it.kind == CloudModelKind.CHAT && it.configured
-        }?.toChatConfig()?.normalized()
-        val model = when {
-            !useModel || selection == "deterministic" -> null
-            local && localIdentity != null && engine.stats.value.loaded -> ContextSummaryModel(
-                modelId = initialState.loadedModelId ?: localIdentity.identityHash,
-                runtimeIdentity = localIdentity.identityHash,
-                params = engine.activeExecutionProfile()?.let { mergedExecutionProfile(request.params, it) }
-                    ?: request.params
-            )
-            !local && cloudConfig != null && cloudId != null -> ContextSummaryModel(
-                modelId = cloudId,
-                runtimeIdentity = "cloud:" + contextSummaryDigest(JSONArray(listOf(
-                    cloudId, cloudConfig.baseUrl.trimEnd('/'), cloudConfig.apiFormat.name, cloudConfig.chatModel
-                )).toString()),
-                params = modelGenerationProfileStore.load(ModelGenerationProfileKey.cloud(cloudId), request.params),
-                source = ContextSummarySource.CLOUD_MODEL
-            )
-            else -> null
-        }
-        return contextSummarizationService.compress(
-            request = request,
-            settings = settings,
-            trigger = trigger,
-            model = model,
-            isOwnerCurrent = ::ownerCurrent,
-            infer = { summaryRequest ->
-                if (!ownerCurrent()) throw CancellationException("Summary owner changed.")
-                uiStateStore.update { current ->
-                    if (ownerCurrent()) current.copy(statusMessage = "正在整理上下文摘要...") else current
-                }
-                if (local) {
-                    check(localImageGenerationCoordinator.activeRequestId() == null) {
-                        "Local image generation owns the runtime resources."
-                    }
-                    withContext(Dispatchers.IO) {
-                        val lease = engine.acquireExclusiveLifecycleLease(stopActiveGeneration = false)
-                        var inferenceStarted = false
-                        try {
-                            if (!ownerCurrent() || activeRuntimeIdentity?.identityHash != localIdentity?.identityHash) {
-                                throw CancellationException("Summary model or owner changed.")
-                            }
-                            inferenceStarted = true
-                            collectContextSummary(
-                                engine.streamChat(
-                                    summaryRequest,
-                                    LocalChatExecutionContext(
-                                        requestId = "context-summary-$generationRunId-${UUID.randomUUID()}",
-                                        lifecycleLease = lease,
-                                        includeDeviceClockContext = false
-                                    )
-                                ),
-                                ::ownerCurrent
-                            )
-                        } finally {
-                            if (inferenceStarted) {
-                                localConversationContextNeedsInvalidation = true
-                                localConversationContextInvalidationSequence.incrementAndGet()
-                            }
-                            withContext(NonCancellable) { lease.release() }
-                        }
-                    }
-                } else {
-                    collectContextSummary(cloudChatProvider.streamChat(checkNotNull(cloudConfig), summaryRequest), ::ownerCurrent)
-                }
-            }
-        )
-    }
+    fun setContextSummaryModel(selection: String) =
+        contextCompressionCoordinator.setContextSummaryModel(selection)
 
     fun attachFile(uriString: String) {
         attachFileFor(
@@ -3626,7 +3415,7 @@ class MainViewModel @JvmOverloads constructor(
         val preflightCompression = compressChatRequestContext(
             request = preflightRequest,
             settings = ContextCompressionSettings(
-                threshold = loadContextCompressionThreshold(),
+                threshold = contextCompressionCoordinator.loadContextCompressionThreshold(),
                 keepRecentMessages = 8
             ),
             // Force a compression attempt when the first safety decision is a
@@ -3705,7 +3494,7 @@ class MainViewModel @JvmOverloads constructor(
                 activeChatSessionId = sessionId,
                 chatSessions = sessionsToPersist,
                 isGenerating = true,
-                promptContextUsage = promptContextUsageFor(
+                promptContextUsage = contextCompressionCoordinator.promptContextUsageFor(
                     plan = rebuiltPreflightContext,
                     admission = admission,
                     params = conversationParams
@@ -4986,12 +4775,12 @@ class MainViewModel @JvmOverloads constructor(
             recordWebSearchCitationAuditRef = ::recordWebSearchCitationAudit,
             attachWebSearchEvidenceToPendingAssistantRef = ::attachWebSearchEvidenceToPendingAssistant,
             attachContextAssemblyTraceRef = ::attachContextAssemblyTrace,
-            promptContextUsageForRef = ::promptContextUsageFor,
+            promptContextUsageForRef = contextCompressionCoordinator::promptContextUsageFor,
             appendWebSearchDiagnosticRef = ::appendWebSearchDiagnostic,
             recordCompletedCharacterMemoryTurnRef = ::recordCompletedCharacterMemoryTurn,
-            summarizeContextForGenerationRef = ::summarizeContextForGeneration,
+            summarizeContextForGenerationRef = contextCompressionCoordinator::summarizeContextForGeneration,
             ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
-            loadContextCompressionThresholdRef = ::loadContextCompressionThreshold,
+            loadContextCompressionThresholdRef = contextCompressionCoordinator::loadContextCompressionThreshold,
             handleAssistantImageToolCallsRef = assistantImageContinuationCoordinator::handleAssistantImageToolCalls,
             finishAssistantImageContinuationRef = assistantImageContinuationCoordinator::finishAssistantImageContinuation,
         )
@@ -5084,20 +4873,6 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    /**
-     * Drains only the output owned by the UI run that process backgrounding invalidated. A newer
-     * foreground request advances the sequence and leaves its buffer untouched.
-     */
-
-    private fun GenerateEvent.Error.isConfigurationActionError(): Boolean = code in setOf(
-        "model_reload_required",
-        "model_reload_required_authorized",
-        "execution_override_forbidden",
-        "model_behavior_override_forbidden",
-        "active_profile_drift",
-        "model_mismatch"
-    )
-
 
     private fun refreshPersistentPrefixCacheSummary() {
         viewModelScope.launch(Dispatchers.IO) {
@@ -5146,28 +4921,6 @@ class MainViewModel @JvmOverloads constructor(
             }
             .isSuccess
     }
-
-    private fun promptContextUsageFor(
-        plan: ChatRuntimeContextPlan,
-        admission: com.muyuchat.core.engine.ContextWindowAdmission,
-        params: GenerationParams
-    ): PromptContextUsage {
-        val historyRetention = admission.messageRetention.filter { it.role != Role.SYSTEM }
-        return PromptContextUsage(
-            retainedMessageCount = historyRetention.count { it.retained },
-            trimmedMessageCount = historyRetention.count { !it.retained },
-            roleTokens = estimateLocalPromptTokens(params.systemPrompt),
-            worldBookTokens = plan.worldBook.estimatedTokens.coerceAtLeast(0),
-            knowledgeTokens = plan.knowledge.estimatedTokens.coerceAtLeast(0),
-            totalEstimatedTokens = admission.admittedUsage.estimatedTokens.coerceAtLeast(0L),
-            messageRetention = historyRetention,
-            selectedWorldBookEntryIds = plan.worldBook.selectedEntryIds,
-            skippedWorldBookEntryIds = plan.worldBook.skippedEntryIds,
-            selectedKnowledgeChunkIds = plan.knowledge.chunks.map { it.id },
-            skippedKnowledgeChunkIds = plan.knowledge.skippedChunkIds
-        )
-    }
-
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
     private fun persistChatSessions(
