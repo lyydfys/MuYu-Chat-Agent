@@ -792,9 +792,12 @@ class MainViewModel @JvmOverloads constructor(
             container.runtimeAdmission.imageLibraryBackupJob = value
         }
     private val imageLibraryBackupCoordinator = ImageLibraryBackupCoordinator()
-    private var adaptiveTuningJob: Job? = null
-    private val adaptiveTuningPauseRequested = AtomicBoolean(false)
-    private val adaptiveTuningCancelRequested = AtomicBoolean(false)
+    private val agentTuningCoordinator = AgentTuningCoordinator()
+    private var adaptiveTuningJob: Job?
+        get() = agentTuningCoordinator.adaptiveTuningJob
+        set(value) {
+            agentTuningCoordinator.adaptiveTuningJob = value
+        }
     // R3/C2：运行期准入态迁入容器 holder（同实例共享，读写语义与调用点不变）。
     private var activeRuntimeIdentity: ModelRuntimeIdentity?
         get() = container.runtimeAdmission.activeRuntimeIdentity
@@ -826,7 +829,11 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.activeProfileTransactionId = value
         }
-    private var activeTuningJobId: String? = null
+    private var activeTuningJobId: String?
+        get() = agentTuningCoordinator.activeTuningJobId
+        set(value) {
+            agentTuningCoordinator.activeTuningJobId = value
+        }
     private var activeModelForRuntimeProfile: ModelManifest?
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
         set(value) {
@@ -1234,19 +1241,19 @@ class MainViewModel @JvmOverloads constructor(
             },
             pauseTuningJobDelegate = { jobId, idempotencyKey ->
                 runTuningControl(jobId, "pause") {
-                    adaptiveTuningPauseRequested.set(true)
+                    agentTuningCoordinator.adaptiveTuningPauseRequested.set(true)
                     runtimeProfileStore.pauseTuningJob(jobId)
                 }
             },
             resumeTuningJobDelegate = { jobId, idempotencyKey ->
                 runTuningControl(jobId, "resume") {
-                    adaptiveTuningPauseRequested.set(false)
+                    agentTuningCoordinator.adaptiveTuningPauseRequested.set(false)
                     runtimeProfileStore.resumeTuningJob(jobId)
                 }
             },
             cancelTuningJobDelegate = { jobId, idempotencyKey ->
                 runTuningControl(jobId, "cancel") {
-                    adaptiveTuningCancelRequested.set(true)
+                    agentTuningCoordinator.adaptiveTuningCancelRequested.set(true)
                     cancelPersistedTuningJob(jobId)
                 }
             },
@@ -5258,135 +5265,50 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    fun scanAgent() {
-        viewModelScope.launch(Dispatchers.IO) {
-            busy("Agent 正在扫描设备和模型...")
-            runCatching {
-                val device = currentDeviceProfile()
-                val recommendation = buildRecommendation(_uiState.value.preference, device)
-                activeRuntimeIdentity?.let { identity ->
-                    val loaded = _uiState.value.models.firstOrNull { it.id == _uiState.value.loadedModelId }
-                    if (loaded != null) {
-                        activeAdaptiveRecommendation = tuningOwner.buildAdaptiveTuningRecommendation(
-                            loaded,
-                            identity,
-                            device,
-                            tuningOwner.modelTuningCapabilities(
-                                loaded,
-                                identity,
-                                loaded.runtime == ChatModelRuntime.GENIEX_QAIRT
-                            )
-                        )
-                    }
-                }
-                agentLogger.append(device, recommendation)
-                uiStateStore.update {
-                    it.copy(
-                        deviceProfile = device,
-                        agentRecommendation = recommendation,
-                        recommendedRemoteModels = sortRecommendedModels(
-                            modelScopeClient.userFacingRecommendedModels(),
-                            device
-                        ),
-                        agentLogs = agentLogger.recent(),
-                        busy = false,
-                        statusMessage = recommendation.explanation
-                    )
-                }
-            }.onFailure { error ->
-                fail("Agent 体检失败：${error.message}")
-            }
-        }
-    }
+    fun scanAgent() = scanAgentFor(
+        store = uiStateStore,
+        scope = viewModelScope,
+        tuningOwner = tuningOwner,
+        modelScopeClient = modelScopeClient,
+        agentLogger = agentLogger,
+        currentDeviceProfile = ::currentDeviceProfile,
+        buildRecommendation = ::buildRecommendation,
+        activeRuntimeIdentity = { activeRuntimeIdentity },
+        setActiveAdaptiveRecommendation = { activeAdaptiveRecommendation = it },
+        busy = ::busy,
+        fail = ::fail
+    )
 
-    fun applyAgentRecommendation() {
-        val state = _uiState.value
-        val recommendation = state.agentRecommendation ?: return
-        val previousParams = state.params
-        val generationRecommendation = activeAdaptiveRecommendation?.generationRecommendation
-        val updatedParams = generationRecommendation?.applyTo(state.params) ?: state.params.copy(
-            nPredict = recommendation.tuningPlan.nPredict,
-            temperature = recommendation.tuningPlan.temperature,
-            topK = recommendation.tuningPlan.topK,
-            topP = recommendation.tuningPlan.topP,
-            minP = recommendation.tuningPlan.minP,
-            repeatPenalty = recommendation.tuningPlan.repeatPenalty,
-            presencePenalty = recommendation.tuningPlan.presencePenalty,
-            frequencyPenalty = recommendation.tuningPlan.frequencyPenalty,
-            seed = recommendation.tuningPlan.seed ?: state.params.seed
-        )
-        val device = state.deviceProfile ?: currentDeviceProfile()
-        agentLogger.append(
-            device = device,
-            recommendation = recommendation,
-            benchmark = state.benchmark,
-            appliedPlan = recommendation.tuningPlan,
-            userConfirmed = true
-        )
-        GenerationPreferences.persistGenerationParams(getApplication(), updatedParams)
-        persistModelGenerationParams(state, updatedParams)
-        uiStateStore.update {
-            it.copy(
-                params = updatedParams,
-                rollbackParams = previousParams,
-                agentLogs = agentLogger.recent(),
-                statusMessage = "已应用助手生成建议；模型加载、线程、模板和 native 参数未被静默修改。"
-            )
-        }
-    }
+    fun applyAgentRecommendation() = applyAgentRecommendationFor(
+        store = uiStateStore,
+        application = getApplication(),
+        agentLogger = agentLogger,
+        activeAdaptiveRecommendation = activeAdaptiveRecommendation,
+        currentDeviceProfile = ::currentDeviceProfile,
+        persistModelGenerationParams = ::persistModelGenerationParams
+    )
 
-    fun rollbackAgentParams() {
-        val state = _uiState.value
-        val previous = state.rollbackParams ?: return
-        GenerationPreferences.persistGenerationParams(getApplication(), previous)
-        persistModelGenerationParams(state, previous)
-        uiStateStore.update {
-            it.copy(
-                params = previous,
-                rollbackParams = null,
-                statusMessage = "已回退到上一次助手生成参数；模型执行 profile 保持不变。"
-            )
-        }
-    }
+    fun rollbackAgentParams() = rollbackAgentParamsFor(
+        store = uiStateStore,
+        application = getApplication(),
+        persistModelGenerationParams = ::persistModelGenerationParams
+    )
 
-    fun loadAgentRecommendedModel() {
-        val recommendation = _uiState.value.agentRecommendation?.recommended
-        val modelId = recommendation?.model?.id
-        val model = _uiState.value.models.firstOrNull { it.id == modelId }
-        if (model != null) {
-            loadModel(model)
-        } else {
-            uiStateStore.update {
-                it.copy(
-                    statusMessage = "推荐模型尚未在本机。请先到模型页下载或导入，再由 Agent 加载。"
-                )
-            }
-        }
-    }
+    fun loadAgentRecommendedModel() = loadAgentRecommendedModelFor(
+        store = uiStateStore,
+        loadModel = ::loadModel
+    )
 
-    fun runAgentBenchmark() {
-        viewModelScope.launch(Dispatchers.IO) {
-            val currentParams = engineApiGenerationParams(engine, _uiState.value)
-            busy("正在按当前参数测速...")
-            runCatching {
-                val device = currentDeviceProfile()
-                val result = benchmarkRunner.runCurrentParamsBenchmark(currentParams)
-                appendBenchmarkHistoryFor(_uiState.value, benchmarkHistoryLogger, device, result, currentParams)
-                uiStateStore.update {
-                    it.copy(
-                        deviceProfile = device,
-                        benchmark = result,
-                        benchmarkHistory = benchmarkHistoryLogger.recent(),
-                        busy = false,
-                        statusMessage = result.error
-                            ?: "当前参数测速完成：decode ${"%.2f".format(result.decodeTps)} token/s，threads=${currentParams.nThreads}"
-                    )
-                }
-            }.onFailure { error ->
-                fail("当前参数测速失败：${error.message}")
-            }
-        }
-    }
+    fun runAgentBenchmark() = runAgentBenchmarkFor(
+        store = uiStateStore,
+        scope = viewModelScope,
+        engine = engine,
+        benchmarkRunner = benchmarkRunner,
+        benchmarkHistoryLogger = benchmarkHistoryLogger,
+        currentDeviceProfile = ::currentDeviceProfile,
+        busy = ::busy,
+        fail = ::fail
+    )
 
     /** Delegates to [runAgentStabilitySmokeFor]. Signature kept verbatim. */
     fun runAgentStabilitySmoke() =
@@ -5408,199 +5330,64 @@ class MainViewModel @JvmOverloads constructor(
             engineSmoke = { params -> runLoopbackEngineStreamSmoke(params) }
         )
 
-    fun startAgentTuning() {
-        tuningOwner.startAgentTuning(AgentDebugMode.Quick)
-    }
+    fun startAgentTuning() =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.QUICK, false, uiStateStore)
 
-    fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) {
-        val debugMode = when (mode) {
-            AgentTuningMode.QUICK -> AgentDebugMode.Quick
-            AgentTuningMode.STANDARD -> AgentDebugMode.Standard
-            AgentTuningMode.DEEP -> AgentDebugMode.Deep
-            AgentTuningMode.POWER_SAVE -> AgentDebugMode.PowerSave
-        }
-        if (mode == AgentTuningMode.POWER_SAVE) {
-            uiStateStore.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
-        }
-        tuningOwner.startAgentTuning(debugMode = debugMode, autoApply = autoApply)
-    }
+    fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, mode, autoApply, uiStateStore)
 
-    fun pauseAgentTuning() {
-        adaptiveTuningPauseRequested.set(true)
-        val jobId = activeTuningJobId
-        if (jobId != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                runCatching { runtimeProfileStore.pauseTuningJob(jobId) }
-                    .onSuccess {
-                        uiStateStore.update { state ->
-                            state.copy(
-                                tuningJobState = AgentTuningJobState.PAUSED,
-                                tuningPhase = "等待用户续跑",
-                                statusMessage = "调优已暂停；不会提交新的候选。"
-                            )
-                        }
-                    }
-            }
-        } else {
-            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.PAUSED, tuningPhase = "等待任务") }
-        }
-    }
+    fun pauseAgentTuning() =
+        agentTuningCoordinator.pauseAgentTuning(runtimeProfileStore, uiStateStore, viewModelScope)
 
-    fun resumeAgentTuning() {
-        adaptiveTuningPauseRequested.set(false)
-        val jobId = activeTuningJobId
-        if (jobId != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                runCatching { runtimeProfileStore.resumeTuningJob(jobId) }
-                    .onSuccess {
-                        uiStateStore.update { state ->
-                            state.copy(
-                                tuningJobState = AgentTuningJobState.RUNNING,
-                                tuningPhase = "继续执行",
-                                statusMessage = "调优已继续。"
-                            )
-                        }
-                    }
-            }
-        } else {
-            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.IDLE) }
-        }
-    }
+    fun resumeAgentTuning() =
+        agentTuningCoordinator.resumeAgentTuning(runtimeProfileStore, uiStateStore, viewModelScope)
 
-    fun cancelAgentTuning() {
-        adaptiveTuningCancelRequested.set(true)
-        val jobId = activeTuningJobId
-        if (jobId != null) {
-            viewModelScope.launch(Dispatchers.IO) {
-                runCatching { cancelPersistedTuningJob(jobId) }
-                    .onSuccess { canceled ->
-                        uiStateStore.update {
-                            it.copy(
-                                tuningJobState = agentJobState(canceled),
-                                tuningPhase = canceled.phase,
-                                statusMessage = if (canceled.state == PersistedTuningJobState.FAILED.name) {
-                                    "调优已取消，稳定 profile 已保留。"
-                                } else {
-                                    "正在取消调优并恢复当前稳定配置…"
-                                }
-                            )
-                        }
-                    }
-            }
-        } else {
-            uiStateStore.update { it.copy(tuningJobState = AgentTuningJobState.IDLE, statusMessage = "当前没有运行中的调优任务。") }
-        }
-    }
+    fun cancelAgentTuning() =
+        agentTuningCoordinator.cancelAgentTuning(::cancelPersistedTuningJob, uiStateStore, viewModelScope)
 
-    fun queryAgentTuningJob() {
-        val identity = activeRuntimeIdentity ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
-                .onSuccess { snapshot ->
-                    val job = snapshot?.activeJob
-                    uiStateStore.update { state ->
-                        state.copy(
-                            tuningJobState = job?.let(::agentJobState) ?: state.tuningJobState,
-                            tuningPhase = job?.phase ?: state.tuningPhase,
-                            statusMessage = job?.let { "调优任务 ${it.jobId.take(8)}：${it.phase}" }
-                                ?: state.statusMessage
-                        )
-                    }
-                }
-        }
-    }
+    fun queryAgentTuningJob() =
+        agentTuningCoordinator.queryAgentTuningJob(runtimeProfileStore, uiStateStore, viewModelScope, activeRuntimeIdentity)
 
-    fun applyPendingAgentProfile() {
-        val identity = activeRuntimeIdentity ?: return
-        if (adaptiveTuningJob?.isActive == true) {
-            showStatus("运行时正在执行其他调优生命周期操作。")
-            return
-        }
-        adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val pending = runCatching { runtimeProfileStore.pendingTransaction(identity.identityHash) }
-                    .getOrNull()
-                if (pending == null) {
-                    showStatus("当前没有可应用的 pending profile。")
-                    return@launch
-                }
-                applyPendingRuntimeTransaction(pending)
-            } finally {
-                activeTuningJobId = null
-                adaptiveTuningJob = null
-            }
-        }
-    }
+    fun applyPendingAgentProfile() =
+        agentTuningCoordinator.applyPendingAgentProfile(
+            runtimeProfileStore = runtimeProfileStore,
+            scope = viewModelScope,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            showStatus = ::showStatus,
+            applyPendingRuntimeTransaction = ::applyPendingRuntimeTransaction
+        )
 
-    fun discardPendingAgentProfile() {
-        val identity = activeRuntimeIdentity ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val pending = runtimeProfileStore.pendingTransaction(identity.identityHash)
-                    ?: error("待应用配置已不存在")
-                val transactionId = pending.journal.transactionId
-                val recovery = runtimeProfileStore.rejectCandidate(
-                    transactionId = transactionId,
-                    failureStage = "USER_DISCARDED",
-                    failureCode = "DISCARDED",
-                    failureSummary = "用户撤销了尚未应用的运行参数修改。"
-                )
-                runtimeProfileStore.completeRecovery(
-                    transactionId = transactionId,
-                    restoredProfileId = recovery.rollbackProfileId
-                )
-                if (pendingProfileTransactionId == transactionId) {
-                    pendingProfileTransactionId = null
-                }
-                val restoredProfile = engine.activeExecutionProfile()
-                    ?: runtimeProfileStore.currentRuntimeState(identity.identityHash)?.activeExecutionProfile
-                    ?: error("稳定运行配置恢复记录缺失")
-                val restored = mergedExecutionProfile(_uiState.value.params, restoredProfile)
-                GenerationPreferences.persistGenerationParams(getApplication(), restored)
-                uiStateStore.update {
-                    it.copy(
-                        params = restored,
-                        pendingProfile = null,
-                        reloadRequired = false,
-                        tuningJobState = AgentTuningJobState.IDLE,
-                        tuningPhase = null,
-                        statusMessage = "已撤销未应用的运行参数修改。"
-                    )
-                }
-            }.onFailure { error ->
-                uiStateStore.update {
-                    it.copy(statusMessage = "撤销修改失败：${error.message ?: "未知错误"}")
-                }
-            }
-        }
-    }
+    fun discardPendingAgentProfile() =
+        agentTuningCoordinator.discardPendingAgentProfile(
+            runtimeProfileStore = runtimeProfileStore,
+            store = uiStateStore,
+            scope = viewModelScope,
+            application = getApplication(),
+            engine = engine,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            getPendingProfileTransactionId = { pendingProfileTransactionId },
+            setPendingProfileTransactionId = { pendingProfileTransactionId = it }
+        )
 
-    fun rollbackAgentProfile() {
-        val identity = activeRuntimeIdentity ?: return
-        val model = activeModelForRuntimeProfile ?: return
-        viewModelScope.launch(Dispatchers.IO) {
-            rollbackCommittedRuntimeProfile(identity, model)
-        }
-    }
+    fun rollbackAgentProfile() =
+        agentTuningCoordinator.rollbackAgentProfile(
+            scope = viewModelScope,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            activeModelForRuntimeProfile = activeModelForRuntimeProfile,
+            rollbackCommittedRuntimeProfile = ::rollbackCommittedRuntimeProfile
+        )
 
-    fun runAgentQuickDebug() {
-        tuningOwner.startAgentTuning(AgentDebugMode.Quick)
-    }
+    fun runAgentQuickDebug() =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.QUICK, false, uiStateStore)
 
-    fun runAgentStandardDebug() {
-        tuningOwner.startAgentTuning(AgentDebugMode.Standard)
-    }
+    fun runAgentStandardDebug() =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.STANDARD, false, uiStateStore)
 
-    fun runAgentDeepDebug() {
-        tuningOwner.startAgentTuning(AgentDebugMode.Deep)
-    }
+    fun runAgentDeepDebug() =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.DEEP, false, uiStateStore)
 
-    fun runAgentPowerDebug() {
-        uiStateStore.update { it.copy(preference = it.preference.copy(mode = PerformanceMode.PowerSave)) }
-        tuningOwner.startAgentTuning(AgentDebugMode.PowerSave)
-    }
-
-
+    fun runAgentPowerDebug() =
+        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.POWER_SAVE, false, uiStateStore)
 
     private val runtimeProfileTransactionPort: RuntimeProfileTransactionPort =
         container.createRuntimeProfileTransactionPort(
@@ -5610,25 +5397,20 @@ class MainViewModel @JvmOverloads constructor(
             showStatusAction = ::showStatus
         )
 
-    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) {
+    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) =
         applyPendingRuntimeTransaction(port = runtimeProfileTransactionPort, pending = pending)
-    }
 
     private suspend fun rollbackCommittedRuntimeProfile(
         identity: ModelRuntimeIdentity,
         model: ModelManifest
-    ) {
-        rollbackCommittedRuntimeProfile(port = runtimeProfileTransactionPort, identity = identity, model = model)
-    }
+    ) = rollbackCommittedRuntimeProfile(port = runtimeProfileTransactionPort, identity = identity, model = model)
 
-
-    fun showAgentDebugExplanation() {
+    fun showAgentDebugExplanation() =
         uiStateStore.update {
             it.copy(
                 statusMessage = "智能调试由规则包执行参数搜索，当前已加载模型只用于解释调试结果。"
             )
         }
-    }
 
     fun toggleApi(enabled: Boolean) {
         val restEnabled = if (enabled) _uiState.value.restEnabled else false
@@ -5912,8 +5694,8 @@ class MainViewModel @JvmOverloads constructor(
             localApiExclusiveLifecycleConflictRef = ::localApiExclusiveLifecycleConflict,
             assignActiveTuningJobIdRef = { activeTuningJobId = it },
             tuningJobPublicJsonRef = ::tuningJobPublicJson,
-            setTuningCancelRequestedRef = { adaptiveTuningCancelRequested.set(it) },
-            setTuningPauseRequestedRef = { adaptiveTuningPauseRequested.set(it) },
+            setTuningCancelRequestedRef = { agentTuningCoordinator.adaptiveTuningCancelRequested.set(it) },
+            setTuningPauseRequestedRef = { agentTuningCoordinator.adaptiveTuningPauseRequested.set(it) },
             launchTuningApplyRef = { pending ->
                 adaptiveTuningJob = viewModelScope.launch(Dispatchers.IO) {
                     try {
@@ -5921,8 +5703,8 @@ class MainViewModel @JvmOverloads constructor(
                     } finally {
                         activeTuningJobId = null
                         adaptiveTuningJob = null
-                        adaptiveTuningCancelRequested.set(false)
-                        adaptiveTuningPauseRequested.set(false)
+                        agentTuningCoordinator.adaptiveTuningCancelRequested.set(false)
+                        agentTuningCoordinator.adaptiveTuningPauseRequested.set(false)
                     }
                 }
             },
@@ -6765,29 +6547,6 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-
-
-
-
-
-
-
-
-
-    private fun sortRecommendedModels(
-        models: List<ModelScopeRecommendedModel>,
-        device: DeviceProfile
-    ): List<ModelScopeRecommendedModel> {
-        return models.filter { it.visibleInRecommendations }.sortedWith(
-            compareBy<ModelScopeRecommendedModel> { model ->
-                model.group.ordinal
-            }.thenBy { model ->
-                model.priority
-            }.thenBy { model ->
-                model.id
-            }
-        )
-    }
 
     private fun buildRecommendation(
         preference: UserPreference,
