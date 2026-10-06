@@ -37,6 +37,8 @@ import com.muyuchat.mca.ImagePromptTranslationPortAdapter
 import com.muyuchat.mca.OfflinePromptTranslationService
 import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
+import com.muyuchat.mca.ImageGenerationHostAdapter
+import com.muyuchat.mca.CloudImageProvider
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
 import java.io.File
@@ -195,6 +197,8 @@ internal class McaAppContainer(private val application: Application) {
     val imageLibraryMutationMutex = Mutex()
 
     val imageAssetWriteMutex = Mutex()
+
+    val cloudImageProvider = CloudImageProvider()
 
     val localImageWorkerClient = LocalImageWorkerClient(application)
 
@@ -505,6 +509,43 @@ internal class McaAppContainer(private val application: Application) {
             assetDirectory = imageAssetDirectory,
             application = application
         )
+
+    /** R3/C2-S3：生图准入/执行唯一 owner 工厂（装配具名 ImageGenerationHostAdapter，真实依赖注入）。 */
+    fun createImageGenerationOwner(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        engine: McaInferenceService,
+        imageLibraryStartupReconciliationProvider: () -> ImageLibraryStartupReconciliation,
+        imageLibraryCommitPortProvider: () -> ImageLibraryCommitPort,
+        chatImageRequestPortProvider: () -> ChatImageRequestPort,
+        imagePromptTranslationPortProvider: () -> ImagePromptTranslationPort,
+        completeAssistantImageToolTurnForJob: (String) -> Unit
+    ): ImageGenerationOwner = ImageGenerationOwner(
+        host = ImageGenerationHostAdapter(
+            store = store,
+            scopeRef = scope,
+            applicationRef = application,
+            runtimeAdmission = runtimeAdmission,
+            coordinator = localImageGenerationCoordinator,
+            coordinatorObservationLock = localImageGenerationCoordinatorObservationLock,
+            localImageLoraLifecycleLockRef = localImageLoraLifecycleLock,
+            localImageTextualInversionLifecycleLockRef = localImageTextualInversionLifecycleLock,
+            localImageLoraStoreRef = localImageLoraStore,
+            localImageWorkerClientRef = localImageWorkerClient,
+            imageAssetDirectoryRef = imageAssetDirectory,
+            imageAssetWriteMutex = imageAssetWriteMutex,
+            cloudImageProviderRef = cloudImageProvider,
+            chatImageCommitJournalRef = chatImageCommitJournal,
+            runtimeProfileStoreRef = runtimeProfileStore,
+            engineRef = engine,
+            createLocalGeneratedImageAssetPort = createCreateLocalGeneratedImageAssetPort(store, application),
+            imageLibraryStartupReconciliationProvider = imageLibraryStartupReconciliationProvider,
+            imageLibraryCommitPortProvider = imageLibraryCommitPortProvider,
+            chatImageRequestPortProvider = chatImageRequestPortProvider,
+            imagePromptTranslationPortProvider = imagePromptTranslationPortProvider,
+            completeAssistantImageToolTurnForJobRef = completeAssistantImageToolTurnForJob
+        )
+    )
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

@@ -545,7 +545,7 @@ class MainViewModel @JvmOverloads constructor(
     private val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OfflinePromptTranslationService(AppOfflinePromptTranslationRuntimeProvider(application))
     }
-    private val cloudImageProvider = CloudImageProvider()
+    private val cloudImageProvider = container.cloudImageProvider
     private val webSearchStore = container.webSearchStore
     private val webSearchDiagnosticStore = container.webSearchDiagnosticStore
     private val webSearchProvider: WebSearchProvider
@@ -585,106 +585,6 @@ class MainViewModel @JvmOverloads constructor(
         recentBenchmarkHistory = { benchmarkHistoryLogger.recent() },
         currentDeviceProfile = { currentDeviceProfile() },
         application = application
-    )
-    // R3/C2: 生图准入/执行唯一 owner（C0-a）：三处端口实现与两个直连调用点收敛到同一实例。
-    private val imageGenerationOwner = ImageGenerationOwner(
-        host = object : ImageGenerationHost {
-            override val scope: CoroutineScope get() = this@MainViewModel.viewModelScope
-            override val application: Application get() = this@MainViewModel.getApplication()
-            override fun currentState(): MainUiState = _uiState.value
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-            override fun showStatus(message: String?) = this@MainViewModel.showStatus(message)
-            override val imageGenerationJob: Job? get() = this@MainViewModel.imageGenerationJob
-            override fun setImageGenerationJob(job: Job?) {
-                this@MainViewModel.imageGenerationJob = job
-            }
-            override var activeImageGenerationJobId: String?
-                get() = this@MainViewModel.activeImageGenerationJobId
-                set(value) {
-                    this@MainViewModel.activeImageGenerationJobId = value
-                }
-            override var activeImageGenerationBackend: ImageBackend?
-                get() = this@MainViewModel.activeImageGenerationBackend
-                set(value) {
-                    this@MainViewModel.activeImageGenerationBackend = value
-                }
-            override var activeImageGenerationModelId: String?
-                get() = this@MainViewModel.activeImageGenerationModelId
-                set(value) {
-                    this@MainViewModel.activeImageGenerationModelId = value
-                }
-            override val localImageTextualInversionLifecycleLock: Any
-                get() = this@MainViewModel.localImageTextualInversionLifecycleLock
-            override val localImageLoraLifecycleLock: Any
-                get() = this@MainViewModel.localImageLoraLifecycleLock
-            override val localImageLoraStore: LocalImageLoraStore
-                get() = this@MainViewModel.localImageLoraStore
-            override val localImageWorkerClient: LocalImageWorkerClient
-                get() = this@MainViewModel.localImageWorkerClient
-            override val imageAssetDirectory: File
-                get() = this@MainViewModel.imageAssetDirectory
-            override val imageLibraryCommitPort: ImageLibraryCommitPort
-                get() = this@MainViewModel.imageLibraryCommitPort
-            override val chatImageRequestPort: ChatImageRequestPort
-                get() = this@MainViewModel.chatImageRequestPort
-            override val chatImageCommitJournal: ChatImageCommitJournal
-                get() = this@MainViewModel.chatImageCommitJournal
-            override suspend fun awaitImageLibraryStartupReconciliation() =
-                this@MainViewModel.awaitImageLibraryStartupReconciliation()
-            override fun tryAcquireObservedImageGenerationLease(requestId: String) =
-                this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
-            override fun releaseObservedImageGenerationLease(
-                lease: LocalImageGenerationCoordinator.Lease
-            ) = this@MainViewModel.releaseObservedImageGenerationLease(lease)
-            override fun resolveCurrentLocalImageLoras(
-                selections: List<Pair<String, Double>>,
-                records: List<LocalImageLoraRecord>
-            ) = this@MainViewModel.resolveCurrentLocalImageLoras(selections, records)
-            override fun resolveCurrentLocalImageTextualInversionIds(
-                ids: List<String>,
-                records: List<TextualInversionArtifact>
-            ) = this@MainViewModel.resolveCurrentLocalImageTextualInversionIds(ids, records)
-            override suspend fun prepareLocalImagePromptExecution(
-                model: LocalImageModelRecord,
-                prompt: String,
-                options: LocalImageGenerationOptions,
-                captured: LocalImagePromptExecution?
-            ) = this@MainViewModel.prepareLocalImagePromptExecution(model, prompt, options, captured)
-            override suspend fun prepareLocalImageRuntimeMemory() =
-                this@MainViewModel.prepareLocalImageRuntimeMemory()
-            override fun startLocalImageGenerationWatchdog(jobId: String) =
-                this@MainViewModel.startLocalImageGenerationWatchdog(jobId)
-            override fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress) =
-                this@MainViewModel.publishLocalImagePreview(jobId, progress)
-            override fun cleanupLocalImagePreviews(jobId: String) =
-                this@MainViewModel.cleanupLocalImagePreviews(jobId)
-            override suspend fun createCloudGeneratedImageAssets(
-                request: CloudImageRequest,
-                config: CloudApiConfig,
-                chatSessionId: String?,
-                generationMetadata: ImageGenerationHistoryMetadata
-            ) = this@MainViewModel.createCloudGeneratedImageAssets(
-                request, config, chatSessionId, generationMetadata
-            )
-            override suspend fun createLocalGeneratedImageAsset(
-                requestId: String,
-                prompt: String,
-                model: LocalImageModelRecord,
-                options: LocalImageGenerationOptions,
-                inputDraft: LocalImageInputDraft,
-                chatSessionId: String?,
-                generationMetadata: ImageGenerationHistoryMetadata,
-                batchLineage: ImageGenerationBatchLineage?,
-                outputLineages: List<ImageGenerationBatchLineage>,
-                onProgress: (LocalImageProgress) -> Unit
-            ) = this@MainViewModel.createLocalGeneratedImageAsset(
-                requestId, prompt, model, options, inputDraft, chatSessionId,
-                generationMetadata, batchLineage, outputLineages, onProgress
-            )
-            override fun completeAssistantImageToolTurnForJob(jobId: String) =
-                this@MainViewModel.completeAssistantImageToolTurnForJob(jobId)
-        }
     )
     private val initialDeviceProfile = deviceProfileReader.read()
     private val initialParams = loadGenerationParams(application)
@@ -1142,6 +1042,18 @@ class MainViewModel @JvmOverloads constructor(
         store = uiStateStore,
         scope = viewModelScope,
         engine = engine
+    )
+    // R3/C2: 生图准入/执行唯一 owner（C0-a）：三处端口实现与两个直连调用点收敛到同一实例。
+    // R3/C2-S3: host 由 McaAppContainer 工厂装配具名适配器，出清 97 行匿名 object 与 33 处 this@MainViewModel。
+    private val imageGenerationOwner = container.createImageGenerationOwner(
+        store = uiStateStore,
+        scope = viewModelScope,
+        engine = engine,
+        imageLibraryStartupReconciliationProvider = { imageLibraryStartupReconciliation },
+        imageLibraryCommitPortProvider = { imageLibraryCommitPort },
+        chatImageRequestPortProvider = { chatImageRequestPort },
+        imagePromptTranslationPortProvider = { imagePromptTranslationPort },
+        completeAssistantImageToolTurnForJob = { completeAssistantImageToolTurnForJob(it) }
     )
     val uiState = uiStateStore.state
 
@@ -2417,10 +2329,8 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     /** Delegates to [publishLocalImagePreviewTo]. Signature kept verbatim. */
-    private fun publishLocalImagePreview(
-        jobId: String,
-        progress: LocalImageProgress
-    ): PublishedLocalImagePreview? = publishLocalImagePreviewTo(
+    private fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
+        publishLocalImagePreviewTo(
         uiStateStore,
         container.runtimeAdmission,
         getApplication(),

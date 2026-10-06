@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.app.Application
 import android.content.Context
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.core.engine.EngineLifecycleLease
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -835,4 +836,195 @@ internal class CreateLocalGeneratedImageAssetPortAdapter(
 
     override val imageAssetDirectory: File
         get() = assetDirectory
+}
+
+/**
+ * C2-S3：ImageGenerationHost 具名适配器——持有真实容器依赖与 VM 作用域，
+ * 彻底消除 MainViewModel 内 97 行匿名 object 与 33 处 this@MainViewModel 捕获。
+ */
+internal class ImageGenerationHostAdapter(
+    private val store: UiStateStore,
+    private val scopeRef: CoroutineScope,
+    private val applicationRef: Application,
+    private val runtimeAdmission: RuntimeAdmissionState,
+    private val coordinator: LocalImageGenerationCoordinator,
+    private val coordinatorObservationLock: Any,
+    private val localImageLoraLifecycleLockRef: Any,
+    private val localImageTextualInversionLifecycleLockRef: Any,
+    private val localImageLoraStoreRef: LocalImageLoraStore,
+    private val localImageWorkerClientRef: LocalImageWorkerClient,
+    private val imageAssetDirectoryRef: File,
+    private val imageAssetWriteMutex: Mutex,
+    private val cloudImageProviderRef: CloudImageProvider,
+    private val chatImageCommitJournalRef: ChatImageCommitJournal,
+    private val runtimeProfileStoreRef: ModelRuntimeProfileStore,
+    private val engineRef: McaInferenceService,
+    private val createLocalGeneratedImageAssetPort: CreateLocalGeneratedImageAssetPort,
+    private val imageLibraryStartupReconciliationProvider: () -> ImageLibraryStartupReconciliation,
+    private val imageLibraryCommitPortProvider: () -> ImageLibraryCommitPort,
+    private val chatImageRequestPortProvider: () -> ChatImageRequestPort,
+    private val imagePromptTranslationPortProvider: () -> ImagePromptTranslationPort,
+    private val completeAssistantImageToolTurnForJobRef: (String) -> Unit
+) : ImageGenerationHost {
+    override val scope: CoroutineScope get() = scopeRef
+    override val application: Application get() = applicationRef
+
+    override fun currentState(): MainUiState = store.current
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) = store.update(transform)
+    override fun showStatus(message: String?) = store.showStatus(message)
+
+    override val imageGenerationJob: Job? get() = runtimeAdmission.imageGenerationJob
+    override fun setImageGenerationJob(job: Job?) {
+        runtimeAdmission.imageGenerationJob = job
+    }
+
+    override var activeImageGenerationJobId: String?
+        get() = runtimeAdmission.activeImageGenerationJobId
+        set(value) {
+            runtimeAdmission.activeImageGenerationJobId = value
+        }
+
+    override var activeImageGenerationBackend: ImageBackend?
+        get() = runtimeAdmission.activeImageGenerationBackend
+        set(value) {
+            runtimeAdmission.activeImageGenerationBackend = value
+        }
+
+    override var activeImageGenerationModelId: String?
+        get() = runtimeAdmission.activeImageGenerationModelId
+        set(value) {
+            runtimeAdmission.activeImageGenerationModelId = value
+        }
+
+    override val localImageTextualInversionLifecycleLock: Any
+        get() = localImageTextualInversionLifecycleLockRef
+
+    override val localImageLoraLifecycleLock: Any
+        get() = localImageLoraLifecycleLockRef
+
+    override val localImageLoraStore: LocalImageLoraStore
+        get() = localImageLoraStoreRef
+
+    override val localImageWorkerClient: LocalImageWorkerClient
+        get() = localImageWorkerClientRef
+
+    override val imageAssetDirectory: File
+        get() = imageAssetDirectoryRef
+
+    override val imageLibraryCommitPort: ImageLibraryCommitPort
+        get() = imageLibraryCommitPortProvider()
+
+    override val chatImageRequestPort: ChatImageRequestPort
+        get() = chatImageRequestPortProvider()
+
+    override val chatImageCommitJournal: ChatImageCommitJournal
+        get() = chatImageCommitJournalRef
+
+    override suspend fun awaitImageLibraryStartupReconciliation() {
+        imageLibraryStartupReconciliationProvider().await()
+    }
+
+    override fun tryAcquireObservedImageGenerationLease(requestId: String): LocalImageGenerationCoordinator.Lease? =
+        tryAcquireObservedImageGenerationLeaseFor(
+            store = store,
+            coordinator = coordinator,
+            observationLock = coordinatorObservationLock,
+            requestId = requestId
+        )
+
+    override fun releaseObservedImageGenerationLease(
+        lease: LocalImageGenerationCoordinator.Lease
+    ): Boolean = releaseObservedImageGenerationLeaseFor(
+        store = store,
+        coordinator = coordinator,
+        observationLock = coordinatorObservationLock,
+        lease = lease
+    )
+
+    override fun resolveCurrentLocalImageLoras(
+        selections: List<Pair<String, Double>>,
+        records: List<LocalImageLoraRecord>
+    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasFor(selections, records)
+
+    override fun resolveCurrentLocalImageTextualInversionIds(
+        ids: List<String>,
+        records: List<TextualInversionArtifact>
+    ): List<String> = resolveCurrentLocalImageTextualInversionIdsFor(ids, records)
+
+    override suspend fun prepareLocalImagePromptExecution(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        captured: LocalImagePromptExecution?
+    ): LocalImagePromptExecution = prepareLocalImagePromptExecution(
+        port = imagePromptTranslationPortProvider(),
+        model = model,
+        prompt = prompt,
+        options = options,
+        captured = captured
+    )
+
+    override suspend fun prepareLocalImageRuntimeMemory(): EngineLifecycleLease =
+        prepareLocalImageRuntimeMemoryFor(
+            store, runtimeAdmission, runtimeProfileStoreRef, engineRef
+        )
+
+    override fun startLocalImageGenerationWatchdog(jobId: String) =
+        startLocalImageGenerationWatchdogFor(store, scopeRef, jobId)
+
+    override fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
+        publishLocalImagePreviewTo(
+            store,
+            runtimeAdmission,
+            applicationRef,
+            imageAssetWriteMutex,
+            jobId,
+            progress
+        )
+
+    override fun cleanupLocalImagePreviews(jobId: String) =
+        cleanupLocalImagePreviewsFor(applicationRef, jobId)
+
+    override suspend fun createCloudGeneratedImageAssets(
+        request: CloudImageRequest,
+        config: CloudApiConfig,
+        chatSessionId: String?,
+        generationMetadata: ImageGenerationHistoryMetadata
+    ): List<ImageAssetRecord> = createCloudGeneratedImageAssetsFor(
+        cloudImageProviderRef,
+        imageAssetWriteMutex,
+        imageAssetDirectoryRef,
+        request,
+        config,
+        chatSessionId,
+        generationMetadata
+    )
+
+    override suspend fun createLocalGeneratedImageAsset(
+        requestId: String,
+        prompt: String,
+        model: LocalImageModelRecord,
+        options: LocalImageGenerationOptions,
+        inputDraft: LocalImageInputDraft,
+        chatSessionId: String?,
+        generationMetadata: ImageGenerationHistoryMetadata,
+        batchLineage: ImageGenerationBatchLineage?,
+        outputLineages: List<ImageGenerationBatchLineage>,
+        onProgress: (LocalImageProgress) -> Unit
+    ): List<ImageAssetRecord> = CreateLocalGeneratedImageAssetOperations.createLocalGeneratedImageAsset(
+        port = createLocalGeneratedImageAssetPort,
+        requestId = requestId,
+        prompt = prompt,
+        model = model,
+        options = options,
+        inputDraft = inputDraft,
+        chatSessionId = chatSessionId,
+        generationMetadata = generationMetadata,
+        batchLineage = batchLineage,
+        outputLineages = outputLineages,
+        onProgress = onProgress
+    )
+
+    override fun completeAssistantImageToolTurnForJob(jobId: String) =
+        completeAssistantImageToolTurnForJobRef(jobId)
 }

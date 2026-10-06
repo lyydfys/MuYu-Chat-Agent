@@ -426,7 +426,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
 
     @Test
     fun `native preview progress reaches the existing generation canvas while synchronous API rejects it`() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
         val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         // The call site stays in MainActivity; the mapping it calls moved to the presentation
