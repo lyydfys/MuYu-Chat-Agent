@@ -20,6 +20,10 @@ import com.muyuchat.mca.ChatImageRetryPort
 import com.muyuchat.mca.ChatImageRetryPortAdapter
 import com.muyuchat.mca.SendChatImageRequestPort
 import com.muyuchat.mca.SendChatImageRequestPortAdapter
+import com.muyuchat.mca.ImageAssetCreationPort
+import com.muyuchat.mca.ImageAssetCreationPortAdapter
+import com.muyuchat.mca.ImageUpscalePort
+import com.muyuchat.mca.ImageUpscalePortAdapter
 import com.muyuchat.mca.ImageGenerationOwner
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
@@ -388,6 +392,43 @@ internal class McaAppContainer(private val application: Application) {
             journalProvider = journalProvider,
             chatSessionStoreRef = chatSessionStore,
             sendPortRef = sendPort
+        )
+
+    /** R3/C3-S15：资产生成/放大端口工厂（owner 与 S13 对账 owner 均真实对象注入）。 */
+    fun createImageAssetCreationPort(
+        store: UiStateStore,
+        application: Application,
+        imageGenerationOwner: ImageGenerationOwner
+    ): ImageAssetCreationPort =
+        ImageAssetCreationPortAdapter(
+            store = store,
+            application = application,
+            admission = runtimeAdmission,
+            imageGenerationOwner = imageGenerationOwner,
+            assetWriteMutex = imageAssetWriteMutex,
+            assetDirectory = imageAssetDirectory,
+            localImageModelStoreRef = localImageModelStore
+        )
+
+    fun createImageUpscalePort(
+        store: UiStateStore,
+        application: Application,
+        assetCreationPort: ImageAssetCreationPort,
+        startupReconciliation: ImageLibraryStartupReconciliation
+    ): ImageUpscalePort =
+        ImageUpscalePortAdapter(
+            store = store,
+            application = application,
+            coordinator = localImageGenerationCoordinator,
+            observationLock = localImageGenerationCoordinatorObservationLock,
+            assetCreationPort = assetCreationPort,
+            assetWriteMutex = imageAssetWriteMutex,
+            startupReconciliation = startupReconciliation,
+            workerClientRef = localImageWorkerClient,
+            chatSessionStoreRef = chatSessionStore,
+            upscalerStoreRef = localImageUpscalerStore,
+            assetDirectory = imageAssetDirectory,
+            mutationMutex = imageLibraryMutationMutex
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

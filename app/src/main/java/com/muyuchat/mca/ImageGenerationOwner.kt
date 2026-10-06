@@ -877,3 +877,34 @@ internal fun updateGenerationImageGrantReleaseDeferInto(store: UiStateStore, def
         }
     }
 }
+
+/** R3/C3-S15：租约观测对顶层化（自 VM 迁出；体逐字，仅依赖参数化）。 */
+internal fun tryAcquireObservedImageGenerationLeaseFor(
+    store: UiStateStore,
+    coordinator: LocalImageGenerationCoordinator,
+    observationLock: Any,
+    requestId: String
+): LocalImageGenerationCoordinator.Lease? =
+    synchronized(observationLock) {
+        updateGenerationImageGrantReleaseDeferInto(store, true)
+        coordinator.tryAcquire(requestId).also { lease ->
+            if (lease == null && coordinator.activeRequestId() == null) {
+                updateGenerationImageGrantReleaseDeferInto(store, false)
+            }
+        }
+    }
+
+/** A stale epoch cannot clear the observable protection for the current lease holder. */
+internal fun releaseObservedImageGenerationLeaseFor(
+    store: UiStateStore,
+    coordinator: LocalImageGenerationCoordinator,
+    observationLock: Any,
+    lease: LocalImageGenerationCoordinator.Lease
+): Boolean = synchronized(observationLock) {
+    val released = coordinator.release(lease)
+    updateGenerationImageGrantReleaseDeferInto(
+        store,
+        coordinator.activeRequestId() != null
+    )
+    released
+}

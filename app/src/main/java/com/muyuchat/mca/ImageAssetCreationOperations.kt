@@ -276,3 +276,37 @@ records: List<LocalImageLoraRecord>
             throw error
         }
     }
+
+// R3/C3-S15：两个资产生成族助手顶层化（自 VM 迁出；体逐字，仅依赖参数化）。
+
+internal fun canReadGenerationHistoryInputFor(application: Application, reference: String): Boolean {
+    val uri = runCatching { Uri.parse(reference.trim()) }.getOrNull()
+        ?.takeIf { it.scheme.equals("content", ignoreCase = true) }
+        ?: return false
+    return runCatching {
+        application.contentResolver.openInputStream(uri)
+            ?.use { stream -> stream.read() >= 0 }
+            ?: false
+    }.getOrDefault(false)
+}
+
+internal fun rejectImageModelSwitchWhileGenerationIsActiveFor(
+    store: UiStateStore,
+    admission: RuntimeAdmissionState
+): Boolean {
+    val activeJobId = admission.activeImageGenerationJobId ?: return false
+    val activeModelName = store.current.imageJobs
+        .firstOrNull { job -> job.id == activeJobId }
+        ?.modelName
+        ?.takeIf(String::isNotBlank)
+    store.update { state ->
+        state.copy(
+            statusMessage = buildString {
+                append("当前图片任务已锁定")
+                activeModelName?.let { append("使用 $it") }
+                append("；完成或取消后再切换模型。")
+            }
+        )
+    }
+    return true
+}

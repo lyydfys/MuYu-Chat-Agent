@@ -963,62 +963,6 @@ class MainViewModel @JvmOverloads constructor(
     private val pendingAssistantImageToolTurns = java.util.concurrent.ConcurrentHashMap<String, PendingAssistantImageToolTurn>()
     private val assistantImageContinuationLock = Any()
     private val assistantImageContinuationsInFlight = mutableSetOf<String>()
-    /**
-     * The ViewModel side of [ImageUpscalePort]. The owner holds the job and the lock; this object only
-     * supplies the app-level collaborators the owner needs.
-     */
-    private val imageUpscalePort: ImageUpscalePort =
-        object : ImageUpscalePort {
-            override val context: Application
-                get() = this@MainViewModel.getApplication()
-
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val imageAssetDirectory: File
-                get() = this@MainViewModel.imageAssetDirectory
-
-            override val localImageWorkerClient: LocalImageWorkerClient
-                get() = this@MainViewModel.localImageWorkerClient
-
-            override val chatSessionStore: ChatSessionStore
-                get() = this@MainViewModel.chatSessionStore
-
-            override val localImageUpscalerStore: LocalImageUpscalerStore
-                get() = this@MainViewModel.localImageUpscalerStore
-
-            override suspend fun <T> withImageLibraryMutationLock(block: suspend () -> T): T =
-                this@MainViewModel.imageLibraryMutationMutex.withLock { block() }
-
-            override fun showStatus(message: String?) {
-                this@MainViewModel.showStatus(message)
-            }
-
-            override suspend fun awaitImageLibraryStartupReconciliation() {
-                this@MainViewModel.awaitImageLibraryStartupReconciliation()
-            }
-
-            override suspend fun createUpscaledImageAsset(
-                spec: ImageUpscaleJobSpec,
-                result: LocalImageResult,
-                requestId: String
-            ): ImageAssetRecord = this@MainViewModel.createUpscaledImageAsset(spec, result, requestId)
-
-            override fun tryAcquireObservedImageGenerationLease(
-                requestId: String
-            ): LocalImageGenerationCoordinator.Lease? =
-                this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
-
-            override fun releaseObservedImageGenerationLease(
-                lease: LocalImageGenerationCoordinator.Lease
-            ): Boolean = this@MainViewModel.releaseObservedImageGenerationLease(lease)
-        }
-
-    /** The single owner of the image-upscale execution. */
-    private val imageUpscaleOwner = ImageUpscaleOwner(imageUpscalePort)
 
     /** Delegates to [ImageUpscaleOwner.upscaleImageAsset]. */
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
@@ -1281,28 +1225,26 @@ class MainViewModel @JvmOverloads constructor(
      * content grant while UI, authenticated Local API, or upscale dispatch is materializing inputs.
      * A failed contender keeps the flag asserted when another epoch still owns the coordinator.
      */
+    /** Delegates to [tryAcquireObservedImageGenerationLeaseFor]. Signature kept verbatim. */
     private fun tryAcquireObservedImageGenerationLease(
         requestId: String
     ): LocalImageGenerationCoordinator.Lease? =
-        synchronized(localImageGenerationCoordinatorObservationLock) {
-            updateGenerationImageGrantReleaseDefer(true)
-            localImageGenerationCoordinator.tryAcquire(requestId).also { lease ->
-                if (lease == null && localImageGenerationCoordinator.activeRequestId() == null) {
-                    updateGenerationImageGrantReleaseDefer(false)
-                }
-            }
-        }
+        tryAcquireObservedImageGenerationLeaseFor(
+            store = uiStateStore,
+            coordinator = localImageGenerationCoordinator,
+            observationLock = localImageGenerationCoordinatorObservationLock,
+            requestId = requestId
+        )
 
-    /** A stale epoch cannot clear the observable protection for the current lease holder. */
+    /** Delegates to [releaseObservedImageGenerationLeaseFor]. Signature kept verbatim. */
     private fun releaseObservedImageGenerationLease(
         lease: LocalImageGenerationCoordinator.Lease
-    ): Boolean = synchronized(localImageGenerationCoordinatorObservationLock) {
-        val released = localImageGenerationCoordinator.release(lease)
-        updateGenerationImageGrantReleaseDefer(
-            localImageGenerationCoordinator.activeRequestId() != null
-        )
-        released
-    }
+    ): Boolean = releaseObservedImageGenerationLeaseFor(
+        store = uiStateStore,
+        coordinator = localImageGenerationCoordinator,
+        observationLock = localImageGenerationCoordinatorObservationLock,
+        lease = lease
+    )
 
     /**
      * Linearizes persistable-grant release with coordinator admission. The release block runs only
@@ -2451,65 +2393,16 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** The ViewModel side of [ImageAssetCreationPort]. */
+    // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
     private val imageAssetCreationPort: ImageAssetCreationPort =
-        object : ImageAssetCreationPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
+        container.createImageAssetCreationPort(uiStateStore, application, imageGenerationOwner)
+    private val imageUpscalePort: ImageUpscalePort =
+        container.createImageUpscalePort(
+            uiStateStore, application, imageAssetCreationPort, imageLibraryStartupReconciliation
+        )
 
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val context: Application
-                get() = this@MainViewModel.getApplication()
-
-            override suspend fun <T> withImageAssetWriteLock(block: suspend () -> T): T =
-                this@MainViewModel.imageAssetWriteMutex.withLock { block() }
-
-            override val imageAssetDirectory: File
-                get() = this@MainViewModel.imageAssetDirectory
-
-            override val localImageModelStore: LocalImageModelStore
-                get() = this@MainViewModel.localImageModelStore
-
-            override fun showStatus(message: String?)
-                = this@MainViewModel.showStatus(message = message)
-
-            override fun invalidatePendingChatImagePreparation()
-                = this@MainViewModel.invalidatePendingChatImagePreparation()
-
-            override fun canReadGenerationHistoryInput(reference: String): Boolean
-                = this@MainViewModel.canReadGenerationHistoryInput(reference = reference)
-
-            override fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean
-                = this@MainViewModel.rejectImageModelSwitchWhileGenerationIsActive()
-
-            override fun enqueueImageGeneration(
-            prompt: String,
-            inputDraft: LocalImageInputDraft,
-            options: LocalImageGenerationOptions,
-            jobSnapshot: ImageGenerationJobSpec?,
-            // Keep the generated UI id in the function body so callers that retry
-            // or continue an assistant tool turn can provide their own stable id.
-            // This also keeps the public admission signature free of interpolation
-            // braces, which makes source-level lifecycle checks unambiguous.
-            requestedJobId: String?,
-            requestedChatSessionId: String?,
-            requestedChatMessageId: String?
-            ): Boolean
-                = this@MainViewModel.imageGenerationOwner.submit(prompt = prompt, inputDraft = inputDraft, options = options, jobSnapshot = jobSnapshot, requestedChatSessionId = requestedChatSessionId, requestedChatMessageId = requestedChatMessageId)
-
-            override fun resolveCurrentLocalImageLoras(
-            selections: List<Pair<String, Double>>,
-            records: List<LocalImageLoraRecord>
-            ): List<LocalImagePreparedLora>
-                = this@MainViewModel.resolveCurrentLocalImageLoras(selections = selections, records = records)
-
-            override fun activeImageGenerationJobId(): String? =
-                this@MainViewModel.activeImageGenerationJobId
-
-            override fun activeImageGenerationModelId(): String? =
-                this@MainViewModel.activeImageGenerationModelId
-        }
+    /** The single owner of the image-upscale execution. */
+    private val imageUpscaleOwner = ImageUpscaleOwner(imageUpscalePort)
 
 /** Delegates to [recreateAsset]. Signature kept verbatim. */
     fun recreateImageAsset(imageId: String) {
@@ -2530,16 +2423,9 @@ class MainViewModel @JvmOverloads constructor(
         return createUpscaledAsset(port = imageAssetCreationPort, spec = spec, result = result, requestId = requestId)
     }
 
-    private fun canReadGenerationHistoryInput(reference: String): Boolean {
-        val uri = runCatching { Uri.parse(reference.trim()) }.getOrNull()
-            ?.takeIf { it.scheme.equals("content", ignoreCase = true) }
-            ?: return false
-        return runCatching {
-            getApplication<Application>().contentResolver.openInputStream(uri)
-                ?.use { stream -> stream.read() >= 0 }
-                ?: false
-        }.getOrDefault(false)
-    }
+    /** Delegates to [canReadGenerationHistoryInputFor]. Signature kept verbatim. */
+    private fun canReadGenerationHistoryInput(reference: String): Boolean =
+        canReadGenerationHistoryInputFor(getApplication(), reference)
 
     /**
      * Prepares the prompt pair for a local image request.
@@ -3076,23 +2962,9 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean {
-        val activeJobId = activeImageGenerationJobId ?: return false
-        val activeModelName = _uiState.value.imageJobs
-            .firstOrNull { job -> job.id == activeJobId }
-            ?.modelName
-            ?.takeIf(String::isNotBlank)
-        uiStateStore.update { state ->
-            state.copy(
-                statusMessage = buildString {
-                    append("当前图片任务已锁定")
-                    activeModelName?.let { append("使用 $it") }
-                    append("；完成或取消后再切换模型。")
-                }
-            )
-        }
-        return true
-    }
+    /** Delegates to [rejectImageModelSwitchWhileGenerationIsActiveFor]. Signature kept verbatim. */
+    private fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean =
+        rejectImageModelSwitchWhileGenerationIsActiveFor(uiStateStore, container.runtimeAdmission)
 
 
     fun verifyLocalImageModel(modelId: String) {

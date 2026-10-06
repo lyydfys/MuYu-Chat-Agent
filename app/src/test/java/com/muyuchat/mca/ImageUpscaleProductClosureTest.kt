@@ -117,13 +117,17 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         )
         val importBackup = functionBody(viewModel, "fun importImageLibraryBackup(")
         val startBackup = functionBody(viewModel, "private fun startImageLibraryBackupJob(")
+        // R3/C3-S15: the two lease helpers moved verbatim to ImageGenerationOwner.kt; the ordering
+        // and identity-check contracts are unchanged -- they are read where the helpers now live,
+        // with the call spelling updated to the parameterized form (defer -> ...Into(store, ...)).
+        val leaseSource = sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
         val observedAcquire = functionBody(
-            viewModel,
-            "private fun tryAcquireObservedImageGenerationLease("
+            leaseSource,
+            "internal fun tryAcquireObservedImageGenerationLeaseFor("
         )
         val observedRelease = functionBody(
-            viewModel,
-            "private fun releaseObservedImageGenerationLease("
+            leaseSource,
+            "internal fun releaseObservedImageGenerationLeaseFor("
         )
 
         assertTrue(upscale.contains("tryAcquireObservedImageGenerationLease(requestId)"))
@@ -206,9 +210,9 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         ))
         assertTrue(localApiGeneration.contains("tryAcquireObservedImageGenerationLease(requestId)"))
         assertTrue(localApiGeneration.contains("releaseObservedImageGenerationLease(generationLease)"))
-        assertTrue(observedAcquire.indexOf("updateGenerationImageGrantReleaseDefer(true)") <
-            observedAcquire.indexOf("localImageGenerationCoordinator.tryAcquire(requestId)"))
-        assertTrue(observedRelease.contains("localImageGenerationCoordinator.activeRequestId() != null"))
+        assertTrue(observedAcquire.indexOf("updateGenerationImageGrantReleaseDeferInto(store, true)") <
+            observedAcquire.indexOf("coordinator.tryAcquire(requestId)"))
+        assertTrue(observedRelease.contains("coordinator.activeRequestId() != null"))
         assertTrue(activity.contains("onUpscaleImageAsset = viewModel::upscaleImageAsset"))
         assertTrue(activity.contains(
             "deferGenerationImageGrantRelease = state.deferGenerationImageGrantRelease"

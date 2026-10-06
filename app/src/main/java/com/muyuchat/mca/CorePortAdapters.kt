@@ -7,6 +7,9 @@ import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.io.File
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ModelRuntimeIdentity
@@ -478,4 +481,141 @@ internal class ChatImageRetryPortAdapter(
     override fun setPendingImageTranslation(value: PendingImageTranslation?) {
         admission.pendingImageTranslation = value
     }
+}
+
+/** R3/C3-S15：资产生成端口具名化（owner 真实对象注入；注释中的 requestedJobId 丢弃为现存行为）。 */
+internal class ImageAssetCreationPortAdapter(
+    private val store: UiStateStore,
+    private val application: Application,
+    private val admission: RuntimeAdmissionState,
+    private val imageGenerationOwner: ImageGenerationOwner,
+    private val assetWriteMutex: Mutex,
+    private val assetDirectory: File,
+    private val localImageModelStoreRef: LocalImageModelStore
+) : ImageAssetCreationPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val context: Application
+        get() = application
+
+    override suspend fun <T> withImageAssetWriteLock(block: suspend () -> T): T =
+        assetWriteMutex.withLock { block() }
+
+    override val imageAssetDirectory: File
+        get() = assetDirectory
+
+    override val localImageModelStore: LocalImageModelStore
+        get() = localImageModelStoreRef
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
+
+    override fun invalidatePendingChatImagePreparation() {
+        invalidatePendingChatImagePreparationInto(store, admission)
+    }
+
+    override fun canReadGenerationHistoryInput(reference: String): Boolean =
+        canReadGenerationHistoryInputFor(application, reference)
+
+    override fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean =
+        rejectImageModelSwitchWhileGenerationIsActiveFor(store, admission)
+
+    override fun enqueueImageGeneration(
+        prompt: String,
+        inputDraft: LocalImageInputDraft,
+        options: LocalImageGenerationOptions,
+        jobSnapshot: ImageGenerationJobSpec?,
+        requestedJobId: String?,
+        requestedChatSessionId: String?,
+        requestedChatMessageId: String?
+    ): Boolean = imageGenerationOwner.submit(
+        prompt = prompt,
+        inputDraft = inputDraft,
+        options = options,
+        jobSnapshot = jobSnapshot,
+        requestedChatSessionId = requestedChatSessionId,
+        requestedChatMessageId = requestedChatMessageId
+    )
+
+    override fun resolveCurrentLocalImageLoras(
+        selections: List<Pair<String, Double>>,
+        records: List<LocalImageLoraRecord>
+    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasFor(selections, records)
+
+    override fun activeImageGenerationJobId(): String? =
+        admission.activeImageGenerationJobId
+
+    override fun activeImageGenerationModelId(): String? =
+        admission.activeImageGenerationModelId
+}
+
+/** R3/C3-S15：图像放大端口具名化（对账 owner 经 S13 注入；createUpscaledAsset 走资产生成端口）。 */
+internal class ImageUpscalePortAdapter(
+    private val store: UiStateStore,
+    private val application: Application,
+    private val coordinator: LocalImageGenerationCoordinator,
+    private val observationLock: Any,
+    private val assetCreationPort: ImageAssetCreationPort,
+    private val assetWriteMutex: Mutex,
+    private val startupReconciliation: ImageLibraryStartupReconciliation,
+    private val workerClientRef: LocalImageWorkerClient,
+    private val chatSessionStoreRef: ChatSessionStore,
+    private val upscalerStoreRef: LocalImageUpscalerStore,
+    private val assetDirectory: File,
+    private val mutationMutex: Mutex
+) : ImageUpscalePort {
+    override val context: Application
+        get() = application
+
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val imageAssetDirectory: File
+        get() = assetDirectory
+
+    override val localImageWorkerClient: LocalImageWorkerClient
+        get() = workerClientRef
+
+    override val chatSessionStore: ChatSessionStore
+        get() = chatSessionStoreRef
+
+    override val localImageUpscalerStore: LocalImageUpscalerStore
+        get() = upscalerStoreRef
+
+    override suspend fun <T> withImageLibraryMutationLock(block: suspend () -> T): T =
+        mutationMutex.withLock { block() }
+
+    override fun showStatus(message: String?) {
+        store.showStatus(message)
+    }
+
+    override suspend fun awaitImageLibraryStartupReconciliation() {
+        startupReconciliation.await()
+    }
+
+    override suspend fun createUpscaledImageAsset(
+        spec: ImageUpscaleJobSpec,
+        result: LocalImageResult,
+        requestId: String
+    ): ImageAssetRecord = assetWriteMutex.withLock {
+        createUpscaledAsset(port = assetCreationPort, spec = spec, result = result, requestId = requestId)
+    }
+
+    override fun tryAcquireObservedImageGenerationLease(
+        requestId: String
+    ): LocalImageGenerationCoordinator.Lease? =
+        tryAcquireObservedImageGenerationLeaseFor(store, coordinator, observationLock, requestId)
+
+    override fun releaseObservedImageGenerationLease(
+        lease: LocalImageGenerationCoordinator.Lease
+    ): Boolean =
+        releaseObservedImageGenerationLeaseFor(store, coordinator, observationLock, lease)
 }

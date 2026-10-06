@@ -134,20 +134,28 @@ class LocalImageGenerationOwnershipContractTest {
 
     @Test
     fun `every lease acquisition has a matching release on the same lease`() {
+        // R3/C3-S15: the two lease helpers moved verbatim to ImageGenerationOwner.kt (the ViewModel
+        // keeps same-name delegates); the assertions keep their strength -- the positive halves scan
+        // both sources, and the no-clearout regex guards both the ViewModel and the helper file.
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val leaseSource = sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
 
         assertTrue(
             "the acquisition helper must be the only constructor of observed leases",
-            viewModel.contains("localImageGenerationCoordinator.tryAcquire(requestId)")
+            viewModel.contains("localImageGenerationCoordinator.tryAcquire(requestId)") ||
+                leaseSource.contains("coordinator.tryAcquire(requestId)")
         )
         assertTrue(
             "releases must go through the identity-checked coordinator call",
-            viewModel.contains("localImageGenerationCoordinator.release(lease)")
+            viewModel.contains("localImageGenerationCoordinator.release(lease)") ||
+                leaseSource.contains("coordinator.release(lease)")
         )
         assertFalse(
             "no caller may clear the active lease without the identity check",
             Regex("localImageGenerationCoordinator\\s*\\.\\s*(?!release|tryAcquire|activeRequestId)\\w+")
-                .containsMatchIn(viewModel)
+                .containsMatchIn(viewModel) ||
+                Regex("\\bcoordinator\\s*\\.\\s*(?!release|tryAcquire|activeRequestId)\\w+")
+                    .containsMatchIn(leaseSource)
         )
     }
 
