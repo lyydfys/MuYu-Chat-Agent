@@ -2386,26 +2386,11 @@ class MainViewModel @JvmOverloads constructor(
         records: List<LocalImageLoraRecord> = _uiState.value.localImageLoras
     ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasFor(selections, records)
 
+    /** Delegates to [resolveCurrentLocalImageTextualInversionIdsFor]. Signature kept verbatim. */
     private fun resolveCurrentLocalImageTextualInversionIds(
         ids: List<String>,
         records: List<TextualInversionArtifact> = _uiState.value.localImageTextualInversions
-    ): List<String> {
-        require(ids.size <= TextualInversionContract.MAX_COUNT) {
-            "单次最多使用 ${TextualInversionContract.MAX_COUNT} 个 Textual Inversion。"
-        }
-        val normalizedIds = ids.map { id -> UUID.fromString(id.trim()).toString() }
-        require(normalizedIds.distinct().size == normalizedIds.size) {
-            "同一个 Textual Inversion 不能重复选择。"
-        }
-        val availableIds = records.mapTo(mutableSetOf(), TextualInversionArtifact::id)
-        normalizedIds.firstOrNull { it !in availableIds }?.let { missingId ->
-            throw LocalImageProductContractException(
-                "image_textual_inversion_not_found",
-                "所选 Textual Inversion 已删除或不可用：$missingId"
-            )
-        }
-        return normalizedIds
-    }
+    ): List<String> = resolveCurrentLocalImageTextualInversionIdsFor(ids, records)
 
     /** The ViewModel side of [ImageAssetCreationPort]. */
     // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
