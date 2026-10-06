@@ -5227,63 +5227,14 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun setAssistantImageToolAutoApproval(enabled: Boolean) {
-        val state = _uiState.value
-        val permission = chatImageToolPermissionUiState()
-        if (!permission.available) {
-            showStatus(permission.unavailableReason)
-            return
-        }
-        val sessionId = state.activeChatSessionId
-        val chatModelId = state.selectedCloudChatModelId
-        val chatModelIdentity = chatImageToolChatModelIdentity(
-            chatModelId,
-            state.selectedChatCloudConfig()?.normalized()
+        setAssistantImageToolAutoApprovalFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
+            chatImageToolPermissionUiState = ::chatImageToolPermissionUiState,
+            showStatus = ::showStatus,
+            enabled = enabled
         )
-        val imageModelIdentity = state.chatImageModelBinding()?.authorizationIdentity()
-        if (sessionId.isNullOrBlank() || chatModelIdentity == null || imageModelIdentity == null) {
-            uiStateStore.update {
-                it.copy(statusMessage = "先发送一条消息创建对话，再设置本对话的角色生图授权。")
-            }
-            return
-        }
-        val target = if (enabled) {
-            ChatImageToolAuthorizationMode.AUTO_APPROVE
-        } else {
-            ChatImageToolAuthorizationMode.ASK_EVERY_TIME
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            val saved = chatImageToolAuthorizationStore.setMode(
-                sessionId,
-                chatModelIdentity,
-                imageModelIdentity,
-                target
-            )
-            uiStateStore.update { current ->
-                val currentChatIdentity = chatImageToolChatModelIdentity(
-                    current.selectedCloudChatModelId,
-                    current.selectedChatCloudConfig()?.normalized()
-                )
-                val currentImageIdentity = current.chatImageModelBinding()?.authorizationIdentity()
-                if (current.activeChatSessionId != sessionId ||
-                    currentChatIdentity != chatModelIdentity ||
-                    currentImageIdentity != imageModelIdentity
-                ) {
-                    current
-                } else {
-                    current.copy(
-                        statusMessage = if (saved) {
-                            if (target == ChatImageToolAuthorizationMode.AUTO_APPROVE) {
-                                "已允许当前对话中的 Responses 角色请求自动生图；可随时改回每次询问。"
-                            } else {
-                                "已改为每次询问；之后的角色生图请求会先等待你确认。"
-                            }
-                        } else {
-                            "授权设置未能保存，请稍后重试。"
-                        }
-                    )
-                }
-            }
-        }
     }
 
     /**
@@ -5374,70 +5325,14 @@ class MainViewModel @JvmOverloads constructor(
         params: GenerationParams,
         conversationContext: List<ChatMessage>,
         preserveAuthoredNegative: Boolean
-    ): ChatImagePromptBridge.Result {
-        val source = prompt.trim()
-        if (source.isBlank()) {
-            return ChatImagePromptBridge.Result.Failed(
-                ChatImagePromptBridge.Code.INVALID_INPUT,
-                "负面图片描述为空。"
-            )
-        }
-        val neutralized = prepareAssistantImagePrompt(
-            prompt = "neutral image\nNegative prompt: $source",
-            chatConfig = chatConfig,
-            params = params,
-            conversationContext = conversationContext
-        )
-        return when (neutralized) {
-            is ChatImagePromptBridge.Result.Prepared -> {
-                val translatedNegative = neutralized.effectiveNegativePrompt
-                    ?.trim()
-                    ?.takeIf(String::isNotBlank)
-                when {
-                    translatedNegative != null -> neutralized.copy(
-                        originalPrompt = source,
-                        effectiveNegativePrompt = translatedNegative
-                    )
-                    preserveAuthoredNegative && !source.containsHanScript() &&
-                        source.length <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS &&
-                        source.isSafeAsciiDiffusionPrompt() -> neutralized.copy(
-                        originalPrompt = source,
-                        effectiveNegativePrompt = source
-                    )
-                    preserveAuthoredNegative -> neutralized.copy(originalPrompt = source)
-                    else -> neutralized.copy(
-                        originalPrompt = source,
-                        effectiveNegativePrompt = ""
-                    )
-                }
-            }
-            is ChatImagePromptBridge.Result.Failed -> {
-                // ASCII exclusions are already safe to send if the model is unavailable. A
-                // Chinese authored branch must never leak through unchanged; model defaults can
-                // be cleared instead of blocking an otherwise valid image request.
-                if (!source.containsHanScript() &&
-                    source.length <= LocalImagePromptExecution.MAX_EFFECTIVE_PROMPT_CHARS &&
-                    source.isSafeAsciiDiffusionPrompt()
-                ) {
-                    ChatImagePromptBridge.Result.Prepared(
-                        originalPrompt = source,
-                        effectivePrompt = "neutral image",
-                        translated = false,
-                        effectiveNegativePrompt = source
-                    )
-                } else if (!preserveAuthoredNegative && source.containsHanScript()) {
-                    ChatImagePromptBridge.Result.Prepared(
-                        originalPrompt = source,
-                        effectivePrompt = "neutral image",
-                        translated = false,
-                        effectiveNegativePrompt = ""
-                    )
-                } else {
-                    neutralized
-                }
-            }
-        }
-    }
+    ): ChatImagePromptBridge.Result = prepareAssistantImageNegativePromptFor(
+        prepareAssistantImagePrompt = ::prepareAssistantImagePrompt,
+        prompt = prompt,
+        chatConfig = chatConfig,
+        params = params,
+        conversationContext = conversationContext,
+        preserveAuthoredNegative = preserveAuthoredNegative
+    )
 
     /** Translate an assistant tool prompt with the exact chat connector that produced the call. */
     private suspend fun prepareAssistantImagePrompt(
@@ -5445,139 +5340,33 @@ class MainViewModel @JvmOverloads constructor(
         chatConfig: CloudApiConfig?,
         params: GenerationParams,
         conversationContext: List<ChatMessage> = _uiState.value.messages
-    ): ChatImagePromptBridge.Result {
-        val config = chatConfig?.takeIf { it.configured }
-            ?: return ChatImagePromptBridge.Result.Failed(
-                ChatImagePromptBridge.Code.MODEL_ERROR,
-                "当前聊天模型配置不可用。请恢复聊天模型后重试。"
-            )
-        val state = _uiState.value
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val assistantRecord = assistantSnapshot?.assistantId
-            ?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
-            ?: state.selectedAssistant()
-        val assistantName = assistantSnapshot?.name ?: assistantRecord?.name
-        val characterContext = assistantSnapshot?.systemPrompt ?: assistantRecord?.systemPrompt
-        val runtimeContext = runCatching {
-            withContext(Dispatchers.IO) {
-                chatContextComposer.compose(
-                    // The tool payload itself is the current query; include it so selected
-                    // knowledge chunks are retrieved for this image request rather than for an
-                    // older chat turn.
-                    messages = conversationContext + ChatMessage(Role.USER, prompt),
-                    params = params,
-                    assistantId = assistantSnapshot?.assistantId
-                        ?: state.selectedAssistantId.orEmpty(),
-                    chatSessionId = state.activeChatSessionId,
-                    knowledgeBaseIds = state.selectedKnowledgeBaseIds,
-                    fileContextEnabled = assistantSnapshot?.fileContextEnabled
-                        ?: assistantRecord?.fileContextEnabled
-                        ?: true
-                ).runtimeSystemContext
-            }
-        }.getOrNull()
-        val first = ChatImagePromptBridge.translateChatImagePrompt(
-            prompt = prompt,
-            stream = cloudChatProvider.streamChat(
-                config = config,
-                request = ChatImagePromptBridge.chatImagePromptBridgeRequest(
-                    prompt = prompt,
-                    params = params,
-                    assistantName = assistantName,
-                    characterContext = characterContext,
-                    conversationContext = conversationContext,
-                    runtimeContext = runtimeContext,
-                    protectNumericLiterals = false
-                )
-            ),
-            // A Responses tool call is also an image-skill invocation. The tool payload may be
-            // English, JSON, Markdown, or a compact preset; always let the selected chat model
-            // normalize it before the image encoder sees it.
-            requireModelSummary = true
-        )
-        if (first is ChatImagePromptBridge.Result.Prepared) return first
-        // Responses providers occasionally wrap the result in prose even when instructed not to.
-        // A single sequential fallback keeps assistant-tool image requests from sending known
-        // invalid Chinese text into an English-only image encoder.
-        return ChatImagePromptBridge.translateChatImagePrompt(
-            prompt = prompt,
-            stream = cloudChatProvider.streamChat(
-                config = config,
-                request = ChatImagePromptBridge.chatImagePromptBridgeRequest(
-                    prompt,
-                    params,
-                    systemPrompt = ChatImagePromptBridge.FALLBACK_SYSTEM_PROMPT,
-                    assistantName = assistantName,
-                    characterContext = characterContext,
-                    conversationContext = conversationContext,
-                    runtimeContext = runtimeContext,
-                    protectNumericLiterals = false
-                )
-            ),
-            requireModelSummary = true
-        )
-    }
+    ): ChatImagePromptBridge.Result = prepareAssistantImagePromptFor(
+        store = uiStateStore,
+        cloudChatProvider = cloudChatProvider,
+        chatContextComposer = chatContextComposer,
+        prompt = prompt,
+        chatConfig = chatConfig,
+        params = params,
+        conversationContext = conversationContext
+    )
 
-    private fun setPendingAssistantToolFailure(message: String) {
-        val state = _uiState.value
-        val messages = state.messages.toMutableList()
-        val pendingIndex = messages.indexOfLast {
-            it.role == Role.ASSISTANT && it.content.isBlank() && it.generatedImageRequest == null
-        }
-        val failedText = "图片请求未执行：$message"
-        if (pendingIndex >= 0) {
-            messages[pendingIndex] = messages[pendingIndex].copy(content = failedText)
-        } else {
-            messages += ChatMessage(Role.ASSISTANT, failedText)
-        }
-        val sessionId = state.activeChatSessionId ?: return
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val sessions = state.chatSessions.upsertSession(
-            sessionId = sessionId,
-            messages = messages,
-            assistantId = assistantSnapshot?.assistantId ?: state.selectedAssistantId,
-            assistantSnapshot = assistantSnapshot,
-            modelMode = state.selectedChatBackend.bindingValue(),
-            modelId = state.currentChatModelId()
+    private fun setPendingAssistantToolFailure(message: String) =
+        setPendingAssistantToolFailureFor(
+            store = uiStateStore,
+            persistChatSessions = ::persistChatSessions,
+            message = message
         )
-        uiStateStore.update {
-            it.copy(messages = messages, chatSessions = sessions, statusMessage = message)
-        }
-        persistChatSessions(sessions)
-    }
 
     private fun attachAssistantImageRequestToTimeline(
         chatSessionId: String,
         request: ChatGeneratedImageRequest
-    ) {
-        val state = _uiState.value
-        val messages = state.messages.toMutableList()
-        val pendingIndex = messages.indexOfLast {
-            it.role == Role.ASSISTANT && it.content.isBlank() && it.generatedImageRequest == null
-        }
-        val card = ChatMessage(
-            role = Role.ASSISTANT,
-            content = request.assistantTranscriptText(),
-            generatedImageRequest = request
-        )
-        if (pendingIndex >= 0) messages[pendingIndex] = card else messages += card
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val sessions = state.chatSessions.upsertSession(
-            sessionId = chatSessionId,
-            messages = messages,
-            assistantId = assistantSnapshot?.assistantId ?: state.selectedAssistantId,
-            assistantSnapshot = assistantSnapshot,
-            modelMode = state.selectedChatBackend.bindingValue(),
-            modelId = state.currentChatModelId()
-        )
-        uiStateStore.update {
-            it.copy(messages = messages, chatSessions = sessions, statusMessage = null)
-        }
-        persistChatSessions(sessions)
-    }
+    ) = attachAssistantImageRequestToTimelineFor(
+        store = uiStateStore,
+        persistChatSessions = ::persistChatSessions,
+        chatSessionId = chatSessionId,
+        request = request
+    )
+
 
     private fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
         synchronized(assistantImageContinuationLock) {
