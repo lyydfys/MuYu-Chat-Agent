@@ -1027,7 +1027,7 @@ class MainViewModel @JvmOverloads constructor(
         engine = engine
     )
     // R3/C2: 生图准入/执行唯一 owner（C0-a）：三处端口实现与两个直连调用点收敛到同一实例。
-    // R3/C2-S3: host 由 McaAppContainer 工厂装配具名适配器，出清 97 行匿名 object 与 33 处 this@MainViewModel。
+    // R3/C2-S3: host 由 McaAppContainer 工厂装配具名适配器，出清 97 行匿名 object 与 33 处 this 引用。
     private val imageGenerationOwner = container.createImageGenerationOwner(
         store = uiStateStore,
         scope = viewModelScope,
@@ -1235,24 +1235,26 @@ class MainViewModel @JvmOverloads constructor(
         }
         installChatLocalApiProviders(chatLocalApiProviderPort)
         installLocalApiAuxProviders(localApiAuxProviderPort)
-        LocalApiRuntime.controlPlane = object : LocalApiControlPlane {
-            override fun busyState(): LocalApiBusyState =
+        LocalApiRuntime.controlPlane = container.createLocalApiControlPlane(
+            busyStateProvider = {
                 localApiBusyStateFor(_uiState.value, tuningJson = { localApiTuningStateJson(localApiPayloadPort) })
-
-            override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult =
+            },
+            preflightProvider = { request ->
                 localApiPreflightFor(
                     request = request,
                     state = _uiState.value,
                     engine = engine,
                     publicModelId = { displayName, id -> localApiPublicModelId(displayName, id) },
-                    runtimeProfileJson = { runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity) }
+                    runtimeProfileJson = { runtimeProfileJsonFor(_uiState.value, engine, activeRuntimeIdentity) }
                 )
-
-            override fun profileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)
-
-            override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)
-
-            override fun tuningJob(jobId: String?): com.muyuchat.api.local.LocalApiControlResult =
+            },
+            profileJsonProvider = {
+                runtimeProfileJsonFor(_uiState.value, engine, activeRuntimeIdentity)
+            },
+            tuningJsonProvider = {
+                localApiTuningStateJson(localApiPayloadPort)
+            },
+            tuningJobProvider = { jobId ->
                 localApiTuningJobFor(
                     requestedJobId = jobId,
                     currentIdentityKey = { activeRuntimeIdentity?.identityHash },
@@ -1262,99 +1264,51 @@ class MainViewModel @JvmOverloads constructor(
                     tuningJson = { localApiTuningStateJson(localApiPayloadPort) },
                     publicJobJson = { job -> tuningJobPublicJson(job) }
                 )
-
-            override fun createTuningJob(
-                request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = localApiCreateTuningJobFor(
-                request = request,
-                idempotencyKey = idempotencyKey,
-                state = _uiState.value,
-                engine = engine,
-                port = localApiTuningControlPort
-            )
-
-            override fun createTuningJob(
-                request: com.muyuchat.api.local.LocalApiTuningJobCreateRequest,
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                createTuningJob(request, idempotency.key)
+            },
+            createTuningJobDelegate = { request, idempotencyKey ->
+                localApiCreateTuningJobFor(
+                    request = request,
+                    idempotencyKey = idempotencyKey,
+                    state = _uiState.value,
+                    engine = engine,
+                    port = localApiTuningControlPort
+                )
+            },
+            pauseTuningJobDelegate = { jobId, idempotencyKey ->
+                runTuningControl(jobId, "pause") {
+                    adaptiveTuningPauseRequested.set(true)
+                    runtimeProfileStore.pauseTuningJob(jobId)
+                }
+            },
+            resumeTuningJobDelegate = { jobId, idempotencyKey ->
+                runTuningControl(jobId, "resume") {
+                    adaptiveTuningPauseRequested.set(false)
+                    runtimeProfileStore.resumeTuningJob(jobId)
+                }
+            },
+            cancelTuningJobDelegate = { jobId, idempotencyKey ->
+                runTuningControl(jobId, "cancel") {
+                    adaptiveTuningCancelRequested.set(true)
+                    cancelPersistedTuningJob(jobId)
+                }
+            },
+            applyTuningJobDelegate = { jobId, idempotencyKey ->
+                localApiApplyTuningJobFor(
+                    jobId = jobId,
+                    idempotencyKey = idempotencyKey,
+                    port = localApiTuningControlPort
+                )
+            },
+            rollbackTuningDelegate = { idempotencyKey ->
+                localApiRollbackTuningFor(
+                    idempotencyKey = idempotencyKey,
+                    port = localApiTuningControlPort
+                )
+            },
+            runDurableLocalApiControl = { idempotency, operation ->
+                runDurableLocalApiControl(idempotency, operation)
             }
-
-            override fun pauseTuningJob(
-                jobId: String,
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "pause") {
-                adaptiveTuningPauseRequested.set(true)
-                runtimeProfileStore.pauseTuningJob(jobId)
-            }
-
-            override fun pauseTuningJob(
-                jobId: String,
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                pauseTuningJob(jobId, idempotency.key)
-            }
-
-            override fun resumeTuningJob(
-                jobId: String,
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "resume") {
-                adaptiveTuningPauseRequested.set(false)
-                runtimeProfileStore.resumeTuningJob(jobId)
-            }
-
-            override fun resumeTuningJob(
-                jobId: String,
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                resumeTuningJob(jobId, idempotency.key)
-            }
-
-            override fun cancelTuningJob(
-                jobId: String,
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = runTuningControl(jobId, "cancel") {
-                adaptiveTuningCancelRequested.set(true)
-                cancelPersistedTuningJob(jobId)
-            }
-
-            override fun cancelTuningJob(
-                jobId: String,
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                cancelTuningJob(jobId, idempotency.key)
-            }
-
-            override fun applyTuningJob(
-                jobId: String,
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = localApiApplyTuningJobFor(
-                jobId = jobId,
-                idempotencyKey = idempotencyKey,
-                port = localApiTuningControlPort
-            )
-
-            override fun applyTuningJob(
-                jobId: String,
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                applyTuningJob(jobId, idempotency.key)
-            }
-
-            override fun rollbackTuning(
-                idempotencyKey: String
-            ): com.muyuchat.api.local.LocalApiControlResult = localApiRollbackTuningFor(
-                idempotencyKey = idempotencyKey,
-                port = localApiTuningControlPort
-            )
-
-            override fun rollbackTuning(
-                idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext
-            ): com.muyuchat.api.local.LocalApiControlResult = runDurableLocalApiControl(idempotency) {
-                rollbackTuning(idempotency.key)
-            }
-        }
+        )
 
         // Every provider above is now installed. Publish them as one immutable set so a runtime call
         // that starts from here on can never observe a half-installed owner (for example the new
@@ -6854,15 +6808,6 @@ class MainViewModel @JvmOverloads constructor(
         return true
     }
 
-    /**
-     * The ViewModel side of [SelectChatSessionPort]: one route per member, no logic of its own. The
-     * decision moved to [selectChatSession], which is now the only place a conversation switch is
-     * decided.
-     *
-     * Every override keeps the `this@MainViewModel.` prefix on purpose: several port members share
-     * their name and signature with the ViewModel member they forward to, and an unqualified call
-     * would recurse into the override instead of reaching the original implementation.
-     */
     fun selectChatSession(sessionId: String) {
         selectChatSession(port = selectChatSessionPort, sessionId = sessionId)
     }
@@ -8484,16 +8429,6 @@ class MainViewModel @JvmOverloads constructor(
             generationMetadata
         )
 
-    /**
-     * The ViewModel side of [CreateLocalGeneratedImageAssetPort]: one delegate per member, no logic
-     * of its own. The publication decision moved to
-     * [CreateLocalGeneratedImageAssetOperations.createLocalGeneratedImageAsset], which is now the
-     * only place a worker result becomes a published image asset.
-     *
-     * `this@MainViewModel.` is spelled out on every forwarding member on purpose: the port members
-     * share their names with the ViewModel members they forward to, so an unqualified call would
-     * recurse into the override instead of reaching the original implementation.
-     */
     // R3-S30：本地生图资产生成端口的具名适配器（真实客户端经网关注入；worker 代际经 holder）。
     private val createLocalGeneratedImageAssetPort: CreateLocalGeneratedImageAssetPort =
         container.createCreateLocalGeneratedImageAssetPort(uiStateStore, application)

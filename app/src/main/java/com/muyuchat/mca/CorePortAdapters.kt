@@ -23,6 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.chat.ChatImageActionKind
 import com.muyuchat.api.local.LocalApiRuntime
+import com.muyuchat.api.local.LocalApiControlPlane
+import com.muyuchat.api.local.LocalApiBusyState
+import com.muyuchat.api.local.LocalApiPreflightRequest
+import com.muyuchat.api.local.LocalApiPreflightResult
+import com.muyuchat.api.local.LocalApiTuningJobCreateRequest
+import com.muyuchat.api.local.LocalApiIdempotencyContext
 import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -2389,6 +2395,104 @@ internal class LocalApiImageGenerationPortAdapter(
     override fun encodeBase64NoWrap(bytes: ByteArray): String =
         Base64.encodeToString(bytes, Base64.NO_WRAP)
 }
+
+internal class LocalApiControlPlaneAdapter(
+    private val busyStateProvider: () -> LocalApiBusyState,
+    private val preflightProvider: (LocalApiPreflightRequest) -> LocalApiPreflightResult,
+    private val profileJsonProvider: () -> String,
+    private val tuningJsonProvider: () -> String,
+    private val tuningJobProvider: (String?) -> LocalApiControlResult,
+    private val createTuningJobDelegate: (LocalApiTuningJobCreateRequest, String) -> LocalApiControlResult,
+    private val pauseTuningJobDelegate: (String, String) -> LocalApiControlResult,
+    private val resumeTuningJobDelegate: (String, String) -> LocalApiControlResult,
+    private val cancelTuningJobDelegate: (String, String) -> LocalApiControlResult,
+    private val applyTuningJobDelegate: (String, String) -> LocalApiControlResult,
+    private val rollbackTuningDelegate: (String) -> LocalApiControlResult,
+    private val runDurableLocalApiControl: (LocalApiIdempotencyContext, () -> LocalApiControlResult) -> LocalApiControlResult,
+) : LocalApiControlPlane {
+    override fun busyState(): LocalApiBusyState = busyStateProvider()
+
+    override fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult =
+        preflightProvider(request)
+
+    override fun profileJson(): String = profileJsonProvider()
+
+    override fun tuningJson(): String = tuningJsonProvider()
+
+    override fun tuningJob(jobId: String?): LocalApiControlResult =
+        tuningJobProvider(jobId)
+
+    override fun createTuningJob(
+        request: LocalApiTuningJobCreateRequest,
+        idempotencyKey: String
+    ): LocalApiControlResult = createTuningJobDelegate(request, idempotencyKey)
+
+    override fun createTuningJob(
+        request: LocalApiTuningJobCreateRequest,
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        createTuningJob(request, idempotency.key)
+    }
+
+    override fun pauseTuningJob(
+        jobId: String,
+        idempotencyKey: String
+    ): LocalApiControlResult = pauseTuningJobDelegate(jobId, idempotencyKey)
+
+    override fun pauseTuningJob(
+        jobId: String,
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        pauseTuningJob(jobId, idempotency.key)
+    }
+
+    override fun resumeTuningJob(
+        jobId: String,
+        idempotencyKey: String
+    ): LocalApiControlResult = resumeTuningJobDelegate(jobId, idempotencyKey)
+
+    override fun resumeTuningJob(
+        jobId: String,
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        resumeTuningJob(jobId, idempotency.key)
+    }
+
+    override fun cancelTuningJob(
+        jobId: String,
+        idempotencyKey: String
+    ): LocalApiControlResult = cancelTuningJobDelegate(jobId, idempotencyKey)
+
+    override fun cancelTuningJob(
+        jobId: String,
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        cancelTuningJob(jobId, idempotency.key)
+    }
+
+    override fun applyTuningJob(
+        jobId: String,
+        idempotencyKey: String
+    ): LocalApiControlResult = applyTuningJobDelegate(jobId, idempotencyKey)
+
+    override fun applyTuningJob(
+        jobId: String,
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        applyTuningJob(jobId, idempotency.key)
+    }
+
+    override fun rollbackTuning(
+        idempotencyKey: String
+    ): LocalApiControlResult = rollbackTuningDelegate(idempotencyKey)
+
+    override fun rollbackTuning(
+        idempotency: LocalApiIdempotencyContext
+    ): LocalApiControlResult = runDurableLocalApiControl(idempotency) {
+        rollbackTuning(idempotency.key)
+    }
+}
+
 
 
 

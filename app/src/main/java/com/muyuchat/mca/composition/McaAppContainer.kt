@@ -98,6 +98,13 @@ import com.muyuchat.core.engine.EngineLifecycleLease
 import com.muyuchat.mca.LocalImageModelRecord
 import com.muyuchat.mca.LocalImageResult
 import com.muyuchat.mca.LocalImageLoraRecord
+import com.muyuchat.api.local.LocalApiControlPlane
+import com.muyuchat.api.local.LocalApiBusyState
+import com.muyuchat.api.local.LocalApiPreflightRequest
+import com.muyuchat.api.local.LocalApiPreflightResult
+import com.muyuchat.api.local.LocalApiTuningJobCreateRequest
+import com.muyuchat.api.local.LocalApiIdempotencyContext
+import com.muyuchat.mca.LocalApiControlPlaneAdapter
 import com.muyuchat.mca.ReplyGenerationMetrics
 import com.muyuchat.mca.UiGenerationCancellation
 import com.muyuchat.mca.ConversationMutationRollbackState
@@ -1020,6 +1027,35 @@ internal class McaAppContainer(private val application: Application) {
             prepareLocalImagePromptExecutionRef = prepareLocalImagePromptExecutionRef,
             prepareLocalImageRuntimeMemoryRef = prepareLocalImageRuntimeMemoryRef,
             executionWithQnnVerificationEvidenceRef = executionWithQnnVerificationEvidenceRef,
+        )
+
+    fun createLocalApiControlPlane(
+        busyStateProvider: () -> LocalApiBusyState,
+        preflightProvider: (LocalApiPreflightRequest) -> LocalApiPreflightResult,
+        profileJsonProvider: () -> String,
+        tuningJsonProvider: () -> String,
+        tuningJobProvider: (String?) -> LocalApiControlResult,
+        createTuningJobDelegate: (LocalApiTuningJobCreateRequest, String) -> LocalApiControlResult,
+        pauseTuningJobDelegate: (String, String) -> LocalApiControlResult,
+        resumeTuningJobDelegate: (String, String) -> LocalApiControlResult,
+        cancelTuningJobDelegate: (String, String) -> LocalApiControlResult,
+        applyTuningJobDelegate: (String, String) -> LocalApiControlResult,
+        rollbackTuningDelegate: (String) -> LocalApiControlResult,
+        runDurableLocalApiControl: (LocalApiIdempotencyContext, () -> LocalApiControlResult) -> LocalApiControlResult,
+    ): LocalApiControlPlane =
+        LocalApiControlPlaneAdapter(
+            busyStateProvider = busyStateProvider,
+            preflightProvider = preflightProvider,
+            profileJsonProvider = profileJsonProvider,
+            tuningJsonProvider = tuningJsonProvider,
+            tuningJobProvider = tuningJobProvider,
+            createTuningJobDelegate = createTuningJobDelegate,
+            pauseTuningJobDelegate = pauseTuningJobDelegate,
+            resumeTuningJobDelegate = resumeTuningJobDelegate,
+            cancelTuningJobDelegate = cancelTuningJobDelegate,
+            applyTuningJobDelegate = applyTuningJobDelegate,
+            rollbackTuningDelegate = rollbackTuningDelegate,
+            runDurableLocalApiControl = runDurableLocalApiControl,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

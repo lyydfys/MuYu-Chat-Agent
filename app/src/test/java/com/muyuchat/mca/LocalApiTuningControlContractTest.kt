@@ -77,7 +77,8 @@ class LocalApiTuningControlContractTest {
         assertEquals(2, Regex("localApiTuningConflict\\(").findAll(body).count())
 
         // idempotency wrapper (second overload) delegates through the durable control helper
-        val wrapperStart = source.indexOf("idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext")
+        val wrapperStart = source.indexOf("idempotency: LocalApiIdempotencyContext").takeIf { it >= 0 }
+            ?: source.indexOf("idempotency: com.muyuchat.api.local.LocalApiIdempotencyContext")
         assertTrue(wrapperStart >= 0)
         val wrapper = source.substring(wrapperStart, (wrapperStart + 400).coerceAtMost(source.length))
         assertTrue(wrapper.contains("runDurableLocalApiControl(idempotency)"))
@@ -89,19 +90,20 @@ class LocalApiTuningControlContractTest {
         // S40-2B-2/2B-3 precondition: the one-line projection delegates and every tuning-control
         // method's String/IdempotencyContext overload pair. Extracting any of these must keep both
         // surfaces accounted for.
-        val source = mainViewModelSource()
-        // R3/S19: profileJson 的一行委托目标随投影外移改为 RuntimeEngineReads 缝；surface 合同保持。
-        assertTrue(source.contains("override fun profileJson(): String = runtimeProfileJsonFor(this@MainViewModel._uiState.value, this@MainViewModel.engine, this@MainViewModel.activeRuntimeIdentity)"))
-        // R1/S9: tuningJson 的转发目标随 VM 私有委托坍塌改为 payload 投影 owner；
-        // "投影 surface 是一行委托"的合同保持，仅更新代理目标。
-        assertTrue(source.contains("override fun tuningJson(): String = localApiTuningStateJson(localApiPayloadPort)"))
+        val source = controlPlaneSource()
+        // R3/S47: controlPlane 具名化后，profileJson 与 tuningJson 委托由 LocalApiControlPlaneAdapter 保持。
+        assertTrue(source.contains("override fun profileJson(): String = profileJsonProvider()"))
+        assertTrue(source.contains("override fun tuningJson(): String = tuningJsonProvider()"))
         for (method in listOf("pauseTuningJob", "resumeTuningJob", "cancelTuningJob", "applyTuningJob", "rollbackTuning")) {
             val count = Regex("override fun $method\\(").findAll(source).count()
             assertEquals("$method must keep exactly its two overloads", 2, count)
         }
     }
 
-    private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+    private fun controlPlaneSource(): String =
+        sourceFile("MainViewModel.kt") + "\n" + sourceFile("CorePortAdapters.kt")
+
+    private fun mainViewModelSource(): String = controlPlaneSource()
 
     @Test
     fun rollbackTuningKeepsItsValidationChainAndAcceptPayload() {
