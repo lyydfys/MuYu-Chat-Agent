@@ -29,6 +29,8 @@ import com.muyuchat.mca.ImageLibraryCommitPortAdapter
 import com.muyuchat.mca.ImageUpscaleOwner
 import com.muyuchat.mca.ImageUpscalePort
 import com.muyuchat.mca.ImageUpscalePortAdapter
+import com.muyuchat.mca.LocalImageUpscalerPort
+import com.muyuchat.mca.LocalImageUpscalerPortAdapter
 import com.muyuchat.mca.CreateLocalGeneratedImageAssetPort
 import com.muyuchat.mca.CreateLocalGeneratedImageAssetPortAdapter
 import com.muyuchat.mca.LocalGeneratedImageWorkerGatewayAdapter
@@ -546,6 +548,18 @@ internal class McaAppContainer(private val application: Application) {
             completeAssistantImageToolTurnForJobRef = completeAssistantImageToolTurnForJob
         )
     )
+
+    /** R3-S32：图片放大模型目录端口工厂（store / preferences / ownerLockProvider 真实依赖注入）。 */
+    fun createLocalImageUpscalerPort(
+        store: UiStateStore,
+        imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
+    ): LocalImageUpscalerPort =
+        LocalImageUpscalerPortAdapter(
+            store = store,
+            upscalerStoreRef = localImageUpscalerStore,
+            preferences = imageUpscalerPreferences,
+            imageUpscaleOwnerProvider = imageUpscaleOwnerProvider
+        )
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

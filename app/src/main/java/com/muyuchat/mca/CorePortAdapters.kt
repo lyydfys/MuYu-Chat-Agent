@@ -1028,3 +1028,31 @@ internal class ImageGenerationHostAdapter(
     override fun completeAssistantImageToolTurnForJob(jobId: String) =
         completeAssistantImageToolTurnForJobRef(jobId)
 }
+
+/**
+ * R3-S32：图片放大模型目录端口具名适配器（store / preferences / ownerLockProvider 真实依赖注入）。
+ */
+internal class LocalImageUpscalerPortAdapter(
+    private val store: UiStateStore,
+    private val upscalerStoreRef: LocalImageUpscalerStore,
+    private val preferences: android.content.SharedPreferences,
+    private val imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
+) : LocalImageUpscalerPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val upscalerStore: LocalImageUpscalerStore
+        get() = upscalerStoreRef
+
+    override fun persistSelectedUpscalerId(id: String?): Boolean =
+        preferences.edit()
+            .putString(IMAGE_UPSCALER_SELECTED_ID, id)
+            .commit()
+
+    override fun <T> withUpscaleLifecycleLock(block: (upscaleRunning: Boolean) -> T): T =
+        imageUpscaleOwnerProvider().withUpscaleLifecycleLock(block)
+}
+

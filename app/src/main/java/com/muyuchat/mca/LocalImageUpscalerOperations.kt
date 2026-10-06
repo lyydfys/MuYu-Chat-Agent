@@ -20,6 +20,8 @@ import kotlinx.coroutines.launch
  * part of the user-visible contract**: the original used `commit()` and distinguished a successful
  * selection from one that could not be persisted, and that distinction drives two different messages.
  */
+internal const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
+
 internal interface LocalImageUpscalerPort {
 
     fun uiState(): MainUiState

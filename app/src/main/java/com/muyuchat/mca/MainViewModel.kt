@@ -384,7 +384,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val LOCAL_API_FOREGROUND_READY_ATTEMPTS = 2
         private const val CLOUD_REASONING_LOCKED_MESSAGE = "云端模型的思考模式由服务商和具体模型决定，MCA 会默认按开启处理；如需关闭或调整，请在云端模型配置中设置相关参数。"
         private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
-        private const val IMAGE_UPSCALER_SELECTED_ID = "selected_id"
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
         private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
@@ -2135,29 +2134,12 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    /**
-     * The ViewModel side of [LocalImageUpscalerPort]. The lifecycle lock stays here and is only ever
-     * entered through [withUpscaleLifecycleLock].
-     */
+    // R3-S32：图片放大模型目录端口具名适配器（容器工厂装配，真实依赖注入）。
     private val localImageUpscalerPort: LocalImageUpscalerPort =
-        object : LocalImageUpscalerPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val upscalerStore: LocalImageUpscalerStore
-                get() = this@MainViewModel.localImageUpscalerStore
-
-            override fun persistSelectedUpscalerId(id: String?): Boolean =
-                this@MainViewModel.imageUpscalerPreferences.edit()
-                    .putString(IMAGE_UPSCALER_SELECTED_ID, id)
-                    .commit()
-
-            override fun <T> withUpscaleLifecycleLock(block: (upscaleRunning: Boolean) -> T): T =
-                this@MainViewModel.imageUpscaleOwner.withUpscaleLifecycleLock(block)
-        }
+        container.createLocalImageUpscalerPort(
+            uiStateStore,
+            { imageUpscaleOwner }
+        )
 
     /** Delegates to [importLocalImageUpscalerModel]. */
     fun importLocalImageUpscaler(uriString: String) {
