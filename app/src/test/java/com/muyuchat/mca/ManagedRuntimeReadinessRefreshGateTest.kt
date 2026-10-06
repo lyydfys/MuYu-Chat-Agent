@@ -86,18 +86,19 @@ class ManagedRuntimeReadinessRefreshGateTest {
 
     @Test
     fun `every manifest validating UI path publishes the refreshed catalog before continuing`() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // v4-①：读者位置无关——按标记定位承载文件，文件不再含路径字面量；断言语义不变。
+        val source = SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
         // R3-S24: the load chain moved to LoadModelOperations.kt; the load half is read where it
         // now lives（发布调用拼写随迁 publishChatCatalogSnapshot(readinessPort)），
         // verify/smoke halves stay on the ViewModel. Same ordering contract.
-        val load = sourceFile("app/src/main/java/com/muyuchat/mca/LoadModelOperations.kt")
+        val load = SourceTextFixtures.sourceOf("internal suspend fun CoroutineScope.runLoadModelBody(")
             .substringAfter("internal suspend fun CoroutineScope.runLoadModelBody(")
             .substringBefore("/** R3-S24：bootstrap")
         // R3/C1: captureLoadedRuntimeSnapshot 声明移出至运行时缝，区段边界标记随迁。
         val verify = section(source, "fun verifyModel(", "private fun clearNativeRuntimeSessionState(")
         // R3-S26: the smoke chain moved to ReadinessSmokeOperations.kt; the smoke half is read
         // where it now lives（发布调用拼写随迁），verify half stays on the ViewModel.
-        val smoke = sourceFile("app/src/main/java/com/muyuchat/mca/ReadinessSmokeOperations.kt")
+        val smoke = SourceTextFixtures.sourceOf("internal fun runAgentStabilitySmokeFor(")
             .substringAfter("internal fun runAgentStabilitySmokeFor(")
         assertTrue(verify.indexOf("modelStore.validateForLoad(") >= 0)
         assertTrue(

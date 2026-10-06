@@ -567,7 +567,9 @@ class LocalImagePromptCancellationContractTest {
         assertTrue(begin.contains("releaseBindingAfterPreparationFailure(next, cancelled)"))
     }
 
-    private fun mainViewModelSource(): String = sourceFile("MainViewModel.kt")
+    /** v4-①：位置无关——按标记定位承载文件（VM 类声明处）。 */
+    private fun mainViewModelSource(): String =
+        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
 
     /** R3/C2: the admission body moved to ImageGenerationOwner.kt (`fun submit`); read it where it now lives. */
     private fun imageGenerationOwnerSource(): String = sourceFile("ImageGenerationOwner.kt")

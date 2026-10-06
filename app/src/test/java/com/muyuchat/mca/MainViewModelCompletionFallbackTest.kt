@@ -604,64 +604,21 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(body.contains("effectiveChatBackend == ChatBackend.LOCAL"))
     }
 
-    private fun mainViewModelSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
-        repeat(8) {
-            val root = directory ?: return@repeat
-            val candidates = listOf(
-                File(root, "src/main/java/com/muyuchat/mca/MainViewModel.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-            )
-            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
-            directory = root.parentFile
-        }
-        error("MainViewModel.kt not found from ${System.getProperty("user.dir")}")
-    }
+    /** v4-①：位置无关——按标记定位承载文件（VM 类声明处），读者不再含路径字面量。 */
+    private fun mainViewModelSource(): String =
+        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
 
-    /** R3/C3-S24: the load vertical (runLoadModelBody etc.). */
-    private fun loadModelOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
-        repeat(8) {
-            val root = directory ?: return@repeat
-            val candidates = listOf(
-                File(root, "src/main/java/com/muyuchat/mca/LoadModelOperations.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/LoadModelOperations.kt")
-            )
-            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
-            directory = root.parentFile
-        }
-        error("LoadModelOperations.kt not found from ${System.getProperty("user.dir")}")
-    }
+    /** R3/C3-S24: the load vertical (runLoadModelBody etc.)；v4-① 标记定位。 */
+    private fun loadModelOperationsSource(): String =
+        SourceTextFixtures.sourceOf("internal suspend fun CoroutineScope.runLoadModelBody(")
 
-    /** R3/C3-S23: the load/unload/delete vertical (restoreLoadedRuntimeSnapshotFor etc.). */
-    private fun runtimeLifecycleOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
-        repeat(8) {
-            val root = directory ?: return@repeat
-            val candidates = listOf(
-                File(root, "src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt")
-            )
-            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
-            directory = root.parentFile
-        }
-        error("RuntimeLifecycleOperations.kt not found from ${System.getProperty("user.dir")}")
-    }
+    /** R3/C3-S23: the load/unload/delete vertical；v4-① 标记定位。 */
+    private fun runtimeLifecycleOperationsSource(): String =
+        SourceTextFixtures.sourceOf("internal suspend fun restoreLoadedRuntimeSnapshotFor(")
 
-    /** R3/C3-S19: the runtime release family (clearNativeRuntimeSessionStateFor etc.). */
-    private fun runtimeReleaseOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
-        repeat(8) {
-            val root = directory ?: return@repeat
-            val candidates = listOf(
-                File(root, "src/main/java/com/muyuchat/mca/RuntimeReleaseOperations.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/RuntimeReleaseOperations.kt")
-            )
-            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
-            directory = root.parentFile
-        }
-        error("RuntimeReleaseOperations.kt not found from ${System.getProperty("user.dir")}")
-    }
+    /** R3/C3-S19: the runtime release family；v4-① 标记定位。 */
+    private fun runtimeReleaseOperationsSource(): String =
+        SourceTextFixtures.sourceOf("internal fun clearNativeRuntimeSessionStateFor(")
 
     /** R3/S18: the runtime engine-read seam that now hosts apiGenerationParams. */
     private fun runtimeEngineReadsSource(): String {        var directory: File? = File(System.getProperty("user.dir")).absoluteFile

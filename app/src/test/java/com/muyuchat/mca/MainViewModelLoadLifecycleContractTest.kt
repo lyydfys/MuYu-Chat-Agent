@@ -7,9 +7,9 @@ import org.junit.Test
 class MainViewModelLoadLifecycleContractTest {
     @Test
     fun successfulFormalLoadPublishesTheModelAndReadyLifecycleTogether() {
-        // R3/S24: the formal-load publication section moved verbatim to LoadModelOperations.kt;
-        // the same anchors and their ordering contract are read where the section now lives.
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/LoadModelOperations.kt")
+        // R3/S24 + v4-①: the formal-load publication section lives wherever its marker lives;
+        // located by content, no path literals. Same anchors and ordering contract.
+        val source = SourceTextFixtures.sourceOf("val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()")
         // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；发布区段锚点随迁。
         val publicationStart = source.indexOf("val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()")
         val publicationEnd = source.indexOf("persistChatSessions(sessionsToPersist)", publicationStart)
