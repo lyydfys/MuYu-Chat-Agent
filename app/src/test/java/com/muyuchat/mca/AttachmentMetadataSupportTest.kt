@@ -59,9 +59,10 @@ class AttachmentMetadataSupportTest {
         assertTrue(size.contains("contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)"))
         assertTrue(size.contains(".getOrDefault(0L)"))
 
+        val attachmentOps = File(projectRoot(), "app/src/main/java/com/muyuchat/mca/ChatAttachmentOperations.kt").readText()
+        assertTrue(attachmentOps.contains("mimeTypeForTextAttachment(contentResolver, uri, displayName)"))
+        assertTrue(attachmentOps.contains("sizeForUri(contentResolver, uri)"))
         val viewModel = File(projectRoot(), "app/src/main/java/com/muyuchat/mca/MainViewModel.kt").readText()
-        assertTrue(viewModel.contains("mimeTypeForTextAttachment(getApplication<Application>().contentResolver, uri, displayName)"))
-        assertTrue(viewModel.contains("sizeForUri(getApplication<Application>().contentResolver, uri)"))
         assertTrue(!viewModel.contains("private fun mimeTypeForTextAttachment("))
         assertTrue(!viewModel.contains("private fun sizeForUri("))
     }

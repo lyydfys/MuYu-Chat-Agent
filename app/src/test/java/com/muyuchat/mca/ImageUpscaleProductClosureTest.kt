@@ -98,8 +98,9 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         )
         val backupOperationsSource = sourceFile("app/src/main/java/com/muyuchat/mca/ImageLibraryBackupOperations.kt")
         val exportImages = functionBody(backupOperationsSource, "internal fun exportImageLibraryBackupFor(")
-        val attachFile = functionBody(viewModel, "fun attachFile(")
-        val importImage = functionBody(viewModel, "private suspend fun importImageAsset(")
+        val attachmentOpsSource = sourceFile("app/src/main/java/com/muyuchat/mca/ChatAttachmentOperations.kt")
+        val attachFile = functionBody(attachmentOpsSource, "internal fun attachFileFor(")
+        val importImage = functionBody(attachmentOpsSource, "internal suspend fun importImageAsset(")
         val atomicImport = functionBody(
             imageAssetFiles,
             "internal suspend fun copyImageAssetStreamAtomically("

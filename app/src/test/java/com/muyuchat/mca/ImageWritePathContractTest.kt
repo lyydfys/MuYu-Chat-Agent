@@ -42,11 +42,12 @@ class ImageWritePathContractTest {
     @Test
     fun theViewModelDirectSitesKeepTheirExactShapes() {
         val vm = sourceFile("MainViewModel.kt")
+        val attachmentOps = sourceFile("ChatAttachmentOperations.kt")
 
         assertEquals(
             "Missing or duplicated import-commit delegate: upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {",
             1,
-            Regex(Regex.escape("upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {")).findAll(vm).count()
+            Regex(Regex.escape("upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {")).findAll(attachmentOps).count()
         )
 
         listOf(

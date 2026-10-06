@@ -1690,119 +1690,22 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun attachFile(uriString: String) {
-        if (_uiState.value.isGenerating) {
-            showStatus("请先停止当前生成，再上传文件")
-            return
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                val uri = Uri.parse(uriString)
-                val name = displayNameForUri(uri)
-                if (isImageAttachment(uri, name)) {
-                    awaitImageLibraryStartupReconciliation()
-                    val image = importImageAsset(
-                        uri = uri,
-                        displayName = name,
-                        source = "uploaded",
-                        chatSessionId = _uiState.value.activeChatSessionId
-                    )
-                    return@runCatching AttachmentImportResult(name, image.toInputAttachment(), false, image)
-                }
-                if (!isSupportedTextAttachment(getApplication<Application>().contentResolver, uri, name)) {
-                    error("当前上传入口暂支持文本、Markdown、JSON、XML 等文本类文件")
-                }
-                val (text, truncated) = readAttachmentText(uri)
-                if (text.isBlank()) error("文件内容为空或无法作为文本读取")
-                val file = createFileAsset(
-                    uri = uri,
-                    displayName = name,
-                    text = text,
-                    truncated = truncated,
-                    source = "uploaded",
-                    chatSessionId = _uiState.value.activeChatSessionId
-                )
-                AttachmentImportResult(name, file.text, file.truncated, fileAsset = file)
-            }
-            result.exceptionOrNull()?.let { error ->
-                if (error is CancellationException) throw error
-            }
-            result.onSuccess { imported ->
-                fun publishImportedAttachment(): List<FileAssetRecord>? {
-                    var filesToPersist: List<FileAssetRecord>? = null
-                    uiStateStore.update { state ->
-                        val importedAttachment = imported.imageAsset?.toChatAttachment()
-                        // The system picker can deliver the same selection more than once and
-                        // every import is copied to a fresh private file.  Compare the actual
-                        // image bytes through the shared vision identity contract before adding
-                        // another marker to the composer; otherwise the outgoing bubble can
-                        // visibly contain the same photo twice even though the user picked it
-                        // only once.
-                        val alreadyAttached = importedAttachment != null &&
-                            state.prepareChatInput().imageAttachments.any { existing ->
-                                listOf(existing, importedAttachment)
-                                    .deduplicateVisionAttachments()
-                                    .size == 1
-                            }
-                        val attachment = buildString {
-                            if (!alreadyAttached) {
-                                if (state.input.isNotBlank()) append("\n\n")
-                                if (imported.imageAsset != null) {
-                                    append(imported.text.trim())
-                                } else if (imported.fileAsset != null) {
-                                    append(imported.fileAsset.toInputAttachment())
-                                } else {
-                                    append("【上传文件：").append(imported.name).append("】\n")
-                                    append(imported.text.trim())
-                                    if (imported.truncated) append("\n\n（文件较大，已截取前 64KB）")
-                                }
-                            }
-                        }
-                        val updatedImages = imported.imageAsset?.let { image ->
-                            (listOf(image) + state.images.filterNot { it.id == image.id })
-                                .sortedImagesForLibrary()
-                        }
-                        val updatedFiles = imported.fileAsset?.let { file ->
-                            (listOf(file) + state.files.filterNot { it.id == file.id })
-                                .sortedFilesForLibrary()
-                        }
-                        if (updatedFiles != null) filesToPersist = updatedFiles
-                        state.copy(
-                            input = state.input + attachment,
-                            images = updatedImages ?: state.images,
-                            files = updatedFiles ?: state.files,
-                            statusMessage = if (imported.imageAsset != null && alreadyAttached) {
-                                "这张图片已在当前消息中，未重复添加：${imported.name}"
-                            } else if (imported.imageAsset != null) {
-                                "已添加图片：${imported.name}"
-                            } else {
-                                "已添加文件：${imported.name}"
-                            }
-                        )
-                    }
-                    return filesToPersist
-                }
-
-                val filesToPersist = imported.imageAsset?.let { image ->
-                    val commit = runCatching {
-                        upsertImportedImageUnderMutationLock(imageLibraryCommitPort, image) {
-                            publishImportedAttachment()
-                        }
-                    }
-                    val error = commit.exceptionOrNull()
-                    if (error != null) {
-                        image.deleteLocalCopy(imageAssetDirectory)
-                        if (error is CancellationException) throw error
-                        fail("图片库保存失败：${error.message ?: "数据库提交失败"}")
-                        return@onSuccess
-                    }
-                    commit.getOrThrow()
-                } ?: publishImportedAttachment()
-                filesToPersist?.let { persistFiles(it) }
-            }.onFailure { error ->
-                showStatus(error.message ?: "文件上传失败")
-            }
-        }
+        attachFileFor(
+            store = uiStateStore,
+            scope = viewModelScope,
+            contentResolver = getApplication<Application>().contentResolver,
+            imageAssetWriteMutex = imageAssetWriteMutex,
+            imageAssetDirectory = imageAssetDirectory,
+            imageLibraryCommitPort = imageLibraryCommitPort,
+            awaitImageLibraryStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
+            prepareChatInput = { it.prepareChatInput() },
+            persistFiles = ::persistFiles,
+            showStatus = ::showStatus,
+            fail = ::fail,
+            uriString = uriString
+        )
     }
+
 
     fun useImageAsset(imageId: String) {
         val image = _uiState.value.images.firstOrNull { it.id == imageId } ?: return
@@ -7465,61 +7368,14 @@ class MainViewModel @JvmOverloads constructor(
         chatImageOptionsForCurrentSelectionFor(state)
 
 
-    private fun displayNameForUri(uri: Uri): String {
-        val resolver = getApplication<Application>().contentResolver
-        val queriedName = if (uri.scheme.equals("content", ignoreCase = true)) {
-            runCatching {
-                resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
-                }
-            }.getOrNull()
-        } else {
-            null
-        }
-        return queriedName ?: uri.lastPathSegment?.substringAfterLast('/') ?: "上传文件"
-    }
+    private fun displayNameForUri(uri: Uri): String =
+        displayNameForUri(getApplication<Application>().contentResolver, uri)
 
+    private fun isImageAttachment(uri: Uri, name: String): Boolean =
+        isImageAttachment(getApplication<Application>().contentResolver, uri, name)
 
-    private fun isImageAttachment(uri: Uri, name: String): Boolean {
-        val resolver = getApplication<Application>().contentResolver
-        val mime = resolver.getType(uri).orEmpty().lowercase()
-        val lowerName = name.lowercase()
-        return mime.startsWith("image/") ||
-            lowerName.endsWith(".jpg") ||
-            lowerName.endsWith(".jpeg") ||
-            lowerName.endsWith(".png") ||
-            lowerName.endsWith(".webp") ||
-            lowerName.endsWith(".heic") ||
-            lowerName.endsWith(".heif")
-    }
-
-    private fun readAttachmentText(uri: Uri, maxBytes: Int = 64 * 1024): Pair<String, Boolean> {
-        val resolver = getApplication<Application>().contentResolver
-        val output = ByteArrayOutputStream()
-        var truncated = false
-        resolver.openInputStream(uri)?.use { input ->
-            val buffer = ByteArray(8192)
-            var total = 0
-            while (true) {
-                val read = input.read(buffer)
-                if (read < 0) break
-                val remaining = maxBytes - total
-                if (read > remaining) {
-                    if (remaining > 0) output.write(buffer, 0, remaining)
-                    truncated = true
-                    break
-                }
-                output.write(buffer, 0, read)
-                total += read
-                if (total >= maxBytes) {
-                    truncated = input.read() >= 0
-                    break
-                }
-            }
-        } ?: error("无法读取文件")
-        return decodeImportedText(output.toByteArray()) to truncated
-    }
+    private fun readAttachmentText(uri: Uri, maxBytes: Int = 64 * 1024): Pair<String, Boolean> =
+        readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes)
 
     private fun createFileAsset(
         uri: Uri,
@@ -7528,18 +7384,15 @@ class MainViewModel @JvmOverloads constructor(
         truncated: Boolean,
         source: String,
         chatSessionId: String? = null
-    ): FileAssetRecord =
-        FileAssetRecord(
-            id = UUID.randomUUID().toString(),
-            name = displayName.ifBlank { "文件" },
-            mimeType = mimeTypeForTextAttachment(getApplication<Application>().contentResolver, uri, displayName),
-            text = text.trim(),
-            preview = text.toFilePreview(),
-            truncated = truncated,
-            source = source,
-            sizeBytes = sizeForUri(getApplication<Application>().contentResolver, uri).takeIf { it > 0L } ?: text.toByteArray(Charsets.UTF_8).size.toLong(),
-            chatSessionId = chatSessionId
-        )
+    ): FileAssetRecord = createFileAsset(
+        contentResolver = getApplication<Application>().contentResolver,
+        uri = uri,
+        displayName = displayName,
+        text = text,
+        truncated = truncated,
+        source = source,
+        chatSessionId = chatSessionId
+    )
 
     private suspend fun importImageAsset(
         uri: Uri,
@@ -7547,35 +7400,17 @@ class MainViewModel @JvmOverloads constructor(
         source: String,
         prompt: String = "",
         chatSessionId: String? = null
-    ): ImageAssetRecord {
-        val app = getApplication<Application>()
-        val extension = imageExtension(displayName)
-        val imported = imageAssetWriteMutex.withLock {
-            val input = if (uri.scheme.equals("file", ignoreCase = true)) {
-                uri.path?.let { File(it).inputStream() }
-            } else {
-                app.contentResolver.openInputStream(uri)
-            } ?: error("无法读取图片")
-            input.use { sourceStream ->
-                copyImageAssetStreamAtomically(
-                    directory = imageAssetDirectory,
-                    suggestedExtension = extension,
-                    input = sourceStream
-                )
-            }
-        }
-        return ImageAssetRecord(
-            id = UUID.randomUUID().toString(),
-            name = displayName.ifBlank { "图片" },
-            uriString = Uri.fromFile(imported.file).toString(),
-            source = source,
-            prompt = prompt,
-            sizeBytes = imported.sizeBytes,
-            width = imported.width,
-            height = imported.height,
-            chatSessionId = chatSessionId
-        )
-    }
+    ): ImageAssetRecord = importImageAsset(
+        contentResolver = getApplication<Application>().contentResolver,
+        imageAssetWriteMutex = imageAssetWriteMutex,
+        imageAssetDirectory = imageAssetDirectory,
+        uri = uri,
+        displayName = displayName,
+        source = source,
+        prompt = prompt,
+        chatSessionId = chatSessionId
+    )
+
 
 
     /** Delegates to [createCloudGeneratedImageAssetsFor]. Signature kept verbatim. */
