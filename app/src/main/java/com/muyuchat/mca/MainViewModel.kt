@@ -372,7 +372,6 @@ class MainViewModel @JvmOverloads constructor(
         private const val CONTEXT_COMPRESSION_PREFERENCES = "mca_context_compression_v1"
         private const val CONTEXT_COMPRESSION_THRESHOLD_KEY = "threshold_percent"
         private const val CONTEXT_SUMMARY_MODEL_KEY = "summary_model"
-        private const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
         private const val MAX_DIRECT_COMPOSER_UTF8_BYTES = 256 * 1024
         private const val ASSISTANT_MODEL_MODE_FOLLOW_CURRENT = "follow_current"
         private const val ASSISTANT_MODEL_MODE_LOCAL = "local"
@@ -1129,9 +1128,35 @@ class MainViewModel @JvmOverloads constructor(
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
         updateGenerationImageGrantReleaseDeferInto(uiStateStore, defer)
 
-    private val autoUseManagedDownloads = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    private var managedDownloadOwnedBusy = false
+    private val modelImportAndDownloadCoordinator = ModelImportAndDownloadCoordinator(
+        application = getApplication(),
+        scope = viewModelScope,
+        store = uiStateStore,
+        modelStore = modelStore,
+        localImageModelStore = localImageModelStore,
+        getManagedRuntimeReadinessRefreshGate = { managedRuntimeReadinessRefreshGate },
+        getManagedRuntimeReadinessPort = { managedRuntimeReadinessPort },
+        chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
+        getInitialChatSessionIds = { initialChatSessions.map { it.id } },
+        showStatus = ::showStatus,
+        failDownload = ::failDownload,
+        busy = ::busy,
+        fail = ::fail,
+        loadModel = ::loadModel,
+        reconcileModelIdentities = { reconcileModelIdentities() }
+    )
 
+    private fun observeManagedDownloads() {
+        modelImportAndDownloadCoordinator.observeManagedDownloads { image ->
+            val selection = settleLocalImageSelection(image)
+            uiStateStore.update { it.copy(
+                localImageModels = selection.models,
+                qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
+                selectedLocalImageModelId = selection.selectedId,
+                selectedImageBackend = selection.selectedBackend
+            ) }
+        }
+    }
 
     init {
         if (!deferStartup) startAfterConstruction()
@@ -1141,7 +1166,7 @@ class MainViewModel @JvmOverloads constructor(
         restorePendingContentImportPreview()
         imageLibraryStartupReconciliation.start()
         observeManagedDownloads()
-        observeManagedImports()
+        modelImportAndDownloadCoordinator.observeManagedImports()
         viewModelScope.launch {
             verifiedOfflineTranslationBundle()?.let { bundle ->
                 uiStateStore.update { state ->
@@ -3193,119 +3218,31 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun refreshLocalModels() {
-        viewModelScope.launch(Dispatchers.IO) {
-            reconcileModelIdentities()
-            refreshRuntimeReadiness(managedRuntimeReadinessPort)
-        }
-    }
+    fun refreshLocalModels() =
+        modelImportAndDownloadCoordinator.refreshLocalModels()
 
-    private suspend fun reconcileModelIdentities() = chatSessionPersistenceMutex.withLock {
-        val result = modelIdentityReferenceMigration.reconcileAndMigrate()
-        if (result.idMapping.isNotEmpty()) {
-            fun canonical(id: String?): String? = result.idMapping[id] ?: id
-            uiStateStore.update { state -> state.copy(
-                models = result.models,
-                loadedModelId = canonical(state.loadedModelId),
-                chatSessions = state.chatSessions.map { it.copy(modelId = canonical(it.modelId)) },
-                assistants = state.assistants.map { it.copy(defaultModelId = canonical(it.defaultModelId)) }
-            ) }
-            durableChatSessions = durableChatSessions.map { it.copy(modelId = canonical(it.modelId)) }
-        }
-    }
+    private suspend fun reconcileModelIdentities() =
+        reconcileModelIdentitiesFor(
+            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+            modelIdentityReferenceMigration = modelIdentityReferenceMigration,
+            store = uiStateStore,
+            getDurableChatSessions = { durableChatSessions },
+            setDurableChatSessions = { durableChatSessions = it }
+        )
 
     fun importModel(uri: Uri) = importModel(listOf(uri))
 
-    fun importModel(uris: List<Uri>, textOnly: Boolean = false, persistentAccess: Boolean = false) {
-        if (uris.isEmpty()) return
-        enqueueManagedImport(ManagedModelImportRequest(uris = uris.distinct().map(Uri::toString),
-            textOnly = textOnly, persistentAccess = persistentAccess))
-    }
+    fun importModel(uris: List<Uri>, textOnly: Boolean = false, persistentAccess: Boolean = false) =
+        modelImportAndDownloadCoordinator.importModel(uris, textOnly, persistentAccess)
 
-    fun importModelDirectory(uri: Uri, textOnly: Boolean = false, persistentAccess: Boolean = false) {
-        enqueueManagedImport(ManagedModelImportRequest(uris = listOf(uri.toString()), directory = true,
-            textOnly = textOnly, persistentAccess = persistentAccess))
-    }
+    fun importModelDirectory(uri: Uri, textOnly: Boolean = false, persistentAccess: Boolean = false) =
+        modelImportAndDownloadCoordinator.importModelDirectory(uri, textOnly, persistentAccess)
 
-    private fun enqueueManagedImport(request: ManagedModelImportRequest) {
-        launchImportOperation {
-            ManagedModelImportWorker.enqueue(getApplication(), request)
-            uiStateStore.update { it.copy(statusMessage = if (request.persistentAccess)
-                "导入任务已保存，可在本地模型页查看进度或暂停；已完成组件可恢复。"
-                else "导入已开始。此文件提供方不支持保留访问权限，重启后可能需要重新选择源文件。") }
-        }
-    }
+    fun pauseManagedImport(requestId: String) =
+        modelImportAndDownloadCoordinator.pauseManagedImport(requestId)
 
-    fun pauseManagedImport(requestId: String) {
-        launchImportOperation {
-            androidx.work.WorkManager.getInstance(getApplication<Application>())
-                .cancelUniqueWork("${ManagedModelImportWorker.TAG}-$requestId")
-        }
-    }
-
-    fun resumeManagedImport(requestId: String) {
-        launchImportOperation {
-            val app = getApplication<Application>()
-            ManagedModelImportWorker.enqueue(app, ManagedModelImportRequest.read(app.filesDir, requestId))
-        }
-    }
-
-    private fun launchImportOperation(operation: suspend () -> Unit) {
-        viewModelScope.launch(Dispatchers.IO) {
-            try { operation() }
-            catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) {
-                showStatus("导入未完成：${error.message}。请在本地模型页重试或重新选择源文件。")
-            }
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            chatImageToolAuthorizationStore.prune(initialChatSessions.map { it.id })
-        }
-    }
-
-    private fun observeManagedImports() {
-        launchImportOperation {
-            val app = getApplication<Application>()
-            val receipts = app.getSharedPreferences("mca_import_receipts", Context.MODE_PRIVATE)
-            val handled = receipts.getStringSet("handled", emptySet()).orEmpty().toMutableSet()
-            androidx.work.WorkManager.getInstance(app).getWorkInfosByTagFlow(ManagedModelImportWorker.TAG).collect { infos ->
-                val tasks = infos.sortedByDescending { info ->
-                    info.tags.firstOrNull { it.startsWith("created:") }?.substringAfter(':')?.toLongOrNull() ?: 0L
-                }.mapNotNull { info ->
-                    info.tags.firstOrNull { it.startsWith(ManagedModelImportWorker.REQUEST_TAG_PREFIX) }
-                        ?.removePrefix(ManagedModelImportWorker.REQUEST_TAG_PREFIX)?.let { it to info }
-                }.distinctBy { it.first }
-                val rows = tasks.map { (requestId, info) ->
-                    val active = !info.state.isFinished
-                    val message = when (info.state) {
-                        androidx.work.WorkInfo.State.SUCCEEDED -> info.outputData.getString("message") ?: "模型导入完成"
-                        androidx.work.WorkInfo.State.FAILED -> info.outputData.getString("error") ?: "导入未完成，请检查源文件和存储空间后重试。"
-                        androidx.work.WorkInfo.State.CANCELLED -> "导入已暂停，可恢复已完成组件"
-                        else -> info.progress.getString("message") ?: "正在等待导入"
-                    }
-                    com.muyuchat.feature.modelhub.ModelImportTaskUi(
-                        id = requestId, message = message, file = info.progress.getString("file"),
-                        bytes = info.progress.getLong("bytes", 0), totalBytes = info.progress.getLong("total", 0),
-                        active = active, resumable = info.state == androidx.work.WorkInfo.State.FAILED || info.state == androidx.work.WorkInfo.State.CANCELLED
-                    )
-                }
-                // Task state is independent of chat/load/download busy ownership.
-                uiStateStore.update { it.copy(importTasks = rows.filter { row -> row.active || row.resumable } +
-                    rows.filter { row -> !row.active && !row.resumable }.take(3)) }
-                val completed = tasks.map { it.second }.filter {
-                    it.state == androidx.work.WorkInfo.State.SUCCEEDED && it.id.toString() !in handled
-                }
-                if (completed.isNotEmpty()) {
-                    managedRuntimeReadinessRefreshGate.invalidate()
-                    reconcileModelIdentities()
-                    val models = modelStore.listModels()
-                    uiStateStore.update { it.copy(models = models) }
-                    handled.addAll(completed.map { it.id.toString() })
-                    receipts.edit().putStringSet("handled", handled.toSet()).apply()
-                }
-            }
-        }
-    }
+    fun resumeManagedImport(requestId: String) =
+        modelImportAndDownloadCoordinator.resumeManagedImport(requestId)
 
     fun fetchRemoteFiles() =
         fetchRemoteFilesFor(
@@ -3340,35 +3277,13 @@ class MainViewModel @JvmOverloads constructor(
             ::enqueueManagedDownload
         )
 
-    fun attachVisionProjector(modelId: String, uri: Uri) {
-        launchModelOperation("模型操作未完成") {
-            busy("正在绑定本地视觉投影器...")
-            val shouldReload = _uiState.value.loadedModelId == modelId &&
-                _uiState.value.selectedChatBackend == ChatBackend.LOCAL
-            runCatching {
-                modelStore.attachVisionProjector(modelId, uri)
-            }.onSuccess { model ->
-                managedRuntimeReadinessRefreshGate.invalidate()
-                uiStateStore.update {
-                    it.copy(
-                        models = modelStore.listModels(),
-                        busy = false,
-                        statusMessage = if (shouldReload) {
-                            "已绑定视觉投影器：${model.visionProjectorFileName ?: "mmproj"}，正在重新加载模型以启用本地识图。"
-                        } else {
-                            "已绑定视觉投影器：${model.visionProjectorFileName ?: "mmproj"}，下次加载该模型后可本地识图。"
-                        }
-                    )
-                }
-                if (shouldReload) {
-                    loadModel(model)
-                }
-            }.onFailure { error ->
-                if (error is CancellationException) throw error
-                fail("视觉文件绑定失败：${error.message}")
-            }
-        }
-    }
+    fun attachVisionProjector(modelId: String, uri: Uri) =
+        modelImportAndDownloadCoordinator.attachVisionProjector(
+            modelId,
+            uri,
+            _uiState.value.loadedModelId,
+            _uiState.value.selectedChatBackend
+        )
 
 
 
@@ -3408,210 +3323,17 @@ class MainViewModel @JvmOverloads constructor(
             url
         )
 
-    fun download(remote: RemoteModelFile) {
-        enqueueManagedDownload(ManagedDownloadRequest(remote = remote,
-            projectorTargetId = if (remote.fileKind() == RemoteModelFileKind.PROJECTOR) _uiState.value.loadedModelId else null), false)
-    }
+    fun download(remote: RemoteModelFile) =
+        modelImportAndDownloadCoordinator.download(remote, _uiState.value.loadedModelId)
 
+    fun pauseManagedDownloads() =
+        modelImportAndDownloadCoordinator.pauseManagedDownloads()
 
+    fun resumeManagedDownloads() =
+        modelImportAndDownloadCoordinator.resumeManagedDownloads()
 
-
-    fun pauseManagedDownloads() {
-        launchModelOperation("暂停下载失败") {
-            androidx.work.WorkManager.getInstance(getApplication<Application>())
-                .cancelAllWorkByTag(ManagedModelDownloadWorker.TAG).result.get()
-        }
-    }
-
-    /** Resume paused/failed downloads from their durable request records. */
-    fun resumeManagedDownloads() {
-        launchModelOperation("继续下载失败") {
-            val app = getApplication<Application>()
-            val workManager = androidx.work.WorkManager.getInstance(app)
-            val requestPreferences = app.getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
-            val requests = requestPreferences.all.mapNotNull { (key, raw) ->
-                if (key.startsWith("use:")) return@mapNotNull null
-                (raw as? String)?.let { value ->
-                    runCatching { ManagedDownloadRequest.fromJson(value) }.getOrNull()
-                }
-            }
-            require(requests.isNotEmpty()) { "没有可恢复的下载任务。" }
-            var resumed = 0
-            requests.forEach { request ->
-                val infos = workManager
-                    .getWorkInfosForUniqueWork("${ManagedModelDownloadWorker.TAG}-${request.identity}")
-                    .get()
-                val hasLiveWork = infos.any { info ->
-                    info.state == androidx.work.WorkInfo.State.RUNNING ||
-                        info.state == androidx.work.WorkInfo.State.ENQUEUED ||
-                        info.state == androidx.work.WorkInfo.State.BLOCKED
-                }
-                if (!hasLiveWork) {
-                    if (requestPreferences.getBoolean("use:${request.identity}", false)) {
-                        autoUseManagedDownloads.add(request.identity)
-                    }
-                    ManagedModelDownloadWorker.enqueue(app, request)
-                    resumed++
-                }
-            }
-            require(resumed > 0) { "下载任务仍在运行，或没有可恢复任务。" }
-            showStatus("已继续下载，保留的临时文件将尝试断点续传。")
-        }
-    }
-
-    private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) {
-        launchModelOperation("无法开始下载") {
-            getApplication<Application>().getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
-                .edit()
-                .putString(request.identity, request.toJson())
-                .putBoolean("use:${request.identity}", useAfterDownload)
-                .apply()
-            if (useAfterDownload) autoUseManagedDownloads.add(request.identity)
-            uiStateStore.update { it.copy(downloadStatus = DownloadStatus.QUEUED,
-                downloadTaskId = request.identity,
-                downloadPhase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED,
-                downloadFailureSource = null,
-                downloadedBytes = 0L, downloadTotalBytes = 0L,
-                downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null,
-                downloadFileName = request.remote?.name ?: request.recommendationId,
-                downloadIntegrityStatus = "RUNNING",
-                downloadIntegrityMessage = "等待文件下载完成后校验。",
-                downloadExecutionStatus = "PENDING",
-                downloadExecutionMessage = "等待安装阶段读取本机兼容性。",
-                statusMessage = "下载任务已保存，网络可用时会继续；可暂停并保留进度。") }
-            ManagedModelDownloadWorker.enqueue(getApplication(), request)
-        }
-    }
-
-    private fun observeManagedDownloads() {
-        viewModelScope.launch {
-            BackgroundDownloadHealth.failure.collect { message ->
-                if (message != null) failDownload(message)
-            }
-        }
-        launchModelOperation("下载任务恢复失败，请在模型页重试") {
-            val app = getApplication<Application>()
-            val acknowledgements = app.getSharedPreferences("mca_download_receipts", Context.MODE_PRIVATE)
-            val handled = acknowledgements.getStringSet("handled", emptySet()).orEmpty().toMutableSet()
-            androidx.work.WorkManager.getInstance(app)
-                .getWorkInfosByTagFlow(ManagedModelDownloadWorker.TAG).collect { infos ->
-                    val active = infos.firstOrNull { it.state == androidx.work.WorkInfo.State.RUNNING }
-                        ?: infos.firstOrNull { !it.state.isFinished }
-                    if (active != null) {
-                        val progress = active.progress
-                        uiStateStore.update { state ->
-                            if (!state.busy) managedDownloadOwnedBusy = true
-                            state.copy(busy = true,
-                                downloadTaskId = active.tags.firstOrNull { tag ->
-                                    tag.matches(Regex("[0-9a-f]{64}"))
-                                } ?: active.id.toString(),
-                                downloadStatus = if (active.state == androidx.work.WorkInfo.State.RUNNING) DownloadStatus.RUNNING else DownloadStatus.QUEUED,
-                                downloadPhase = progress.getString("phase")?.let { name ->
-                                    runCatching { com.muyuchat.feature.modelhub.ModelHubDownloadPhase.valueOf(name) }.getOrNull()
-                                } ?: if (active.state == androidx.work.WorkInfo.State.RUNNING) {
-                                    com.muyuchat.feature.modelhub.ModelHubDownloadPhase.DOWNLOADING
-                                } else {
-                                    com.muyuchat.feature.modelhub.ModelHubDownloadPhase.QUEUED
-                                },
-                                downloadFailureSource = progress.getString("failureSource")?.let { name ->
-                                    runCatching { com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.valueOf(name) }.getOrNull()
-                                },
-                                downloadFileName = progress.getString("file") ?: state.downloadFileName,
-                                downloadedBytes = progress.getLong("bytes", 0),
-                                downloadTotalBytes = progress.getLong("total", 0),
-                                downloadSpeedBytesPerSecond = if (active.state == androidx.work.WorkInfo.State.RUNNING) progress.getLong("speed", 0) else 0L,
-                                downloadRemainingSeconds = if (active.state == androidx.work.WorkInfo.State.RUNNING) {
-                                    progress.getLong("remainingSeconds", -1L).takeIf { it >= 0L }
-                                } else null,
-                                statusMessage = progress.getString("message") ?: "下载任务已保留，正在等待网络或其他下载完成…",
-                                downloadIntegrityStatus = progress.getString("integrityStatus") ?: state.downloadIntegrityStatus,
-                                downloadIntegrityMessage = progress.getString("integrityMessage") ?: state.downloadIntegrityMessage,
-                                downloadExecutionStatus = progress.getString("executionStatus") ?: state.downloadExecutionStatus,
-                                downloadExecutionMessage = progress.getString("executionMessage") ?: state.downloadExecutionMessage)
-                        }
-                    }
-                    infos.filter { it.state.isFinished && it.id.toString() !in handled }
-                        .sortedBy { work -> work.tags.firstOrNull { it.startsWith("created:") }?.removePrefix("created:")?.toLongOrNull() ?: 0L }.forEach { info ->
-                        recoverModelOperation(operation = {
-                            val error = info.outputData.getString("error")
-                            if (info.state == androidx.work.WorkInfo.State.SUCCEEDED && error == null) {
-                                info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }?.let { identity ->
-                                    app.getSharedPreferences(DOWNLOAD_REQUESTS_PREFERENCES, Context.MODE_PRIVATE)
-                                        .edit().remove(identity).remove("use:$identity").apply()
-                                }
-                                reconcileModelIdentities()
-                                refreshRuntimeReadiness(managedRuntimeReadinessPort)
-                                val imageId = info.outputData.getString("imageId")
-                                val image = imageId?.let { id -> localImageModelStore.loadModels(discover = false).firstOrNull { it.matchesCatalogId(id) } }
-                                if (image != null) {
-                                    val selection = settleLocalImageSelection(image)
-                                    uiStateStore.update { it.copy(localImageModels = selection.models,
-                                        qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
-                                        selectedLocalImageModelId = selection.selectedId, selectedImageBackend = selection.selectedBackend) }
-                                }
-                                if (active == null) {
-                                    uiStateStore.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
-                                        downloadStatus = DownloadStatus.DONE, downloadSpeedBytesPerSecond = 0,
-                                        downloadTaskId = info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }
-                                            ?: info.id.toString(),
-                                        downloadPhase = com.muyuchat.feature.modelhub.ModelHubDownloadPhase.COMPLETED,
-                                        downloadFailureSource = null,
-                                        downloadRemainingSeconds = null, statusMessage = info.outputData.getString("message"),
-                                        downloadIntegrityStatus = info.outputData.getString("integrityStatus") ?: it.downloadIntegrityStatus,
-                                        downloadIntegrityMessage = info.outputData.getString("integrityMessage") ?: it.downloadIntegrityMessage,
-                                        downloadExecutionStatus = info.outputData.getString("executionStatus") ?: it.downloadExecutionStatus,
-                                        downloadExecutionMessage = info.outputData.getString("executionMessage") ?: it.downloadExecutionMessage) }
-                                    managedDownloadOwnedBusy = false
-                                }
-                                val model = info.outputData.getString("modelId")?.let(modelStore::getModel)
-                                if (model != null) {
-                                    val projectorDownloaded = info.outputData.getBoolean("projector", false)
-                                    val reloadLoadedVisionModel = projectorDownloaded &&
-                                        _uiState.value.loadedModelId == model.id &&
-                                        _uiState.value.selectedChatBackend == ChatBackend.LOCAL
-                                    if (reloadLoadedVisionModel) {
-                                        // A projector downloaded through the model hub is
-                                        // persisted after the worker finishes.  Reload the
-                                        // active GGUF immediately so the native runner binds
-                                        // the new mmproj instead of advertising a stale text
-                                        // session until the next manual model load.
-                                        uiStateStore.update {
-                                            it.copy(statusMessage = "视觉投影器已下载，正在重新加载模型以启用识图…")
-                                        }
-                                        loadModel(model)
-                                    } else {
-                                        useDownloadedChatModel(model, info.tags.any { autoUseManagedDownloads.remove(it) })
-                                    }
-                                }
-                            } else if (active == null) {
-                                uiStateStore.update { it.copy(busy = if (managedDownloadOwnedBusy) false else it.busy,
-                                    downloadStatus = if (info.state == androidx.work.WorkInfo.State.CANCELLED) DownloadStatus.PAUSED else DownloadStatus.FAILED,
-                                    downloadTaskId = info.tags.firstOrNull { tag -> tag.matches(Regex("[0-9a-f]{64}")) }
-                                        ?: info.id.toString(),
-                                    downloadPhase = info.outputData.getString("phase")?.let { name ->
-                                        runCatching { com.muyuchat.feature.modelhub.ModelHubDownloadPhase.valueOf(name) }.getOrNull()
-                                    } ?: it.downloadPhase,
-                                    downloadFailureSource = info.outputData.getString("failureSource")?.let { name ->
-                                        runCatching { com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.valueOf(name) }.getOrNull()
-                                    } ?: if (info.state == androidx.work.WorkInfo.State.CANCELLED) null
-                                    else com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.DOWNLOAD,
-                                    downloadSpeedBytesPerSecond = 0, downloadRemainingSeconds = null,
-                                    statusMessage = error ?: "下载已暂停，进度已保留。再次点击下载可继续。",
-                                    downloadIntegrityStatus = info.outputData.getString("integrityStatus") ?: it.downloadIntegrityStatus,
-                                    downloadIntegrityMessage = info.outputData.getString("integrityMessage") ?: it.downloadIntegrityMessage,
-                                    downloadExecutionStatus = info.outputData.getString("executionStatus") ?: it.downloadExecutionStatus,
-                                    downloadExecutionMessage = info.outputData.getString("executionMessage") ?: it.downloadExecutionMessage) }
-                                managedDownloadOwnedBusy = false
-                            }
-                        }, onFailure = { error ->
-                            failDownload("模型文件已保留，但刷新列表失败：${error.message}。请释放存储空间后刷新本地模型。")
-                        })
-                        handled.add(info.id.toString())
-                        acknowledgements.edit().putStringSet("handled", handled.toList().takeLast(128).toSet()).apply()
-                    }
-                }
-        }
-    }
+    private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
+        modelImportAndDownloadCoordinator.enqueueManagedDownload(request, useAfterDownload)
 
     private fun launchModelOperation(message: String, operation: suspend kotlinx.coroutines.CoroutineScope.() -> Unit): Job =
         viewModelScope.launch(Dispatchers.IO) {
@@ -3625,13 +3347,6 @@ class MainViewModel @JvmOverloads constructor(
             })
         }
 
-    private fun useDownloadedChatModel(model: ModelManifest, requested: Boolean) {
-        val state = _uiState.value
-        if (requested && !state.busy && !state.isGenerating && state.loadedModelId == null &&
-            state.selectedChatBackend == ChatBackend.LOCAL && state.tab == AppTab.MODELS) {
-            loadModel(model)
-        }
-    }
 
     /** Delegates to [selectChatModelFor]. Signature kept verbatim. */
     fun selectChatModel(choiceId: String) =
