@@ -82,6 +82,15 @@ import com.muyuchat.mca.ChatLocalApiProviderPort
 import com.muyuchat.mca.ChatLocalApiProviderPortAdapter
 import com.muyuchat.mca.ChatGenerationExecutionPort
 import com.muyuchat.mca.ChatGenerationExecutionPortAdapter
+import com.muyuchat.mca.ChatImagePromptBridgePort
+import com.muyuchat.mca.ChatImagePromptBridgePortAdapter
+import com.muyuchat.feature.chat.ChatImageActionKind
+import com.muyuchat.mca.PendingChatImageAction
+import com.muyuchat.mca.PendingImageTranslation
+import com.muyuchat.mca.PromptEnvelope
+import com.muyuchat.mca.OfflinePromptTranslationRequest
+import com.muyuchat.mca.OfflinePromptTranslationResolution
+import com.muyuchat.mca.LocalImageGenerationOptions
 import com.muyuchat.mca.ChatContextComposer
 import com.muyuchat.mca.ChatRuntimeContextPlan
 import com.muyuchat.mca.WebSearchCitationAudit
@@ -894,6 +903,44 @@ internal class McaAppContainer(private val application: Application) {
             loadContextCompressionThresholdRef = loadContextCompressionThresholdRef,
             handleAssistantImageToolCallsRef = handleAssistantImageToolCallsRef,
             finishAssistantImageContinuationRef = finishAssistantImageContinuationRef,
+        )
+
+    fun createChatImagePromptBridgePort(
+        store: UiStateStore,
+        chatContextComposer: ChatContextComposer,
+        engine: McaInferenceService,
+        currentBridgeGenerationRef: () -> Long,
+        incrementBridgeGenerationRef: () -> Long,
+        cancelBridgeJobRef: () -> Unit,
+        setBridgeJobRef: (Job) -> Unit,
+        bridgeScopeRef: () -> CoroutineScope,
+        setPendingChatImageActionRef: (String, ChatImageActionKind, String, Int?, () -> Boolean) -> Unit,
+        setPendingImageTranslationRef: (PendingImageTranslation) -> Unit,
+        showStatusRef: (String?) -> Unit,
+        chatImageOptionsForCurrentSelectionRef: (MainUiState) -> LocalImageGenerationOptions,
+        offlinePromptTranslationServiceProvider: () -> OfflinePromptTranslationService,
+        verifiedOfflineTranslationBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?,
+        sendChatImageRequestRef: (String, String, LocalImageGenerationOptions?, PromptEnvelope?, String?) -> Unit,
+        negativePromptSupportedRef: (MainUiState) -> Boolean,
+    ): ChatImagePromptBridgePort =
+        ChatImagePromptBridgePortAdapter(
+            store = store,
+            chatContextComposer = chatContextComposer,
+            cloudChatProvider = cloudChatProvider,
+            engine = engine,
+            currentBridgeGenerationRef = currentBridgeGenerationRef,
+            incrementBridgeGenerationRef = incrementBridgeGenerationRef,
+            cancelBridgeJobRef = cancelBridgeJobRef,
+            setBridgeJobRef = setBridgeJobRef,
+            bridgeScopeRef = bridgeScopeRef,
+            setPendingChatImageActionRef = setPendingChatImageActionRef,
+            setPendingImageTranslationRef = setPendingImageTranslationRef,
+            showStatusRef = showStatusRef,
+            chatImageOptionsForCurrentSelectionRef = chatImageOptionsForCurrentSelectionRef,
+            offlinePromptTranslationServiceProvider = offlinePromptTranslationServiceProvider,
+            verifiedOfflineTranslationBundleRef = verifiedOfflineTranslationBundleRef,
+            sendChatImageRequestRef = sendChatImageRequestRef,
+            negativePromptSupportedRef = negativePromptSupportedRef,
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

@@ -161,6 +161,7 @@ class ChatImagePromptBridgeOperationsContractTest {
             "The ViewModel must keep the port implementation",
             viewModel.contains("private val chatImagePromptBridgePort: ChatImagePromptBridgePort =")
         )
+        val portImplementationSource = viewModel + "\n" + corePortAdaptersSource()
         listOf(
             "override fun currentState(): MainUiState",
             "override fun updateUiState(transform: (MainUiState) -> MainUiState)",
@@ -186,7 +187,7 @@ class ChatImagePromptBridgeOperationsContractTest {
             "override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot?",
             "override fun selectedAssistant(state: MainUiState): AssistantRecord?"
         ).forEach { member ->
-            assertTrue("Port implementation must declare $member", viewModel.contains(member))
+            assertTrue("Port implementation must declare $member", portImplementationSource.contains(member))
         }
 
         // The negative-branch capability probe stays a ViewModel member: the assistant image-turn
@@ -219,6 +220,11 @@ class ChatImagePromptBridgeOperationsContractTest {
     private fun mainViewModelSource(): String = projectFile(
         "src/main/java/com/muyuchat/mca/MainViewModel.kt",
         "app/src/main/java/com/muyuchat/mca/MainViewModel.kt"
+    )
+
+    private fun corePortAdaptersSource(): String = projectFile(
+        "src/main/java/com/muyuchat/mca/CorePortAdapters.kt",
+        "app/src/main/java/com/muyuchat/mca/CorePortAdapters.kt"
     )
 
     private fun projectFile(vararg candidates: String): String {

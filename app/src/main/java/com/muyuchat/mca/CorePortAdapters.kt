@@ -7,11 +7,15 @@ import com.muyuchat.core.engine.EngineLifecycleLease
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import com.muyuchat.feature.chat.ChatImageActionKind
+import com.muyuchat.api.local.LocalApiRuntime
+import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.GenerationParams
@@ -2052,6 +2056,135 @@ internal class ChatGenerationExecutionPortAdapter(
         createdFiles: MutableList<File>
     ): List<ChatMessage> = messages.preparedForLocalVision(visionAttachmentPort, createdFiles)
 }
+
+internal class ChatImagePromptBridgePortAdapter(
+    private val store: UiStateStore,
+    private val chatContextComposer: ChatContextComposer,
+    private val cloudChatProvider: OpenAiCompatibleChatProvider,
+    private val engine: McaInferenceService,
+    private val currentBridgeGenerationRef: () -> Long,
+    private val incrementBridgeGenerationRef: () -> Long,
+    private val cancelBridgeJobRef: () -> Unit,
+    private val setBridgeJobRef: (Job) -> Unit,
+    private val bridgeScopeRef: () -> CoroutineScope,
+    private val setPendingChatImageActionRef: (String, ChatImageActionKind, String, Int?, () -> Boolean) -> Unit,
+    private val setPendingImageTranslationRef: (PendingImageTranslation) -> Unit,
+    private val showStatusRef: (String?) -> Unit,
+    private val chatImageOptionsForCurrentSelectionRef: (MainUiState) -> LocalImageGenerationOptions,
+    private val offlinePromptTranslationServiceProvider: () -> OfflinePromptTranslationService,
+    private val verifiedOfflineTranslationBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?,
+    private val sendChatImageRequestRef: (String, String, LocalImageGenerationOptions?, PromptEnvelope?, String?) -> Unit,
+    private val negativePromptSupportedRef: (MainUiState) -> Boolean,
+) : ChatImagePromptBridgePort {
+
+    override fun currentState(): MainUiState = store.state.value
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun currentBridgeGeneration(): Long = currentBridgeGenerationRef()
+
+    override fun incrementBridgeGeneration(): Long = incrementBridgeGenerationRef()
+
+    override fun cancelBridgeJob() {
+        cancelBridgeJobRef()
+    }
+
+    override fun setBridgeJob(job: Job) {
+        setBridgeJobRef(job)
+    }
+
+    override fun bridgeScope(): CoroutineScope = bridgeScopeRef()
+
+    override fun setPendingChatImageAction(
+        id: String,
+        kind: ChatImageActionKind,
+        visibleUserText: String,
+        requestedOutputCount: Int?,
+        stillOwned: () -> Boolean
+    ) {
+        setPendingChatImageActionRef(id, kind, visibleUserText, requestedOutputCount, stillOwned)
+    }
+
+    override fun setPendingImageTranslation(translation: PendingImageTranslation) {
+        setPendingImageTranslationRef(translation)
+    }
+
+    override fun showStatus(message: String?) {
+        showStatusRef(message)
+    }
+
+    override fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
+        chatImageOptionsForCurrentSelectionRef(state)
+
+    override fun composeChatContext(
+        messages: List<ChatMessage>,
+        params: GenerationParams,
+        assistantId: String,
+        chatSessionId: String?,
+        knowledgeBaseIds: Set<String>,
+        fileContextEnabled: Boolean
+    ): ChatRuntimeContextPlan = chatContextComposer.compose(
+        messages = messages,
+        params = params,
+        assistantId = assistantId,
+        chatSessionId = chatSessionId,
+        knowledgeBaseIds = knowledgeBaseIds,
+        fileContextEnabled = fileContextEnabled
+    )
+
+    override fun streamChatCloud(config: CloudApiConfig, request: ChatRequest): Flow<GenerateEvent> =
+        cloudChatProvider.streamChat(config, request)
+
+    override fun streamChatLocal(
+        request: ChatRequest,
+        executionContext: LocalChatExecutionContext
+    ): Flow<GenerateEvent> =
+        LocalApiRuntime.streamChat(request, executionContext)
+            ?: engine.streamChat(request, executionContext)
+
+    override suspend fun translateOffline(request: OfflinePromptTranslationRequest): OfflinePromptTranslationResolution =
+        offlinePromptTranslationServiceProvider().translate(verifiedOfflineTranslationBundleRef(), request)
+
+    override fun sendChatImageRequest(
+        visibleUserText: String,
+        prompt: String,
+        optionsOverride: LocalImageGenerationOptions?,
+        promptEnvelope: PromptEnvelope?,
+        contextTraceJson: String?
+    ) {
+        sendChatImageRequestRef(
+            visibleUserText,
+            prompt,
+            optionsOverride,
+            promptEnvelope,
+            contextTraceJson
+        )
+    }
+
+    override fun negativePromptSupported(state: MainUiState): Boolean =
+        negativePromptSupportedRef(state)
+
+    override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
+        state.canWriteToActiveAssistantSession()
+
+    override fun selectedChatCloudConfig(state: MainUiState): CloudApiConfig? =
+        state.selectedChatCloudConfig()
+
+    override fun selectedImageCloudConfig(state: MainUiState): CloudApiConfig? =
+        state.selectedImageCloudConfig()
+
+    override fun selectedLocalImageModel(state: MainUiState): LocalImageModelRecord? =
+        state.selectedLocalImageModel()
+
+    override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot? =
+        state.activeAssistantSnapshot()
+
+    override fun selectedAssistant(state: MainUiState): AssistantRecord? =
+        state.selectedAssistant()
+}
+
 
 
 

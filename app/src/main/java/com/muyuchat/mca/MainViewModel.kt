@@ -8068,35 +8068,16 @@ class MainViewModel @JvmOverloads constructor(
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
     private val chatImagePromptBridgePort: ChatImagePromptBridgePort =
-        object : ChatImagePromptBridgePort {
-            override fun currentState(): MainUiState = _uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                uiStateStore.update(transform)
-            }
-
-            override fun currentBridgeGeneration(): Long = chatImagePromptBridgeGeneration.get()
-
-            override fun incrementBridgeGeneration(): Long =
-                chatImagePromptBridgeGeneration.incrementAndGet()
-
-            override fun cancelBridgeJob() {
-                chatImagePromptBridgeJob?.cancel()
-            }
-
-            override fun setBridgeJob(job: Job) {
-                chatImagePromptBridgeJob = job
-            }
-
-            override fun bridgeScope(): CoroutineScope = viewModelScope
-
-            override fun setPendingChatImageAction(
-                id: String,
-                kind: com.muyuchat.feature.chat.ChatImageActionKind,
-                visibleUserText: String,
-                requestedOutputCount: Int?,
-                stillOwned: () -> Boolean
-            ) {
+        container.createChatImagePromptBridgePort(
+            store = uiStateStore,
+            chatContextComposer = chatContextComposer,
+            engine = engine,
+            currentBridgeGenerationRef = { chatImagePromptBridgeGeneration.get() },
+            incrementBridgeGenerationRef = { chatImagePromptBridgeGeneration.incrementAndGet() },
+            cancelBridgeJobRef = { chatImagePromptBridgeJob?.cancel() },
+            setBridgeJobRef = { chatImagePromptBridgeJob = it },
+            bridgeScopeRef = { viewModelScope },
+            setPendingChatImageActionRef = { id, kind, visibleUserText, requestedOutputCount, stillOwned ->
                 pendingChatImageAction = PendingChatImageAction(
                     id = id,
                     kind = kind,
@@ -8104,83 +8085,23 @@ class MainViewModel @JvmOverloads constructor(
                     requestedOutputCount = requestedOutputCount,
                     stillOwned = stillOwned
                 )
-            }
-
-            override fun setPendingImageTranslation(translation: PendingImageTranslation) {
-                pendingImageTranslation = translation
-            }
-
-            override fun showStatus(message: String?) {
-                this@MainViewModel.showStatus(message = message)
-            }
-
-            override fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
-                this@MainViewModel.chatImageOptionsForCurrentSelection(state)
-
-            override fun composeChatContext(
-                messages: List<ChatMessage>,
-                params: GenerationParams,
-                assistantId: String,
-                chatSessionId: String?,
-                knowledgeBaseIds: Set<String>,
-                fileContextEnabled: Boolean
-            ): ChatRuntimeContextPlan = chatContextComposer.compose(
-                messages = messages,
-                params = params,
-                assistantId = assistantId,
-                chatSessionId = chatSessionId,
-                knowledgeBaseIds = knowledgeBaseIds,
-                fileContextEnabled = fileContextEnabled
-            )
-
-            override fun streamChatCloud(config: CloudApiConfig, request: ChatRequest): Flow<GenerateEvent> =
-                cloudChatProvider.streamChat(config, request)
-
-            override fun streamChatLocal(
-                request: ChatRequest,
-                executionContext: LocalChatExecutionContext
-            ): Flow<GenerateEvent> =
-                LocalApiRuntime.streamChat(request, executionContext)
-                    ?: engine.streamChat(request, executionContext)
-
-            override suspend fun translateOffline(request: OfflinePromptTranslationRequest): OfflinePromptTranslationResolution =
-                offlinePromptTranslationService.translate(verifiedOfflineTranslationBundle(), request)
-
-            override fun sendChatImageRequest(
-                visibleUserText: String,
-                prompt: String,
-                optionsOverride: LocalImageGenerationOptions?,
-                promptEnvelope: PromptEnvelope?,
-                contextTraceJson: String?
-            ) = this@MainViewModel.sendChatImageRequest(
-                visibleUserText = visibleUserText,
-                prompt = prompt,
-                optionsOverride = optionsOverride,
-                promptEnvelope = promptEnvelope,
-                contextTraceJson = contextTraceJson
-            )
-
-            override fun negativePromptSupported(state: MainUiState): Boolean =
-                this@MainViewModel.chatImageNegativePromptSupported(state)
-
-            override fun canWriteToActiveAssistantSession(state: MainUiState): Boolean =
-                state.canWriteToActiveAssistantSession()
-
-            override fun selectedChatCloudConfig(state: MainUiState): CloudApiConfig? =
-                state.selectedChatCloudConfig()
-
-            override fun selectedImageCloudConfig(state: MainUiState): CloudApiConfig? =
-                state.selectedImageCloudConfig()
-
-            override fun selectedLocalImageModel(state: MainUiState): LocalImageModelRecord? =
-                state.selectedLocalImageModel()
-
-            override fun activeAssistantSnapshot(state: MainUiState): AssistantConversationSnapshot? =
-                state.activeAssistantSnapshot()
-
-            override fun selectedAssistant(state: MainUiState): AssistantRecord? =
-                state.selectedAssistant()
-        }
+            },
+            setPendingImageTranslationRef = { pendingImageTranslation = it },
+            showStatusRef = { showStatus(it) },
+            chatImageOptionsForCurrentSelectionRef = { chatImageOptionsForCurrentSelection(it) },
+            offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
+            verifiedOfflineTranslationBundleRef = { verifiedOfflineTranslationBundle() },
+            sendChatImageRequestRef = { visibleUserText, prompt, optionsOverride, promptEnvelope, contextTraceJson ->
+                sendChatImageRequest(
+                    visibleUserText = visibleUserText,
+                    prompt = prompt,
+                    optionsOverride = optionsOverride,
+                    promptEnvelope = promptEnvelope,
+                    contextTraceJson = contextTraceJson
+                )
+            },
+            negativePromptSupportedRef = { chatImageNegativePromptSupported(it) },
+        )
 
     /** The ViewModel side of [ChatStopGenerationPort]. */
     private val chatStopGenerationPort: ChatStopGenerationPort =
