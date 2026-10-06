@@ -36,6 +36,8 @@ import com.muyuchat.mca.CreateLocalGeneratedImageAssetPortAdapter
 import com.muyuchat.mca.LocalGeneratedImageWorkerGatewayAdapter
 import com.muyuchat.mca.ImagePromptTranslationPort
 import com.muyuchat.mca.ImagePromptTranslationPortAdapter
+import com.muyuchat.mca.ImagePromptTranslationPreviewPort
+import com.muyuchat.mca.ImagePromptTranslationPreviewPortAdapter
 import com.muyuchat.mca.OfflinePromptTranslationService
 import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
@@ -559,6 +561,18 @@ internal class McaAppContainer(private val application: Application) {
             upscalerStoreRef = localImageUpscalerStore,
             preferences = imageUpscalerPreferences,
             imageUpscaleOwnerProvider = imageUpscaleOwnerProvider
+        )
+
+    /** R3-S33：提示词翻译预览端口工厂（直调 operations，service 延迟注入）。 */
+    fun createImagePromptTranslationPreviewPort(
+        store: UiStateStore,
+        serviceProvider: () -> OfflinePromptTranslationService
+    ): ImagePromptTranslationPreviewPort =
+        ImagePromptTranslationPreviewPortAdapter(
+            store = store,
+            admission = runtimeAdmission,
+            downloader = offlineTranslationDownloader,
+            serviceProvider = serviceProvider
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

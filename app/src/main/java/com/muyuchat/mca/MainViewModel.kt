@@ -5850,26 +5850,12 @@ class MainViewModel @JvmOverloads constructor(
         cancelOfflinePromptTranslationInstallFor(container.runtimeAdmission)
     }
 
-    /**
-     * The ViewModel side of [ImagePromptTranslationPreviewPort]: one route per member, no logic of
-     * its own. The previews moved to [translateImagePromptPreview], which is now the only place an
-     * offline prompt translation is decided.
-     */
+    // R3-S33：提示词翻译预览端口具名适配器（容器工厂装配，真实依赖注入）。
     private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
-        object : ImagePromptTranslationPreviewPort {
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override val offlinePromptTranslationService: OfflinePromptTranslationService
-                get() = this@MainViewModel.offlinePromptTranslationService
-
-            override suspend fun verifiedOfflineTranslationBundle():
-                VerifiedOfflinePromptTranslationBundle? =
-                this@MainViewModel.verifiedOfflineTranslationBundle()
-        }
+        container.createImagePromptTranslationPreviewPort(
+            uiStateStore,
+            { offlinePromptTranslationService }
+        )
 
     suspend fun translateImagePromptPreview(prompt: String): String =
         translateImagePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)

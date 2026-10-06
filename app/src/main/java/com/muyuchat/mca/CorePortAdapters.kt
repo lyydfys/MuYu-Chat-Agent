@@ -1056,3 +1056,26 @@ internal class LocalImageUpscalerPortAdapter(
         imageUpscaleOwnerProvider().withUpscaleLifecycleLock(block)
 }
 
+/**
+ * R3-S33：提示词翻译预览端口具名适配器（直调 operations；service 以 provider 保 lazy 时机）。
+ */
+internal class ImagePromptTranslationPreviewPortAdapter(
+    private val store: UiStateStore,
+    private val admission: RuntimeAdmissionState,
+    private val downloader: OfflinePromptTranslationBundleDownloader,
+    private val serviceProvider: () -> OfflinePromptTranslationService
+) : ImagePromptTranslationPreviewPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val offlinePromptTranslationService: OfflinePromptTranslationService
+        get() = serviceProvider()
+
+    override suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? =
+        verifiedOfflineTranslationBundleFor(store, admission, downloader)
+}
+
+
