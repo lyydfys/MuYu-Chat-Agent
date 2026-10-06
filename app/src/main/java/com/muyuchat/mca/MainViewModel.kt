@@ -9794,7 +9794,7 @@ class MainViewModel @JvmOverloads constructor(
 
             override fun finishAssistantImageContinuation(requestId: String, completed: Boolean, failureMessage: String) = this@MainViewModel.finishAssistantImageContinuation(requestId, completed, failureMessage)
 
-            override fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?) = this@MainViewModel.chatImageToolChatModelIdentity(modelId, config)
+            override fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?) = com.muyuchat.mca.chatImageToolChatModelIdentity(modelId, config)
 
             override suspend fun localVisionRunnerAvailable() = isLocalVisionRunnerAvailable(visionAttachmentPort)
 
@@ -10215,27 +10215,6 @@ class MainViewModel @JvmOverloads constructor(
             ?.toChatConfig()
 
     /** Secret-free identity for the exact Responses chat endpoint and model configuration. */
-    private fun chatImageToolChatModelIdentity(
-        modelId: String?,
-        config: CloudApiConfig?
-    ): String? {
-        val normalizedId = modelId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        val normalized = config?.normalized() ?: return null
-        if (!normalized.configured || normalized.apiFormat != CloudApiFormat.OPENAI_RESPONSES ||
-            !normalized.supportsTools
-        ) return null
-        return encodeChatImageAuthorizationIdentity(
-            listOf(
-                normalizedId,
-                normalized.apiFormat.name,
-                normalized.baseUrl,
-                normalized.chatModel,
-                normalized.supportsTools.toString(),
-                normalized.responsesReasoningEnabled.toString()
-            )
-        )
-    }
-
     private fun attachContextAssemblyTrace(
         traceJson: String?,
         generationRunId: Long,
@@ -10268,38 +10247,6 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun AssistantImageModelBinding.authorizationIdentity(): String =
-        encodeChatImageAuthorizationIdentity(
-            listOf(backend.name, modelId, fingerprint)
-        )
-
-    private fun encodeChatImageAuthorizationIdentity(parts: List<String>): String =
-        parts.joinToString(separator = "\u0000") { value -> "${value.length}:$value" }
-
-    private fun MainUiState.chatImageModelBinding(): AssistantImageModelBinding? {
-        val state = this
-        return when (selectedImageBackend) {
-        ImageBackend.LOCAL -> selectedLocalImageModel()?.let { model ->
-            AssistantImageModelBinding(
-                backend = ImageBackend.LOCAL,
-                modelId = model.id,
-                modelName = model.displayName,
-                options = chatImageOptionsForCurrentSelection(state),
-                fingerprint = model.chatImageRetryFingerprint()
-            )
-        }
-        ImageBackend.CLOUD -> selectedImageCloudConfig()?.let { config ->
-            val modelId = selectedCloudImageModelId ?: return@let null
-            AssistantImageModelBinding(
-                backend = ImageBackend.CLOUD,
-                modelId = modelId,
-                modelName = config.displayName.ifBlank { config.imageModel },
-                options = LocalImageGenerationOptions(batchCount = 1),
-                fingerprint = config.chatImageRetryFingerprint()
-            )
-        }
-        }
-    }
 
     /** Delegates to [chatImageOptionsForCurrentSelectionFor]. Signature kept verbatim. */
     internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
