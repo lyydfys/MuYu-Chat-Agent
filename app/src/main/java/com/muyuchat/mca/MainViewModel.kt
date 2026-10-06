@@ -6887,24 +6887,15 @@ class MainViewModel @JvmOverloads constructor(
         return pending
     }
 
-    private fun completeAssistantImageToolTurnForJob(jobId: String) {
-        val job = _uiState.value.imageJobs.firstOrNull { it.id == jobId } ?: return
-        val requestId = job.spec?.chatMessageId ?: return
-        val owner = findChatGeneratedImageRequest(requestId) ?: return
-        val (sessionId, request) = owner
-        if (request.origin != ChatGeneratedImageOrigin.ASSISTANT_TOOL) return
-        val output = when (request.status) {
-            ChatGeneratedImageStatus.DONE -> toolResultJson("completed", "Image generated successfully.")
-            ChatGeneratedImageStatus.CANCELLED -> toolResultJson("cancelled", "Image generation was cancelled.")
-            ChatGeneratedImageStatus.FAILED -> toolResultJson("failed", "Image generation failed.")
-            ChatGeneratedImageStatus.INTERRUPTED -> toolResultJson("interrupted", "Image generation was interrupted.")
-            ChatGeneratedImageStatus.AWAITING_APPROVAL,
-            ChatGeneratedImageStatus.QUEUED,
-            ChatGeneratedImageStatus.GENERATING -> return
-        }
-        applyChatGeneratedImageRequest(chatImageRequestPort, sessionId, requestId, request.copy(toolOutputJson = output))
-        continueAssistantImageToolTurn(requestId, output)
-    }
+    /** Delegates to [completeAssistantImageToolTurnForJobFor]. Signature kept verbatim. */
+    private fun completeAssistantImageToolTurnForJob(jobId: String) =
+        completeAssistantImageToolTurnForJobFor(
+            uiStateStore,
+            chatImageRequestPort,
+            { findChatGeneratedImageRequest(it) },
+            { requestId, output -> continueAssistantImageToolTurn(requestId, output) },
+            jobId
+        )
 
     /**
      * The ViewModel side of [ChatImageRequestApprovalPort]: one route per member, no logic of its
