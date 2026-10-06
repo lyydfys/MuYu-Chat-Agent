@@ -9417,50 +9417,22 @@ class MainViewModel @JvmOverloads constructor(
     }
 
 
+    /** Delegates to [createCloudGeneratedImageAssetsFor]. Signature kept verbatim. */
     private suspend fun createCloudGeneratedImageAssets(
         request: CloudImageRequest,
         config: CloudApiConfig,
         chatSessionId: String? = null,
         generationMetadata: ImageGenerationHistoryMetadata
-    ): List<ImageAssetRecord> {
-        val result = cloudImageProvider.generateBatch(config, request)
-        currentCoroutineContext().ensureActive()
-        return imageAssetWriteMutex.withLock {
-            val writtenFiles = mutableListOf<File>()
-            try {
-                result.outputs.mapIndexed { index, output ->
-                    currentCoroutineContext().ensureActive()
-                    val extension = imageExtensionForMime(output.mimeType)
-                    val outputFile = writeImageAssetBytesAtomically(
-                        directory = imageAssetDirectory,
-                        fileName = "cloud-image-${System.currentTimeMillis()}-${UUID.randomUUID().toString().take(8)}-$index.$extension",
-                        bytes = output.bytes
-                    )
-                    writtenFiles += outputFile
-                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeFile(outputFile.absolutePath, bounds)
-                    require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-                        "Cloud image $index could not be decoded after publication."
-                    }
-                    ImageAssetRecord(
-                        id = UUID.randomUUID().toString(),
-                        name = "Cloud Image ${java.text.SimpleDateFormat("HHmmss", java.util.Locale.getDefault()).format(java.util.Date())}-$index.$extension",
-                        uriString = Uri.fromFile(outputFile).toString(),
-                        source = "generated:${config.imageApiFormat.label}",
-                        prompt = output.revisedPrompt.ifBlank { request.positivePrompt },
-                        sizeBytes = outputFile.length(),
-                        width = bounds.outWidth,
-                        height = bounds.outHeight,
-                        generationMetadataJson = generationMetadata.toJsonString(),
-                        chatSessionId = chatSessionId
-                    )
-                }
-            } catch (error: Throwable) {
-                writtenFiles.forEach { file -> runCatching { file.delete() } }
-                throw error
-            }
-        }
-    }
+    ): List<ImageAssetRecord> =
+        createCloudGeneratedImageAssetsFor(
+            cloudImageProvider,
+            imageAssetWriteMutex,
+            imageAssetDirectory,
+            request,
+            config,
+            chatSessionId,
+            generationMetadata
+        )
 
     /**
      * The ViewModel side of [CreateLocalGeneratedImageAssetPort]: one delegate per member, no logic

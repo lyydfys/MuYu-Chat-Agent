@@ -116,7 +116,12 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),
             "internal suspend fun createUpscaledAsset("
         )
-        val cloudPublish = functionBody(viewModel, "private suspend fun createCloudGeneratedImageAssets(")
+        // R3-S28: the cloud publication body moved to CreateCloudGeneratedImageAssetsOperations.kt;
+        // the assertions are unchanged（mutex 参数名保持）-- read where the body now lives.
+        val cloudPublish = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/CreateCloudGeneratedImageAssetsOperations.kt"),
+            "internal suspend fun createCloudGeneratedImageAssetsFor("
+        )
         val localPublish = functionBody(
             sourceFile("app/src/main/java/com/muyuchat/mca/CreateLocalGeneratedImageAssetOperations.kt"),
             "suspend fun createLocalGeneratedImageAsset("
