@@ -94,8 +94,8 @@ class ManagedRuntimeReadinessRefreshGateTest {
         val load = SourceTextFixtures.sourceOf("internal suspend fun CoroutineScope.runLoadModelBody(")
             .substringAfter("internal suspend fun CoroutineScope.runLoadModelBody(")
             .substringBefore("/** R3-S24：bootstrap")
-        // R3/C1: captureLoadedRuntimeSnapshot 声明移出至运行时缝，区段边界标记随迁。
-        val verify = section(source, "fun verifyModel(", "private fun clearNativeRuntimeSessionState(")
+        val verify = SourceTextFixtures.sourceOf("internal fun verifyModelFor(")
+            .substringAfter("internal fun verifyModelFor(")
         // R3-S26: the smoke chain moved to ReadinessSmokeOperations.kt; the smoke half is read
         // where it now lives（发布调用拼写随迁），verify half stays on the ViewModel.
         val smoke = SourceTextFixtures.sourceOf("internal fun runAgentStabilitySmokeFor(")
