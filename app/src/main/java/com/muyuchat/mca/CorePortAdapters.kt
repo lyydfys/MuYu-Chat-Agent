@@ -4,6 +4,9 @@ import android.app.Application
 import android.content.Context
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 
@@ -182,4 +185,86 @@ internal class ChatTerminalSettlementPortAdapter(
     override fun discardPendingOutput(runId: Long?) {
         accumulatorRef.discard(runId)
     }
+}
+
+internal class ChatSessionPersistencePortAdapter(
+    private val store: UiStateStore,
+    private val scopeRef: CoroutineScope,
+    private val engineRef: McaInferenceService,
+    private val chatRunsRef: ChatRunOwnership,
+    private val chatSessionStoreRef: ChatSessionStore,
+    private val persistenceState: ChatSessionPersistenceState,
+    private val accumulatorRef: ChatStreamAccumulator,
+    private val worldStoreRef: WorldBookStore,
+    private val admissionRef: RuntimeAdmissionState
+) : ChatSessionPersistencePort {
+    override val uiState: StateFlow<MainUiState>
+        get() = store.state
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override val scope: CoroutineScope
+        get() = scopeRef
+
+    override val chatRuns: ChatRunOwnership
+        get() = chatRunsRef
+
+    override val chatSessionStore: ChatSessionStore
+        get() = chatSessionStoreRef
+
+    override val chatSessionPersistenceMutex get() = persistenceState.persistenceMutex
+
+    override val chatSessionPersistenceSequence get() = persistenceState.persistenceSequence
+
+    override val chatSessionPersistenceStateLock get() = persistenceState.stateLock
+
+    override val pendingKnowledgeBindings: MutableMap<String, Set<String>>
+        get() = persistenceState.pendingKnowledgeBindings
+
+    override var durableChatSessions: List<ChatSessionRecord>
+        get() = persistenceState.durableChatSessions
+        set(value) {
+            persistenceState.durableChatSessions = value
+        }
+
+    override fun flushPendingAssistantOutput(generationRunId: Long?): Boolean =
+        accumulatorRef.flush(generationRunId)
+
+    override fun reconciledChatSessionsAfterSave(snapshot: List<ChatSessionRecord>): List<ChatSessionRecord> =
+        reconciledChatSessionsAfterSaveFor(persistenceState, chatSessionStoreRef, snapshot)
+
+    override fun publishReconciledChatSessions(requested: List<ChatSessionRecord>, persisted: List<ChatSessionRecord>) =
+        publishReconciledChatSessionsInto(store, chatRunsRef, requested, persisted)
+
+    override fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
+        cleanupPendingWorldBooksAfterOwnerCommitFor(persistenceState, worldStoreRef, store, scope, retainedOwnerIds)
+
+    override fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) =
+        cancelPendingWorldBookCleanupIn(persistenceState, scope, ownerIds)
+
+    override val engine: McaInferenceService
+        get() = engineRef
+
+    override var localConversationContextNeedsInvalidation: Boolean
+        get() = admissionRef.localConversationContextNeedsInvalidation
+        set(value) {
+            admissionRef.localConversationContextNeedsInvalidation = value
+        }
+
+    override val localConversationContextInvalidationSequence get() =
+        admissionRef.localConversationContextInvalidationSequence
+
+    override var conversationMutationBarrier: Job?
+        get() = admissionRef.conversationMutationBarrier
+        set(value) {
+            admissionRef.conversationMutationBarrier = value
+        }
+
+    override var localConversationContextInvalidationJob: Job?
+        get() = admissionRef.localConversationContextInvalidationJob
+        set(value) {
+            admissionRef.localConversationContextInvalidationJob = value
+        }
 }

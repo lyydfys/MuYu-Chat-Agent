@@ -920,8 +920,8 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.chatSessionPersistenceState.stateLock
     private val pendingKnowledgeBindings: MutableMap<String, Set<String>>
         get() = container.chatSessionPersistenceState.pendingKnowledgeBindings
-    private val pendingWorldBookCleanupOwners =
-        linkedMapOf<WorldBookScope, MutableSet<String>>()
+    private val pendingWorldBookCleanupOwners: MutableMap<WorldBookScope, MutableSet<String>>
+        get() = container.chatSessionPersistenceState.pendingWorldBookCleanupOwners
     private var directParameterStageJob: Job? = null
     private val directParameterStageMutex = Mutex()
     private val directParameterStageGeneration = AtomicLong(0L)
@@ -4466,49 +4466,16 @@ contextTraceJson: String?
         }
     }
 
-    private fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
-        if (ownerIds.isEmpty()) return
-        synchronized(chatSessionPersistenceStateLock) {
-            pendingWorldBookCleanupOwners[scope]?.let { pending ->
-                pending.removeAll(ownerIds)
-                if (pending.isEmpty()) pendingWorldBookCleanupOwners.remove(scope)
-            }
-        }
-    }
+    private fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) =
+        cancelPendingWorldBookCleanupIn(container.chatSessionPersistenceState, scope, ownerIds)
 
     /**
      * World books are secondary data.  They are removed only after the Room
      * owner snapshot has committed; failed/skipped writes keep this queue for
      * the next authoritative snapshot.
      */
-    private fun cleanupPendingWorldBooksAfterOwnerCommit(
-        scope: WorldBookScope,
-        retainedOwnerIds: Set<String>
-    ) {
-        val ownersToRemove = synchronized(chatSessionPersistenceStateLock) {
-            pendingWorldBookCleanupOwners[scope]
-                ?.filterNotTo(linkedSetOf()) { it in retainedOwnerIds }
-                .orEmpty()
-        }
-        if (ownersToRemove.isEmpty()) return
-        runCatching {
-            worldBookStore.removeScopedOwners(scope, ownersToRemove)
-        }.onSuccess { updatedWorldBooks ->
-            synchronized(chatSessionPersistenceStateLock) {
-                pendingWorldBookCleanupOwners[scope]?.let { pending ->
-                    pending.removeAll(ownersToRemove)
-                    if (pending.isEmpty()) pendingWorldBookCleanupOwners.remove(scope)
-                }
-            }
-            uiStateStore.update { it.copy(worldBooks = updatedWorldBooks) }
-        }.onFailure { error ->
-            uiStateStore.update {
-                it.copy(
-                    statusMessage = "主体数据已保存，但关联世界书清理失败，原数据已保留：${error.message ?: "存储错误"}"
-                )
-            }
-        }
-    }
+    private fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
+        cleanupPendingWorldBooksAfterOwnerCommitFor(container.chatSessionPersistenceState, worldBookStore, uiStateStore, scope, retainedOwnerIds)
 
     fun deleteAssistant(assistantId: String) {
         val state = _uiState.value
@@ -10108,55 +10075,8 @@ contextTraceJson: String?
         LocalApiForegroundService.stopListener()
     }
 
-    /** The ViewModel side of [ChatGenerationExecutionPort]. */
-    private val chatSessionPersistencePort: ChatSessionPersistencePort =
-        object : ChatSessionPersistencePort {
-            override val uiState get() = this@MainViewModel.uiState
-            // R3/S24: 写入经 store 具名方法（端口不再暴露可变流）。
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) =
-                this@MainViewModel.uiStateStore.update(transform)
-            override val scope get() = this@MainViewModel.viewModelScope
-            override val chatRuns get() = this@MainViewModel.chatRuns
-            override val chatSessionStore get() = this@MainViewModel.chatSessionStore
-            override val chatSessionPersistenceMutex get() = this@MainViewModel.chatSessionPersistenceMutex
-            override val chatSessionPersistenceSequence get() = this@MainViewModel.chatSessionPersistenceSequence
-            override val chatSessionPersistenceStateLock get() = this@MainViewModel.chatSessionPersistenceStateLock
-            override val pendingKnowledgeBindings get() = this@MainViewModel.pendingKnowledgeBindings
-            override var durableChatSessions: List<ChatSessionRecord>
-                get() = this@MainViewModel.durableChatSessions
-                set(value) { this@MainViewModel.durableChatSessions = value }
-
-            override fun flushPendingAssistantOutput(generationRunId: Long?): Boolean =
-                this@MainViewModel.flushPendingAssistantOutput(generationRunId)
-
-            override fun reconciledChatSessionsAfterSave(snapshot: List<ChatSessionRecord>): List<ChatSessionRecord> =
-                this@MainViewModel.reconciledChatSessionsAfterSave(snapshot)
-
-            override fun publishReconciledChatSessions(requested: List<ChatSessionRecord>, persisted: List<ChatSessionRecord>) {
-                this@MainViewModel.publishReconciledChatSessions(requested, persisted)
-            }
-
-            override fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) {
-                this@MainViewModel.cleanupPendingWorldBooksAfterOwnerCommit(scope, retainedOwnerIds)
-            }
-
-            override val engine get() = this@MainViewModel.engine
-            override var localConversationContextNeedsInvalidation: Boolean
-                get() = this@MainViewModel.localConversationContextNeedsInvalidation
-                set(value) { this@MainViewModel.localConversationContextNeedsInvalidation = value }
-            override val localConversationContextInvalidationSequence get() = this@MainViewModel.localConversationContextInvalidationSequence
-            override var conversationMutationBarrier: Job?
-                get() = this@MainViewModel.conversationMutationBarrier
-                set(value) { this@MainViewModel.conversationMutationBarrier = value }
-            override var localConversationContextInvalidationJob: Job?
-                get() = this@MainViewModel.localConversationContextInvalidationJob
-                set(value) { this@MainViewModel.localConversationContextInvalidationJob = value }
-
-            override fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
-                this@MainViewModel.cancelPendingWorldBookCleanup(scope, ownerIds)
-            }
-        }
-
+    // R3/C3-S11：会话持久化端口具名化——容器工厂构造（真实依赖全对象化）。
+    private val chatSessionPersistencePort = container.createChatSessionPersistencePort(uiStateStore, viewModelScope, engine)
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         object : ImageLibraryCommitPort {
             override val uiState get() = this@MainViewModel.uiState
@@ -10797,53 +10717,11 @@ contextTraceJson: String?
         )
     }
 
-    private fun reconciledChatSessionsAfterSave(
-        snapshot: List<ChatSessionRecord>
-    ): List<ChatSessionRecord> {
-        val mixedIds = runCatching { chatSessionStore.mixedSessionIds() }.getOrNull() ?: return snapshot
-        val currentById = snapshot.associateBy { it.id }
-        val durableById = durableChatSessions.associateBy { it.id }
-        if (mixedIds.none { id ->
-                currentById[id]?.mixedAssistantHistory != true || currentById[id] != durableById[id]
-            }) return snapshot
-        val persisted = chatSessionStore.load()
-        return persisted.takeIf { sessions ->
-            mixedIds.all { id -> sessions.any { it.id == id && it.mixedAssistantHistory } }
-        } ?: snapshot
-    }
+    private fun reconciledChatSessionsAfterSave(snapshot: List<ChatSessionRecord>): List<ChatSessionRecord> =
+        reconciledChatSessionsAfterSaveFor(container.chatSessionPersistenceState, chatSessionStore, snapshot)
 
-    private fun publishReconciledChatSessions(
-        requested: List<ChatSessionRecord>,
-        persisted: List<ChatSessionRecord>
-    ) {
-        if (requested == persisted) return
-        val requestedById = requested.associateBy { it.id }
-        val correctedById = persisted.filter { it.mixedAssistantHistory }.associateBy { it.id }
-        var activeCorrection = false
-        uiStateStore.update { current ->
-            val corrected = current.chatSessions.map { session ->
-                correctedById[session.id]?.takeIf { requestedById[session.id] == session } ?: session
-            }
-            if (corrected == current.chatSessions) current else {
-                val activeBefore = current.chatSessions.firstOrNull { it.id == current.activeChatSessionId }
-                val activeAfter = corrected.firstOrNull { it.id == current.activeChatSessionId }
-                val activeWasCorrected = activeAfter != activeBefore
-                if (activeWasCorrected) activeCorrection = true
-                current.copy(
-                    chatSessions = corrected,
-                    messages = if (activeWasCorrected) activeAfter?.messages.orEmpty() else current.messages,
-                    isGenerating = if (activeWasCorrected) false else current.isGenerating,
-                    generationPhase = if (activeWasCorrected) null else current.generationPhase,
-                    generationTokenProgress = if (activeWasCorrected) null else current.generationTokenProgress,
-                    generationPersistProgress = if (activeWasCorrected) null else current.generationPersistProgress,
-                    statusMessage = if (activeWasCorrected) {
-                        "会话角色归属不明确，原始消息已保留；可从历史菜单创建角色分支。"
-                    } else current.statusMessage
-                )
-            }
-        }
-        if (activeCorrection) cancelGenerationJob()
-    }
+    private fun publishReconciledChatSessions(requested: List<ChatSessionRecord>, persisted: List<ChatSessionRecord>) =
+        publishReconciledChatSessionsInto(uiStateStore, chatRuns, requested, persisted)
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
     private fun persistChatSessions(

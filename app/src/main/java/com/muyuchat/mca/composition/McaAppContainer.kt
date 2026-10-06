@@ -1,6 +1,8 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.ChatSessionPersistencePortAdapter
+import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
 import com.muyuchat.mca.LocalImageGenerationCoordinator
 import com.muyuchat.mca.ContextCompressionRequestStore
@@ -280,6 +282,24 @@ internal class McaAppContainer(private val application: Application) {
             chatRunsRef = chatRuns,
             diagnosticStoreRef = webSearchDiagnosticStore,
             accumulatorRef = chatStreamAccumulator
+        )
+
+    /** R3/C3-S11：会话持久化端口具名适配器工厂。 */
+    fun createChatSessionPersistencePort(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        engine: McaInferenceService
+    ): ChatSessionPersistencePort =
+        ChatSessionPersistencePortAdapter(
+            store = store,
+            scopeRef = scope,
+            engineRef = engine,
+            chatRunsRef = chatRuns,
+            chatSessionStoreRef = chatSessionStore,
+            persistenceState = chatSessionPersistenceState,
+            accumulatorRef = chatStreamAccumulator,
+            worldStoreRef = worldBookStore,
+            admissionRef = runtimeAdmission
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
