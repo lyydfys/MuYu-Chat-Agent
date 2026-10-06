@@ -16,6 +16,8 @@ import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ModelRuntimeIdentity
+import com.muyuchat.core.modelstore.ModelManifest
+import com.muyuchat.core.modelstore.ModelStoreRepository
 
 /**
  * R3/C3-S1（插队裁定 2）：自 MainViewModel 具名化的端口适配器——只持有真实依赖
@@ -1279,6 +1281,61 @@ internal class ChatImageRequestApprovalPortAdapter(
     override fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
         continueAssistantImageToolTurnRef(requestId, outputJson)
     }
+}
+
+/**
+ * R3-S36：运行时就绪刷新端口具名适配器（B 族第 1 端口，破万里程碑）。
+ */
+internal class ManagedRuntimeReadinessPortAdapter(
+    override val context: Application,
+    private val store: UiStateStore,
+    private val modelStore: ModelStoreRepository,
+    private val localImageModelStore: LocalImageModelStore,
+    private val refreshGate: ManagedRuntimeReadinessRefreshGate,
+    private val admission: RuntimeAdmissionState,
+    private val coordinator: LocalImageGenerationCoordinator,
+    private val imageLibraryBackupJobActiveProvider: () -> Boolean,
+    private val hasActiveImageUpscaleProvider: () -> Boolean
+) : ManagedRuntimeReadinessPort {
+    override fun uiState(): MainUiState = store.current
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun listLocalModels(): List<ModelManifest> = modelStore.listModels()
+
+    override fun loadLocalImageModels(): List<LocalImageModelRecord> =
+        localImageModelStore.loadModels()
+
+    override fun loadPersistedSelectedImageModelId(): String? =
+        localImageModelStore.loadSelectedModelId()
+
+    override fun saveSelectedImageModelId(id: String?) {
+        localImageModelStore.saveSelectedModelId(id)
+    }
+
+    override fun beginReadinessRefresh(): Long = refreshGate.begin()
+
+    override fun invalidateReadinessRefresh() {
+        refreshGate.invalidate()
+    }
+
+    override fun isReadinessRefreshCurrent(token: Long): Boolean = refreshGate.isCurrent(token)
+
+    override fun imageLibraryBackupJobActive(): Boolean =
+        imageLibraryBackupJobActiveProvider()
+
+    override fun hasActiveImageGeneration(): Boolean =
+        admission.activeImageGenerationJobId != null
+
+    override fun hasActiveImageUpscale(): Boolean = hasActiveImageUpscaleProvider()
+
+    override fun hasActiveLocalApiImageGeneration(): Boolean =
+        admission.activeLocalApiImageModelId != null
+
+    override fun hasActiveImageGenerationRequest(): Boolean =
+        coordinator.activeRequestId() != null
 }
 
 

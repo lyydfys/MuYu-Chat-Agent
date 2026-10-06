@@ -42,6 +42,8 @@ import com.muyuchat.mca.AssistantImageToolTurnPort
 import com.muyuchat.mca.AssistantImageToolTurnPortAdapter
 import com.muyuchat.mca.ChatImageRequestApprovalPort
 import com.muyuchat.mca.ChatImageRequestApprovalPortAdapter
+import com.muyuchat.mca.ManagedRuntimeReadinessPort
+import com.muyuchat.mca.ManagedRuntimeReadinessPortAdapter
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -636,6 +638,24 @@ internal class McaAppContainer(private val application: Application) {
             chatImageRequestPortProvider = chatImageRequestPortProvider,
             buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
             continueAssistantImageToolTurnRef = continueAssistantImageToolTurn
+        )
+
+    /** R3-S36：运行时就绪刷新端口工厂（B 族第 1 端口，破万里程碑）。 */
+    fun createManagedRuntimeReadinessPort(
+        store: UiStateStore,
+        imageLibraryBackupJobActive: () -> Boolean,
+        hasActiveImageUpscale: () -> Boolean
+    ): ManagedRuntimeReadinessPort =
+        ManagedRuntimeReadinessPortAdapter(
+            context = application,
+            store = store,
+            modelStore = modelStore,
+            localImageModelStore = localImageModelStore,
+            refreshGate = readinessRefreshGate,
+            admission = runtimeAdmission,
+            coordinator = localImageGenerationCoordinator,
+            imageLibraryBackupJobActiveProvider = imageLibraryBackupJobActive,
+            hasActiveImageUpscaleProvider = hasActiveImageUpscale
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

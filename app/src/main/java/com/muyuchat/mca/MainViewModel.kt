@@ -1486,59 +1486,13 @@ class MainViewModel @JvmOverloads constructor(
      *
      * Must be called from an IO coroutine.
      */
-    /**
-     * The ViewModel side of [ManagedRuntimeReadinessPort]. Every concurrency primitive stays here and
-     * is reduced to a yes/no answer, so nothing that a caller could misuse crosses the boundary.
-     */
+    /** R3-S36：运行时就绪刷新端口具名适配器（容器工厂装配，出清 48 行匿名实现与 14 处 this@VM，破万里程碑）。 */
     private val managedRuntimeReadinessPort: ManagedRuntimeReadinessPort =
-        object : ManagedRuntimeReadinessPort {
-            override val context: Application
-                get() = this@MainViewModel.getApplication()
-
-            override fun uiState(): MainUiState = this@MainViewModel._uiState.value
-
-            override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                this@MainViewModel.uiStateStore.update(transform)
-            }
-
-            override fun listLocalModels(): List<ModelManifest> =
-                this@MainViewModel.modelStore.listModels()
-
-            override fun loadLocalImageModels(): List<LocalImageModelRecord> =
-                this@MainViewModel.localImageModelStore.loadModels()
-
-            override fun loadPersistedSelectedImageModelId(): String? =
-                this@MainViewModel.localImageModelStore.loadSelectedModelId()
-
-            override fun saveSelectedImageModelId(id: String?) {
-                this@MainViewModel.localImageModelStore.saveSelectedModelId(id)
-            }
-
-            override fun beginReadinessRefresh(): Long =
-                this@MainViewModel.managedRuntimeReadinessRefreshGate.begin()
-
-            override fun invalidateReadinessRefresh() {
-                this@MainViewModel.managedRuntimeReadinessRefreshGate.invalidate()
-            }
-
-            override fun isReadinessRefreshCurrent(token: Long): Boolean =
-                this@MainViewModel.managedRuntimeReadinessRefreshGate.isCurrent(token)
-
-            override fun imageLibraryBackupJobActive(): Boolean =
-                this@MainViewModel.imageLibraryBackupJob?.isCompleted == false
-
-            override fun hasActiveImageGeneration(): Boolean =
-                this@MainViewModel.activeImageGenerationJobId != null
-
-            override fun hasActiveImageUpscale(): Boolean =
-                this@MainViewModel.imageUpscaleOwner.hasActiveUpscale()
-
-            override fun hasActiveLocalApiImageGeneration(): Boolean =
-                this@MainViewModel.activeLocalApiImageModelId != null
-
-            override fun hasActiveImageGenerationRequest(): Boolean =
-                this@MainViewModel.localImageGenerationCoordinator.activeRequestId() != null
-        }
+        container.createManagedRuntimeReadinessPort(
+            store = uiStateStore,
+            imageLibraryBackupJobActive = { imageLibraryBackupJob?.isCompleted == false },
+            hasActiveImageUpscale = { imageUpscaleOwner.hasActiveUpscale() }
+        )
 
     /** Delegates to [publishChatCatalogSnapshot]. */
     private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot =
