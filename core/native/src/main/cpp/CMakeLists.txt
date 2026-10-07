@@ -94,13 +94,39 @@ target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract mca_j
 
 add_library(mca_native SHARED native_engine.cpp)
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
-add_library(mca_prompt_handoff SHARED mnn_qnn_prompt_handoff.cpp)
+add_library(mca_prompt_handoff SHARED
+        mnn_qnn_prompt_handoff.cpp
+        mca/prompt/mnn_qnn_prompt_gateway.cpp)
 target_compile_definitions(mca_prompt_handoff PRIVATE MCA_PROMPT_HANDOFF_BUILDING=1)
 target_link_libraries(mca_prompt_handoff PRIVATE mca_contract)
+
+add_library(mca_qnn_runtime STATIC
+        mca/qnn/qnn_runtime_loader.cpp
+        mca/qnn/qnn_capability_probe.cpp
+        mca/qnn/qnn_backend_owner.cpp
+        mca/qnn/qnn_engine.cpp
+        mca/qnn/qnn_session.cpp
+        mca/qnn/qnn_request.cpp)
+target_include_directories(mca_qnn_runtime PUBLIC
+        "${CMAKE_CURRENT_LIST_DIR}")
+target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
+
+add_library(mca_mnn_runtime STATIC
+        mca/mnn/mnn_runtime_loader.cpp
+        mca/mnn/mnn_backend_owner.cpp
+        mca/mnn/mnn_engine.cpp
+        mca/mnn/mnn_session.cpp
+        mca/mnn/mnn_request.cpp
+        mca/mnn/mnn_stream_router.cpp
+        mca/mnn/mnn_token_emitter.cpp)
+target_include_directories(mca_mnn_runtime PUBLIC
+        "${CMAKE_CURRENT_LIST_DIR}")
+target_link_libraries(mca_mnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
+
 add_library(mca_mnn_native SHARED mnn_native_engine.cpp)
 add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
-target_link_libraries(mca_mnn_native PRIVATE mca_prompt_handoff mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
-target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
+target_link_libraries(mca_mnn_native PRIVATE mca_prompt_handoff mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle mca_mnn_runtime)
+target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle mca_qnn_runtime)
 target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
