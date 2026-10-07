@@ -14,6 +14,7 @@ import com.muyuchat.mca.DiagnosticsOperations
 import com.muyuchat.mca.LocalGenerationSmokeResult
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatAppearanceCoordinator
+import com.muyuchat.mca.ChatImageWorkflowCoordinator
 import com.muyuchat.mca.ChatSessionPersistencePortAdapter
 import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
@@ -1505,6 +1506,51 @@ internal class McaAppContainer(private val application: Application) {
             imagePromptTokenMeasurementHost = imagePromptTokenMeasurementHost,
             visionAttachmentPort = visionAttachmentPort,
             chatSessionStore = chatSessionStore
+        )
+
+    fun createChatImageWorkflowCoordinator(
+        scope: CoroutineScope,
+        store: UiStateStore,
+        imageAssetWriteMutex: Mutex,
+        imageLibraryMutationMutex: Mutex,
+        imageLibraryBackup: ImageLibraryBackup,
+        chatSessionStore: ChatSessionStore,
+        imageGenerationOwner: ImageGenerationOwner,
+        imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
+        chatImageRetryPort: ChatImageRetryPort,
+        showStatus: (String?) -> Unit,
+        tryAcquireObservedImageGenerationLease: (String) -> LocalImageGenerationCoordinator.Lease?,
+        releaseObservedImageGenerationLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
+        offlinePromptTranslationService: () -> OfflinePromptTranslationService,
+        runtimeProfileStore: ModelRuntimeProfileStore,
+        engine: McaInferenceService,
+        selectCloudImageModel: (String) -> Unit,
+        registerLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Unit,
+        unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
+        cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
+    ): ChatImageWorkflowCoordinator =
+        ChatImageWorkflowCoordinator(
+            application = application,
+            scope = scope,
+            store = store,
+            container = this,
+            imageAssetWriteMutex = imageAssetWriteMutex,
+            imageLibraryMutationMutex = imageLibraryMutationMutex,
+            imageLibraryBackup = imageLibraryBackup,
+            chatSessionStore = chatSessionStore,
+            imageGenerationOwner = imageGenerationOwner,
+            imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
+            chatImageRetryPort = chatImageRetryPort,
+            showStatus = showStatus,
+            tryAcquireObservedImageGenerationLease = tryAcquireObservedImageGenerationLease,
+            releaseObservedImageGenerationLease = releaseObservedImageGenerationLease,
+            offlinePromptTranslationService = offlinePromptTranslationService,
+            runtimeProfileStore = runtimeProfileStore,
+            engine = engine,
+            selectCloudImageModel = selectCloudImageModel,
+            registerLocalApiImageGenerationOwnership = registerLocalApiImageGenerationOwnership,
+            unregisterLocalApiImageGenerationOwnership = unregisterLocalApiImageGenerationOwnership,
+            cancelOwnedLocalApiImageWorker = cancelOwnedLocalApiImageWorker
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

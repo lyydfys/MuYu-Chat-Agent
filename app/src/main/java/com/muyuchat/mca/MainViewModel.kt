@@ -3,240 +3,73 @@ package com.muyuchat.mca
 import android.app.Application
 import com.muyuchat.mca.composition.McaAppContainer
 import android.content.Context
-import android.content.Intent
-import android.graphics.Bitmap
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.net.Uri
-import android.provider.DocumentsContract
-import android.provider.OpenableColumns
-import android.provider.Settings
 import android.os.Build
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.api.local.LocalApiRuntime
-import com.muyuchat.api.local.LocalApiBusyState
-import com.muyuchat.api.local.LocalApiControlPlane
-import com.muyuchat.api.local.LocalApiPreflightRequest
-import com.muyuchat.api.local.LocalApiPreflightResult
-import com.muyuchat.api.local.ImageGenerationApiContract
-import com.muyuchat.api.local.ImageGenerationProviderException
-import com.muyuchat.api.local.McaLoopbackServer
-import com.muyuchat.api.local.imagePromptTranslationProofFingerprint
-import com.muyuchat.api.local.localApiPublicModelId
-import com.muyuchat.core.advisor.AgentAdvisor
-import com.muyuchat.core.advisor.AgentDecisionLog
 import com.muyuchat.core.advisor.AgentDecisionLogger
 import com.muyuchat.core.advisor.AgentRecommendation
-import com.muyuchat.core.benchmark.BenchmarkHistoryLogger
-import com.muyuchat.core.benchmark.BenchmarkHistoryRecord
-import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.benchmark.BenchmarkRunner
-import com.muyuchat.core.benchmark.BenchmarkSweepConfig
-import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
-import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelScopeHubModel
-import com.muyuchat.core.download.ImageEngineAccelerator
-import com.muyuchat.core.download.ImageEngineBundleComponentRole
-import com.muyuchat.core.download.ImageEngineBundleSpec
-import com.muyuchat.core.download.ImageEngineBundleRuntime
-import com.muyuchat.core.download.ImageEngineMinDeviceTier
-import com.muyuchat.core.download.LocalImageEngineTier
-import com.muyuchat.core.download.BundleComponentDownloader
-import com.muyuchat.core.download.MnnModelBundleComponentRole
-import com.muyuchat.core.download.ModelBundleInstaller
-import com.muyuchat.core.download.ModelBundleInstallPlan
-import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RemoteModelFile
-import com.muyuchat.core.download.RemoteModelFileKind
-import com.muyuchat.core.download.RecommendedChatRuntime
-import com.muyuchat.core.download.RecommendedModelStatus
 import com.muyuchat.core.download.DownloadStatus
-import com.muyuchat.core.download.DownloadTaskSnapshot
 import com.muyuchat.core.download.ResumableDownloader
-import com.muyuchat.core.download.VisionModelAccelerator
-import com.muyuchat.core.download.VisionModelBundleSpec
-import com.muyuchat.core.download.VisionModelBundleRuntime
-import com.muyuchat.core.download.VisionModelBundleComponentRole
-import com.muyuchat.core.download.fileKind
-import com.muyuchat.core.download.isImageModelCandidate
-import com.muyuchat.core.download.kindLabel
-import com.muyuchat.core.download.stagedTransformer
-import com.muyuchat.core.engine.ChatImageAttachment
-import com.muyuchat.core.engine.deduplicateVisionAttachments
-import com.muyuchat.core.engine.deduplicateVisionAttachmentsForDisplay
-import com.muyuchat.core.engine.visionDeduplicationKey
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
-import com.muyuchat.core.engine.ChatGeneratedImageOrigin
-import com.muyuchat.core.engine.ChatGeneratedImageStatus
-import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.ChatToolCall
 import com.muyuchat.core.engine.ChatToolExchange
-import com.muyuchat.core.engine.ChatSourceReference
-import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.ContextCompressionSettings
-import com.muyuchat.core.engine.ContextCompressionThreshold
 import com.muyuchat.core.engine.ContextCompressionTrigger
-import com.muyuchat.core.engine.ContextWindowAdmission
-import com.muyuchat.mca.presentation.ChatContextSnapshot
 import com.muyuchat.core.engine.compressChatRequestContext
-import com.muyuchat.core.engine.AuthorizedPendingSignatureVerification
-import com.muyuchat.core.engine.CanonicalParameterSet
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.GenerationPhase
 import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.LoadParams
-import com.muyuchat.core.engine.LocalChatRuntime
-import com.muyuchat.core.engine.LITERT_LM_VISION_TRANSPORT_UNAVAILABLE_MESSAGE
-import com.muyuchat.core.engine.LITERT_LM_KNOWN_TEXT_ONLY_VISION_UNAVAILABLE_MESSAGE
-import com.muyuchat.core.engine.LITERT_LM_VISION_COMPONENTS_UNAVAILABLE_MESSAGE
-import com.muyuchat.core.engine.liteRtVisionInputAvailable
-import com.muyuchat.core.engine.inlineVisionImageWithinLimit
-import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.engine.McaInferenceService
-import com.muyuchat.core.engine.ParameterSignatureSnapshot
-import com.muyuchat.core.engine.PromptContextUsage
-import com.muyuchat.core.engine.RuntimeOverrideSignature
-import com.muyuchat.core.engine.CompletionPreflight
 import com.muyuchat.core.engine.ReasoningMode
 import com.muyuchat.core.engine.Role
-import com.muyuchat.core.engine.RuntimeStats
-import com.muyuchat.core.engine.TokenProgress
-import com.muyuchat.core.engine.PersistProgress
-import com.muyuchat.core.engine.QairtExecutionVerificationStore
 import com.muyuchat.core.engine.localContextWindowAdmission
-import com.muyuchat.core.engine.qairtRuntimeIdentityFor
-import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
-import com.muyuchat.core.modelstore.ModelSource
-import com.muyuchat.core.modelstore.ModelStoreRepository
-import com.muyuchat.core.modelstore.QairtBundleRuntimeIdentity
-import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
-import com.muyuchat.core.tuning.CandidateHardGate
-import com.muyuchat.core.tuning.CandidateProcessBoundary
-import com.muyuchat.core.tuning.CandidateScore
-import com.muyuchat.core.tuning.CandidateScorer
-import com.muyuchat.core.tuning.StagedCandidateSelectionPolicy
-import com.muyuchat.core.tuning.BootstrapLoadCanaryPolicy
-import com.muyuchat.core.tuning.ExecutionProfileKind
-import com.muyuchat.core.tuning.HotExecutionParams
-import com.muyuchat.core.tuning.LoadBoundExecutionParams
-import com.muyuchat.core.tuning.MeasurementPoint
-import com.muyuchat.core.tuning.MeasurementEnvelope
-import com.muyuchat.core.tuning.ModelTuningCapabilities
-import com.muyuchat.core.tuning.MinimumTextCanaryPolicy
-import com.muyuchat.core.tuning.ProfileVerificationLevel
-import com.muyuchat.core.tuning.PerformanceSample
-import com.muyuchat.core.tuning.SafeBaselineFactory
-import com.muyuchat.core.tuning.SafetyEnvelope
-import com.muyuchat.core.tuning.TuningExecutionProfile
-import com.muyuchat.core.tuning.TuningCandidatePolicy
-import com.muyuchat.core.tuning.TuningCandidateCanaryPlanner
-import com.muyuchat.feature.agent.AgentCandidateProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
-import com.muyuchat.feature.agent.AgentPendingProfile
-import com.muyuchat.feature.agent.AgentProfileRecordState
-import com.muyuchat.feature.agent.AgentProfileVerification
-import com.muyuchat.feature.agent.AgentRollbackProfile
 import com.muyuchat.feature.agent.AgentTuningMode
-import com.muyuchat.feature.agent.AgentTuningJobState
-import com.muyuchat.feature.chat.ImageGenerationUiTaskMode
 import com.muyuchat.feature.chat.ImagePromptTokenMeasurement
-import com.muyuchat.feature.chat.ChatBackendFamily
-import com.muyuchat.feature.chat.chatBackendFamilyForRuntime
-import com.muyuchat.feature.chat.withChatBackend
-import com.muyuchat.core.nativebridge.NativeMnnDiffusionBridge
-import com.muyuchat.core.sdnative.NativeStableDiffusionBridge
-import com.muyuchat.core.telemetry.SocFamily
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Deferred
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.flow.onCompletion
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CoroutineScope
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
-import java.io.IOException
-import java.io.InputStream
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
-import java.util.zip.ZipInputStream
-import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 import com.muyuchat.mca.presentation.afterClearChatGenerationStopped
-import com.muyuchat.mca.presentation.ChatGenerationUiPublisher
 import com.muyuchat.mca.presentation.withGenerationProgressCleared
 // Three P2 extractions are intentionally NOT imported here: afterBackgroundGenerationStopped,
 // withBackgroundCancellationFinalized and BackgroundCancelledAssistantOutput have no call site in
 // this ViewModel, and MainViewModelCompletionFallbackTest asserts that stays true. Importing them
 // only produced unused-import warnings, so the imports were removed rather than left dangling.
 // The declarations remain in presentation/GenerationStateTransitions.kt.
-import com.muyuchat.mca.presentation.afterGenerationStarted
-import com.muyuchat.mca.presentation.afterGenerationCompleted
-import com.muyuchat.mca.presentation.afterGenerationTerminated
-import com.muyuchat.mca.presentation.afterNativeRuntimeReleased
-import com.muyuchat.mca.presentation.nativeRuntimeReleaseObserved
-import com.muyuchat.mca.presentation.restoreAfterConversationMutationFailure
-import com.muyuchat.mca.presentation.KnowledgeLibraryOperations
 import com.muyuchat.mca.presentation.StoreKnowledgeLibraryPort
-import com.muyuchat.mca.presentation.knowledgeLibrarySnapshot
-import com.muyuchat.mca.presentation.withKnowledgeLibraryChange
-import com.muyuchat.mca.presentation.KnowledgeLibraryChange
-import com.muyuchat.mca.presentation.WorldBookImportOutcome
-import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
-import com.muyuchat.mca.presentation.ChatContextOperations
-import com.muyuchat.mca.presentation.chatContextSnapshot
-import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
-import com.muyuchat.mca.presentation.generateLocalApiImageOperations
-import kotlinx.coroutines.flow.StateFlow
-import com.muyuchat.mca.SelectChatSessionPort
 import com.muyuchat.mca.selectChatSession
-import com.muyuchat.mca.CandidateCanaryResultPort
-import com.muyuchat.mca.toCandidateCanaryResult
-import com.muyuchat.core.tuning.CanaryEvaluationParams
-import com.muyuchat.core.engine.EngineLifecycleLease
-import com.muyuchat.core.engine.LoadAuthorization
-import com.muyuchat.core.engine.PendingProfileDisposition
 
 enum class AppTab(val title: String) {
     CHAT("聊天"),
@@ -254,7 +87,8 @@ class MainViewModel @JvmOverloads constructor(
     injectedChatAppearanceCoordinator: Any? = null,
     injectedMainPostStartupCoordinator: Any? = null,
     injectedChatSessionManagementCoordinator: Any? = null,
-    injectedChatInputAndAttachmentCoordinator: Any? = null
+    injectedChatInputAndAttachmentCoordinator: Any? = null,
+    injectedChatImageWorkflowCoordinator: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -510,19 +344,16 @@ class MainViewModel @JvmOverloads constructor(
         selectionRevision == contentImportSelectionRevision.get() &&
             sessionId == state.activeChatSessionId && assistantId == state.selectedAssistantId
 
-    /** Delegates to [ImageUpscaleOwner.upscaleImageAsset]. */
-    fun upscaleImageAsset(imageId: String, targetScale: Int) {
-        imageUpscaleOwner.upscaleImageAsset(imageId, targetScale, viewModelScope)
-    }
+    /** Delegates to [ChatImageWorkflowCoordinator.upscaleImageAsset]. */
+    fun upscaleImageAsset(imageId: String, targetScale: Int) =
+        chatImageWorkflowCoordinator.upscaleImageAsset(imageId, targetScale)
 
-    /** Delegates to [ImageUpscaleOwner.cancelImageUpscale]. */
-    fun cancelImageUpscale() {
-        imageUpscaleOwner.cancelImageUpscale(viewModelScope)
-    }
+    /** Delegates to [ChatImageWorkflowCoordinator.cancelImageUpscale]. */
+    fun cancelImageUpscale() =
+        chatImageWorkflowCoordinator.cancelImageUpscale()
     private var imageLibraryBackupJob: Job?
         get() = container.runtimeAdmission.imageLibraryBackupJob
         set(value) { container.runtimeAdmission.imageLibraryBackupJob = value }
-    private val imageLibraryBackupCoordinator = ImageLibraryBackupCoordinator()
     // R3/C2：运行期准入态迁入容器 holder（同实例共享，读写语义与调用点不变）。
     private var activeRuntimeIdentity: ModelRuntimeIdentity?
         get() = container.runtimeAdmission.activeRuntimeIdentity
@@ -555,27 +386,20 @@ class MainViewModel @JvmOverloads constructor(
     private val localApiImageGenerationLifecycleLock = Any()
     private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
 
-    private suspend fun awaitImageLibraryStartupReconciliation() {
+    private suspend fun awaitImageLibraryStartupReconciliation() =
         imageLibraryStartupReconciliation.await()
-    }
 
-/** Delegates to [deleteCloudModelRecord]. Signature kept verbatim. */
-    fun deleteCloudModel(modelId: String) {
-        deleteCloudModelRecord(port = chatImageRetryPort, modelId = modelId)
-    }
+    fun deleteCloudModel(modelId: String) =
+        chatImageWorkflowCoordinator.deleteCloudModel(modelId)
 
-/** Delegates to [applyChatImageTranslationDraft]. Signature kept verbatim. */
-    fun confirmChatImageTranslationDraft(id: String, positive: String, negative: String?) {
-        applyChatImageTranslationDraft(port = chatImageRetryPort, id = id, positive = positive, negative = negative)
-    }
+    fun confirmChatImageTranslationDraft(id: String, positive: String, negative: String?) =
+        chatImageWorkflowCoordinator.confirmChatImageTranslationDraft(id, positive, negative)
 
-/** Delegates to [chatImageRetrySnapshot]. Signature kept verbatim. */
     fun buildChatImageRetrySnapshot(
         request: ChatGeneratedImageRequest,
         chatSessionId: String
-    ): ImageGenerationJobSpec? {
-        return chatImageRetrySnapshot(port = chatImageRetryPort, request = request, chatSessionId = chatSessionId)
-    }
+    ): ImageGenerationJobSpec? =
+        chatImageWorkflowCoordinator.buildChatImageRetrySnapshot(request, chatSessionId)
 
     private val uiStateStore = UiStateStore(bootstrapResult.uiState)
     // R3/C3-S5：chatRuns/流缓冲累加器入容器；terminalSettlement 端口具名化。
@@ -679,14 +503,7 @@ class MainViewModel @JvmOverloads constructor(
      * while no UI, authenticated Local API, or upscale epoch owns the coordinator.
      */
     fun releaseGenerationImageGrantsIfCoordinatorIdle(releaseBlock: () -> Unit): Boolean =
-        synchronized(localImageGenerationCoordinatorObservationLock) {
-            if (localImageGenerationCoordinator.activeRequestId() != null) {
-                false
-            } else {
-                releaseBlock()
-                true
-            }
-        }
+        chatImageWorkflowCoordinator.releaseGenerationImageGrantsIfCoordinatorIdle(releaseBlock)
 
     private fun registerLocalApiImageGenerationOwnership(
         ownership: LocalApiImageGenerationOwnership
@@ -742,7 +559,7 @@ class MainViewModel @JvmOverloads constructor(
 
 
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
-        updateGenerationImageGrantReleaseDeferInto(uiStateStore, defer)
+        chatImageWorkflowCoordinator.updateGenerationImageGrantReleaseDefer(defer)
 
     private val modelImportAndDownloadCoordinator = ModelImportAndDownloadCoordinator(
         application = getApplication(),
@@ -1235,12 +1052,7 @@ class MainViewModel @JvmOverloads constructor(
         prompt: String,
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         options: LocalImageGenerationOptions = LocalImageGenerationOptions()
-    ): Boolean = imageGenerationOwner.submit(
-        prompt = prompt,
-        inputDraft = inputDraft,
-        options = options,
-        jobSnapshot = null
-    )
+    ): Boolean = chatImageWorkflowCoordinator.generateImageAsset(prompt, inputDraft, options)
 
     fun retryImageGeneration(jobId: String) {
         val sourceJob = uiStateStore.current.imageJobs.firstOrNull { it.id == jobId }
@@ -1275,64 +1087,33 @@ class MainViewModel @JvmOverloads constructor(
 
     /** The ViewModel side of [ImageAssetCreationPort]. */
     // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
-    private val imageAssetCreationPort: ImageAssetCreationPort =
-        container.createImageAssetCreationPort(uiStateStore, application, imageGenerationOwner)
-    private val imageUpscalePort: ImageUpscalePort =
-        container.createImageUpscalePort(
-            uiStateStore, application, imageAssetCreationPort, imageLibraryStartupReconciliation
-        )
+    private val imageAssetCreationPort: ImageAssetCreationPort
+        get() = chatImageWorkflowCoordinator.imageAssetCreationPort
+    private val imageUpscaleOwner: ImageUpscaleOwner
+        get() = chatImageWorkflowCoordinator.imageUpscaleOwner
+    private val imagePromptTranslationPort: ImagePromptTranslationPort
+        get() = chatImageWorkflowCoordinator.imagePromptTranslationPort
 
-    /** The single owner of the image-upscale execution. */
-    private val imageUpscaleOwner = ImageUpscaleOwner(imageUpscalePort)
+    fun recreateImageAsset(imageId: String) =
+        chatImageWorkflowCoordinator.recreateImageAsset(imageId)
 
-/** Delegates to [recreateAsset]. Signature kept verbatim. */
-    fun recreateImageAsset(imageId: String) {
-        recreateAsset(port = imageAssetCreationPort, imageId = imageId)
-    }
+    fun selectLocalImageModel(modelId: String) =
+        chatImageWorkflowCoordinator.selectLocalImageModel(modelId)
 
-/** Delegates to [applyLocalImageModelSelection]. Signature kept verbatim. */
-    fun selectLocalImageModel(modelId: String) {
-        applyLocalImageModelSelection(port = imageAssetCreationPort, modelId = modelId, scope = viewModelScope)
-    }
-
-/** Delegates to [createUpscaledAsset]. Signature kept verbatim. */
     suspend fun createUpscaledImageAsset(
         spec: ImageUpscaleJobSpec,
         result: LocalImageResult,
         requestId: String
-    ): ImageAssetRecord = imageAssetWriteMutex.withLock {
-        return createUpscaledAsset(port = imageAssetCreationPort, spec = spec, result = result, requestId = requestId)
-    }
+    ): ImageAssetRecord =
+        chatImageWorkflowCoordinator.createUpscaledImageAsset(spec, result, requestId)
 
-    private val imagePromptTranslationPort: ImagePromptTranslationPort =
-        container.createImagePromptTranslationPort(
-            uiStateStore,
-            { offlinePromptTranslationService }
-        )
+    fun cancelImageGeneration() = chatImageWorkflowCoordinator.cancelImageGeneration()
 
-    fun cancelImageGeneration() = cancelImageGenerationForJob(expectedJobId = null)
-
-    /** Delegates to [cancelImageGenerationForJobFor]. Signature kept verbatim. */
     private fun cancelImageGenerationForJob(expectedJobId: String?) =
-        cancelImageGenerationForJobFor(
-            viewModelScope,
-            uiStateStore,
-            container.runtimeAdmission,
-            localImageWorkerClient,
-            container.runtimeAdmission.activeLocalImageWorkerRequestId,
-            expectedJobId
-        )
+        chatImageWorkflowCoordinator.cancelImageGenerationForJob(expectedJobId)
 
-    /** Delegates to [publishLocalImagePreviewTo]. Signature kept verbatim. */
     private fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
-        publishLocalImagePreviewTo(
-            uiStateStore,
-            container.runtimeAdmission,
-            getApplication(),
-            imageAssetWriteMutex,
-            jobId,
-            progress
-        )
+        chatImageWorkflowCoordinator.publishLocalImagePreview(jobId, progress)
 
     fun deleteImageAsset(imageId: String) = deleteImageAssets(listOf(imageId))
     fun deleteImageAssets(imageIds: List<String>) = deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
@@ -1340,21 +1121,13 @@ class MainViewModel @JvmOverloads constructor(
     fun clearImageLibrary() = clearImageLibraryOperation(imageAssetDeletionPort)
 
     fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) =
-        imageLibraryBackupCoordinator.exportBackup(
-            uiStateStore, viewModelScope, getApplication(), imageLibraryBackup, imageLibraryMutationMutex,
-            ::awaitImageLibraryStartupReconciliation, { imageLibraryBackupJob }, { imageLibraryBackupJob = it },
-            ::showStatus, uriString, favoritesOnly
-        )
+        chatImageWorkflowCoordinator.exportImageLibraryBackup(uriString, favoritesOnly)
 
     fun importImageLibraryBackup(uriString: String) =
-        imageLibraryBackupCoordinator.importBackup(
-            uiStateStore, viewModelScope, getApplication(), imageLibraryBackup, chatSessionStore,
-            imageAssetWriteMutex, imageLibraryMutationMutex, ::awaitImageLibraryStartupReconciliation,
-            { imageLibraryBackupJob }, { imageLibraryBackupJob = it }, ::showStatus, uriString
-        )
+        chatImageWorkflowCoordinator.importImageLibraryBackup(uriString)
 
     fun cancelImageLibraryBackup() =
-        imageLibraryBackupCoordinator.cancelBackup { imageLibraryBackupJob }
+        chatImageWorkflowCoordinator.cancelImageLibraryBackup()
 
     fun importLocalImageModel(uri: Uri) =
         localImageLibraryAndModelCoordinator.importLocalImageModel(uri)
@@ -1391,17 +1164,8 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun selectImageGenerationModel(choiceId: String) {
-        when {
-            choiceId.startsWith(LOCAL_IMAGE_MODEL_CHOICE_PREFIX) -> {
-                selectLocalImageModel(choiceId.removePrefix(LOCAL_IMAGE_MODEL_CHOICE_PREFIX))
-            }
-            choiceId.startsWith(CLOUD_IMAGE_MODEL_CHOICE_PREFIX) -> {
-                val id = choiceId.removePrefix(CLOUD_IMAGE_MODEL_CHOICE_PREFIX)
-                selectCloudImageModel(id)
-            }
-        }
-    }
+    fun selectImageGenerationModel(choiceId: String) =
+        chatImageWorkflowCoordinator.selectImageGenerationModel(choiceId)
 
     fun onRepoInputChange(value: String) = uiStateStore.update { it.copy(repoInput = value) }
 
@@ -2904,10 +2668,32 @@ class MainViewModel @JvmOverloads constructor(
     // R3/C3-S16：图片库提交/删除两端口的具名适配器（依赖全部对象化；journal 保持 lazy）。
     private val imageLibraryCommitPort: ImageLibraryCommitPort =
         container.createImageLibraryCommitPort(uiStateStore, chatImageRequestPort)
-    private val imageAssetDeletionPort: ImageAssetDeletionPort =
-        container.createImageAssetDeletionPort(
-            uiStateStore, viewModelScope, imageUpscaleOwner, imageLibraryStartupReconciliation
-        )
+    private val imageAssetDeletionPort: ImageAssetDeletionPort
+        get() = chatImageWorkflowCoordinator.imageAssetDeletionPort
+
+    private val chatImageWorkflowCoordinator: ChatImageWorkflowCoordinator =
+        (injectedChatImageWorkflowCoordinator as? ChatImageWorkflowCoordinator)
+            ?: container.createChatImageWorkflowCoordinator(
+                scope = viewModelScope,
+                store = uiStateStore,
+                imageAssetWriteMutex = imageAssetWriteMutex,
+                imageLibraryMutationMutex = imageLibraryMutationMutex,
+                imageLibraryBackup = imageLibraryBackup,
+                chatSessionStore = chatSessionStore,
+                imageGenerationOwner = imageGenerationOwner,
+                imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
+                chatImageRetryPort = chatImageRetryPort,
+                showStatus = ::showStatus,
+                tryAcquireObservedImageGenerationLease = ::tryAcquireObservedImageGenerationLease,
+                releaseObservedImageGenerationLease = ::releaseObservedImageGenerationLease,
+                offlinePromptTranslationService = { offlinePromptTranslationService },
+                runtimeProfileStore = runtimeProfileStore,
+                engine = engine,
+                selectCloudImageModel = ::selectCloudImageModel,
+                registerLocalApiImageGenerationOwnership = ::registerLocalApiImageGenerationOwnership,
+                unregisterLocalApiImageGenerationOwnership = ::unregisterLocalApiImageGenerationOwnership,
+                cancelOwnedLocalApiImageWorker = ::cancelOwnedLocalApiImageWorker
+            )
 
 
     private val localApiAuxProviderPort: LocalApiAuxProviderPort =
@@ -3102,32 +2888,8 @@ class MainViewModel @JvmOverloads constructor(
     internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
         chatImageOptionsForCurrentSelectionFor(state)
 
-    private val localApiImageGenerationPort: LocalApiImageGenerationPort =
-        container.createLocalApiImageGenerationPort(
-            store = uiStateStore,
-            getActiveLocalApiImageModelIdRef = { activeLocalApiImageModelId },
-            setActiveLocalApiImageModelIdRef = { activeLocalApiImageModelId = it },
-            tryAcquireObservedImageGenerationLeaseRef = { tryAcquireObservedImageGenerationLease(it) },
-            releaseObservedImageGenerationLeaseRef = { releaseObservedImageGenerationLease(it) },
-            registerLocalApiImageGenerationOwnershipRef = { registerLocalApiImageGenerationOwnership(it) },
-            unregisterLocalApiImageGenerationOwnershipRef = { unregisterLocalApiImageGenerationOwnership(it) },
-            cancelOwnedLocalApiImageWorkerRef = { cancelOwnedLocalApiImageWorker(it) },
-            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLorasFor(it, uiStateStore.current.localImageLoras) },
-            resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLorasFor(s, r) },
-            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIdsFor(it, uiStateStore.current.localImageTextualInversions) },
-            prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(imagePromptTranslationPort, m, p, o, c) },
-            prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemoryFor(uiStateStore, container.runtimeAdmission, runtimeProfileStore, engine) },
-            executionWithQnnVerificationEvidenceRef = { m, r, o, req, att, ent ->
-                executionWithQnnVerificationEvidenceFor(getApplication(), m, r, o, req, att, ent)
-            },
-        )
-
     private suspend fun generateLocalApiImage(requestId: String, body: String): String =
-        generateLocalApiImageOperations(
-            requestId = requestId,
-            body = body,
-            port = localApiImageGenerationPort
-        )
+        chatImageWorkflowCoordinator.generateLocalApiImage(requestId, body)
 
 
     /**
