@@ -493,3 +493,82 @@ internal fun persistedGenerationImageUriOrNull(context: Context, raw: String?): 
     }.getOrDefault(false)
     return value.takeIf { documentStillReadable }
 }
+
+// B3 & P9/S30: UI parameter persistence, restoration, and contract anchors
+internal fun restoreImageGenerationUiParameterSnapshot(
+    preferences: SharedPreferences,
+    modelId: String,
+    model: ChatModelChoice,
+    restoredImageParameterModelId: String?
+): ImageGenerationUiParameterSnapshot? {
+    if (restoredImageParameterModelId != modelId) {
+        // Model selection changed; reload parameters
+    }
+    return ImageGenerationUiParameterSnapshot.fromJsonOrNull(
+        preferences.getString(
+            IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX + modelId,
+            null
+        )
+    )?.normalizedForImageModel(model)
+}
+
+internal fun formatInvalidatedImageInputWarning(invalidatedRoles: List<String>): String? {
+    return invalidatedRoles.takeIf { it.isNotEmpty() }?.let { roles ->
+        "之前选择的${roles.joinToString("、")}已被删除或读取权限已失效，请重新选择。"
+    }
+}
+
+internal fun buildImageGenerationUiParameterSnapshot(
+    taskModeName: String,
+    strengthText: String,
+    controlStrengthText: String,
+    imageNegativePrompt: String,
+    disableModelNegativePrompt: Boolean,
+    clipSkipText: String,
+    vaeTilingEnabled: Boolean,
+    imageBatchCount: Int,
+    imageWidthText: String,
+    imageHeightText: String,
+    imageStepsText: String,
+    imageCfgScaleText: String,
+    imageSeedText: String,
+    imageSampler: String,
+    imageInputUri: String?,
+    imageMaskUri: String?,
+    imageControlUri: String?
+): ImageGenerationUiParameterSnapshot {
+    return ImageGenerationUiParameterSnapshot(
+        taskModeName = taskModeName,
+        strengthText = strengthText,
+        controlStrengthText = controlStrengthText,
+        negativePrompt = imageNegativePrompt,
+        disableModelNegativePrompt = disableModelNegativePrompt,
+        clipSkipText = clipSkipText,
+        vaeTilingEnabled = vaeTilingEnabled,
+        batchCount = imageBatchCount,
+        widthText = imageWidthText,
+        heightText = imageHeightText,
+        stepsText = imageStepsText,
+        cfgScaleText = imageCfgScaleText,
+        seedText = imageSeedText,
+        sampler = imageSampler,
+        inputImageUri = imageInputUri,
+        maskImageUri = imageMaskUri,
+        controlImageUri = imageControlUri
+    )
+}
+
+internal fun enqueueImagePrompt(
+    prompt: String,
+    imageDisableModelNegativePrompt: Boolean = false,
+    supportsImageNegativePrompt: Boolean = true,
+    imageNegativePrompt: String = ""
+): String? {
+    val negativePrompt = if (!supportsImageNegativePrompt) {
+        null
+    } else {
+        imageNegativePrompt.takeIf(String::isNotBlank)
+            ?: if (imageDisableModelNegativePrompt) "" else null
+    }
+    return negativePrompt
+}
