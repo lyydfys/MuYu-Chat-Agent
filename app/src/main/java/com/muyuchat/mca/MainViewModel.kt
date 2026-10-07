@@ -471,7 +471,7 @@ class MainViewModel @JvmOverloads constructor(
     private fun persistAssistantsAsync() {
         viewModelScope.launch(Dispatchers.IO) {
             assistantSaveMutex.withLock {
-                runCatching { assistantStore.saveAssistants(_uiState.value.assistants) }
+                runCatching { assistantStore.saveAssistants(uiStateStore.current.assistants) }
                     .onFailure { error ->
                         uiStateStore.update { it.copy(
                             statusMessage = "助手保存失败：${error.message ?: "请重试"}"
@@ -512,7 +512,7 @@ class MainViewModel @JvmOverloads constructor(
     // R3/C1: 诊断族读写随 C1 裁定 B 移入 DiagnosticsOperations（体逐字、评测点不变）。
     private val diagnosticsOperations = DiagnosticsOperations(
         engine = engine,
-        currentState = { _uiState.value },
+        currentState = { uiStateStore.current },
         updateUiState = { transform -> uiStateStore.update(transform) },
         recentAgentLogs = { agentLogger.recent() },
         recentBenchmarkHistory = { benchmarkHistoryLogger.recent() },
@@ -715,8 +715,8 @@ class MainViewModel @JvmOverloads constructor(
     private val contentImportSelectionRevision: AtomicLong
         get() = container.runtimeAdmission.contentImportSelectionRevision
     internal fun captureContentImportOwner(): ContentImportOwner = ContentImportOwner(
-        sessionId = _uiState.value.activeChatSessionId,
-        assistantId = _uiState.value.selectedAssistantId,
+        sessionId = uiStateStore.current.activeChatSessionId,
+        assistantId = uiStateStore.current.selectedAssistantId,
         selectionRevision = contentImportSelectionRevision.get()
     )
     private fun ContentImportOwner.isCurrent(state: MainUiState): Boolean =
@@ -1404,7 +1404,7 @@ class MainViewModel @JvmOverloads constructor(
     /** Refreshes product-facing readiness; persisted verification remains advisory. */
 
     fun onInputChange(value: String) {
-        if (value != _uiState.value.input &&
+        if (value != uiStateStore.current.input &&
             (container.runtimeAdmission.pendingImageTranslation != null || container.runtimeAdmission.pendingChatImageAction != null)
         ) invalidatePendingChatImagePreparation()
         val bounded = value.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES)
@@ -1425,7 +1425,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun startBrowserTask(request: com.muyuchat.feature.chat.BrowserTaskLaunch) {
-        val state = _uiState.value
+        val state = uiStateStore.current
         val session = request.sessionId?.let { id -> state.chatSessions.firstOrNull { it.id == id } }
         val ownerMessages = if (request.sessionId == state.activeChatSessionId) state.messages else session?.messages.orEmpty()
         if (request.sessionId != null && session == null && request.sessionId != state.activeChatSessionId) return
@@ -1436,7 +1436,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun onBrowserTaskEvent(event: com.muyuchat.feature.chat.BrowserTaskEvent) {
-        val activeTask = _uiState.value.browserTask
+        val activeTask = uiStateStore.current.browserTask
         if (event.action == com.muyuchat.feature.chat.BrowserTaskAction.CANCEL &&
             activeTask?.taskId == event.taskId && activeWebSearchTaskId == event.taskId
         ) activeWebSearchDeferred?.cancel()
@@ -1565,7 +1565,7 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     fun retryImageGeneration(jobId: String) {
-        val sourceJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
+        val sourceJob = uiStateStore.current.imageJobs.firstOrNull { it.id == jobId }
         val originalSnapshot = sourceJob?.spec
         if (sourceJob == null || originalSnapshot == null) {
             showStatus("原图片任务参数已不可用，无法按原任务重试。")
@@ -1724,7 +1724,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
                 return@launchModelOperation
             }
-            val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
+            val removed = uiStateStore.current.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = runCatching { localImageModelStore.deleteModel(modelId) }.getOrDefault(false)
             settleAndApplyLocalImageModelCatalogUpdate(
                 store = uiStateStore,
@@ -1757,7 +1757,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun updateParams(params: GenerationParams) {
-        val state = _uiState.value
+        val state = uiStateStore.current
         val previous = state.params
         val scopedParams = params.copy(systemPrompt = state.selectedAssistant()?.systemPrompt ?: previous.systemPrompt)
         val changedRuntimeFields = runtimeParameterChanges(previous, scopedParams)
@@ -1771,7 +1771,7 @@ class MainViewModel @JvmOverloads constructor(
         // not make users repeat the same tuning work.
         persistModelGenerationParams(state, scopedParams)
         val updatedAssistants = updatedAssistantsWithParams(state.assistants, state.selectedAssistantId, scopedParams)
-        val hasLoadedModel = _uiState.value.loadedModelId != null
+        val hasLoadedModel = uiStateStore.current.loadedModelId != null
         val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
         uiStateStore.update { state ->
             state.copy(
@@ -1844,7 +1844,7 @@ class MainViewModel @JvmOverloads constructor(
         assistantStore = assistantStore,
         application = getApplication(),
         rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
         showStatus = ::showStatus,
         persistModelGenerationParams = ::persistModelGenerationParams,
         persistAssistantsAsync = ::persistAssistantsAsync,
@@ -1949,7 +1949,7 @@ class MainViewModel @JvmOverloads constructor(
     fun clearWebSearchDiagnostics() = webSearchWorkflowCoordinator.clearWebSearchDiagnostics()
 
     fun selectAssistant(assistantId: String) {
-        val state = _uiState.value
+        val state = uiStateStore.current
         if (rejectWhileConversationMutationInProgress()) return
         val assistant = state.assistants.firstOrNull { it.id == assistantId } ?: return
         val previousSession = state.chatSessions.latestSessionForAssistant(assistantId)
@@ -1957,12 +1957,12 @@ class MainViewModel @JvmOverloads constructor(
             if (previousSession.id != state.activeChatSessionId || state.selectedAssistantId != assistant.id) {
                 selectChatSession(previousSession.id)
             }
-            if (_uiState.value.activeChatSessionId == previousSession.id &&
+            if (uiStateStore.current.activeChatSessionId == previousSession.id &&
                 previousSession.modelMode.toChatBackendOrNull() == ChatBackend.LOCAL
             ) {
                 previousSession.modelId?.let { modelId ->
-                    if (_uiState.value.loadedModelId != modelId) {
-                        _uiState.value.models.firstOrNull { it.id == modelId }?.let(::loadModel)
+                    if (uiStateStore.current.loadedModelId != modelId) {
+                        uiStateStore.current.models.firstOrNull { it.id == modelId }?.let(::loadModel)
                     }
                 }
             }
@@ -1973,7 +1973,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun createChatForAssistant(assistantId: String) {
-        val assistant = _uiState.value.assistants.firstOrNull { it.id == assistantId } ?: return
+        val assistant = uiStateStore.current.assistants.firstOrNull { it.id == assistantId } ?: return
         if (!newChatForAssistant(assistant, bindDefaultModel = true)) return
         finishSelectingNewAssistant(assistant)
     }
@@ -1988,7 +1988,7 @@ class MainViewModel @JvmOverloads constructor(
             contentImportSelectionRevision = contentImportSelectionRevision,
             markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
             applyAssistantDefaultModel = ::applyAssistantDefaultModel,
-            currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
+            currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() },
             assistant = assistant
         )
 
@@ -2033,7 +2033,7 @@ class MainViewModel @JvmOverloads constructor(
         application = getApplication(),
         scope = viewModelScope,
         rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
         showStatus = ::showStatus,
         queueWorldBookCleanup = ::queueWorldBookCleanup,
         cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
@@ -2041,7 +2041,7 @@ class MainViewModel @JvmOverloads constructor(
         persistChatSessions = ::persistChatSessions,
         chatAppearanceMutex = chatAppearanceCoordinator.mutex,
         cleanupUnusedChatBackgrounds = { chatAppearanceCoordinator.cleanupUnusedChatBackgrounds() },
-        currentModelGenerationProfileKey = { _uiState.value.modelGenerationProfileKey() },
+        currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() },
         assistantId = assistantId
     )
 
@@ -2062,7 +2062,7 @@ class MainViewModel @JvmOverloads constructor(
 
     private suspend fun stageContentImportPreview(preview: ContentImportPreview) {
         contentImportCommitMutex.withLock {
-            if (_uiState.value.contentImportCommitting) return
+            if (uiStateStore.current.contentImportCommitting) return
             try {
                 withContext(Dispatchers.IO) { contentImportPreviewStore.save(preview) }
                 uiStateStore.update { it.copy(contentImportPreview = preview) }
@@ -2076,7 +2076,7 @@ class MainViewModel @JvmOverloads constructor(
     fun cancelContentImportPreview(id: String) {
         viewModelScope.launch {
             contentImportCommitMutex.withLock {
-                if (_uiState.value.contentImportCommitting || _uiState.value.contentImportPreview?.id != id) return@withLock
+                if (uiStateStore.current.contentImportCommitting || uiStateStore.current.contentImportPreview?.id != id) return@withLock
                 try {
                     withContext(Dispatchers.IO) { contentImportPreviewStore.clear(id) }
                     uiStateStore.update { it.copy(contentImportPreview = null) }
@@ -2091,8 +2091,8 @@ class MainViewModel @JvmOverloads constructor(
     fun confirmContentImportPreview(id: String) {
         viewModelScope.launch {
             contentImportCommitMutex.withLock {
-                val preview = _uiState.value.contentImportPreview?.takeIf { it.id == id } ?: return@withLock
-                if (_uiState.value.contentImportCommitting || _uiState.value.isGenerating) return@withLock
+                val preview = uiStateStore.current.contentImportPreview?.takeIf { it.id == id } ?: return@withLock
+                if (uiStateStore.current.contentImportCommitting || uiStateStore.current.isGenerating) return@withLock
                 uiStateStore.update { it.copy(contentImportCommitting = true) }
                 try {
                     val committed = when (preview.kind) {
@@ -2142,8 +2142,8 @@ class MainViewModel @JvmOverloads constructor(
         chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
         stageContentImportPreview = { stageContentImportPreview(it) },
         conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
-        currentOwnerIsCurrent = { owner.isCurrent(_uiState.value) },
+        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
+        currentOwnerIsCurrent = { owner.isCurrent(uiStateStore.current) },
         selectAssistant = ::selectAssistant,
         result = result,
         owner = owner,
@@ -2157,7 +2157,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun updateChatImageLoraSelection(selections: List<Pair<String, Double>>?) {
         val frozen = selections?.toList()
-        val valid = frozen?.let { runCatching { resolveCurrentLocalImageLorasFor(it, _uiState.value.localImageLoras) }.isSuccess } == true
+        val valid = frozen?.let { runCatching { resolveCurrentLocalImageLorasFor(it, uiStateStore.current.localImageLoras) }.isSuccess } == true
         uiStateStore.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
@@ -2169,10 +2169,10 @@ class MainViewModel @JvmOverloads constructor(
     ): Boolean = importWorldBookOwnedFor(
         knowledgeLibraryPort = knowledgeLibraryPort,
         uiStateStore = uiStateStore,
-        currentState = { _uiState.value },
+        currentState = { uiStateStore.current },
         stageContentImportPreview = { stageContentImportPreview(it) },
         markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        ownerIsCurrent = { it.isCurrent(_uiState.value) },
+        ownerIsCurrent = { it.isCurrent(uiStateStore.current) },
         rawJson = rawJson,
         scope = scope,
         owner = owner,
@@ -2185,7 +2185,7 @@ class MainViewModel @JvmOverloads constructor(
         importOwner: ContentImportOwner? = null
     ) = importWorldBookFileFor(
         scope = viewModelScope,
-        isGenerating = { _uiState.value.isGenerating },
+        isGenerating = { uiStateStore.current.isGenerating },
         showStatus = ::showStatus,
         captureContentImportOwner = ::captureContentImportOwner,
         importWorldBookOwned = ::importWorldBookOwned,
@@ -2196,25 +2196,25 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     fun deleteWorldBook(worldBookId: String) =
-        deleteWorldBookFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, worldBookId)
+        deleteWorldBookFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, worldBookId)
 
     fun createKnowledgeBase(name: String, description: String = "") =
-        createKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, name, description)
+        createKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, name, description)
 
     fun importKnowledgeDocument(
         knowledgeBaseId: String,
         uriString: String,
         importOwner: ContentImportOwner? = null
     ) {
-        if (_uiState.value.isGenerating) {
+        if (uiStateStore.current.isGenerating) {
             showStatus("请先停止当前生成，再导入知识库文件")
             return
         }
-        if (knowledgeBaseId in _uiState.value.knowledgeBaseImportingIds) {
+        if (knowledgeBaseId in uiStateStore.current.knowledgeBaseImportingIds) {
             showStatus("该知识库正在导入文件，请稍候")
             return
         }
-        val known = _uiState.value.knowledgeBases.any { it.id == knowledgeBaseId }
+        val known = uiStateStore.current.knowledgeBases.any { it.id == knowledgeBaseId }
         if (!known) {
             showStatus("未找到要导入的知识库")
             return
@@ -2253,7 +2253,7 @@ class MainViewModel @JvmOverloads constructor(
         require(contentImportSha256(preview.rawSource) == preview.sourceHash) {
             "导入预览内容已改变，请重新选择文档。"
         }
-        require(_uiState.value.knowledgeBases.any { it.id == baseId }) {
+        require(uiStateStore.current.knowledgeBases.any { it.id == baseId }) {
             "原知识库已删除，请重新选择知识库。"
         }
         val document = withContext(Dispatchers.IO) {
@@ -2263,7 +2263,7 @@ class MainViewModel @JvmOverloads constructor(
         chatSessionPersistenceSequence.incrementAndGet()
         withContext(Dispatchers.IO) {
             chatSessionPersistenceMutex.withLock {
-                val snapshot = _uiState.value
+                val snapshot = uiStateStore.current
                 val ownerSessionId = owner.sessionId?.takeIf { id -> snapshot.chatSessions.any { it.id == id } }
                 val binding = ownerSessionId?.let { sessionId ->
                     val selected = synchronized(chatSessionPersistenceStateLock) {
@@ -2301,19 +2301,19 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         }
-        if (owner.isCurrent(_uiState.value)) markLocalConversationContextInvalid()
+        if (owner.isCurrent(uiStateStore.current)) markLocalConversationContextInvalid()
         return true
     }
 
     fun setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) =
-        setKnowledgeBaseSelectedFor(uiStateStore, { _uiState.value }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
+        setKnowledgeBaseSelectedFor(uiStateStore, { uiStateStore.current }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
 
     fun deleteKnowledgeBase(knowledgeBaseId: String) =
-        deleteKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { _uiState.value.knowledgeLibrarySnapshot() }, knowledgeBaseId)
+        deleteKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, knowledgeBaseId)
 
     fun updateReasoningMode(mode: ReasoningMode) =
         updateReasoningModeFor(
-            _uiState.value,
+            uiStateStore.current,
             getApplication(),
             modelGenerationProfileStore,
             uiStateStore,
@@ -2341,16 +2341,16 @@ class MainViewModel @JvmOverloads constructor(
      * object; loading the model later reads this profile and applies it to native.
      */
     fun updateModelBackendPreference(modelId: String, backendId: String) {
-        val target = _uiState.value.models.firstOrNull { it.id == modelId } ?: return
+        val target = uiStateStore.current.models.firstOrNull { it.id == modelId } ?: return
         val family = chatBackendFamilyForRuntime(target.runtime.storageValue)
         val current = loadModelGenerationParams(
             backend = ChatBackend.LOCAL,
             modelId = modelId,
-            defaults = _uiState.value.params
+            defaults = uiStateStore.current.params
         )
         val updated = current.withChatBackend(family, backendId)
         persistModelGenerationParams(ChatBackend.LOCAL, modelId, updated)
-        if (_uiState.value.loadedModelId == modelId) {
+        if (uiStateStore.current.loadedModelId == modelId) {
             // Backend selection is load-bound for llama.cpp, MNN, LiteRT-LM,
             // and QAIRT. Updating only the hot generation parameters leaves
             // the old native session running and makes the chip lie about the
@@ -2412,7 +2412,7 @@ class MainViewModel @JvmOverloads constructor(
 
 
     fun updateAgentPreference(preference: UserPreference) {
-        val state = _uiState.value
+        val state = uiStateStore.current
         val recommendation = runCatching { buildRecommendation(preference) }.getOrNull()
         val updatedParams = recommendation?.tuningPlan?.applyTo(state.params)
         val paramsChanged = updatedParams != null && updatedParams != state.params
@@ -2476,7 +2476,7 @@ class MainViewModel @JvmOverloads constructor(
             modelScopeClient,
             ::busy,
             ::fail,
-            _uiState.value.repoInput
+            uiStateStore.current.repoInput
         )
 
     fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) =
@@ -2506,8 +2506,8 @@ class MainViewModel @JvmOverloads constructor(
         modelImportAndDownloadCoordinator.attachVisionProjector(
             modelId,
             uri,
-            _uiState.value.loadedModelId,
-            _uiState.value.selectedChatBackend
+            uiStateStore.current.loadedModelId,
+            uiStateStore.current.selectedChatBackend
         )
 
 
@@ -2525,9 +2525,9 @@ class MainViewModel @JvmOverloads constructor(
             modelScopeClient,
             ::busy,
             ::fail,
-            _uiState.value.hubQuery,
-            _uiState.value.hubPage,
-            _uiState.value.hubModels,
+            uiStateStore.current.hubQuery,
+            uiStateStore.current.hubPage,
+            uiStateStore.current.hubModels,
             reset
         )
 
@@ -2549,7 +2549,7 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     fun download(remote: RemoteModelFile) =
-        modelImportAndDownloadCoordinator.download(remote, _uiState.value.loadedModelId)
+        modelImportAndDownloadCoordinator.download(remote, uiStateStore.current.loadedModelId)
 
     fun pauseManagedDownloads() =
         modelImportAndDownloadCoordinator.pauseManagedDownloads()
@@ -2690,7 +2690,7 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     fun sendMessage() {
-        val state = _uiState.value
+        val state = uiStateStore.current
         if (rejectWhileConversationMutationInProgress()) return
         if (assistantImageContinuationCoordinator.hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
             showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
@@ -2707,7 +2707,7 @@ class MainViewModel @JvmOverloads constructor(
                 val uniqueAttachments = preparedInput.imageAttachments
                     .deduplicatedVisionAttachmentsForSend(getApplication<Application>())
                 withContext(Dispatchers.Main.immediate) {
-                    val current = _uiState.value
+                    val current = uiStateStore.current
                     if (current.input != state.input || current.isGenerating) return@withContext
                     sendPreparedMessageAsync(current, preparedInput.copy(imageAttachments = uniqueAttachments))
                 }
@@ -2827,7 +2827,7 @@ class MainViewModel @JvmOverloads constructor(
                         visibleUserText = preparedInput.text,
                         requestedOutputCount = imageDecision.requestedOutputCount,
                         stillOwned = {
-                            val current = _uiState.value
+                            val current = uiStateStore.current
                             current.activeChatSessionId == state.activeChatSessionId &&
                                 current.messages == state.messages &&
                                 current.input == state.input &&
@@ -2955,7 +2955,7 @@ class MainViewModel @JvmOverloads constructor(
             }
             return
         }
-        val currentOwner = _uiState.value
+        val currentOwner = uiStateStore.current
         if (currentOwner.activeChatSessionId != state.activeChatSessionId ||
             !currentOwner.canWriteToActiveAssistantSession() ||
             currentOwner.input != state.input || currentOwner.messages != state.messages ||
@@ -3096,7 +3096,7 @@ class MainViewModel @JvmOverloads constructor(
         assistantImageContinuationCoordinator.cancelChatImageGeneration(requestId)
 
     fun regenerateLastResponse() {
-        val state = _uiState.value
+        val state = uiStateStore.current
         if (rejectWhileConversationMutationInProgress()) return
         if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) return
@@ -3245,7 +3245,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun newChat() {
         if (rejectWhileConversationMutationInProgress()) return
-        newChatForAssistant(_uiState.value.selectedAssistant())
+        newChatForAssistant(uiStateStore.current.selectedAssistant())
     }
 
     private fun newChatForAssistant(
@@ -3256,7 +3256,7 @@ class MainViewModel @JvmOverloads constructor(
         val created = newChatForAssistantFor(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             showStatus = ::showStatus,
             invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
             cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
@@ -3281,7 +3281,7 @@ class MainViewModel @JvmOverloads constructor(
         container.createSelectChatSessionPort(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             invalidatePendingChatImagePreparation = { invalidatePendingChatImagePreparation() },
             cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
             bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
@@ -3296,7 +3296,7 @@ class MainViewModel @JvmOverloads constructor(
         branchMixedChatSessionFor(
             store = uiStateStore,
             rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             persistChatSessions = { persistChatSessions(it) },
             selectChatSession = ::selectChatSession,
             sessionId = sessionId,
@@ -3311,7 +3311,7 @@ class MainViewModel @JvmOverloads constructor(
             scope = viewModelScope,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
             pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             queueWorldBookCleanup = ::queueWorldBookCleanup,
@@ -3351,7 +3351,7 @@ class MainViewModel @JvmOverloads constructor(
             scope = viewModelScope,
             rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
             showStatus = ::showStatus,
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(_uiState.value, it) },
+            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
             queueWorldBookCleanup = ::queueWorldBookCleanup,
             pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
@@ -3361,7 +3361,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
-        val current = _uiState.value.persistentPrefixCacheEnabled
+        val current = uiStateStore.current.persistentPrefixCacheEnabled
         if (current == enabled) {
             refreshPersistentPrefixCacheSummary()
             return
@@ -3417,7 +3417,7 @@ class MainViewModel @JvmOverloads constructor(
             chatRuns.activePublishedJob()?.join()
             val cleared = engine.clearPersistentPrefixCache()
             val summary = engine.persistentPrefixCacheSummary()
-            val enabledNow = _uiState.value.persistentPrefixCacheEnabled
+            val enabledNow = uiStateStore.current.persistentPrefixCacheEnabled
             engine.setPersistentPrefixCacheEnabled(enabledNow)
             // R3/S21: 前缀缓存族写入统一经 UiStateStore。
             uiStateStore.update { state ->
@@ -3436,7 +3436,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun clearChat() {
         viewModelScope.launch {
-            manualContextCompressionRequests.clear(_uiState.value.activeChatSessionId)
+            manualContextCompressionRequests.clear(uiStateStore.current.activeChatSessionId)
             cancelGenerationJob()
             engine.stopGeneration()
             discardPendingAssistantOutput()
@@ -3519,7 +3519,7 @@ class MainViewModel @JvmOverloads constructor(
             ) ?: return@launch
             if (recovery != foregroundRecoverySequence.get()) return@launch
 
-            val stateBeforeProbe = _uiState.value
+            val stateBeforeProbe = uiStateStore.current
             val canProbeWorker = stateBeforeProbe.loadedModelId != null &&
                 !stateBeforeProbe.busy &&
                 !stateBeforeProbe.isGenerating &&
@@ -3764,7 +3764,7 @@ class MainViewModel @JvmOverloads constructor(
         }
 
     fun toggleApi(enabled: Boolean) {
-        val restEnabled = if (enabled) _uiState.value.restEnabled else false
+        val restEnabled = if (enabled) uiStateStore.current.restEnabled else false
         persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
         uiStateStore.update {
             it.copy(
@@ -3783,7 +3783,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun toggleRest(enabled: Boolean) {
-        val apiEnabled = enabled || _uiState.value.apiEnabled
+        val apiEnabled = enabled || uiStateStore.current.apiEnabled
         persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
         uiStateStore.update {
             it.copy(
@@ -4191,12 +4191,12 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun persistKnowledgeBaseBindings(sessionId: String, knowledgeBaseIds: Set<String>) {
         persistChatSessions(
-            sessions = _uiState.value.chatSessions,
+            sessions = uiStateStore.current.chatSessions,
             knowledgeBinding = sessionId to knowledgeBaseIds
         )
     }
 
-    private fun persistFiles(files: List<FileAssetRecord> = _uiState.value.files) =
+    private fun persistFiles(files: List<FileAssetRecord> = uiStateStore.current.files) =
         persistFilesFor(chatSessionStore, uiStateStore, viewModelScope, files)
 
     private fun busy(message: String) {
@@ -4224,7 +4224,7 @@ class MainViewModel @JvmOverloads constructor(
         modelMode: String? = null,
         modelId: String? = null
     ): List<ChatSessionRecord> = upsertSessionFor(
-        state = _uiState.value,
+        state = uiStateStore.current,
         sessionId = sessionId,
         messages = messages,
         assistantId = assistantId,
@@ -4290,9 +4290,9 @@ class MainViewModel @JvmOverloads constructor(
             registerLocalApiImageGenerationOwnershipRef = { registerLocalApiImageGenerationOwnership(it) },
             unregisterLocalApiImageGenerationOwnershipRef = { unregisterLocalApiImageGenerationOwnership(it) },
             cancelOwnedLocalApiImageWorkerRef = { cancelOwnedLocalApiImageWorker(it) },
-            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLorasFor(it, _uiState.value.localImageLoras) },
+            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLorasFor(it, uiStateStore.current.localImageLoras) },
             resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLorasFor(s, r) },
-            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIdsFor(it, _uiState.value.localImageTextualInversions) },
+            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIdsFor(it, uiStateStore.current.localImageTextualInversions) },
             prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(imagePromptTranslationPort, m, p, o, c) },
             prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemoryFor(uiStateStore, container.runtimeAdmission, runtimeProfileStore, engine) },
             executionWithQnnVerificationEvidenceRef = { m, r, o, req, att, ent ->
@@ -4452,13 +4452,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun buildRecommendation(
         preference: UserPreference,
         device: DeviceProfile = currentDeviceProfile(),
-        lastDecodeTps: Double? = _uiState.value.benchmark?.decodeTps?.takeIf { it > 0.0 }
-            ?: _uiState.value.stats.decodeTps.takeIf { it > 0.0 }
+        lastDecodeTps: Double? = uiStateStore.current.benchmark?.decodeTps?.takeIf { it > 0.0 }
+            ?: uiStateStore.current.stats.decodeTps.takeIf { it > 0.0 }
     ): AgentRecommendation =
         advisor.recommend(
             device = device,
             localModels = modelStore.listModels(),
-            remoteFiles = _uiState.value.remoteFiles,
+            remoteFiles = uiStateStore.current.remoteFiles,
             preference = preference,
             lastDecodeTps = lastDecodeTps
         )
