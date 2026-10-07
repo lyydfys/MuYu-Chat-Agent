@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import com.muyuchat.mca.composition.MainCoordinatorAssembly
+import com.muyuchat.mca.composition.MainCoordinatorHost
 import com.muyuchat.mca.composition.McaAppContainer
 import android.content.Context
 import android.net.Uri
@@ -548,57 +550,8 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-
-
-
-
-
-
-
-
-
-
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
         chatImageWorkflowCoordinator.updateGenerationImageGrantReleaseDefer(defer)
-
-    private val modelImportAndDownloadCoordinator = ModelImportAndDownloadCoordinator(
-        application = getApplication(),
-        scope = viewModelScope,
-        store = uiStateStore,
-        modelStore = modelStore,
-        localImageModelStore = localImageModelStore,
-        getManagedRuntimeReadinessRefreshGate = { managedRuntimeReadinessRefreshGate },
-        getManagedRuntimeReadinessPort = { managedRuntimeReadinessPort },
-        chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
-        getInitialChatSessionIds = { initialChatSessions.map { it.id } },
-        showStatus = ::showStatus,
-        failDownload = ::failDownload,
-        busy = ::busy,
-        fail = ::fail,
-        loadModel = ::loadModel,
-        reconcileModelIdentities = { reconcileModelIdentities() }
-    )
-
-    private val localImageLibraryAndModelCoordinator = LocalImageLibraryAndModelCoordinator(
-        store = uiStateStore,
-        scope = viewModelScope,
-        application = getApplication(),
-        container = container,
-        localImageModelStore = localImageModelStore,
-        localImageWorkerClient = localImageWorkerClient,
-        localImageLoraStore = localImageLoraStore,
-        managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
-        launchModelOperation = ::launchModelOperation,
-        tryAcquireObservedImageGenerationLease = ::tryAcquireObservedImageGenerationLease,
-        releaseObservedImageGenerationLease = ::releaseObservedImageGenerationLease,
-        showStatus = ::showStatus,
-        busy = ::busy,
-        fail = ::fail,
-        persistFiles = ::persistFiles,
-        activeImageGenerationModelId = { activeImageGenerationModelId },
-        activeLocalApiImageModelId = { activeLocalApiImageModelId },
-        imageUpscaleOwnerProvider = { imageUpscaleOwner }
-    )
 
     private fun observeManagedDownloads() {
         modelImportAndDownloadCoordinator.observeManagedDownloads { image ->
@@ -612,211 +565,161 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private val assistantImageContinuationCoordinator: AssistantImageToolContinuationCoordinator = AssistantImageToolContinuationCoordinator(
-        store = uiStateStore,
-        admission = container.runtimeAdmission,
-        container = container,
-        cloudChatProvider = cloudChatProvider,
-        chatContextComposer = chatContextComposer,
-        imageGenerationOwnerProvider = { imageGenerationOwner },
-        chatImageRequestPort = { chatImageRequestPort },
-        persistChatSessions = { persistChatSessions(it) },
-        buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
-        chatImageNegativePromptSupported = { chatImageNegativePromptSupported(it) },
-        cancelImageGenerationForJob = { cancelImageGenerationForJob(it) },
-        reserveUiGenerationStart = ::reserveUiGenerationStart,
-        cancelPendingReservation = { chatRuns.cancelPending(it) },
-        showStatus = ::showStatus,
-        startGeneration = { requestMessages, reservation, toolExchanges, paramsOverride, offerAssistantImageTool, chatModelIdOverride, continuationRequestId ->
-            startGeneration(
-                requestMessages = requestMessages,
-                reservation = reservation,
-                toolExchanges = toolExchanges,
-                paramsOverride = paramsOverride,
-                offerAssistantImageTool = offerAssistantImageTool,
-                chatModelIdOverride = chatModelIdOverride,
-                continuationRequestId = continuationRequestId
-            )
+    private val coordinatorHost = object : MainCoordinatorHost {
+        override val store get() = uiStateStore
+        override val scope get() = viewModelScope
+        override val application get() = getApplication<Application>()
+        override val container get() = this@MainViewModel.container
+        override val engine get() = this@MainViewModel.engine
+        override val initialChatSessions get() = this@MainViewModel.initialChatSessions
+        override val chatContextComposer get() = this@MainViewModel.chatContextComposer
+        override val tuningOwner get() = this@MainViewModel.tuningOwner
+        override val agentLogger get() = this@MainViewModel.agentLogger
+        override val benchmarkRunner get() = this@MainViewModel.benchmarkRunner
+        override val diagnosticsOperations get() = this@MainViewModel.diagnosticsOperations
+        override val localApiRuntimeOwner get() = this@MainViewModel.localApiRuntimeOwner
+        override val modelScopeClient get() = this@MainViewModel.modelScopeClient
+        override val installationScopeId get() = this@MainViewModel.installationScopeId
+        override val localApiIdempotencyJournalLock get() = this@MainViewModel.localApiIdempotencyJournalLock
+        override val characterMemorySummaryCoordinator get() = this@MainViewModel.characterMemorySummaryCoordinator
+        override val knowledgeLibraryPort get() = this@MainViewModel.knowledgeLibraryPort
+        override val contextCompressionPreferences get() = this@MainViewModel.contextCompressionPreferences
+        override val imageLibraryStartupReconciliation get() = this@MainViewModel.imageLibraryStartupReconciliation
+        override val persistentPrefixCacheOperationSequence get() = this@MainViewModel.persistentPrefixCacheOperationSequence
+        override val modelIdentityReferenceMigration get() = this@MainViewModel.modelIdentityReferenceMigration
+        override val skipInitialModelDiscovery get() = this@MainViewModel.skipInitialModelDiscovery
+        override val imagePromptTokenMeasurementHost get() = this@MainViewModel.imagePromptTokenMeasurementHost
+        override val visionAttachmentPort get() = this@MainViewModel.visionAttachmentPort
+        override val chatTerminalSettlementPort get() = this@MainViewModel.chatTerminalSettlementPort
+        override val webSearchWorkflowCoordinator get() = this@MainViewModel.webSearchWorkflowCoordinator
+        override val chatAppearanceCoordinator get() = this@MainViewModel.chatAppearanceCoordinator
+        override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner
+        override val chatImageRequestPort get() = this@MainViewModel.chatImageRequestPort
+        override val imageLibraryCommitPort get() = this@MainViewModel.imageLibraryCommitPort
+        override val imageGenerationOwner get() = this@MainViewModel.imageGenerationOwner
+        override val offlinePromptTranslationService get() = this@MainViewModel.offlinePromptTranslationService
+
+        override var activeWebSearchTaskId: String?
+            get() = this@MainViewModel.activeWebSearchTaskId
+            set(value) { this@MainViewModel.activeWebSearchTaskId = value }
+        override var foregroundRecoveryJob: Job?
+            get() = this@MainViewModel.foregroundRecoveryJob
+            set(value) { this@MainViewModel.foregroundRecoveryJob = value }
+
+        override fun hostShowStatus(message: String?) = this@MainViewModel.showStatus(message)
+        override fun hostFail(message: String) = this@MainViewModel.fail(message)
+        override fun hostBusy(message: String) = this@MainViewModel.busy(message)
+        override fun hostFailDownload(message: String) = this@MainViewModel.failDownload(message)
+        override fun hostLoadModel(requestedModel: ModelManifest) = this@MainViewModel.loadModel(requestedModel)
+        override fun hostLaunchModelOperation(message: String, operation: suspend CoroutineScope.() -> Unit) =
+            this@MainViewModel.launchModelOperation(message, operation)
+        override fun hostTryAcquireObservedImageGenerationLease(requestId: String) =
+            this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
+        override fun hostReleaseObservedImageGenerationLease(lease: LocalImageGenerationCoordinator.Lease) =
+            this@MainViewModel.releaseObservedImageGenerationLease(lease)
+        override fun hostPersistFiles(files: List<FileAssetRecord>) {
+            this@MainViewModel.persistFiles(files)
         }
+        override fun hostPersistChatSessions(
+            sessions: List<ChatSessionRecord>?,
+            binding: Pair<String, Set<String>>?,
+            generationRunId: Long?
+        ) = this@MainViewModel.persistChatSessions(sessions, binding, generationRunId)
+        override fun hostBuildChatImageRetrySnapshot(request: ChatGeneratedImageRequest, sessionId: String) =
+            this@MainViewModel.buildChatImageRetrySnapshot(request, sessionId)
+        override fun hostChatImageNegativePromptSupported(state: MainUiState) =
+            this@MainViewModel.chatImageNegativePromptSupported(state)
+        override fun hostCancelImageGenerationForJob(expectedJobId: String?) =
+            this@MainViewModel.cancelImageGenerationForJob(expectedJobId)
+        override fun hostReserveUiGenerationStart() = this@MainViewModel.reserveUiGenerationStart()
+        override fun hostStartGeneration(
+            requestMessages: List<ChatMessage>,
+            reservation: UiGenerationReservation?,
+            toolExchanges: List<ChatToolExchange>,
+            paramsOverride: GenerationParams?,
+            offerAssistantImageTool: Boolean,
+            chatModelIdOverride: String?,
+            continuationRequestId: String?,
+            preflightCompression: com.muyuchat.core.engine.ContextCompressionResult?
+        ) = this@MainViewModel.startGeneration(
+            requestMessages, reservation, toolExchanges, paramsOverride,
+            offerAssistantImageTool, chatModelIdOverride, continuationRequestId, preflightCompression
+        )
+        override fun hostSendChatImageRequestWithPromptBridge(
+            visibleUserText: String,
+            prompt: String,
+            requestedOutputCount: Int?,
+            allowCloudTranslationFallback: Boolean
+        ) = this@MainViewModel.sendChatImageRequestWithPromptBridge(
+            visibleUserText, prompt, requestedOutputCount, allowCloudTranslationFallback
+        )
+        override fun hostSendPreparedMessage(state: MainUiState, preparedInput: PreparedChatInput) =
+            this@MainViewModel.sendPreparedMessage(state, preparedInput)
+        override fun hostPersistModelGenerationParams(state: MainUiState, params: GenerationParams) =
+            this@MainViewModel.persistModelGenerationParams(state, params)
+        override fun hostPersistModelGenerationParams(backend: ChatBackend, modelId: String?, params: GenerationParams) =
+            this@MainViewModel.persistModelGenerationParams(backend, modelId, params)
+        override fun hostUpdateParams(params: GenerationParams) = this@MainViewModel.updateParams(params)
+        override fun hostCancelGenerationJob() = this@MainViewModel.cancelGenerationJob()
+        override fun hostPublishManagedChatCatalogAfterValidation() =
+            this@MainViewModel.publishManagedChatCatalogAfterValidation()
+        override fun hostLoadModelGenerationParams(backend: ChatBackend, modelId: String?, defaults: GenerationParams) =
+            this@MainViewModel.loadModelGenerationParams(backend, modelId, defaults)
+        override fun hostCurrentDeviceProfile() = this@MainViewModel.currentDeviceProfile()
+        override fun hostMarkLocalConversationContextInvalid() = this@MainViewModel.markLocalConversationContextInvalid()
+        override fun hostEnqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
+            this@MainViewModel.enqueueManagedDownload(request, useAfterDownload)
+        override fun hostSelectChatSession(sessionId: String) = this@MainViewModel.selectChatSession(sessionId)
+        override fun hostNewChatForAssistant(assistant: AssistantRecord, bindDefaultModel: Boolean) =
+            this@MainViewModel.newChatForAssistant(assistant, bindDefaultModel)
+        override fun hostCaptureContentImportOwner() = this@MainViewModel.captureContentImportOwner()
+        override suspend fun hostStageContentImportPreview(preview: ContentImportPreview) =
+            this@MainViewModel.stageContentImportPreview(preview)
+        override fun hostReadAttachmentText(uri: Uri, maxBytes: Int) =
+            com.muyuchat.mca.readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes)
+        override fun hostObserveManagedDownloads() = this@MainViewModel.observeManagedDownloads()
+        override fun hostSchedulePersistentPrefixCacheClear(
+            operation: Long,
+            successMessage: String,
+            failureMessage: String
+        ) = this@MainViewModel.schedulePersistentPrefixCacheClear(operation, successMessage, failureMessage)
+        override fun hostAppendAssistant(
+            delta: String,
+            reasoningDelta: String,
+            reasoningDurationMs: Long,
+            forcePublish: Boolean,
+            generationRunId: Long?
+        ) = this@MainViewModel.appendAssistant(delta, reasoningDelta, reasoningDurationMs, forcePublish, generationRunId)
+        override fun hostFlushPendingAssistantOutput(generationRunId: Long?) =
+            this@MainViewModel.flushPendingAssistantOutput(generationRunId)
+        override suspend fun hostEnsureLocalConversationContextInvalidated() =
+            this@MainViewModel.ensureLocalConversationContextInvalidated()
+        override fun hostPrepareChatInput(state: MainUiState) =
+            state.prepareChatInput()
+    }
+
+    private val coordinatorAssembly: MainCoordinatorAssembly = MainCoordinatorAssembly.create(
+        host = coordinatorHost,
+        injectedMainPostStartupCoordinator = injectedMainPostStartupCoordinator,
+        injectedChatSessionManagementCoordinator = injectedChatSessionManagementCoordinator,
+        injectedChatInputAndAttachmentCoordinator = injectedChatInputAndAttachmentCoordinator,
     )
 
-    private val offlinePromptTranslationAndChatImageCoordinator: OfflinePromptTranslationAndChatImageCoordinator = OfflinePromptTranslationAndChatImageCoordinator(
-        store = uiStateStore,
-        admission = container.runtimeAdmission,
-        scope = viewModelScope,
-        container = container,
-        installer = container.offlineTranslationInstaller,
-        downloader = container.offlineTranslationDownloader,
-        offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
-        chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
-        prepareChatInput = { it.prepareChatInput() },
-        showStatus = ::showStatus,
-        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasUnresolvedAssistantImageToolTurn = assistantImageContinuationCoordinator::hasUnresolvedAssistantImageToolTurn,
-        sendChatImageRequestWithPromptBridge = ::sendChatImageRequestWithPromptBridge,
-        sendPreparedMessage = ::sendPreparedMessage
-    )
-
-    private val agentTuningCoordinator: AgentTuningCoordinator = container.createAgentTuningCoordinator(
-        store = uiStateStore,
-        scope = viewModelScope,
-        engine = engine,
-        tuningOwner = tuningOwner,
-        agentLogger = agentLogger,
-        benchmarkRunner = benchmarkRunner,
-        diagnosticsOperations = diagnosticsOperations,
-        managedRuntimeReadinessPortProvider = { managedRuntimeReadinessPort },
-        localApiRuntimeOwner = localApiRuntimeOwner,
-        modelScopeClient = modelScopeClient,
-        cancelPersistedTuningJob = { localApiControlPlaneCoordinator.cancelPersistedTuningJob(it) },
-        activeRuntimeIdentity = { activeRuntimeIdentity },
-        activeAdaptiveRecommendation = { activeAdaptiveRecommendation },
-        setActiveAdaptiveRecommendation = { activeAdaptiveRecommendation = it },
-        busy = ::busy,
-        fail = ::fail,
-        showStatus = ::showStatus,
-        persistModelGenerationParams = ::persistModelGenerationParams,
-        updateParams = ::updateParams,
-        loadModel = ::loadModel,
-        timedLoadModel = { model, runtime, loadParams ->
-            chatModelCoordinator.timedLoadModel(model, runtime, loadParams)
-        },
-        runLocalGenerationSmoke = { params ->
-            chatModelCoordinator.runLocalGenerationSmoke(params)
-        },
-        cancelGenerationJob = ::cancelGenerationJob,
-        activeModelForRuntimeProfile = { activeModelForRuntimeProfile },
-        getPendingProfileTransactionId = { pendingProfileTransactionId },
-        setPendingProfileTransactionId = { pendingProfileTransactionId = it }
-    )
-
-    private val chatModelCoordinator: ChatModelCoordinator = container.createChatModelCoordinator(
-        store = uiStateStore,
-        scope = viewModelScope,
-        engine = engine,
-        tuningOwner = tuningOwner,
-        modelGenerationProfileStore = modelGenerationProfileStore,
-        managedRuntimeReadinessPort = { managedRuntimeReadinessPort },
-        installationScopeId = installationScopeId,
-        cancelGenerationJob = ::cancelGenerationJob,
-        persistChatSessions = { persistChatSessions(it) },
-        persistChatSessionsWithBinding = { sessions, binding -> persistChatSessions(sessions, binding) },
-        publishManagedChatCatalogAfterValidation = ::publishManagedChatCatalogAfterValidation,
-        busy = ::busy,
-        loadModelGenerationParams = { backend, modelId, defaults ->
-            loadModelGenerationParams(backend, modelId, defaults)
-        },
-        persistModelGenerationParams = { backend, modelId, params ->
-            persistModelGenerationParams(backend, modelId, params)
-        },
-        updateParams = ::updateParams,
-        cancelDirectParameterStageJob = { directParameterStageJob?.cancel() },
-        rejectImageModelSwitchWhileGenerationIsActive = ::rejectImageModelSwitchWhileGenerationIsActive,
-        invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-        activeRuntimeIdentity = { activeRuntimeIdentity },
-        currentDeviceProfile = ::currentDeviceProfile,
-        currentQairtBundleSha256 = ::currentQairtBundleSha256,
-        currentQairtVerifiedLocalModelIds = ::currentQairtVerifiedLocalModelIds
-    )
-
-    private val localApiControlPlaneCoordinator: LocalApiControlPlaneCoordinator = LocalApiControlPlaneCoordinator(
-        container = container,
-        store = uiStateStore,
-        engine = engine,
-        tuningOwner = tuningOwner,
-        runtimeProfileStore = runtimeProfileStore,
-        agentTuningCoordinator = agentTuningCoordinator,
-        getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
-        setActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId = it },
-        getAdaptiveTuningJob = { agentTuningCoordinator.adaptiveTuningJob },
-        setAdaptiveTuningJob = { agentTuningCoordinator.adaptiveTuningJob = it },
-        getActiveRuntimeIdentity = { activeRuntimeIdentity },
-        applyPendingRuntimeTransaction = agentTuningCoordinator::applyPendingRuntimeTransaction,
-        rollbackCommittedRuntimeProfile = agentTuningCoordinator::rollbackCommittedRuntimeProfile,
-        idempotencyJournalLock = localApiIdempotencyJournalLock,
-        application = getApplication(),
-        scope = viewModelScope
-    )
-
-    private val modelScopeHubCoordinator: ModelScopeHubCoordinator = container.createModelScopeHubCoordinator(
-        scope = viewModelScope,
-        store = uiStateStore,
-        client = modelScopeClient,
-        currentDeviceProfile = ::currentDeviceProfile,
-        busy = ::busy,
-        fail = ::fail,
-        showStatus = ::showStatus,
-        enqueueManagedDownload = ::enqueueManagedDownload
-    )
-
-    private val assistantProfileCoordinator: AssistantProfileCoordinator = container.createAssistantProfileCoordinator(
-        store = uiStateStore,
-        scope = viewModelScope,
-        modelGenerationProfileStore = modelGenerationProfileStore,
-        chatSessionStore = chatSessionStore,
-        knowledgeLibraryPort = knowledgeLibraryPort,
-        chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
-        pendingWorldBookCleanupOwners = pendingWorldBookCleanupOwners,
-        engine = engine,
-        characterMemorySummaryCoordinator = characterMemorySummaryCoordinator,
-        chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-        chatSessionPersistenceSequence = chatSessionPersistenceSequence,
-        getPendingKnowledgeBindings = { pendingKnowledgeBindings },
-        setDurableChatSessions = { durableChatSessions = it },
-        conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
-        contentImportSelectionRevision = contentImportSelectionRevision,
-        activeRuntimeIdentity = { activeRuntimeIdentity },
-        runtimeUserOverrideFields = runtimeUserOverrideFields,
-        directParameterStageGeneration = directParameterStageGeneration,
-        getActiveDirectParameterStageJob = { directParameterStageJob },
-        setActiveDirectParameterStageJob = { directParameterStageJob = it },
-        directParameterStageMutex = directParameterStageMutex,
-        adaptiveTuningJobIsActive = { agentTuningCoordinator.adaptiveTuningJob?.isActive == true },
-        getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
-        getPendingProfileTransactionId = { pendingProfileTransactionId },
-        setPendingProfileTransactionId = { pendingProfileTransactionId = it },
-        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        showStatus = ::showStatus,
-        persistModelGenerationParams = { state, params -> persistModelGenerationParams(state, params) },
-        persistChatSessions = { sessions -> persistChatSessions(sessions) },
-        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        onLocalConversationContextNeedsInvalidation = {
-            localConversationContextNeedsInvalidation = true
-            localConversationContextInvalidationSequence.incrementAndGet()
-        },
-        selectChatSession = ::selectChatSession,
-        loadModel = ::loadModel,
-        selectCloudChatModel = ::selectCloudChatModel,
-        newChatForAssistant = ::newChatForAssistant,
-        invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-        chatAppearanceMutex = chatAppearanceCoordinator.mutex,
-        cleanupUnusedChatBackgrounds = { chatAppearanceCoordinator.cleanupUnusedChatBackgrounds() },
-        captureContentImportOwner = ::captureContentImportOwner,
-        stageContentImportPreview = ::stageContentImportPreview,
-        readAttachmentText = { uri, maxBytes -> readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes) },
-        currentModelGenerationProfileKey = { GenerationPreferences.modelGenerationProfileKey(uiStateStore.current.selectedChatBackend, uiStateStore.current.currentChatModelId()) }
-    )
-
-    private val contextCompressionCoordinator = ContextCompressionCoordinator(
-        store = uiStateStore,
-        engine = engine,
-        cloudChatProvider = cloudChatProvider,
-        modelGenerationProfileStore = modelGenerationProfileStore,
-        hasActiveImageRequest = { localImageGenerationCoordinator.activeRequestId() != null },
-        manualContextCompressionRequests = manualContextCompressionRequests,
-        preferences = contextCompressionPreferences,
-        chatRuns = container.chatRuns,
-        getActiveRuntimeIdentity = { activeRuntimeIdentity },
-        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        persistChatSessions = { persistChatSessions() },
-        showStatus = ::showStatus,
-        onLocalInferenceStarted = {
-            localConversationContextNeedsInvalidation = true
-            localConversationContextInvalidationSequence.incrementAndGet()
-        }
-    )
-
-
+    private val modelImportAndDownloadCoordinator get() = coordinatorAssembly.modelImportAndDownloadCoordinator
+    private val localImageLibraryAndModelCoordinator get() = coordinatorAssembly.localImageLibraryAndModelCoordinator
+    private val assistantImageContinuationCoordinator get() = coordinatorAssembly.assistantImageContinuationCoordinator
+    private val offlinePromptTranslationAndChatImageCoordinator get() = coordinatorAssembly.offlinePromptTranslationAndChatImageCoordinator
+    private val agentTuningCoordinator get() = coordinatorAssembly.agentTuningCoordinator
+    private val chatModelCoordinator get() = coordinatorAssembly.chatModelCoordinator
+    private val localApiControlPlaneCoordinator get() = coordinatorAssembly.localApiControlPlaneCoordinator
+    private val modelScopeHubCoordinator get() = coordinatorAssembly.modelScopeHubCoordinator
+    private val assistantProfileCoordinator get() = coordinatorAssembly.assistantProfileCoordinator
+    private val contextCompressionCoordinator get() = coordinatorAssembly.contextCompressionCoordinator
+    private val managedRuntimeReadinessPort get() = coordinatorAssembly.managedRuntimeReadinessPort
+    private val contentImportPreviewCoordinator get() = coordinatorAssembly.contentImportPreviewCoordinator
+    private val mainPostStartupCoordinator get() = coordinatorAssembly.mainPostStartupCoordinator
+    private val chatSessionManagementCoordinator get() = coordinatorAssembly.chatSessionManagementCoordinator
+    private val chatInputAndAttachmentCoordinator get() = coordinatorAssembly.chatInputAndAttachmentCoordinator
 
     fun selectTab(tab: AppTab) {
         uiStateStore.update { it.copy(tab = tab) }
@@ -826,87 +729,6 @@ class MainViewModel @JvmOverloads constructor(
             }
         }
     }
-
-
-
-    /**
-     * validateForLoad may rewrite a QAIRT directory fingerprint. Invalidate any in-flight
-     * readiness refresh first, then publish the exact persisted catalog and advisory evidence
-     * before a later canary, load, cancellation, or failure can return.
-     *
-     * Must be called from an IO coroutine.
-     */
-    /** R3-S36：运行时就绪刷新端口具名适配器（容器工厂装配，出清 48 行匿名实现与 14 处 this@VM，破万里程碑）。 */
-    private val managedRuntimeReadinessPort: ManagedRuntimeReadinessPort =
-        container.createManagedRuntimeReadinessPort(
-            store = uiStateStore,
-            imageLibraryBackupJobActive = { imageLibraryBackupJob?.isCompleted == false },
-            hasActiveImageUpscale = { imageUpscaleOwner.hasActiveUpscale() }
-        )
-
-    private val contentImportPreviewCoordinator: ContentImportPreviewCoordinator =
-        container.createContentImportPreviewCoordinator(
-            store = uiStateStore,
-            scope = viewModelScope,
-            assistantProfileCoordinator = assistantProfileCoordinator,
-            showStatus = ::showStatus
-        )
-
-    private val mainPostStartupCoordinator: MainPostStartupCoordinator =
-        (injectedMainPostStartupCoordinator as? MainPostStartupCoordinator) ?: container.createMainPostStartupCoordinator(
-            store = uiStateStore,
-            scope = viewModelScope,
-            engine = engine,
-            imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
-            modelImportAndDownloadCoordinator = modelImportAndDownloadCoordinator,
-            offlinePromptTranslationAndChatImageCoordinator = offlinePromptTranslationAndChatImageCoordinator,
-            chatModelCoordinator = chatModelCoordinator,
-            restorePendingContentImportPreview = { restorePendingContentImportPreview() },
-            observeManagedDownloadsAction = { observeManagedDownloads() },
-            schedulePersistentPrefixCacheClear = { op, succ, fail -> schedulePersistentPrefixCacheClear(op, succ, fail) },
-            persistentPrefixCacheOperationSequence = persistentPrefixCacheOperationSequence,
-            managedRuntimeReadinessPortProvider = { managedRuntimeReadinessPort },
-            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-            modelIdentityReferenceMigration = modelIdentityReferenceMigration,
-            getDurableChatSessions = { durableChatSessions },
-            setDurableChatSessions = { durableChatSessions = it },
-            skipInitialModelDiscovery = skipInitialModelDiscovery
-        )
-
-    private val chatSessionManagementCoordinator: ChatSessionManagementCoordinator =
-        (injectedChatSessionManagementCoordinator as? ChatSessionManagementCoordinator)
-            ?: container.createChatSessionManagementCoordinator(
-                store = uiStateStore,
-                scope = viewModelScope,
-                rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-                hasActiveAssistantImageExecutionIn = { state, assistantId -> hasActiveAssistantImageExecutionIn(state, assistantId) },
-                showStatus = ::showStatus,
-                fail = ::fail,
-                invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-                cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
-                bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
-                loadModelGenerationParams = { backend, modelId, defaults -> loadModelGenerationParams(backend, modelId, defaults) },
-                markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-                continueAssistantImageTurn = ::continueAssistantImageTurn,
-                persistChatSessions = { persistChatSessions(it) }
-            )
-
-    private val chatInputAndAttachmentCoordinator: ChatInputAndAttachmentCoordinator =
-        (injectedChatInputAndAttachmentCoordinator as? ChatInputAndAttachmentCoordinator)
-            ?: container.createChatInputAndAttachmentCoordinator(
-                store = uiStateStore,
-                scope = viewModelScope,
-                showStatus = ::showStatus,
-                fail = ::fail,
-                invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-                awaitImageLibraryStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
-                imageAssetWriteMutex = imageAssetWriteMutex,
-                imageAssetDirectory = imageAssetDirectory,
-                imageLibraryCommitPort = { imageLibraryCommitPort },
-                imagePromptTokenMeasurementHost = imagePromptTokenMeasurementHost,
-                visionAttachmentPort = visionAttachmentPort,
-                chatSessionStore = chatSessionStore
-            )
 
     init {
         if (!deferStartup) startAfterConstruction()
@@ -2713,43 +2535,7 @@ class MainViewModel @JvmOverloads constructor(
             cancelActiveLocalApiImageGenerationAction = ::cancelActiveLocalApiImageGeneration,
             localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
         )
-
-    private val chatExecutionPort: ChatGenerationExecutionPort =
-        container.createChatGenerationExecutionPort(
-            store = uiStateStore,
-            engine = engine,
-            chatContextComposer = chatContextComposer,
-            visionAttachmentPort = visionAttachmentPort,
-            getActiveWebSearchTaskIdRef = { activeWebSearchTaskId },
-            setActiveWebSearchTaskIdRef = { activeWebSearchTaskId = it },
-            getForegroundRecoveryJobRef = { foregroundRecoveryJob },
-            persistChatSessionsRef = ::persistChatSessions,
-            appendAssistantRef = ::appendAssistant,
-            flushPendingAssistantOutputRef = ::flushPendingAssistantOutput,
-            removePendingAssistantPlaceholderRef = { settlePendingAssistantPlaceholder(port = chatTerminalSettlementPort, generationRunId = it) },
-            ensureVisibleAssistantReplyAfterCompletionRef = { settleVisibleAssistantReply(port = chatTerminalSettlementPort, generationRunId = it) },
-            applyWebSearchAnswerGuardsToLastAssistantRef = webSearchWorkflowCoordinator::applyWebSearchAnswerGuardsToLastAssistant,
-            recordWebSearchCitationAuditRef = webSearchWorkflowCoordinator::recordWebSearchCitationAudit,
-            attachWebSearchEvidenceToPendingAssistantRef = webSearchWorkflowCoordinator::attachWebSearchEvidenceToPendingAssistant,
-            attachContextAssemblyTraceRef = { traceJson, generationRunId, sessionId, assistantMessageId ->
-                attachContextAssemblyTrace(
-                    uiStateStore = uiStateStore,
-                    chatRuns = chatRuns,
-                    traceJson = traceJson,
-                    generationRunId = generationRunId,
-                    sessionId = sessionId,
-                    assistantMessageId = assistantMessageId
-                )
-            },
-            promptContextUsageForRef = contextCompressionCoordinator::promptContextUsageFor,
-            appendWebSearchDiagnosticRef = webSearchWorkflowCoordinator::appendDiagnostic,
-            recordCompletedCharacterMemoryTurnRef = assistantProfileCoordinator::recordCompletedCharacterMemoryTurn,
-            summarizeContextForGenerationRef = contextCompressionCoordinator::summarizeContextForGeneration,
-            ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
-            loadContextCompressionThresholdRef = contextCompressionCoordinator::loadContextCompressionThreshold,
-            handleAssistantImageToolCallsRef = assistantImageContinuationCoordinator::handleAssistantImageToolCalls,
-            finishAssistantImageContinuationRef = assistantImageContinuationCoordinator::finishAssistantImageContinuation,
-        )
+    private val chatExecutionPort: ChatGenerationExecutionPort get() = coordinatorAssembly.chatExecutionPort
 
     /** The ViewModel side of [ChatImagePromptBridgePort]. */
     private val chatImagePromptBridgePort: ChatImagePromptBridgePort =
