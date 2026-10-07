@@ -206,6 +206,8 @@ import com.muyuchat.mca.LocalApiTuningControlPort
 import com.muyuchat.mca.LocalApiTuningControlPortAdapter
 import com.muyuchat.mca.TuningJobEntity
 import com.muyuchat.mca.PendingRuntimeProfileTransaction
+import com.muyuchat.mca.ChatModelCoordinator
+import com.muyuchat.mca.ManagedChatCatalogSnapshot
 import com.muyuchat.api.local.LocalApiControlResult
 import org.json.JSONObject
 
@@ -1307,6 +1309,70 @@ internal class McaAppContainer(private val application: Application) {
             readAttachmentText = readAttachmentText,
             currentModelGenerationProfileKey = currentModelGenerationProfileKey
         )
+
+    /** Lane A - A7：模型生命周期与云端模型配置协调器工厂。 */
+    fun createChatModelCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        engine: McaInferenceService,
+        tuningOwner: TuningOwner,
+        modelGenerationProfileStore: ModelGenerationProfileStore,
+        managedRuntimeReadinessPort: () -> ManagedRuntimeReadinessPort,
+        installationScopeId: String,
+        cancelGenerationJob: () -> Unit,
+        persistChatSessions: (List<ChatSessionRecord>?) -> Unit,
+        persistChatSessionsWithBinding: (List<ChatSessionRecord>?, Pair<String, Set<String>>?) -> Unit,
+        publishManagedChatCatalogAfterValidation: () -> ManagedChatCatalogSnapshot,
+        busy: (String) -> Unit,
+        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+        persistModelGenerationParams: (ChatBackend, String, GenerationParams) -> Unit,
+        updateParams: (GenerationParams) -> Unit,
+        cancelDirectParameterStageJob: () -> Unit,
+        rejectImageModelSwitchWhileGenerationIsActive: () -> Boolean,
+        invalidatePendingChatImagePreparation: () -> Unit,
+        activeRuntimeIdentity: () -> ModelRuntimeIdentity?,
+        currentDeviceProfile: () -> DeviceProfile,
+        currentQairtBundleSha256: (ModelManifest, List<ModelManifest>) -> String?,
+        currentQairtVerifiedLocalModelIds: (android.content.Context, List<ModelManifest>) -> Set<String>
+    ): ChatModelCoordinator {
+        val cloudModelConfigPort = createCloudModelConfigPort(
+            store = store,
+            loadModelGenerationParams = loadModelGenerationParams,
+            persistChatSessions = persistChatSessionsWithBinding
+        )
+        return ChatModelCoordinator(
+            store = store,
+            scope = scope,
+            application = application,
+            engine = engine,
+            modelStore = modelStore,
+            cloudApiStore = cloudApiStore,
+            runtimeProfileStore = runtimeProfileStore,
+            modelGenerationProfileStore = modelGenerationProfileStore,
+            tuningOwner = tuningOwner,
+            advisor = advisor,
+            admission = runtimeAdmission,
+            deviceProfileReader = deviceProfileReader,
+            managedRuntimeReadinessRefreshGate = readinessRefreshGate,
+            managedRuntimeReadinessPort = managedRuntimeReadinessPort,
+            cloudModelConfigPort = cloudModelConfigPort,
+            installationScopeId = installationScopeId,
+            cancelGenerationJob = cancelGenerationJob,
+            persistChatSessions = persistChatSessions,
+            publishManagedChatCatalogAfterValidation = publishManagedChatCatalogAfterValidation,
+            busy = busy,
+            loadModelGenerationParams = loadModelGenerationParams,
+            persistModelGenerationParams = persistModelGenerationParams,
+            updateParams = updateParams,
+            cancelDirectParameterStageJob = cancelDirectParameterStageJob,
+            rejectImageModelSwitchWhileGenerationIsActive = rejectImageModelSwitchWhileGenerationIsActive,
+            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            currentDeviceProfile = currentDeviceProfile,
+            currentQairtBundleSha256 = currentQairtBundleSha256,
+            currentQairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds
+        )
+    }
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

@@ -762,7 +762,6 @@ class MainViewModel @JvmOverloads constructor(
             container.runtimeAdmission.activeModelForRuntimeProfile = value
         }
     private val localApiIdempotencyJournalLock = Any()
-    private val pendingRuntimeRecoveries = linkedMapOf<String, RuntimeRecoveryPlan>()
     private var activeImageGenerationJobId: String?
         get() = container.runtimeAdmission.activeImageGenerationJobId
         set(value) {
@@ -1174,12 +1173,45 @@ class MainViewModel @JvmOverloads constructor(
         persistModelGenerationParams = ::persistModelGenerationParams,
         updateParams = ::updateParams,
         loadModel = ::loadModel,
-        timedLoadModel = ::timedLoadModel,
-        runLocalGenerationSmoke = ::runLocalGenerationSmoke,
+        timedLoadModel = { model, runtime, loadParams ->
+            chatModelCoordinator.timedLoadModel(model, runtime, loadParams)
+        },
+        runLocalGenerationSmoke = { params ->
+            chatModelCoordinator.runLocalGenerationSmoke(params)
+        },
         cancelGenerationJob = ::cancelGenerationJob,
         activeModelForRuntimeProfile = { activeModelForRuntimeProfile },
         getPendingProfileTransactionId = { pendingProfileTransactionId },
         setPendingProfileTransactionId = { pendingProfileTransactionId = it }
+    )
+
+    private val chatModelCoordinator: ChatModelCoordinator = container.createChatModelCoordinator(
+        store = uiStateStore,
+        scope = viewModelScope,
+        engine = engine,
+        tuningOwner = tuningOwner,
+        modelGenerationProfileStore = modelGenerationProfileStore,
+        managedRuntimeReadinessPort = { managedRuntimeReadinessPort },
+        installationScopeId = installationScopeId,
+        cancelGenerationJob = ::cancelGenerationJob,
+        persistChatSessions = { persistChatSessions(it) },
+        persistChatSessionsWithBinding = { sessions, binding -> persistChatSessions(sessions, binding) },
+        publishManagedChatCatalogAfterValidation = ::publishManagedChatCatalogAfterValidation,
+        busy = ::busy,
+        loadModelGenerationParams = { backend, modelId, defaults ->
+            loadModelGenerationParams(backend, modelId, defaults)
+        },
+        persistModelGenerationParams = { backend, modelId, params ->
+            persistModelGenerationParams(backend, modelId, params)
+        },
+        updateParams = ::updateParams,
+        cancelDirectParameterStageJob = { directParameterStageJob?.cancel() },
+        rejectImageModelSwitchWhileGenerationIsActive = ::rejectImageModelSwitchWhileGenerationIsActive,
+        invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
+        activeRuntimeIdentity = { activeRuntimeIdentity },
+        currentDeviceProfile = ::currentDeviceProfile,
+        currentQairtBundleSha256 = ::currentQairtBundleSha256,
+        currentQairtVerifiedLocalModelIds = ::currentQairtVerifiedLocalModelIds
     )
 
     private val localApiControlPlaneCoordinator: LocalApiControlPlaneCoordinator = LocalApiControlPlaneCoordinator(
@@ -1351,7 +1383,7 @@ class MainViewModel @JvmOverloads constructor(
         )
 
         launchModelOperation("恢复运行记录失败") {
-            recoverInterruptedRuntimeProfiles()
+            chatModelCoordinator.recoverInterruptedRuntimeProfiles()
         }
 
         // Always enqueue one construction-time recovery when the persisted
@@ -2201,91 +2233,29 @@ class MainViewModel @JvmOverloads constructor(
     fun showCloudReasoningModeLocked() =
         showStatus(CLOUD_REASONING_LOCKED_MESSAGE)
 
-    fun updateCloudApiEnabled(enabled: Boolean) = applyCloudApiEnabled(cloudModelConfigPort, enabled)
-    fun updateCloudApiFormat(value: String) = applyCloudApiFormat(cloudModelConfigPort, value)
-    fun updateCloudImageApiFormat(value: String) = applyCloudImageApiFormat(cloudModelConfigPort, value)
-    fun applyCloudProviderPreset(value: String) = applyCloudProviderPreset(cloudModelConfigPort, value)
-    fun beginAddCloudModel(kind: String) = applyBeginAddCloudModel(cloudModelConfigPort, kind)
-    fun editCloudModel(modelId: String) = applyEditCloudModel(cloudModelConfigPort, modelId)
-    fun updateCloudBaseUrl(value: String) = applyCloudBaseUrl(cloudModelConfigPort, value)
-    fun updateCloudApiKey(value: String) = applyCloudApiKey(cloudModelConfigPort, value)
-    fun updateCloudChatModel(value: String) = applyCloudChatModel(cloudModelConfigPort, value)
-    fun updateCloudSupportsVision(value: Boolean) = applyCloudSupportsVision(cloudModelConfigPort, value)
-
-    /**
-     * Persists a GGUF backend choice against the target model before it is loaded.
-     * A choice made for another model must never leak through the global parameter
-     * object; loading the model later reads this profile and applies it to native.
-     */
-    fun updateModelBackendPreference(modelId: String, backendId: String) {
-        val target = uiStateStore.current.models.firstOrNull { it.id == modelId } ?: return
-        val family = chatBackendFamilyForRuntime(target.runtime.storageValue)
-        val current = loadModelGenerationParams(
-            backend = ChatBackend.LOCAL,
-            modelId = modelId,
-            defaults = uiStateStore.current.params
-        )
-        val updated = current.withChatBackend(family, backendId)
-        persistModelGenerationParams(ChatBackend.LOCAL, modelId, updated)
-        if (uiStateStore.current.loadedModelId == modelId) {
-            // Backend selection is load-bound for llama.cpp, MNN, LiteRT-LM,
-            // and QAIRT. Updating only the hot generation parameters leaves
-            // the old native session running and makes the chip lie about the
-            // selected transport. Persist the model-scoped profile, then use
-            // the normal transactional loader so the old session is stopped,
-            // the requested backend is initialized, and failures can restore
-            // the previous stable model.
-            updateParams(updated)
-            directParameterStageJob?.cancel()
-            uiStateStore.update {
-                it.copy(
-                    statusMessage = "正在重新加载 ${target.displayName}（${backendLabel(family, backendId)}）…"
-                )
-            }
-            loadModel(target)
-        } else {
-            uiStateStore.update { state ->
-                state.copy(
-                    statusMessage = "已保存 ${target.displayName} 的 " +
-                        "${backendLabel(family, backendId)} 设置；下次加载该模型时生效。"
-                )
-            }
-        }
-    }
-
-    /** Read a target model's persisted generation profile for the model selector UI. */
-    /** R3-S38：云模型配置端口具名适配器（容器工厂装配，出清 50 行匿名实现与 11 处 this@VM）。 */
-    private val cloudModelConfigPort: CloudModelConfigPort =
-        container.createCloudModelConfigPort(
-            store = uiStateStore,
-            loadModelGenerationParams = { backend, modelId, defaults ->
-                loadModelGenerationParams(backend, modelId, defaults)
-            },
-            persistChatSessions = { sessions, binding ->
-                persistChatSessions(sessions, binding)
-            }
-        )
-
-
-/** Delegates to [cloudChatModelGenerationParams]. Signature kept verbatim. */
-    fun generationParamsForChatModel(modelId: String): GenerationParams = cloudChatModelGenerationParams(port = cloudModelConfigPort, modelId = modelId)
-
-    fun updateCloudSupportsTools(value: Boolean) = applyCloudSupportsTools(port = cloudModelConfigPort, value = value)
-    fun updateCloudImageModel(value: String) = applyCloudImageModel(port = cloudModelConfigPort, value = value)
-    fun updateCloudResponsesReasoning(value: Boolean) = applyCloudResponsesReasoning(port = cloudModelConfigPort, value = value)
-    fun updateCloudImageSize(value: String) = applyCloudImageSize(port = cloudModelConfigPort, value = value)
-    fun updateCloudImageEndpointPath(value: String) = applyCloudImageEndpointPath(port = cloudModelConfigPort, value = value)
-    fun updateCloudDisplayName(value: String) = applyCloudDisplayName(port = cloudModelConfigPort, value = value)
-    fun saveCloudApiConfig() = persistCloudApiConfig(port = cloudModelConfigPort)
-    fun saveCloudChatModel() = saveCloudChatModelConfig(port = cloudModelConfigPort)
-    fun saveCloudImageModel() = saveCloudImageModelConfig(port = cloudModelConfigPort)
-    fun testCloudApiConfig() = runCloudApiConfigTest(port = cloudModelConfigPort, scope = viewModelScope)
-
-    fun selectCloudImageModel(modelId: String) {
-        if (rejectImageModelSwitchWhileGenerationIsActive()) return
-        invalidatePendingChatImagePreparation()
-        selectCloudImageModelFor(cloudModelConfigPort, modelId)
-    }
+    fun updateCloudApiEnabled(enabled: Boolean) = chatModelCoordinator.updateCloudApiEnabled(enabled)
+    fun updateCloudApiFormat(value: String) = chatModelCoordinator.updateCloudApiFormat(value)
+    fun updateCloudImageApiFormat(value: String) = chatModelCoordinator.updateCloudImageApiFormat(value)
+    fun applyCloudProviderPreset(value: String) = chatModelCoordinator.applyCloudProviderPreset(value)
+    fun beginAddCloudModel(kind: String) = chatModelCoordinator.beginAddCloudModel(kind)
+    fun editCloudModel(modelId: String) = chatModelCoordinator.editCloudModel(modelId)
+    fun updateCloudBaseUrl(value: String) = chatModelCoordinator.updateCloudBaseUrl(value)
+    fun updateCloudApiKey(value: String) = chatModelCoordinator.updateCloudApiKey(value)
+    fun updateCloudChatModel(value: String) = chatModelCoordinator.updateCloudChatModel(value)
+    fun updateCloudSupportsVision(value: Boolean) = chatModelCoordinator.updateCloudSupportsVision(value)
+    fun updateModelBackendPreference(modelId: String, backendId: String) = chatModelCoordinator.updateModelBackendPreference(modelId, backendId)
+    fun generationParamsForChatModel(modelId: String): GenerationParams = chatModelCoordinator.generationParamsForChatModel(modelId)
+    fun updateCloudSupportsTools(value: Boolean) = chatModelCoordinator.updateCloudSupportsTools(value)
+    fun updateCloudImageModel(value: String) = chatModelCoordinator.updateCloudImageModel(value)
+    fun updateCloudResponsesReasoning(value: Boolean) = chatModelCoordinator.updateCloudResponsesReasoning(value)
+    fun updateCloudImageSize(value: String) = chatModelCoordinator.updateCloudImageSize(value)
+    fun updateCloudImageEndpointPath(value: String) = chatModelCoordinator.updateCloudImageEndpointPath(value)
+    fun updateCloudDisplayName(value: String) = chatModelCoordinator.updateCloudDisplayName(value)
+    fun saveCloudApiConfig() = chatModelCoordinator.saveCloudApiConfig()
+    fun saveCloudChatModel() = chatModelCoordinator.saveCloudChatModel()
+    fun saveCloudImageModel() = chatModelCoordinator.saveCloudImageModel()
+    fun testCloudApiConfig() = chatModelCoordinator.testCloudApiConfig()
+    fun selectCloudImageModel(modelId: String) = chatModelCoordinator.selectCloudImageModel(modelId)
 
 
     fun updateAgentPreference(preference: UserPreference) {
@@ -2387,134 +2357,17 @@ class MainViewModel @JvmOverloads constructor(
     private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
         modelImportAndDownloadCoordinator.enqueueManagedDownload(request, useAfterDownload)
 
-    private fun launchModelOperation(message: String, operation: suspend kotlinx.coroutines.CoroutineScope.() -> Unit): Job =
-        viewModelScope.launch(Dispatchers.IO) {
-            recoverModelOperation(operation = { operation() }, onFailure = { error ->
-                Log.e("McaModelOperation", message, error)
-                uiStateStore.update { state -> state.copy(busy = false,
-                    statusMessage = "$message：${error.message.orEmpty()}。请检查模型文件和存储空间后重试。",
-                    engineLifecycle = if (state.engineLifecycle == AgentEngineLifecycle.LOADING) {
-                        if (state.stats.loaded) AgentEngineLifecycle.READY else AgentEngineLifecycle.ERROR
-                    } else state.engineLifecycle) }
-            })
-        }
+    internal fun launchModelOperation(
+        message: String,
+        operation: suspend kotlinx.coroutines.CoroutineScope.() -> Unit
+    ): Job = chatModelCoordinator.launchModelOperation(message, operation)
 
-
-    /** Delegates to [selectChatModelFor]. Signature kept verbatim. */
-    fun selectChatModel(choiceId: String) =
-        selectChatModelFor(uiStateStore, ::loadModel, { selectCloudChatModel(it) }, choiceId)
-
-    /** Delegates to [selectCloudChatModelFor]. Signature kept verbatim. */
-    private fun selectCloudChatModel(modelId: String?) =
-        selectCloudChatModelFor(
-            uiStateStore,
-            cloudApiStore,
-            engine,
-            viewModelScope,
-            getApplication(),
-            modelGenerationProfileStore,
-            { persistChatSessions(it) },
-            modelId
-        )
-
-
-    /** Delegates to [runLoadModelBody]. Signature kept verbatim. */
-    private suspend fun CoroutineScope.loadModelBody(requestedModel: ModelManifest) =
-        runLoadModelBody(
-            requestedModel,
-            uiStateStore,
-            container.runtimeAdmission,
-            pendingRuntimeRecoveries,
-            engine,
-            modelStore,
-            runtimeProfileStore,
-            modelGenerationProfileStore,
-            cloudApiStore,
-            tuningOwner,
-            container.advisor,
-            deviceProfileReader,
-            managedRuntimeReadinessRefreshGate,
-            managedRuntimeReadinessPort,
-            getApplication(),
-            installationScopeId,
-            cancelGeneration = { cancelGenerationJob() },
-            persistChatSessions = { persistChatSessions(it) }
-        )
-    fun loadModel(requestedModel: ModelManifest) {
-        launchModelOperation("模型操作未完成") {
-            loadModelBody(requestedModel)
-        }
-    }
-
-    fun verifyModel(model: ModelManifest) {
-        verifyModelFor(
-            store = uiStateStore,
-            application = getApplication(),
-            modelStore = modelStore,
-            managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
-            publishManagedChatCatalogAfterValidation = ::publishManagedChatCatalogAfterValidation,
-            busy = ::busy,
-            launchModelOperation = ::launchModelOperation,
-            model = model
-        )
-    }
-
-
-    /** Delegates to [clearNativeRuntimeSessionStateFor]. Signature kept verbatim. */
-    private fun clearNativeRuntimeSessionState(
-        lifecycle: AgentEngineLifecycle,
-        statusMessage: String,
-        busy: Boolean = false
-    ) = clearNativeRuntimeSessionStateFor(
-        uiStateStore, container.runtimeAdmission, engine, lifecycle, statusMessage, busy
-    )
-
-    /** Delegates to [restoreLoadedRuntimeSnapshotFor]. Signature kept verbatim. */
-    private suspend fun restoreLoadedRuntimeSnapshot(
-        snapshot: LoadedRuntimeSnapshot,
-        statusMessage: String
-    ): Boolean = restoreLoadedRuntimeSnapshotFor(
-        uiStateStore,
-        container.runtimeAdmission,
-        engine,
-        runtimeProfileStore,
-        modelStore,
-        tuningOwner,
-        managedRuntimeReadinessRefreshGate,
-        snapshot,
-        statusMessage
-    )
-
-    /** Delegates to [unloadModelFor]. Signature kept verbatim. */
-    fun unloadModel(model: ModelManifest) = unloadModelFor(
-        viewModelScope,
-        uiStateStore,
-        container.runtimeAdmission,
-        engine,
-        runtimeProfileStore,
-        model
-    ) { cancelGenerationJob() }
-
-    /** Delegates to [deleteModelFor]. Signature kept verbatim. */
-    fun deleteModel(model: ModelManifest) = deleteModelFor(
-        viewModelScope,
-        uiStateStore,
-        container.runtimeAdmission,
-        engine,
-        runtimeProfileStore,
-        modelStore,
-        managedRuntimeReadinessRefreshGate,
-        getApplication(),
-        model
-    ) { cancelGenerationJob() }
-
-    /** Delegates to [clearPendingRuntimeTransactionForLifecycleFor]. Signature kept verbatim. */
-    private suspend fun clearPendingRuntimeTransactionForLifecycle(
-        reason: String,
-        identity: ModelRuntimeIdentity? = activeRuntimeIdentity
-    ) = clearPendingRuntimeTransactionForLifecycleFor(
-        runtimeProfileStore, container.runtimeAdmission, reason, identity
-    )
+    fun selectChatModel(choiceId: String) = chatModelCoordinator.selectChatModel(choiceId)
+    internal fun selectCloudChatModel(modelId: String?) = chatModelCoordinator.selectCloudChatModel(modelId)
+    fun loadModel(requestedModel: ModelManifest) = chatModelCoordinator.loadModel(requestedModel)
+    fun verifyModel(model: ModelManifest) = chatModelCoordinator.verifyModel(model)
+    fun unloadModel(model: ModelManifest) = chatModelCoordinator.unloadModel(model)
+    fun deleteModel(model: ModelManifest) = chatModelCoordinator.deleteModel(model)
 
     fun sendMessage() {
         val state = uiStateStore.current
@@ -4113,30 +3966,6 @@ class MainViewModel @JvmOverloads constructor(
         localApiRuntimeOwner.currentOpenApiAddress(detectLanIpAddress())
 
 
-
-    private suspend fun timedLoadModel(
-        model: ModelManifest,
-        runtime: LocalChatRuntime,
-        loadParams: LoadParams
-    ): Long = timedLoadModelFor(
-        engine = engine,
-        activeRuntimeIdentity = activeRuntimeIdentity,
-        modelStore = modelStore,
-        context = getApplication(),
-        device = currentDeviceProfile(),
-        installationScopeId = installationScopeId,
-        model = model,
-        runtime = runtime,
-        loadParams = loadParams,
-        currentQairtBundleSha256 = ::currentQairtBundleSha256,
-        currentQairtVerifiedLocalModelIds = ::currentQairtVerifiedLocalModelIds
-    )
-
-    private suspend fun runLocalGenerationSmoke(params: GenerationParams): LocalGenerationSmokeResult =
-        runLocalGenerationSmokeFor(engine, params)
-
-    private suspend fun recoverInterruptedRuntimeProfiles() =
-        recoverInterruptedRuntimeProfilesFor(runtimeProfileStore, pendingRuntimeRecoveries, uiStateStore)
 
     fun currentDeviceProfile(): DeviceProfile = agentTuningCoordinator.currentDeviceProfile()
 
