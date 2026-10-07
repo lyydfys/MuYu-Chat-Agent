@@ -354,7 +354,8 @@ internal sealed interface VisionBundleDownloadResult {
 class MainViewModel @JvmOverloads constructor(
     application: Application,
     private val deferStartup: Boolean = false,
-    private val skipInitialModelDiscovery: Boolean = false
+    private val skipInitialModelDiscovery: Boolean = false,
+    injectedEngine: McaInferenceService? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -428,10 +429,8 @@ class MainViewModel @JvmOverloads constructor(
     fun openAppUpdateRelease() {
         appUpdateOwner.openAppUpdateRelease()
     }
-    private val isolatedLocalChatRunners = IsolatedLocalChatRunners(application)
-    private val engine = McaInferenceService(
-        context = application,
-        runners = isolatedLocalChatRunners.runners,
+    private val engine: McaInferenceService = injectedEngine ?: container.createInferenceService(
+        runners = container.isolatedLocalChatRunners.runners,
         installationScopeId = installationScopeId
     )
     private val apiKey = GenerationPreferences.loadOrCreateApiKey(application)
@@ -3957,7 +3956,7 @@ class MainViewModel @JvmOverloads constructor(
             forceServerStop = false
         )
         localImageWorkerClient.close()
-        isolatedLocalChatRunners.close()
+        container.isolatedLocalChatRunners.close()
         super.onCleared()
     }
 

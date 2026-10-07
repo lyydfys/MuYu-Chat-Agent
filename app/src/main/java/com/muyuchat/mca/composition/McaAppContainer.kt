@@ -9,6 +9,11 @@ import com.muyuchat.mca.ContextCompressionRequestStore
 import com.muyuchat.mca.ImageLibraryBackup
 import android.content.Context
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import com.muyuchat.core.engine.LocalChatRuntime
+import com.muyuchat.core.engine.LocalChatRunner
+import com.muyuchat.mca.IsolatedLocalChatRunners
 import com.muyuchat.mca.canonicalImageAssetDirectory
 import com.muyuchat.core.engine.Role
 import com.muyuchat.mca.ChatImageCommitJournal
@@ -1068,6 +1073,20 @@ internal class McaAppContainer(private val application: Application) {
             applyTuningJobDelegate = applyTuningJobDelegate,
             rollbackTuningDelegate = rollbackTuningDelegate,
             runDurableLocalApiControl = runDurableLocalApiControl,
+        )
+
+    val isolatedLocalChatRunners: IsolatedLocalChatRunners by lazy {
+        IsolatedLocalChatRunners(application)
+    }
+
+    fun createInferenceService(
+        runners: Map<LocalChatRuntime, LocalChatRunner> = isolatedLocalChatRunners.runners,
+        installationScopeId: String = runBlocking(Dispatchers.IO) { runtimeProfileStore.installationScopeId() }
+    ): McaInferenceService =
+        McaInferenceService(
+            context = application,
+            runners = runners,
+            installationScopeId = installationScopeId
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
