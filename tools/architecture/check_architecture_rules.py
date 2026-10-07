@@ -161,6 +161,29 @@ def check_line_endings(errors):
                         f"Rule 7 Violation: {path.relative_to(REPO_ROOT)} contains CRLF line endings"
                     )
 
+def check_api_worker_no_ui_dependencies(errors):
+    """Rule 8: Local API and Worker packages must not import MainViewModel or UI Screens."""
+    print("Checking Rule 8: API & Worker UI decoupling...")
+    check_dirs = [
+        REPO_ROOT / "api" / "local" / "src" / "main",
+        REPO_ROOT / "app" / "src" / "main" / "java" / "com" / "muyuchat" / "mca" / "worker"
+    ]
+    forbidden_pattern = re.compile(r'^\s*import\s+.*(?:MainViewModel|ui\.screen).*')
+    for d in check_dirs:
+        if not d.is_dir():
+            continue
+        for root, _, files in os.walk(d):
+            for f in files:
+                if f.endswith(".kt"):
+                    path = Path(root) / f
+                    with open(path, "r", encoding="utf-8") as file_obj:
+                        for line_no, line in enumerate(file_obj, start=1):
+                            if forbidden_pattern.match(line):
+                                errors.append(
+                                    f"Rule 8 Violation: {path.relative_to(REPO_ROOT)}:{line_no} "
+                                    f"imports UI component: '{line.strip()}'"
+                                )
+
 def main():
     print(f"=== MCA Architecture Gate Verification ===")
     print(f"Working tree: {REPO_ROOT}\n")
@@ -174,6 +197,7 @@ def main():
     check_local_only_exclusions(errors)
     check_no_device_allowlist(errors)
     check_line_endings(errors)
+    check_api_worker_no_ui_dependencies(errors)
 
     print("\n-------------------------------------------")
     if errors:
@@ -187,3 +211,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
