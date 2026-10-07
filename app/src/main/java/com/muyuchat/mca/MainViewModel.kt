@@ -506,16 +506,10 @@ class MainViewModel @JvmOverloads constructor(
         currentDeviceProfile = { currentDeviceProfile() },
         application = application
     )
-    private val initialDeviceProfile = deviceProfileReader.read()
-    private val initialParams = loadGenerationParams(application)
-    private val initialPersistentPrefixCacheEnabled = loadPersistentPrefixCacheEnabled(application)
     private val runtimeUserOverrideFields: MutableSet<String>
         get() = container.runtimeAdmission.runtimeUserOverrideFields
+    private val initialParams = loadGenerationParams(application)
     private val initialAssistants = assistantStore.loadAssistants(initialParams)
-    private val initialAssistantMemories = initialAssistants.flatMap { assistant ->
-        chatSessionStore.loadMemories(assistant.id)
-    }
-    private val initialGlobalChatAppearance = container.globalChatAppearanceStore.load()
     private val loadedChatSessions = chatSessionStore.load()
     private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
     private val initialChatSessions = loadedChatSessions
@@ -532,74 +526,35 @@ class MainViewModel @JvmOverloads constructor(
                 runCatching { chatSessionStore.save(snapshots) }
             }
         }
+    private val bootstrapResult = MainUiBootstrapFactory.create(
+        application = application,
+        container = container,
+        engine = engine,
+        modelScopeClient = modelScopeClient,
+        agentLogger = agentLogger,
+        benchmarkHistoryLogger = benchmarkHistoryLogger,
+        deviceProfileReader = deviceProfileReader,
+        chatSessionStore = chatSessionStore,
+        worldBookStore = worldBookStore,
+        knowledgeBaseStore = knowledgeBaseStore,
+        cloudApiStore = cloudApiStore,
+        localImageModelStore = localImageModelStore,
+        localImageLoraStore = localImageLoraStore,
+        imageUpscalerPreferences = imageUpscalerPreferences,
+        modelGenerationProfileStore = modelGenerationProfileStore,
+        contextCompressionPreferences = contextCompressionPreferences,
+        apiKey = apiKey,
+        currentOpenApiAddress = currentOpenApiAddress(),
+        apiUrl = ::apiUrl,
+        skipInitialModelDiscovery = skipInitialModelDiscovery,
+        initialAppUpdateState = initialAppUpdateState,
+        initialParams = initialParams,
+        initialAssistants = initialAssistants,
+        initialStoredSelectedAssistantId = initialStoredSelectedAssistantId,
+        initialChatSessions = initialChatSessions
+    )
     // R3/C3-S4：持久化状态 holder 的容器初始化（紧随初值装配完成之后）。
     private val chatSessionPersistenceStateInit = container.initializeChatSessionPersistenceState(initialChatSessions)
-    private val initialWorldBooks = worldBookStore.load()
-    private val initialKnowledgeBases = knowledgeBaseStore.loadBases()
-    private val initialStartupSession = initialChatSessions
-        .latestSessionForAssistant(initialStoredSelectedAssistantId)
-        ?: initialChatSessions.firstOrNull()
-    // Per-base document counts are refreshed after the first frame.  Querying every document
-    // table here made startup time grow with the number of imported knowledge bases.
-    private val initialKnowledgeDocumentCounts: Map<String, Int> = emptyMap()
-    private val initialKnowledgeBaseIds = initialStartupSession
-        ?.id
-        ?.let(knowledgeBaseStore::selectedKnowledgeBaseIds)
-        .orEmpty()
-    // Image/file history is hydrated after the shell is visible; it is not needed to construct
-    // the first chat screen and can be large on devices with many generated images.
-    private val initialImages: List<ImageAssetRecord> = emptyList()
-    private val initialFiles: List<FileAssetRecord> = emptyList()
-    private val initialSelectedAssistantId = initialStartupSession
-        ?.assistantSnapshot
-        ?.assistantId
-        ?.takeIf { assistantId -> initialAssistants.any { it.id == assistantId } }
-        ?: initialStartupSession
-        ?.assistantId
-        ?.takeIf { assistantId -> initialAssistants.any { it.id == assistantId } }
-        ?: initialStoredSelectedAssistantId
-    private val initialSelectedAssistant = initialAssistants.firstOrNull { it.id == initialSelectedAssistantId }
-    private val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
-    private val initialLocalImageModels = if (skipInitialModelDiscovery) emptyList() else localImageModelStore.loadModels(discover = false)
-    private val initialLocalImageLoras = localImageLoraStore.load()
-    private val initialLocalImageUpscalers = container.localImageUpscalerStore.load()
-    private val initialSelectedLocalImageUpscalerId = imageUpscalerPreferences
-        .getString(IMAGE_UPSCALER_SELECTED_ID, null)
-        ?.takeIf { id -> initialLocalImageUpscalers.any { it.id == id } }
-        ?: initialLocalImageUpscalers.firstOrNull()?.id
-    private val initialSelectedLocalImageModelId = localImageModelStore.loadSelectedModelId()
-        ?.takeIf { id ->
-            initialLocalImageModels.any {
-                it.id == id &&
-                    it.isReadyForLocalImageGeneration()
-            }
-        }
-        ?: initialLocalImageModels.firstOrNull {
-            it.isReadyForLocalImageGeneration()
-        }?.id
-    private val initialCloudModels = cloudApiStore.loadModels()
-    private val initialSessionCloudChatModelId = initialStartupSession
-        ?.takeIf { it.modelMode.equals("cloud", ignoreCase = true) }
-        ?.modelId
-        ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.CHAT } }
-    private val initialSelectedCloudChatModelId = initialSessionCloudChatModelId
-        ?: cloudApiStore.loadSelectedCloudChatModelId()
-        ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.CHAT } }
-        ?: initialCloudModels.firstOrNull { it.kind == CloudModelKind.CHAT }?.id
-    private val initialSelectedCloudImageModelId = cloudApiStore.loadSelectedCloudImageModelId()
-        ?.takeIf { id -> initialCloudModels.any { it.id == id && it.kind == CloudModelKind.IMAGE } }
-        ?: initialCloudModels.firstOrNull { it.kind == CloudModelKind.IMAGE }?.id
-    private val initialCloudConfig = initialCloudModels
-        .firstOrNull { it.id == initialSelectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
-        ?.toChatConfig()
-        ?: cloudApiStore.load()
-    private val initialWebSearchConfig = container.webSearchStore.load()
-    private val initialWebSearchDiagnostics = container.webSearchDiagnosticStore.load()
-    private val initialSelectedBackend = initialStartupSession
-        ?.modelMode
-        ?.toChatBackendOrNull()
-        ?: cloudApiStore.loadSelectedBackend()
-    private val initialSelectedImageBackend = localImageModelStore.loadSelectedBackend()
     @Volatile
     private var replyGenerationMetrics: ReplyGenerationMetrics? = null
     /** Prevents double taps from invalidating the stop epoch twice and losing UI cleanup. */
@@ -816,80 +771,7 @@ class MainViewModel @JvmOverloads constructor(
         return chatImageRetrySnapshot(port = chatImageRetryPort, request = request, chatSessionId = chatSessionId)
     }
 
-    private val uiStateStore = UiStateStore(
-        MainUiState(
-            messages = initialStartupSession?.messages.orEmpty(),
-            chatSessions = initialChatSessions,
-            activeChatSessionId = initialStartupSession?.id,
-            images = initialImages,
-            files = initialFiles,
-            localImageModels = initialLocalImageModels,
-            localImageLoras = initialLocalImageLoras,
-            localImageTextualInversionLoading = true,
-            localImageTextualInversionMessage = "正在加载 Textual Inversion 库…",
-            localImageUpscalers = initialLocalImageUpscalers,
-            selectedLocalImageUpscalerId = initialSelectedLocalImageUpscalerId,
-            selectedLocalImageModelId = initialSelectedLocalImageModelId,
-            selectedImageBackend = when (initialSelectedImageBackend) {
-                ImageBackend.LOCAL -> if (initialSelectedLocalImageModelId != null) ImageBackend.LOCAL else ImageBackend.CLOUD
-                ImageBackend.CLOUD -> ImageBackend.CLOUD
-            },
-            cloudApiConfig = initialCloudConfig,
-            cloudModels = initialCloudModels,
-            selectedCloudChatModelId = initialSelectedCloudChatModelId,
-            selectedCloudImageModelId = initialSelectedCloudImageModelId,
-            assistants = initialAssistants,
-            assistantMemories = initialAssistantMemories,
-            selectedAssistantId = initialSelectedAssistantId,
-            globalChatAppearance = initialGlobalChatAppearance,
-            worldBooks = initialWorldBooks,
-            knowledgeBases = initialKnowledgeBases,
-            knowledgeDocumentCounts = initialKnowledgeDocumentCounts,
-            selectedKnowledgeBaseIds = initialKnowledgeBaseIds,
-            selectedChatBackend = if (initialSelectedBackend == ChatBackend.CLOUD && initialCloudConfig.configured) {
-                ChatBackend.CLOUD
-            } else {
-                ChatBackend.LOCAL
-            },
-            // Managed model discovery may walk multi-gigabyte package trees. The IO refresh in
-            // init populates this list without blocking the first MainActivity frame.
-            models = emptyList(),
-            mnnRuntimeAvailable = engine.isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
-            recommendedRemoteModels = sortRecommendedModels(
-                modelScopeClient.userFacingRecommendedModels(),
-                initialDeviceProfile
-            ),
-            params = loadModelGenerationParams(
-                backend = if (initialSelectedBackend == ChatBackend.CLOUD) {
-                    ChatBackend.CLOUD
-                } else {
-                    ChatBackend.LOCAL
-                },
-                modelId = if (initialSelectedBackend == ChatBackend.CLOUD) {
-                    initialSelectedCloudChatModelId
-                } else {
-                    initialStartupSession?.modelId
-                },
-                defaults = initialEffectiveParams
-            ),
-            agentLogs = agentLogger.recent(),
-            benchmarkHistory = benchmarkHistoryLogger.recent(),
-            deviceProfile = initialDeviceProfile,
-            // These fields report the actual listener, not the persisted desired state. Startup
-            // restoration publishes RUNNING only after both the socket and foreground service work.
-            apiEnabled = false,
-            restEnabled = false,
-            apiKey = apiKey,
-            localApiAddress = apiUrl("127.0.0.1"),
-            openApiAddress = currentOpenApiAddress(),
-            webSearchConfig = initialWebSearchConfig,
-            webSearchDiagnostics = initialWebSearchDiagnostics,
-            persistentPrefixCacheEnabled = initialPersistentPrefixCacheEnabled,
-            contextCompressionThresholdPercent = ContextCompressionCoordinator.loadThreshold(contextCompressionPreferences).percent,
-            contextSummaryModelSelection = ContextCompressionCoordinator.loadSummaryModelSelection(contextCompressionPreferences),
-            appUpdate = initialAppUpdateState
-        )
-    )
+    private val uiStateStore = UiStateStore(bootstrapResult.uiState)
     // R3/C3-S5：chatRuns/流缓冲累加器入容器；terminalSettlement 端口具名化。
     private val chatStreamAccumulatorInit = container.initializeChatStreamAccumulator(uiStateStore, viewModelScope)
 
@@ -904,7 +786,7 @@ class MainViewModel @JvmOverloads constructor(
     // R3/C3-S13：启动对账 owner（lazy async + await 状态写随 body 移出；start() 调用点不变；
     // 声明位于 init/startAfterConstruction 之前，保持与旧字段等价的初始化序）。
     private val imageLibraryStartupReconciliation = container.createImageLibraryStartupReconciliation(
-        uiStateStore, viewModelScope, chatImageCommitRecoveryPort, initialKnowledgeBases
+        uiStateStore, viewModelScope, chatImageCommitRecoveryPort, bootstrapResult.initialKnowledgeBases
     )
     private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
@@ -1288,7 +1170,7 @@ class MainViewModel @JvmOverloads constructor(
         cleanupUnusedChatBackgrounds = { chatAppearanceCoordinator.cleanupUnusedChatBackgrounds() },
         captureContentImportOwner = ::captureContentImportOwner,
         stageContentImportPreview = ::stageContentImportPreview,
-        readAttachmentText = { uri, maxBytes -> readAttachmentText(uri, maxBytes) },
+        readAttachmentText = { uri, maxBytes -> readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes) },
         currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() }
     )
 
@@ -1339,8 +1221,9 @@ class MainViewModel @JvmOverloads constructor(
                 }
             }
         }
-        engine.setPersistentPrefixCacheEnabled(initialPersistentPrefixCacheEnabled)
-        if (initialPersistentPrefixCacheEnabled) {
+        val persistentPrefixCacheEnabled = uiStateStore.current.persistentPrefixCacheEnabled
+        engine.setPersistentPrefixCacheEnabled(persistentPrefixCacheEnabled)
+        if (persistentPrefixCacheEnabled) {
             refreshPersistentPrefixCacheSummary()
         } else {
             val operation = persistentPrefixCacheOperationSequence.incrementAndGet()
@@ -2658,7 +2541,8 @@ class MainViewModel @JvmOverloads constructor(
             chatSessionIdForKnowledgeBinding = sessionId
             selectedKnowledgeBaseIdsForBinding = it.selectedKnowledgeBaseIds
             val messages = it.messages + user + assistant
-            sessionsToPersist = it.chatSessions.upsertSession(
+            sessionsToPersist = it.chatSessions.upsertSessionFor(
+                state = it,
                 sessionId = sessionId,
                 messages = messages,
                 assistantId = conversationAssistantId,
@@ -2797,7 +2681,8 @@ class MainViewModel @JvmOverloads constructor(
         var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         uiStateStore.update {
             val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
-            sessionsToPersist = it.chatSessions.upsertSession(
+            sessionsToPersist = it.chatSessions.upsertSessionFor(
+                state = it,
                 sessionId = sessionId,
                 messages = kept,
                 assistantId = it.selectedAssistantId,
@@ -3616,7 +3501,16 @@ class MainViewModel @JvmOverloads constructor(
             applyWebSearchAnswerGuardsToLastAssistantRef = webSearchWorkflowCoordinator::applyWebSearchAnswerGuardsToLastAssistant,
             recordWebSearchCitationAuditRef = webSearchWorkflowCoordinator::recordWebSearchCitationAudit,
             attachWebSearchEvidenceToPendingAssistantRef = webSearchWorkflowCoordinator::attachWebSearchEvidenceToPendingAssistant,
-            attachContextAssemblyTraceRef = ::attachContextAssemblyTrace,
+            attachContextAssemblyTraceRef = { traceJson, generationRunId, sessionId, assistantMessageId ->
+                attachContextAssemblyTrace(
+                    uiStateStore = uiStateStore,
+                    chatRuns = chatRuns,
+                    traceJson = traceJson,
+                    generationRunId = generationRunId,
+                    sessionId = sessionId,
+                    assistantMessageId = assistantMessageId
+                )
+            },
             promptContextUsageForRef = contextCompressionCoordinator::promptContextUsageFor,
             appendWebSearchDiagnosticRef = webSearchWorkflowCoordinator::appendDiagnostic,
             recordCompletedCharacterMemoryTurnRef = assistantProfileCoordinator::recordCompletedCharacterMemoryTurn,
@@ -3769,72 +3663,9 @@ class MainViewModel @JvmOverloads constructor(
         uiStateStore.update { it.copy(busy = false, statusMessage = message) }
     }
 
-
-
-    private fun List<ChatSessionRecord>.upsertSession(
-        sessionId: String,
-        messages: List<ChatMessage>,
-        assistantId: String? = null,
-        assistantSnapshot: AssistantConversationSnapshot? = null,
-        replaceAssistantSnapshot: Boolean = false,
-        modelMode: String? = null,
-        modelId: String? = null
-    ): List<ChatSessionRecord> = upsertSessionFor(
-        state = uiStateStore.current,
-        sessionId = sessionId,
-        messages = messages,
-        assistantId = assistantId,
-        assistantSnapshot = assistantSnapshot,
-        replaceAssistantSnapshot = replaceAssistantSnapshot,
-        modelMode = modelMode,
-        modelId = modelId
-    )
-
-    /** Secret-free identity for the exact Responses chat endpoint and model configuration. */
-    private fun attachContextAssemblyTrace(
-        traceJson: String?,
-        generationRunId: Long,
-        sessionId: String?,
-        assistantMessageId: String?
-    ) {
-        if (traceJson == null || sessionId == null || assistantMessageId == null ||
-            !chatRuns.isCurrent(generationRunId)
-        ) return
-        uiStateStore.update { state ->
-            if (!chatRuns.isCurrent(generationRunId) ||
-                state.activeChatSessionId != sessionId
-            ) return@update state
-            val index = state.messages.indexOfLast {
-                it.id == assistantMessageId && it.role == Role.ASSISTANT
-            }
-            val sessionIndex = state.chatSessions.indexOfFirst { it.id == sessionId }
-            if (index < 0 || sessionIndex < 0 ||
-                state.chatSessions[sessionIndex].messages.none { it.id == assistantMessageId }
-            ) return@update state
-            val updated = state.messages.mapIndexed { position, message ->
-                if (position == index) message.copy(contextAssemblyTraceJson = traceJson) else message
-            }
-            state.copy(
-                messages = updated,
-                chatSessions = state.chatSessions.mapIndexed { position, session ->
-                    if (position != sessionIndex) session else session.copy(messages = updated)
-                }
-            )
-        }
-    }
-
-
     /** Delegates to [chatImageOptionsForCurrentSelectionFor]. Signature kept verbatim. */
     internal fun chatImageOptionsForCurrentSelection(state: MainUiState): LocalImageGenerationOptions =
         chatImageOptionsForCurrentSelectionFor(state)
-
-
-    private fun readAttachmentText(uri: Uri, maxBytes: Int = 64 * 1024): Pair<String, Boolean> =
-        readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes)
-
-
-
-
 
     private val localApiImageGenerationPort: LocalApiImageGenerationPort =
         container.createLocalApiImageGenerationPort(
