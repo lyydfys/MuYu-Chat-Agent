@@ -287,7 +287,7 @@ private data class LocalApiApplyResult(
     val restEnabled: Boolean,
     val failure: Throwable? = null
 )
-private val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
+internal val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
 private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
 internal const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
 // `internal`, not `private`: the vision preparation that enforces this cap moved to
@@ -933,8 +933,6 @@ class MainViewModel @JvmOverloads constructor(
     private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
-    // R3/C3-S1（插队裁定 2）：三个小端口具名化为容器工厂构造（真实依赖注入），匿名实现已删除。
-    private val localImageAdapterPort = container.createLocalImageAdapterPort(uiStateStore)
     private val webSearchConfigPort = container.createWebSearchConfigPort(uiStateStore)
     private val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
@@ -1097,6 +1095,27 @@ class MainViewModel @JvmOverloads constructor(
         fail = ::fail,
         loadModel = ::loadModel,
         reconcileModelIdentities = { reconcileModelIdentities() }
+    )
+
+    private val localImageLibraryAndModelCoordinator = LocalImageLibraryAndModelCoordinator(
+        store = uiStateStore,
+        scope = viewModelScope,
+        application = getApplication(),
+        container = container,
+        localImageModelStore = localImageModelStore,
+        localImageWorkerClient = localImageWorkerClient,
+        localImageLoraStore = localImageLoraStore,
+        managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
+        launchModelOperation = ::launchModelOperation,
+        tryAcquireObservedImageGenerationLease = ::tryAcquireObservedImageGenerationLease,
+        releaseObservedImageGenerationLease = ::releaseObservedImageGenerationLease,
+        showStatus = ::showStatus,
+        busy = ::busy,
+        fail = ::fail,
+        persistFiles = ::persistFiles,
+        activeImageGenerationModelId = { activeImageGenerationModelId },
+        activeLocalApiImageModelId = { activeLocalApiImageModelId },
+        imageUpscaleOwnerProvider = { imageUpscaleOwner }
     )
 
     private fun observeManagedDownloads() {
@@ -1347,13 +1366,6 @@ class MainViewModel @JvmOverloads constructor(
     }
 
 
-    /** Must be called from an IO coroutine. */
-
-
-    private fun LocalImageModelRecord.isReadyForManagedSelection(
-        qnnVerificationCurrentByModelId: Map<String, Boolean>
-    ): Boolean = localImageReadinessForUi(qnnVerificationCurrentByModelId[id]) == null
-
 
     /**
      * validateForLoad may rewrite a QAIRT directory fingerprint. Invalidate any in-flight
@@ -1463,29 +1475,9 @@ class MainViewModel @JvmOverloads constructor(
     }
 
 
-    fun useImageAsset(imageId: String) {
-        val image = _uiState.value.images.firstOrNull { it.id == imageId } ?: return
-        uiStateStore.update { state ->
-            val alreadyAttached = imageAttachmentRegex.findAll(state.input).any { match ->
-                match.groupValues.getOrNull(2)?.trim() == image.uriString.trim()
-            }
-            if (alreadyAttached) {
-                return@update state.copy(statusMessage = "这张图片已在当前消息中：${image.name}")
-            }
-            val separator = if (state.input.isBlank()) "" else "\n\n"
-            state.copy(
-                input = state.input + separator + image.toInputAttachment(),
-                statusMessage = "已插入图片：${image.name}"
-            )
-        }
-    }
+    fun useImageAsset(imageId: String) =
+        localImageLibraryAndModelCoordinator.useImageAsset(imageId)
 
-    /**
-     * Measures a prompt with the tokenizer declared by the selected local image
-     * model. This is tokenizer-only and never loads a diffusion graph. Known
-     * tokenizer adapters return exact counts; other stable-diffusion.cpp
-     * profiles return an explicitly marked conservative estimate.
-     */
     /**
      * Measures how many tokens a prompt will occupy for a local image model.
      *
@@ -1501,56 +1493,29 @@ class MainViewModel @JvmOverloads constructor(
         prompt = prompt
     )
 
+    fun useFileAsset(fileId: String) =
+        localImageLibraryAndModelCoordinator.useFileAsset(fileId)
 
-    fun useFileAsset(fileId: String) {
-        val file = _uiState.value.files.firstOrNull { it.id == fileId } ?: return
-        uiStateStore.update { state ->
-            val separator = if (state.input.isBlank()) "" else "\n\n"
-            state.copy(
-                input = state.input + separator + file.toInputAttachment(),
-                statusMessage = "已插入文件：${file.name}"
-            )
-        }
-    }
+    fun deleteFileAsset(fileId: String) =
+        localImageLibraryAndModelCoordinator.deleteFileAsset(fileId)
 
-    fun deleteFileAsset(fileId: String) {
-        deleteFileAssetFor(
-            store = uiStateStore,
-            persistFiles = ::persistFiles,
-            fileId = fileId
-        )
-    }
+    fun clearFileLibrary() =
+        localImageLibraryAndModelCoordinator.clearFileLibrary()
 
-    fun clearFileLibrary() {
-        clearFileLibraryFor(
-            store = uiStateStore,
-            showStatus = ::showStatus,
-            persistFiles = ::persistFiles
-        )
-    }
-
-    /** Delegates to [importLocalImageLoraAdapter]. */
     fun importLocalImageLora(uriString: String) =
-        importLocalImageLoraAdapter(localImageAdapterPort, viewModelScope, uriString)
+        localImageLibraryAndModelCoordinator.importLocalImageLora(uriString)
 
-    /** Delegates to [deleteLocalImageLoraAdapter]. */
     fun deleteLocalImageLora(id: String) =
-        deleteLocalImageLoraAdapter(localImageAdapterPort, viewModelScope, id)
+        localImageLibraryAndModelCoordinator.deleteLocalImageLora(id)
 
-    /** Delegates to [importLocalImageTextualInversionArtifact]. Signature copied verbatim. */
     fun importLocalImageTextualInversion(uriString: String, trigger: String) =
-        importLocalImageTextualInversionArtifact(localImageAdapterPort, viewModelScope, uriString, trigger)
+        localImageLibraryAndModelCoordinator.importLocalImageTextualInversion(uriString, trigger)
 
-    /** Delegates to [deleteLocalImageTextualInversionArtifact]. */
     fun deleteLocalImageTextualInversion(id: String) =
-        deleteLocalImageTextualInversionArtifact(localImageAdapterPort, viewModelScope, id)
+        localImageLibraryAndModelCoordinator.deleteLocalImageTextualInversion(id)
 
-    /** Downloads the publisher-pinned Viggle v0.2.1 adapter into the same
-     * private store used by user-imported LoRAs. Unknown device profiles do not
-     * affect visibility or access; the store's byte and SHA checks are the
-     * acceptance gate. */
     fun downloadOfficialViggleLora() =
-        downloadOfficialViggleLoraFor(uiStateStore, viewModelScope, localImageLoraStore)
+        localImageLibraryAndModelCoordinator.downloadOfficialViggleLora()
 
     fun reportMissingLocalImageLoraSelection() {
         uiStateStore.update { it.copy(chatImageLoraSelections = null) }
@@ -1562,51 +1527,28 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun reportMissingLocalImageTextualInversionSelection() {
-        uiStateStore.update {
-            it.copy(
-                localImageTextualInversionMessage =
-                    "所选 Textual Inversion 已删除，请重新选择。",
-                statusMessage = "所选 Textual Inversion 已删除，请重新选择。"
-            )
-        }
-    }
+    fun reportMissingLocalImageTextualInversionSelection() =
+        localImageLibraryAndModelCoordinator.reportMissingLocalImageTextualInversionSelection()
 
-    // R3-S32：图片放大模型目录端口具名适配器（容器工厂装配，真实依赖注入）。
-    private val localImageUpscalerPort: LocalImageUpscalerPort =
-        container.createLocalImageUpscalerPort(
-            uiStateStore,
-            { imageUpscaleOwner }
-        )
-
-    /** Delegates to [importLocalImageUpscalerModel]. */
     fun importLocalImageUpscaler(uriString: String) =
-        importLocalImageUpscalerModel(localImageUpscalerPort, viewModelScope, uriString)
+        localImageLibraryAndModelCoordinator.importLocalImageUpscaler(uriString)
 
-    /** Delegates to [selectLocalImageUpscalerModel]. */
     fun selectLocalImageUpscaler(id: String) =
-        selectLocalImageUpscalerModel(localImageUpscalerPort, id)
+        localImageLibraryAndModelCoordinator.selectLocalImageUpscaler(id)
 
-    /** Delegates to [deleteLocalImageUpscalerModel]. */
     fun deleteLocalImageUpscaler(id: String) =
-        deleteLocalImageUpscalerModel(localImageUpscalerPort, viewModelScope, id)
-
-
-
-
+        localImageLibraryAndModelCoordinator.deleteLocalImageUpscaler(id)
 
     fun generateImageAsset(
         prompt: String,
         inputDraft: LocalImageInputDraft = LocalImageInputDraft(),
         options: LocalImageGenerationOptions = LocalImageGenerationOptions()
-    ): Boolean {
-        return imageGenerationOwner.submit(
-            prompt = prompt,
-            inputDraft = inputDraft,
-            options = options,
-            jobSnapshot = null
-        )
-    }
+    ): Boolean = imageGenerationOwner.submit(
+        prompt = prompt,
+        inputDraft = inputDraft,
+        options = options,
+        jobSnapshot = null
+    )
 
     fun retryImageGeneration(jobId: String) {
         val sourceJob = _uiState.value.imageJobs.firstOrNull { it.id == jobId }
@@ -1639,18 +1581,6 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    /** Delegates to [resolveCurrentLocalImageLorasFor]. Signature kept verbatim. */
-    private fun resolveCurrentLocalImageLoras(
-        selections: List<Pair<String, Double>>,
-        records: List<LocalImageLoraRecord> = _uiState.value.localImageLoras
-    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasFor(selections, records)
-
-    /** Delegates to [resolveCurrentLocalImageTextualInversionIdsFor]. Signature kept verbatim. */
-    private fun resolveCurrentLocalImageTextualInversionIds(
-        ids: List<String>,
-        records: List<TextualInversionArtifact> = _uiState.value.localImageTextualInversions
-    ): List<String> = resolveCurrentLocalImageTextualInversionIdsFor(ids, records)
-
     /** The ViewModel side of [ImageAssetCreationPort]. */
     // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
     private val imageAssetCreationPort: ImageAssetCreationPort =
@@ -1682,47 +1612,11 @@ class MainViewModel @JvmOverloads constructor(
         return createUpscaledAsset(port = imageAssetCreationPort, spec = spec, result = result, requestId = requestId)
     }
 
-    /** Delegates to [canReadGenerationHistoryInputFor]. Signature kept verbatim. */
-    private fun canReadGenerationHistoryInput(reference: String): Boolean =
-        canReadGenerationHistoryInputFor(getApplication(), reference)
-
-    /**
-     * Prepares the prompt pair for a local image request.
-     *
-     * The decision moved to [prepareLocalImagePromptExecution]; what stays here is the port: the
-     * verified bundle, the shared translation service, and the status publication that still reads
-     * the live active image-job id at the same moment it always did.
-     */
-    private suspend fun prepareLocalImagePromptExecution(
-        model: LocalImageModelRecord,
-        prompt: String,
-        options: LocalImageGenerationOptions,
-        captured: LocalImagePromptExecution?
-    ): LocalImagePromptExecution = prepareLocalImagePromptExecution(
-        port = imagePromptTranslationPort,
-        model = model,
-        prompt = prompt,
-        options = options,
-        captured = captured
-    )
-
-    // R3-S27：translation 端口的具名适配器（service 以 provider 保 lazy 时机；verifiedBundle 为过渡
-    // 注入——offline-translation 家族批落地后改为直接调用并删除该 lambda）。
-    // R3-S27/S31：translation 端口的具名适配器（service 以 provider 保 lazy 时机；verifiedBundle 直调 operations）。
     private val imagePromptTranslationPort: ImagePromptTranslationPort =
         container.createImagePromptTranslationPort(
             uiStateStore,
             { offlinePromptTranslationService }
         )
-    /** Delegates to [prepareLocalImageRuntimeMemoryFor]. Signature kept verbatim. */
-    private suspend fun prepareLocalImageRuntimeMemory(): com.muyuchat.core.engine.EngineLifecycleLease =
-        prepareLocalImageRuntimeMemoryFor(
-            uiStateStore, container.runtimeAdmission, runtimeProfileStore, engine
-        )
-
-    /** Delegates to [startLocalImageGenerationWatchdogFor]. Signature kept verbatim. */
-    private fun startLocalImageGenerationWatchdog(jobId: String) =
-        startLocalImageGenerationWatchdogFor(uiStateStore, viewModelScope, jobId)
 
     fun cancelImageGeneration() = cancelImageGenerationForJob(expectedJobId = null)
 
@@ -1740,21 +1634,13 @@ class MainViewModel @JvmOverloads constructor(
     /** Delegates to [publishLocalImagePreviewTo]. Signature kept verbatim. */
     private fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
         publishLocalImagePreviewTo(
-        uiStateStore,
-        container.runtimeAdmission,
-        getApplication(),
-        imageAssetWriteMutex,
-        jobId,
-        progress
-    )
-
-    /** Delegates to [canPublishLocalImagePreviewFor]. Signature kept verbatim. */
-    private fun canPublishLocalImagePreview(jobId: String): Boolean =
-        canPublishLocalImagePreviewFor(uiStateStore, container.runtimeAdmission, jobId)
-
-    /** Delegates to [cleanupLocalImagePreviewsFor]. Signature kept verbatim. */
-    private fun cleanupLocalImagePreviews(jobId: String) =
-        cleanupLocalImagePreviewsFor(getApplication(), jobId)
+            uiStateStore,
+            container.runtimeAdmission,
+            getApplication(),
+            imageAssetWriteMutex,
+            jobId,
+            progress
+        )
 
     fun deleteImageAsset(imageId: String) = deleteImageAssets(listOf(imageId))
 
@@ -1801,123 +1687,20 @@ class MainViewModel @JvmOverloads constructor(
     fun cancelImageLibraryBackup() =
         imageLibraryBackupCoordinator.cancelBackup { imageLibraryBackupJob }
 
-    fun importLocalImageModel(uri: Uri) {
-        launchModelOperation("模型操作未完成") {
-            busy("正在导入本地图像生成引擎...")
-            runCatching {
-                localImageModelStore.importFromUri(uri)
-            }
-                .onSuccess { model ->
-                    val selection = settleLocalImageSelection(model)
-                    val readiness = model.localImageReadinessForUi(
-                        selection.qnnVerificationCurrentByModelId[model.id]
-                    )
-                    val diagnostic = model.localImageVerificationDiagnosticMessage()
-                    managedRuntimeReadinessRefreshGate.invalidate()
-                    uiStateStore.update {
-                        it.copy(
-                            localImageModels = selection.models,
-                            qnnImageVerificationCurrentByModelId = selection.qnnVerificationCurrentByModelId,
-                            selectedLocalImageModelId = selection.selectedId,
-                            selectedImageBackend = selection.selectedBackend,
-                            busy = false,
-                            statusMessage = if (readiness != null) {
-                                "已导入 ${model.displayName}，但暂不能生成：$readiness"
-                            } else if (diagnostic != null) {
-                                "已导入本地图像生成引擎：${model.displayName}；$diagnostic"
-                            } else {
-                                "已导入本地图像生成引擎：${model.displayName}"
-                            }
-                        )
-                    }
-                }
-                .onFailure { error ->
-                if (error is CancellationException) throw error
-                    fail(error.message ?: "本地图像生成引擎导入失败")
-                }
-        }
-    }
+    fun importLocalImageModel(uri: Uri) =
+        localImageLibraryAndModelCoordinator.importLocalImageModel(uri)
 
     /** Delegates to [rejectImageModelSwitchWhileGenerationIsActiveFor]. Signature kept verbatim. */
     private fun rejectImageModelSwitchWhileGenerationIsActive(): Boolean =
         rejectImageModelSwitchWhileGenerationIsActiveFor(uiStateStore, container.runtimeAdmission)
 
-
-    fun verifyLocalImageModel(modelId: String) {
-        verifyLocalImageModelFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            application = getApplication(),
-            localImageModelStore = localImageModelStore,
-            localImageWorkerClient = localImageWorkerClient,
-            tryAcquireObservedImageGenerationLease = ::tryAcquireObservedImageGenerationLease,
-            releaseObservedImageGenerationLease = ::releaseObservedImageGenerationLease,
-            managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
-            showStatus = ::showStatus,
-            busy = ::busy,
-            modelId = modelId
-        )
-    }
-
-
-    /** Delegates to [executionWithQnnVerificationEvidenceFor]. Signature kept verbatim. */
-    private fun executionWithQnnVerificationEvidence(
-        model: LocalImageModelRecord,
-        result: LocalImageResult,
-        options: LocalImageGenerationOptions,
-        requestId: String,
-        attemptId: String,
-        entryPoint: QnnImageEvidenceEntryPoint
-    ): String = executionWithQnnVerificationEvidenceFor(
-        getApplication(), model, result, options, requestId, attemptId, entryPoint
-    )
-
-
-
-
-    private data class LocalImageSelection(
-        val models: List<LocalImageModelRecord>,
-        val selectedId: String?,
-        val selectedBackend: ImageBackend,
-        val qnnVerificationCurrentByModelId: Map<String, Boolean>
-    )
+    fun verifyLocalImageModel(modelId: String) =
+        localImageLibraryAndModelCoordinator.verifyLocalImageModel(modelId)
 
     /** Must be called from an IO coroutine. */
     private fun settleLocalImageSelection(
         preferred: LocalImageModelRecord
-    ): LocalImageSelection {
-        val models = localImageModelStore.loadModels()
-        val preferredModel = models.firstOrNull { it.matchesCatalogId(preferred.id) } ?: preferred
-        val qnnVerificationCurrentByModelId = currentQnnImageVerificationByModelId(getApplication(), models)
-        val currentSelectedId = localImageModelStore.loadSelectedModelId()
-        val currentBackend = localImageModelStore.loadSelectedBackend()
-        val currentReadyId = currentSelectedId?.takeIf { id ->
-            models.any {
-                it.id == id && it.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
-            }
-        }
-        val preferredReady = preferredModel.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
-        val selectedId = when {
-            preferredReady -> preferredModel.id
-            currentReadyId != null -> currentReadyId
-            else -> models.firstOrNull {
-                it.isReadyForManagedSelection(qnnVerificationCurrentByModelId)
-            }?.id
-        }
-        localImageModelStore.saveSelectedModelId(selectedId)
-        val selectedBackend = when {
-            preferredReady -> ImageBackend.LOCAL
-            selectedId == null && currentBackend == ImageBackend.LOCAL -> ImageBackend.CLOUD
-            else -> currentBackend
-        }
-        localImageModelStore.saveSelectedBackend(selectedBackend)
-        return LocalImageSelection(
-            models = models,
-            selectedId = selectedId,
-            selectedBackend = selectedBackend,
-            qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId
-        )
-    }
+    ): LocalImageSelection = localImageLibraryAndModelCoordinator.settleLocalImageSelection(preferred)
 
     fun deleteLocalImageModel(modelId: String) {
         launchModelOperation("模型操作未完成") {
@@ -2543,24 +2326,8 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    fun removeLocalImageModelRecord(modelId: String) {
-        launchModelOperation("模型记录操作未完成") {
-            if (activeImageGenerationModelId == modelId || activeLocalApiImageModelId == modelId) {
-                showStatus("当前图片任务正在使用该模型，请结束后再移除记录。")
-                return@launchModelOperation
-            }
-            val removed = _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
-            val success = localImageModelStore.removeModelRecord(modelId)
-            settleAndApplyLocalImageModelCatalogUpdate(
-                store = uiStateStore,
-                localImageModelStore = localImageModelStore,
-                context = getApplication(),
-                managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
-                statusMessage = if (success) "已移除目录记录：${removed?.displayName ?: "模型"}；文件仍保留。"
-                    else "未找到本地图像模型记录。"
-            )
-        }
-    }
+    fun removeLocalImageModelRecord(modelId: String) =
+        localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
 
     private suspend fun stageContentImportPreview(preview: ContentImportPreview) {
         contentImportCommitMutex.withLock {
@@ -2659,7 +2426,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun updateChatImageLoraSelection(selections: List<Pair<String, Double>>?) {
         val frozen = selections?.toList()
-        val valid = frozen?.let { runCatching { resolveCurrentLocalImageLoras(it) }.isSuccess } == true
+        val valid = frozen?.let { runCatching { resolveCurrentLocalImageLorasFor(it, _uiState.value.localImageLoras) }.isSuccess } == true
         uiStateStore.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
@@ -5040,13 +4807,13 @@ class MainViewModel @JvmOverloads constructor(
             registerLocalApiImageGenerationOwnershipRef = { registerLocalApiImageGenerationOwnership(it) },
             unregisterLocalApiImageGenerationOwnershipRef = { unregisterLocalApiImageGenerationOwnership(it) },
             cancelOwnedLocalApiImageWorkerRef = { cancelOwnedLocalApiImageWorker(it) },
-            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLoras(it) },
-            resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLoras(s, r) },
-            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIds(it) },
-            prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(m, p, o, c) },
-            prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemory() },
+            resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLorasFor(it, _uiState.value.localImageLoras) },
+            resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLorasFor(s, r) },
+            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIdsFor(it, _uiState.value.localImageTextualInversions) },
+            prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(imagePromptTranslationPort, m, p, o, c) },
+            prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemoryFor(uiStateStore, container.runtimeAdmission, runtimeProfileStore, engine) },
             executionWithQnnVerificationEvidenceRef = { m, r, o, req, att, ent ->
-                executionWithQnnVerificationEvidence(m, r, o, req, att, ent)
+                executionWithQnnVerificationEvidenceFor(getApplication(), m, r, o, req, att, ent)
             },
         )
 
