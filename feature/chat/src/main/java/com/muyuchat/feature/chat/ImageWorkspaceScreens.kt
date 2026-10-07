@@ -20,268 +20,33 @@ package com.muyuchat.feature.chat
 // The import list is the one from ChatScreen.kt, copied whole rather than trimmed: unused imports
 // are warnings in Kotlin, and copying them keeps the move mechanical instead of making it a
 // judgement call about which of roughly 260 imports each declaration still needs.
-
-import android.content.ClipData
-import android.content.ContentValues
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
-import android.content.SharedPreferences
-import android.app.ActivityManager
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.os.Build
-import android.os.BatteryManager
-import android.os.Environment
-import android.os.SystemClock
-import android.provider.MediaStore
 import android.widget.Toast
-import androidx.activity.BackEventCompat
-import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
-import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DatePickerDialog
-import androidx.compose.material3.DateRangePicker
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.FloatingActionButtonDefaults
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.material3.rememberDateRangePickerState
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.zIndex
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.changedToUp
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.ClipEntry
-import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.semantics.Role as SemanticsRole
-import androidx.compose.ui.semantics.CustomAccessibilityAction
-import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.customActions
-import androidx.compose.ui.semantics.liveRegion
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.stateDescription
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
-import androidx.compose.ui.text.withStyle
-import androidx.compose.ui.text.input.TextFieldValue
-import androidx.compose.ui.text.input.OffsetMapping
-import androidx.compose.ui.text.input.TransformedText
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import com.muyuchat.core.engine.ChatMessage
-import com.muyuchat.core.engine.ChatImageAttachment
-import com.muyuchat.core.engine.visionDeduplicationKey
-import com.muyuchat.core.engine.ChatGeneratedImageRequest
-import com.muyuchat.core.engine.ChatGeneratedImageOrigin
-import com.muyuchat.core.engine.ChatGeneratedImageStatus
-import com.muyuchat.core.engine.ChatImageToolContinuationStatus
-import com.muyuchat.core.engine.ChatSourceReference
-import com.muyuchat.core.engine.ChatWebSearchTrace
-import com.muyuchat.core.engine.GenerationPhase
-import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.ReasoningMode
-import com.muyuchat.core.engine.Role
-import com.muyuchat.core.engine.RuntimeStats
-import com.muyuchat.core.engine.PersistProgress
-import com.muyuchat.core.engine.TokenProgress
-import com.muyuchat.core.engine.PromptContextUsage
-import com.muyuchat.core.engine.PromptMessageRetention
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.currentCoroutineContext
-import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
-import java.security.MessageDigest
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.util.Calendar
-import org.json.JSONArray
-import org.json.JSONObject
-import kotlin.math.roundToInt
-import com.muyuchat.core.designsystem.SystemBackMotionHandler
-import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
 @Composable
 internal fun ImagesWorkspaceScreen(
@@ -444,98 +209,21 @@ internal fun ImagesWorkspaceScreen(
     var pendingDeleteIds by remember { mutableStateOf(emptySet<String>()) }
     var batchSaving by remember { mutableStateOf(false) }
     var showBackupDialog by rememberSaveable { mutableStateOf(false) }
-    var backupFavoritesOnly by rememberSaveable { mutableStateOf(false) }
-    val backupExportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/zip")
-    ) { uri ->
-        uri?.let { onExportBackup(it.toString(), backupFavoritesOnly) }
-    }
-    val backupImportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        uri?.let { onImportBackup(it.toString()) }
-    }
-    val libraryModels = remember(images) {
-        images.mapNotNull { image ->
-            image.generationModelId.takeIf(String::isNotBlank)?.let { id ->
-                id to image.generationModelName.ifBlank { id }
-            }
-        }.distinctBy { it.first }
-    }
-    val libraryTaskModes = remember(images) {
-        images.map(ImageAssetUiItem::generationTaskMode)
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted()
-    }
-    val libraryOperations = remember(images) {
-        images.mapNotNull { imageLibraryOperationWireName(it) }
-            .distinct()
-            .sorted()
-    }
-    val libraryDimensions = remember(images) {
-        images.mapNotNull(ImageLibraryDimensions::from)
-            .distinct()
-            .sortedWith(compareBy<ImageLibraryDimensions> { it.width * it.height }.thenBy { it.key })
-    }
-    val librarySchedulers = remember(images) {
-        images.map(ImageAssetUiItem::generationSampler)
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted()
-    }
-    val libraryRuntimes = remember(images) {
-        images.map(ImageAssetUiItem::generationRuntime)
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted()
-    }
-    val libraryDevices = remember(images) {
-        images.map(ImageAssetUiItem::generationDevice)
-            .filter(String::isNotBlank)
-            .distinct()
-            .sorted()
-    }
-    val libraryDateRange = remember(libraryDateStartUtcMillis, libraryDateEndUtcMillis) {
-        imageLibraryDateRangeFromUtcPickerSelection(
-            selectedStartDateMillis = libraryDateStartUtcMillis,
-            selectedEndDateMillis = libraryDateEndUtcMillis
-        )
-    }
-    val libraryDimensionsFilter = remember(libraryDimensionsKey) {
-        ImageLibraryDimensions.fromKeyOrNull(libraryDimensionsKey)
-    }
-    val filteredImages = remember(
-        images,
-        libraryQuery,
-        favoritesOnly,
-        libraryModelId,
-        libraryTaskMode,
-        libraryOperation,
-        libraryDateRange,
-        libraryDimensionsFilter,
-        libraryScheduler,
-        libraryRuntime,
-        libraryDevice,
-        newestFirst
-    ) {
-        filterImageLibrary(
-            images = images,
-            filter = ImageLibraryFilter(
-                query = libraryQuery,
-                favoritesOnly = favoritesOnly,
-                modelId = libraryModelId,
-                taskMode = libraryTaskMode,
-                operation = libraryOperation,
-                dateRange = libraryDateRange,
-                dimensions = libraryDimensionsFilter,
-                scheduler = libraryScheduler,
-                runtime = libraryRuntime,
-                device = libraryDevice,
-                newestFirst = newestFirst
-            )
-        )
-    }
+    val filters = rememberImageWorkspaceLibraryFilters(
+        images = images,
+        libraryQuery = libraryQuery,
+        favoritesOnly = favoritesOnly,
+        libraryModelId = libraryModelId,
+        libraryTaskMode = libraryTaskMode,
+        libraryOperation = libraryOperation,
+        libraryDateStartUtcMillis = libraryDateStartUtcMillis,
+        libraryDateEndUtcMillis = libraryDateEndUtcMillis,
+        libraryDimensionsKey = libraryDimensionsKey,
+        libraryScheduler = libraryScheduler,
+        libraryRuntime = libraryRuntime,
+        libraryDevice = libraryDevice,
+        newestFirst = newestFirst
+    )
     val latestJob = jobs.firstOrNull()
     val activeJob = if (showGenerationCanvas) latestJob else null
     val activePrompt = activeJob?.prompt ?: pendingConversationPrompt
@@ -655,21 +343,18 @@ internal fun ImagesWorkspaceScreen(
                 onUseImageAsset = onUseImageAsset
             )
         } else if (imageModels.isEmpty() && images.isEmpty()) {
-            Column(Modifier.fillMaxWidth().padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ImageGalleryTitleBar(onBack = onBack)
-                Text("还没有可用的生图模型", style = MaterialTheme.typography.titleMedium)
-                Button(onClick = onOpenModels) { Text("选择推荐模型") }
-                OutlinedButton(onClick = onImportModel) { Text("导入已有模型") }
-                ImageTranslationDownloadRow(
-                    status = offlineTranslationStatus,
-                    installed = offlineTranslationInstalled,
-                    installing = offlineTranslationInstalling,
-                    downloading = offlineTranslationDownloading,
-                    progress = offlineTranslationDownloadProgress,
-                    onDownload = onDownloadOfflineTranslation,
-                    onCancel = onCancelOfflineTranslationDownload
-                )
-            }
+            ImageWorkspaceEmptyState(
+                onBack = onBack,
+                onOpenModels = onOpenModels,
+                onImportModel = onImportModel,
+                offlineTranslationStatus = offlineTranslationStatus,
+                offlineTranslationInstalled = offlineTranslationInstalled,
+                offlineTranslationInstalling = offlineTranslationInstalling,
+                offlineTranslationDownloading = offlineTranslationDownloading,
+                offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
+                onDownloadOfflineTranslation = onDownloadOfflineTranslation,
+                onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload
+            )
         } else {
             ImageGalleryHome(
                 offlineTranslationStatus = offlineTranslationStatus,
@@ -680,14 +365,14 @@ internal fun ImagesWorkspaceScreen(
                 onDownloadOfflineTranslation = onDownloadOfflineTranslation,
                 onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
                 revealParameters = revealParameters,
-                images = filteredImages,
+                images = filters.filteredImages,
                 totalImageCount = images.size,
                 libraryQuery = libraryQuery,
                 favoritesOnly = favoritesOnly,
                 selectedLibraryModelId = libraryModelId,
                 selectedLibraryTaskMode = libraryTaskMode,
                 selectedLibraryOperation = libraryOperation,
-                selectedLibraryDateRange = libraryDateRange,
+                selectedLibraryDateRange = filters.dateRange,
                 selectedLibraryDateStartUtcMillis = libraryDateStartUtcMillis,
                 selectedLibraryDateEndUtcMillis = libraryDateEndUtcMillis,
                 selectedLibraryDimensionsKey = libraryDimensionsKey,
@@ -695,13 +380,13 @@ internal fun ImagesWorkspaceScreen(
                 selectedLibraryRuntime = libraryRuntime,
                 selectedLibraryDevice = libraryDevice,
                 newestFirst = newestFirst,
-                libraryModels = libraryModels,
-                libraryTaskModes = libraryTaskModes,
-                libraryOperations = libraryOperations,
-                libraryDimensions = libraryDimensions,
-                librarySchedulers = librarySchedulers,
-                libraryRuntimes = libraryRuntimes,
-                libraryDevices = libraryDevices,
+                libraryModels = filters.models,
+                libraryTaskModes = filters.taskModes,
+                libraryOperations = filters.operations,
+                libraryDimensions = filters.dimensions,
+                librarySchedulers = filters.schedulers,
+                libraryRuntimes = filters.runtimes,
+                libraryDevices = filters.devices,
                 selectionMode = selectionMode,
                 selectedImageIds = selectedImageIds,
                 batchSaving = batchSaving,
@@ -837,7 +522,7 @@ internal fun ImagesWorkspaceScreen(
                     }
                 },
                 onSelectAllVisible = {
-                    val visibleIds = filteredImages.mapTo(mutableSetOf(), ImageAssetUiItem::id)
+                    val visibleIds = filters.filteredImages.mapTo(mutableSetOf(), ImageAssetUiItem::id)
                     selectedImageIds = if (
                         visibleIds.isNotEmpty() && visibleIds.all(selectedImageIds::contains)
                     ) {
@@ -919,295 +604,94 @@ internal fun ImagesWorkspaceScreen(
         )
         }
 
-        previewImageId?.let { imageId ->
-            images.firstOrNull { it.id == imageId }?.let { image ->
-                val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
-                val generationActionsEnabled = jobs.none(ImageGenerationUiJob::isWorking) &&
-                    image.uriString.startsWith("content://", ignoreCase = true)
-                val canUseAsImg2Img = generationActionsEnabled &&
-                    ImageGenerationUiTaskMode.IMG2IMG in supportedTaskModes
-                val ultraFixTargetSize = selectedModel
-                    ?.takeIf { !selectedImageModelIsCloud && canUseAsImg2Img }
-                    ?.ultraFixTargetSizeForSourceOrNull(image.width, image.height)
-                val sourcePresetFields = image.generationPreset
-                    ?.let(::availableImageGenerationPresetFields)
-                    .orEmpty()
-                val reusablePresetFields = image.generationPreset?.let { preset ->
-                    compatibleImageGenerationPresetFields(
-                        preset = preset,
-                        selectedModel = selectedModel,
-                        selectedModelIsCloud = selectedImageModelIsCloud,
-                        supportsNegativePrompt = supportsNegativePrompt,
-                        supportsClipSkip = supportsClipSkip,
-                        supportsVaeTiling = supportsVaeTiling,
-                        supportsLora = supportsLora,
-                        availableLoraIds = loras.mapTo(mutableSetOf(), ImageLoraUiItem::id),
-                        maxBatchCount = maxBatchCount,
-                        currentTaskMode = taskMode,
-                        supportsTextualInversion = supportsTextualInversion,
-                        supportsUltraFix = supportsUltraFix,
-                        availableTextualInversionIds = textualInversions
-                            .filter { it.compatibleWithSelectedModel }
-                            .mapTo(mutableSetOf(), ImageTextualInversionUiItem::id)
-                    ).let { compatible ->
-                        if (inputImageUri == null) {
-                            compatible - ImageGenerationPresetField.ULTRAFIX
-                        } else {
-                            compatible
-                        }
-                    }
-                }.orEmpty()
-                ImageAssetPreviewOverlay(
-                    image = image,
-                    upscalers = upscalers,
-                    selectedUpscalerId = selectedUpscalerId,
-                    upscalerImporting = upscalerImporting,
-                    upscalerMessage = upscalerMessage,
-                    upscaleJob = upscaleJob,
-                    onDismiss = { previewImageId = null },
-                    onShare = {
-                        scope.launch {
-                            val result = withContext(Dispatchers.IO) {
-                                createCachedImageShareIntent(
-                                    context = context,
-                                    image = image,
-                                    includePrompt = false
-                                )
-                            }
-                            result
-                                .mapCatching { intent -> context.startActivity(intent) }
-                                .onFailure { error ->
-                                    Toast.makeText(
-                                        context,
-                                        error.message?.takeIf(String::isNotBlank) ?: "图片分享失败",
-                                        Toast.LENGTH_SHORT
-                                    ).show()
-                                }
-                        }
-                    },
-                    onDelete = {
-                        pendingDeleteIds = setOf(image.id)
-                    },
-                    canUseAsImg2Img = canUseAsImg2Img,
-                    canUseUltraFix = ultraFixTargetSize != null,
-                    onUseAsImg2Img = {
-                        onUseImageAsGenerationInput(image.uriString, image.width, image.height)
-                        onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
-                        onUltraFixEnabledChange(false)
-                        image.generationPrompt.takeIf(String::isNotBlank)?.let(onPromptChange)
-                        showGenerationCanvas = true
-                        previewImageId = null
-                    },
-                    onUseUltraFix = onUseUltraFix@ {
-                        val target = ultraFixTargetSize ?: return@onUseUltraFix
-                        onUseImageAsGenerationInput(image.uriString, image.width, image.height)
-                        onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
-                        if (!onUltraFixEnabledChange(true)) return@onUseUltraFix
-                        onWidthTextChange(target.first.toString())
-                        onHeightTextChange(target.second.toString())
-                        image.generationPrompt.takeIf(String::isNotBlank)?.let(onPromptChange)
-                        showGenerationCanvas = true
-                        previewImageId = null
-                    },
-                    onImportUpscaler = onImportUpscaler,
-                    onDeleteUpscaler = onDeleteUpscaler,
-                    onSelectUpscaler = onSelectUpscaler,
-                    onUpscale = { scale -> onUpscaleImage(image.id, scale) },
-                    onCancelUpscale = onCancelUpscale,
-                    onSetFavorite = { favorite -> onSetImageAssetFavorite(image.id, favorite) },
-                    reusablePresetFields = reusablePresetFields,
-                    hiddenPresetFieldCount = sourcePresetFields.size - reusablePresetFields.size,
-                    onUseParameters = useParameters@ { preset, fields ->
-                        val hasStructuredUltraFixPayload = preset.ultraFix != null
-                        val selectedUltraFix = ImageGenerationPresetField.ULTRAFIX in fields
-                        val compositeUltraFix = preset.ultraFix?.takeIf {
-                            selectedUltraFix
-                        }
-                        if (compositeUltraFix != null) {
-                            val currentSourceTarget = selectedModel
-                                ?.ultraFixTargetSizeForSourceOrNull(
-                                    inputImageWidth,
-                                    inputImageHeight
-                                )
-                            if (currentSourceTarget == null ||
-                                compositeUltraFix.targetWidth < currentSourceTarget.first ||
-                                compositeUltraFix.targetHeight < currentSourceTarget.second
-                            ) {
-                                Toast.makeText(
-                                    context,
-                                    "当前源图尺寸与这组 UltraFix 参数不兼容",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                return@useParameters
-                            }
-                            if (!onUltraFixEnabledChange(true)) return@useParameters
-                        }
-                        if (ImageGenerationPresetField.PROMPT in fields) {
-                            onPromptChange(preset.prompt)
-                        }
-                        if (ImageGenerationPresetField.NEGATIVE_PROMPT in fields) {
-                            onNegativePromptChange(preset.negativePrompt.orEmpty())
-                            onDisableModelNegativePromptChange(preset.negativePrompt == "")
-                        }
-                        if (ImageGenerationPresetField.STRENGTH in fields &&
-                            !hasStructuredUltraFixPayload
-                        ) {
-                            preset.strength?.let { onStrengthTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.CONTROL_STRENGTH in fields) {
-                            preset.controlStrength?.let {
-                                onControlStrengthTextChange(it.toString())
-                            }
-                        }
-                        if (ImageGenerationPresetField.SIZE in fields &&
-                            !hasStructuredUltraFixPayload
-                        ) {
-                            preset.width?.let { onWidthTextChange(it.toString()) }
-                            preset.height?.let { onHeightTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.STEPS in fields &&
-                            !hasStructuredUltraFixPayload
-                        ) {
-                            preset.steps?.let { onStepsTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.CFG in fields) {
-                            preset.cfgScale?.let { onCfgScaleTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.SEED in fields) {
-                            preset.seed?.let { onSeedTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.SAMPLER in fields) {
-                            val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
-                            preset.sampleMethod
-                                ?.takeIf {
-                                    selectedModel
-                                        ?.imageSupportedSamplersForTask(taskMode)
-                                        ?.contains(it) == true
-                                }
-                                ?.let(onSamplerChange)
-                        }
-                        if (ImageGenerationPresetField.CLIP_SKIP in fields && supportsClipSkip) {
-                            preset.clipSkip?.let { onClipSkipTextChange(it.toString()) }
-                        }
-                        if (ImageGenerationPresetField.BATCH in fields &&
-                            !hasStructuredUltraFixPayload
-                        ) {
-                            preset.batchCount?.let { onBatchCountChange(it.coerceIn(1, maxBatchCount)) }
-                        }
-                        if (ImageGenerationPresetField.VAE_TILING in fields &&
-                            supportsVaeTiling && !hasStructuredUltraFixPayload
-                        ) {
-                            onVaeTilingEnabledChange(preset.vaeTileSize != null)
-                        }
-                        if (ImageGenerationPresetField.LORA in fields && supportsLora) {
-                            val desiredIds = preset.loras.mapTo(mutableSetOf(), ImageGenerationUiLoraSelection::id)
-                            selectedLoras
-                                .filterNot { draft -> draft.id in desiredIds }
-                                .forEach { draft -> onToggleLora(draft.id) }
-                            preset.loras.forEach { selection ->
-                                if (selectedLoras.none { draft -> draft.id == selection.id }) {
-                                    onToggleLora(selection.id)
-                                }
-                                onLoraMultiplierChange(selection.id, selection.multiplier.toString())
-                            }
-                        }
-                        if (ImageGenerationPresetField.TEXTUAL_INVERSION in fields &&
-                            supportsTextualInversion
-                        ) {
-                            val desiredIds = preset.textualInversionIds.toSet()
-                            selectedTextualInversionIds
-                                .filterNot(desiredIds::contains)
-                                .forEach(onToggleTextualInversion)
-                            preset.textualInversionIds
-                                .filterNot(selectedTextualInversionIds::contains)
-                                .forEach(onToggleTextualInversion)
-                        }
-                        if (ImageGenerationPresetField.ULTRAFIX in fields && supportsUltraFix) {
-                            preset.ultraFix?.let { ultraFix ->
-                                onWidthTextChange(ultraFix.targetWidth.toString())
-                                onHeightTextChange(ultraFix.targetHeight.toString())
-                                onUltraFixRefinementStepsTextChange(
-                                    ultraFix.refinementSteps.toString()
-                                )
-                                onUltraFixDenoisingStepsTextChange(
-                                    ultraFix.inversionSteps.toString()
-                                )
-                                onUltraFixTileSizeTextChange(ultraFix.tileSize.toString())
-                                onUltraFixOverlapTextChange(ultraFix.overlap.toString())
-                            }
-                        }
-                        previewImageId = null
-                        Toast.makeText(context, "已将所选参数应用到生成面板", Toast.LENGTH_SHORT).show()
-                    },
-                    onRecreate = {
-                        pendingConversationPrompt = image.generationPrompt.ifBlank { image.prompt }
-                        showGenerationCanvas = true
-                        previewImageId = null
-                        onRecreateImageAsset(image.id)
-                    },
-                    recreateEnabled = image.canRecreate && jobs.none { it.isWorking },
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            }
-        }
-        }
-    }
-    if (pendingDeleteIds.isNotEmpty()) {
-        AlertDialog(
-            onDismissRequest = { pendingDeleteIds = emptySet() },
-            title = { Text(if (pendingDeleteIds.size == 1) "删除图片" else "批量删除") },
-            text = {
-                Text(
-                    if (pendingDeleteIds.size == 1) {
-                        "确定删除这张图片吗？此操作无法撤销。"
-                    } else {
-                        "确定删除选中的 ${pendingDeleteIds.size} 张图片吗？此操作无法撤销。"
-                    }
-                )
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        val ids = pendingDeleteIds.toList()
-                        if (ids.size == 1) onDeleteImageAsset(ids.single())
-                        else onDeleteImageAssets(ids)
-                        if (previewImageId?.let(pendingDeleteIds::contains) == true) {
-                            previewImageId = null
-                        }
-                        selectedImageIds = selectedImageIds - pendingDeleteIds
-                        pendingDeleteIds = emptySet()
-                        if (selectedImageIds.isEmpty()) selectionMode = false
-                    }
-                ) { Text("删除", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = {
-                TextButton(onClick = { pendingDeleteIds = emptySet() }) { Text("取消") }
-            }
+        ImageWorkspacePreviewSection(
+            previewImageId = previewImageId,
+            images = images,
+            imageModels = imageModels,
+            selectedImageModelId = selectedImageModelId,
+            selectedImageModelIsCloud = selectedImageModelIsCloud,
+            jobs = jobs,
+            supportedTaskModes = supportedTaskModes,
+            supportsNegativePrompt = supportsNegativePrompt,
+            supportsClipSkip = supportsClipSkip,
+            supportsVaeTiling = supportsVaeTiling,
+            supportsLora = supportsLora,
+            loras = loras,
+            selectedLoras = selectedLoras,
+            maxBatchCount = maxBatchCount,
+            taskMode = taskMode,
+            supportsTextualInversion = supportsTextualInversion,
+            supportsUltraFix = supportsUltraFix,
+            textualInversions = textualInversions,
+            selectedTextualInversionIds = selectedTextualInversionIds,
+            inputImageUri = inputImageUri,
+            inputImageWidth = inputImageWidth,
+            inputImageHeight = inputImageHeight,
+            upscalers = upscalers,
+            selectedUpscalerId = selectedUpscalerId,
+            upscalerImporting = upscalerImporting,
+            upscalerMessage = upscalerMessage,
+            upscaleJob = upscaleJob,
+            onDismissPreview = { previewImageId = null },
+            onDeleteImage = { id -> pendingDeleteIds = setOf(id) },
+            onUseImageAsGenerationInput = onUseImageAsGenerationInput,
+            onTaskModeChange = onTaskModeChange,
+            onUltraFixEnabledChange = onUltraFixEnabledChange,
+            onPromptChange = onPromptChange,
+            onNegativePromptChange = onNegativePromptChange,
+            onDisableModelNegativePromptChange = onDisableModelNegativePromptChange,
+            onStrengthTextChange = onStrengthTextChange,
+            onControlStrengthTextChange = onControlStrengthTextChange,
+            onWidthTextChange = onWidthTextChange,
+            onHeightTextChange = onHeightTextChange,
+            onStepsTextChange = onStepsTextChange,
+            onCfgScaleTextChange = onCfgScaleTextChange,
+            onSeedTextChange = onSeedTextChange,
+            onSamplerChange = onSamplerChange,
+            onClipSkipTextChange = onClipSkipTextChange,
+            onBatchCountChange = onBatchCountChange,
+            onVaeTilingEnabledChange = onVaeTilingEnabledChange,
+            onToggleLora = onToggleLora,
+            onLoraMultiplierChange = onLoraMultiplierChange,
+            onToggleTextualInversion = onToggleTextualInversion,
+            onUltraFixRefinementStepsTextChange = onUltraFixRefinementStepsTextChange,
+            onUltraFixDenoisingStepsTextChange = onUltraFixDenoisingStepsTextChange,
+            onUltraFixTileSizeTextChange = onUltraFixTileSizeTextChange,
+            onUltraFixOverlapTextChange = onUltraFixOverlapTextChange,
+            onImportUpscaler = onImportUpscaler,
+            onDeleteUpscaler = onDeleteUpscaler,
+            onSelectUpscaler = onSelectUpscaler,
+            onUpscaleImage = { id, scale -> onUpscaleImage(id, scale) },
+            onCancelUpscale = onCancelUpscale,
+            onSetImageAssetFavorite = { id, fav -> onSetImageAssetFavorite(id, fav) },
+            onRecreateImageAsset = onRecreateImageAsset,
+            onOpenGenerationCanvas = { showGenerationCanvas = true },
+            onSetPendingConversationPrompt = { pendingConversationPrompt = it }
         )
     }
-    if (showBackupDialog) {
-        ImageLibraryBackupDialog(
-            state = backupState,
-            totalCount = images.size,
-            totalBytes = images.sumOf(ImageAssetUiItem::sizeBytes),
-            favoriteCount = images.count(ImageAssetUiItem::favorite),
-            favoriteBytes = images.asSequence()
-                .filter(ImageAssetUiItem::favorite)
-                .sumOf(ImageAssetUiItem::sizeBytes),
-            favoritesOnly = backupFavoritesOnly,
-            onFavoritesOnlyChange = { backupFavoritesOnly = it },
-            onExport = {
-                val timestamp = java.text.SimpleDateFormat(
-                    "yyyyMMdd_HHmmss",
-                    java.util.Locale.US
-                ).format(java.util.Date())
-                backupExportLauncher.launch("MCA_image_library_$timestamp.zip")
-            },
-            onImport = {
-                backupImportLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
-            },
-            onCancel = onCancelBackup,
-            onDismiss = { if (!backupState.running) showBackupDialog = false }
-        )
-    }
+    ImageWorkspaceDeleteDialog(
+        pendingDeleteIds = pendingDeleteIds,
+        onConfirmDelete = { ids ->
+            if (ids.size == 1) onDeleteImageAsset(ids.single())
+            else onDeleteImageAssets(ids)
+            if (previewImageId?.let(ids::contains) == true) {
+                previewImageId = null
+            }
+            selectedImageIds = selectedImageIds - ids.toSet()
+            pendingDeleteIds = emptySet()
+            if (selectedImageIds.isEmpty()) selectionMode = false
+        },
+        onDismiss = { pendingDeleteIds = emptySet() }
+    )
+
+    ImageWorkspaceBackupDialogHost(
+        show = showBackupDialog,
+        backupState = backupState,
+        images = images,
+        onExportBackup = onExportBackup,
+        onImportBackup = onImportBackup,
+        onCancelBackup = onCancelBackup,
+        onDismiss = { showBackupDialog = false }
+    )
+}
 }
