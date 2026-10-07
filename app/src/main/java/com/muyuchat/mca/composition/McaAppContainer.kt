@@ -86,8 +86,16 @@ import com.muyuchat.mca.ImageGenerationHostAdapter
 import com.muyuchat.mca.CloudImageProvider
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.KnowledgeBaseRecord
+import com.muyuchat.mca.MainPostStartupCoordinator
+import com.muyuchat.mca.ContentImportPreviewCoordinator
+import com.muyuchat.mca.ContentImportPreviewStore
+import com.muyuchat.mca.ModelImportAndDownloadCoordinator
+import com.muyuchat.mca.OfflinePromptTranslationAndChatImageCoordinator
+import com.muyuchat.mca.ModelIdentityReferenceMigration
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Job
 import java.io.File
+
 import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
 import com.muyuchat.mca.bindingValue
@@ -1374,7 +1382,67 @@ internal class McaAppContainer(private val application: Application) {
         )
     }
 
+    val contentImportPreviewStore = ContentImportPreviewStore(application)
+
+    /** Lane A - A9/A10：启动后异步工作流与状态监控协调器工厂。 */
+    fun createMainPostStartupCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        engine: McaInferenceService,
+        imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
+        modelImportAndDownloadCoordinator: ModelImportAndDownloadCoordinator,
+        offlinePromptTranslationAndChatImageCoordinator: OfflinePromptTranslationAndChatImageCoordinator,
+        chatModelCoordinator: ChatModelCoordinator,
+        restorePendingContentImportPreview: () -> Unit,
+        observeManagedDownloadsAction: () -> Unit,
+        schedulePersistentPrefixCacheClear: (Long, String, String) -> Unit,
+        persistentPrefixCacheOperationSequence: AtomicLong,
+        managedRuntimeReadinessPortProvider: () -> ManagedRuntimeReadinessPort,
+        chatSessionPersistenceMutex: Mutex,
+        modelIdentityReferenceMigration: ModelIdentityReferenceMigration,
+        getDurableChatSessions: () -> List<ChatSessionRecord>,
+        setDurableChatSessions: (List<ChatSessionRecord>) -> Unit,
+        skipInitialModelDiscovery: Boolean
+    ): MainPostStartupCoordinator =
+        MainPostStartupCoordinator(
+            store = store,
+            scope = scope,
+            application = application,
+            container = this,
+            engine = engine,
+            modelStore = modelStore,
+            imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
+            modelImportAndDownloadCoordinator = modelImportAndDownloadCoordinator,
+            offlinePromptTranslationAndChatImageCoordinator = offlinePromptTranslationAndChatImageCoordinator,
+            chatModelCoordinator = chatModelCoordinator,
+            restorePendingContentImportPreview = restorePendingContentImportPreview,
+            observeManagedDownloadsAction = observeManagedDownloadsAction,
+            schedulePersistentPrefixCacheClear = schedulePersistentPrefixCacheClear,
+            persistentPrefixCacheOperationSequence = persistentPrefixCacheOperationSequence,
+            managedRuntimeReadinessPortProvider = managedRuntimeReadinessPortProvider,
+            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+            modelIdentityReferenceMigration = modelIdentityReferenceMigration,
+            getDurableChatSessions = getDurableChatSessions,
+            setDurableChatSessions = setDurableChatSessions,
+            skipInitialModelDiscovery = skipInitialModelDiscovery
+        )
+
+    fun createContentImportPreviewCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        assistantProfileCoordinator: AssistantProfileCoordinator,
+        showStatus: (String?) -> Unit
+    ): ContentImportPreviewCoordinator =
+        ContentImportPreviewCoordinator(
+            store = store,
+            scope = scope,
+            contentImportPreviewStore = contentImportPreviewStore,
+            assistantProfileCoordinator = assistantProfileCoordinator,
+            showStatus = showStatus
+        )
+
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()
     )
 }
+
