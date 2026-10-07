@@ -146,6 +146,7 @@ import com.muyuchat.mca.LocalImageAdapterPortAdapter
 import com.muyuchat.mca.WebSearchConfigPortAdapter
 import com.muyuchat.mca.VisionAttachmentPortAdapter
 import com.muyuchat.mca.WebSearchConfigPort
+import com.muyuchat.mca.WebSearchWorkflowCoordinator
 import com.muyuchat.mca.LocalImageAdapterPort
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.mca.AssistantStore
@@ -333,6 +334,17 @@ internal class McaAppContainer(private val application: Application) {
             webSearchStoreRef = webSearchStore,
             diagnosticStoreRef = webSearchDiagnosticStore,
             providerRef = webSearchProvider
+        )
+
+    fun createWebSearchWorkflowCoordinator(
+        store: UiStateStore,
+        terminalPort: ChatTerminalSettlementPort,
+        scope: CoroutineScope
+    ): WebSearchWorkflowCoordinator =
+        WebSearchWorkflowCoordinator(
+            port = createWebSearchConfigPort(store),
+            terminalPort = terminalPort,
+            scope = scope
         )
 
     fun createVisionAttachmentPort(store: UiStateStore, engine: McaInferenceService): VisionAttachmentPort =

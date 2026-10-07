@@ -489,8 +489,6 @@ class MainViewModel @JvmOverloads constructor(
     private val cloudImageProvider = container.cloudImageProvider
     private val webSearchStore = container.webSearchStore
     private val webSearchDiagnosticStore = container.webSearchDiagnosticStore
-    private val webSearchProvider: WebSearchProvider
-        get() = container.webSearchProvider
     private var activeWebSearchDeferred: Deferred<WebSearchResult>?
         get() = container.runtimeAdmission.activeWebSearchDeferred
         set(value) {
@@ -933,7 +931,8 @@ class MainViewModel @JvmOverloads constructor(
     private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
-    private val webSearchConfigPort = container.createWebSearchConfigPort(uiStateStore)
+    private val webSearchWorkflowCoordinator: WebSearchWorkflowCoordinator =
+        container.createWebSearchWorkflowCoordinator(uiStateStore, chatTerminalSettlementPort, viewModelScope)
     private val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
     private val tuningOwner = container.createTuningOwner(
@@ -1918,171 +1917,36 @@ class MainViewModel @JvmOverloads constructor(
         assistantId = assistantId, backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
     )
 
-    /** Delegates to [persistWebSearchConfig]. */
     fun saveWebSearchConfig(
-        enabled: Boolean,
-        provider: String,
-        endpoint: String,
-        apiKey: String,
-        maxResults: Int,
-        fetchPageContent: Boolean,
-        triggerMode: String,
-        researchMode: String,
-        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
-        persistWebSearchConfig(
-            port = webSearchConfigPort,
-            enabled = enabled,
-            provider = provider,
-            endpoint = endpoint,
-            apiKey = apiKey,
-            maxResults = maxResults,
-            fetchPageContent = fetchPageContent,
-            triggerMode = triggerMode,
-            researchMode = researchMode,
-            backupProviders = backupProviders
-        )
-    }
+        enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
+        fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) = webSearchWorkflowCoordinator.saveWebSearchConfig(enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
 
-    /** Delegates to [runWebSearchConfigTest]. */
-    fun testWebSearchConfig(query: String) {
-        runWebSearchConfigTest(port = webSearchConfigPort, scope = viewModelScope, query = query)
-    }
+    fun testWebSearchConfig(query: String) = webSearchWorkflowCoordinator.testWebSearchConfig(query)
 
-    /** Delegates to [runWebSearchConfigTest]. */
     fun testWebSearchConfig(
-        query: String,
-        enabled: Boolean,
-        provider: String,
-        endpoint: String,
-        apiKey: String,
-        maxResults: Int,
-        fetchPageContent: Boolean,
-        triggerMode: String,
-        researchMode: String,
-        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
-        runWebSearchConfigTest(
-            port = webSearchConfigPort,
-            scope = viewModelScope,
-            query = query,
-            enabled = enabled,
-            provider = provider,
-            endpoint = endpoint,
-            apiKey = apiKey,
-            maxResults = maxResults,
-            fetchPageContent = fetchPageContent,
-            triggerMode = triggerMode,
-            researchMode = researchMode,
-            backupProviders = backupProviders
-        )
-    }
+        query: String, enabled: Boolean, provider: String, endpoint: String, apiKey: String,
+        maxResults: Int, fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) = webSearchWorkflowCoordinator.testWebSearchConfig(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
 
-    /** Delegates to [runWebSearchPreflight]. */
     fun preflightWebSearchConfig(
-        enabled: Boolean,
-        provider: String,
-        endpoint: String,
-        apiKey: String,
-        maxResults: Int,
-        fetchPageContent: Boolean,
-        triggerMode: String,
-        researchMode: String,
-        backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
-        runWebSearchPreflight(
-            port = webSearchConfigPort,
-            scope = viewModelScope,
-            enabled = enabled,
-            provider = provider,
-            endpoint = endpoint,
-            apiKey = apiKey,
-            maxResults = maxResults,
-            fetchPageContent = fetchPageContent,
-            triggerMode = triggerMode,
-            researchMode = researchMode,
-            backupProviders = backupProviders
-        )
-    }
+        enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
+        fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
+    ) = webSearchWorkflowCoordinator.preflightWebSearchConfig(enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
 
-    /** Delegates to [runWebSearchConfigTest]. */
-    private fun testWebSearchConfig(query: String, config: WebSearchConfig) {
-        runWebSearchConfigTest(
-            port = webSearchConfigPort,
-            scope = viewModelScope,
-            query = query,
-            config = config
-        )
-    }
-
-    /** Delegates to [runWebSearchTurnTest]. */
     fun testWebSearchTurn(
-        query: String,
-        enabled: Boolean,
-        provider: String,
-        endpoint: String,
-        apiKey: String,
-        maxResults: Int,
-        fetchPageContent: Boolean,
-        triggerMode: String,
-        researchMode: String,
-        backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
+        query: String, enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
+        fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
         allowPublicCheckSourceForProtocolTest: Boolean = false
-    ) {
-        runWebSearchTurnTest(
-            port = webSearchConfigPort,
-            scope = viewModelScope,
-            query = query,
-            enabled = enabled,
-            provider = provider,
-            endpoint = endpoint,
-            apiKey = apiKey,
-            maxResults = maxResults,
-            fetchPageContent = fetchPageContent,
-            triggerMode = triggerMode,
-            researchMode = researchMode,
-            backupProviders = backupProviders,
-            allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
-        )
-    }
+    ) = webSearchWorkflowCoordinator.testWebSearchTurn(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders, allowPublicCheckSourceForProtocolTest)
 
-    /** Delegates to [runWebSearchTurnTest]. */
-    private fun testWebSearchTurn(
-        query: String,
-        config: WebSearchConfig,
-        allowPublicCheckSourceForProtocolTest: Boolean
-    ) {
-        runWebSearchTurnTest(
-            port = webSearchConfigPort,
-            scope = viewModelScope,
-            query = query,
-            config = config,
-            allowPublicCheckSourceForProtocolTest = allowPublicCheckSourceForProtocolTest
-        )
-    }
+    fun toggleWebSearchForNextTurn() = webSearchWorkflowCoordinator.toggleWebSearchForNextTurn()
 
+    fun cycleWebSearchResearchModeForNextTurn() = webSearchWorkflowCoordinator.cycleWebSearchResearchModeForNextTurn()
 
+    fun selectWebSearchResearchModeForNextTurn(mode: String) = webSearchWorkflowCoordinator.selectWebSearchResearchModeForNextTurn(mode)
 
-
-
-
-
-
-
-    fun toggleWebSearchForNextTurn() =
-        applyToggleWebSearchForNextTurn(webSearchConfigPort)
-
-    fun cycleWebSearchResearchModeForNextTurn() =
-        applyCycleWebSearchResearchModeForNextTurn(webSearchConfigPort)
-
-    fun selectWebSearchResearchModeForNextTurn(mode: String) =
-        applySelectWebSearchResearchModeForNextTurn(webSearchConfigPort, mode)
-
-    fun clearWebSearchDiagnostics() =
-        applyClearWebSearchDiagnostics(webSearchConfigPort)
-
-    private fun appendWebSearchDiagnostic(record: WebSearchDiagnosticRecord): List<WebSearchDiagnosticRecord> =
-        webSearchConfigPort.appendDiagnostic(record)
+    fun clearWebSearchDiagnostics() = webSearchWorkflowCoordinator.clearWebSearchDiagnostics()
 
     fun selectAssistant(assistantId: String) {
         val state = _uiState.value
@@ -4338,14 +4202,14 @@ class MainViewModel @JvmOverloads constructor(
             persistChatSessionsRef = ::persistChatSessions,
             appendAssistantRef = ::appendAssistant,
             flushPendingAssistantOutputRef = ::flushPendingAssistantOutput,
-            removePendingAssistantPlaceholderRef = ::removePendingAssistantPlaceholder,
-            ensureVisibleAssistantReplyAfterCompletionRef = ::ensureVisibleAssistantReplyAfterCompletion,
-            applyWebSearchAnswerGuardsToLastAssistantRef = ::applyWebSearchAnswerGuardsToLastAssistant,
-            recordWebSearchCitationAuditRef = ::recordWebSearchCitationAudit,
-            attachWebSearchEvidenceToPendingAssistantRef = ::attachWebSearchEvidenceToPendingAssistant,
+            removePendingAssistantPlaceholderRef = { settlePendingAssistantPlaceholder(port = chatTerminalSettlementPort, generationRunId = it) },
+            ensureVisibleAssistantReplyAfterCompletionRef = { settleVisibleAssistantReply(port = chatTerminalSettlementPort, generationRunId = it) },
+            applyWebSearchAnswerGuardsToLastAssistantRef = webSearchWorkflowCoordinator::applyWebSearchAnswerGuardsToLastAssistant,
+            recordWebSearchCitationAuditRef = webSearchWorkflowCoordinator::recordWebSearchCitationAudit,
+            attachWebSearchEvidenceToPendingAssistantRef = webSearchWorkflowCoordinator::attachWebSearchEvidenceToPendingAssistant,
             attachContextAssemblyTraceRef = ::attachContextAssemblyTrace,
             promptContextUsageForRef = contextCompressionCoordinator::promptContextUsageFor,
-            appendWebSearchDiagnosticRef = ::appendWebSearchDiagnostic,
+            appendWebSearchDiagnosticRef = webSearchWorkflowCoordinator::appendDiagnostic,
             recordCompletedCharacterMemoryTurnRef = ::recordCompletedCharacterMemoryTurn,
             summarizeContextForGenerationRef = contextCompressionCoordinator::summarizeContextForGeneration,
             ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
@@ -4405,43 +4269,6 @@ class MainViewModel @JvmOverloads constructor(
             flushPendingAssistantOutputRef = { flushPendingAssistantOutput() },
             persistConversationMutationRef = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
         )
-
-/** Delegates to [settleWebSearchAnswerGuards]. Signature kept verbatim. */
-    fun applyWebSearchAnswerGuardsToLastAssistant(
-        generationRunId: Long? = null
-    ): WebSearchCitationAudit? {
-        return settleWebSearchAnswerGuards(port = chatTerminalSettlementPort, generationRunId = generationRunId)
-    }
-
-/** Delegates to [settleVisibleAssistantReply]. Signature kept verbatim. */
-    fun ensureVisibleAssistantReplyAfterCompletion(generationRunId: Long? = null) {
-        settleVisibleAssistantReply(port = chatTerminalSettlementPort, generationRunId = generationRunId)
-    }
-
-/** Delegates to [settleWebSearchCitationAudit]. Signature kept verbatim. */
-    fun recordWebSearchCitationAudit(
-        recordId: String?,
-        audit: WebSearchCitationAudit,
-        generationRunId: Long? = null
-    ) {
-        settleWebSearchCitationAudit(port = chatTerminalSettlementPort, recordId = recordId, audit = audit, generationRunId = generationRunId)
-    }
-
-/** Delegates to [settlePendingAssistantPlaceholder]. Signature kept verbatim. */
-    fun removePendingAssistantPlaceholder(generationRunId: Long? = null) {
-        settlePendingAssistantPlaceholder(port = chatTerminalSettlementPort, generationRunId = generationRunId)
-    }
-
-/** Delegates to [settleWebSearchEvidenceAttachment]. Signature kept verbatim. */
-    fun attachWebSearchEvidenceToPendingAssistant(
-        sources: List<ChatSourceReference>,
-        trace: ChatWebSearchTrace?,
-        generationRunId: Long? = null
-    ) {
-        settleWebSearchEvidenceAttachment(port = chatTerminalSettlementPort, sources = sources, trace = trace, generationRunId = generationRunId)
-    }
-
-
 
 
     private fun refreshPersistentPrefixCacheSummary() {
