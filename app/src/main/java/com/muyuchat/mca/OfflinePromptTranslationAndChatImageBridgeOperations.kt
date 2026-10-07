@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import android.net.Uri
 import com.muyuchat.feature.chat.ChatImageActionKind
+import com.muyuchat.mca.composition.McaAppContainer
 import kotlinx.coroutines.CoroutineScope
 
 /**
@@ -11,8 +12,10 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
     private val store: UiStateStore,
     private val admission: RuntimeAdmissionState,
     private val scope: CoroutineScope,
+    private val container: McaAppContainer,
     private val installer: OfflinePromptTranslationBundleInstaller,
     private val downloader: OfflinePromptTranslationBundleDownloader,
+    private val offlinePromptTranslationServiceProvider: () -> OfflinePromptTranslationService,
     private val chatImageToolAuthorizationStore: ChatImageToolAuthorizationStore,
     private val prepareChatInput: (MainUiState) -> PreparedChatInput,
     private val showStatus: (String) -> Unit,
@@ -21,6 +24,18 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
     private val sendChatImageRequestWithPromptBridge: (visibleUserText: String, prompt: String, requestedOutputCount: Int?, allowCloudTranslationFallback: Boolean) -> Unit,
     private val sendPreparedMessage: (currentState: MainUiState, preparedInput: PreparedChatInput) -> Unit
 ) {
+    private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
+        container.createImagePromptTranslationPreviewPort(
+            store,
+            offlinePromptTranslationServiceProvider
+        )
+
+    suspend fun translateImagePromptPreview(prompt: String): String =
+        com.muyuchat.mca.translateImagePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
+
+    suspend fun translateImageNegativePromptPreview(prompt: String): String =
+        com.muyuchat.mca.translateImageNegativePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
+
     fun importOfflinePromptTranslationBundle(uri: Uri) {
         importOfflinePromptTranslationBundleFor(
             store = store,

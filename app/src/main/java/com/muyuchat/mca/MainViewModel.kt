@@ -943,7 +943,7 @@ class MainViewModel @JvmOverloads constructor(
     )
     // R3/C2: 生图准入/执行唯一 owner（C0-a）：三处端口实现与两个直连调用点收敛到同一实例。
     // R3/C2-S3: host 由 McaAppContainer 工厂装配具名适配器，出清 97 行匿名 object 与 33 处 this 引用。
-    private val imageGenerationOwner = container.createImageGenerationOwner(
+    private val imageGenerationOwner: ImageGenerationOwner = container.createImageGenerationOwner(
         store = uiStateStore,
         scope = viewModelScope,
         engine = engine,
@@ -1130,27 +1130,42 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private val assistantImageContinuationCoordinator = AssistantImageToolContinuationCoordinator(
+    private val assistantImageContinuationCoordinator: AssistantImageToolContinuationCoordinator = AssistantImageToolContinuationCoordinator(
         store = uiStateStore,
         admission = container.runtimeAdmission,
         container = container,
         cloudChatProvider = cloudChatProvider,
         chatContextComposer = chatContextComposer,
+        imageGenerationOwnerProvider = { imageGenerationOwner },
         chatImageRequestPort = { chatImageRequestPort },
-        chatImageRequestApprovalPort = { chatImageRequestApprovalPort },
         persistChatSessions = { persistChatSessions(it) },
         buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
         chatImageNegativePromptSupported = { chatImageNegativePromptSupported(it) },
-        continueAssistantImageToolTurn = { reqId, json -> continueAssistantImageToolTurn(reqId, json) },
-        cancelImageGenerationForJob = { cancelImageGenerationForJob(it) }
+        cancelImageGenerationForJob = { cancelImageGenerationForJob(it) },
+        reserveUiGenerationStart = ::reserveUiGenerationStart,
+        cancelPendingReservation = { chatRuns.cancelPending(it) },
+        showStatus = ::showStatus,
+        startGeneration = { requestMessages, reservation, toolExchanges, paramsOverride, offerAssistantImageTool, chatModelIdOverride, continuationRequestId ->
+            startGeneration(
+                requestMessages = requestMessages,
+                reservation = reservation,
+                toolExchanges = toolExchanges,
+                paramsOverride = paramsOverride,
+                offerAssistantImageTool = offerAssistantImageTool,
+                chatModelIdOverride = chatModelIdOverride,
+                continuationRequestId = continuationRequestId
+            )
+        }
     )
 
-    private val offlinePromptTranslationAndChatImageCoordinator = OfflinePromptTranslationAndChatImageCoordinator(
+    private val offlinePromptTranslationAndChatImageCoordinator: OfflinePromptTranslationAndChatImageCoordinator = OfflinePromptTranslationAndChatImageCoordinator(
         store = uiStateStore,
         admission = container.runtimeAdmission,
         scope = viewModelScope,
+        container = container,
         installer = container.offlineTranslationInstaller,
         downloader = container.offlineTranslationDownloader,
+        offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
         chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
         prepareChatInput = { it.prepareChatInput() },
         showStatus = ::showStatus,
@@ -3295,27 +3310,11 @@ class MainViewModel @JvmOverloads constructor(
     fun cancelOfflinePromptTranslationInstall() =
         offlinePromptTranslationAndChatImageCoordinator.cancelOfflinePromptTranslationInstall()
 
-    // R3-S33：提示词翻译预览端口具名适配器（容器工厂装配，真实依赖注入）。
-    private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
-        container.createImagePromptTranslationPreviewPort(
-            uiStateStore,
-            { offlinePromptTranslationService }
-        )
-
     suspend fun translateImagePromptPreview(prompt: String): String =
-        translateImagePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
+        offlinePromptTranslationAndChatImageCoordinator.translateImagePromptPreview(prompt)
 
     suspend fun translateImageNegativePromptPreview(prompt: String): String =
-        translateImageNegativePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
-
-    private suspend fun translateImagePromptTextPreview(
-        prompt: String,
-        fieldLabel: String
-    ): String = translateImagePromptTextPreview(
-        port = imagePromptTranslationPreviewPort,
-        prompt = prompt,
-        fieldLabel = fieldLabel
-    )
+        offlinePromptTranslationAndChatImageCoordinator.translateImageNegativePromptPreview(prompt)
 
     fun downloadOfflinePromptTranslationBundle() =
         offlinePromptTranslationAndChatImageCoordinator.downloadOfflinePromptTranslationBundle()
@@ -3359,215 +3358,18 @@ class MainViewModel @JvmOverloads constructor(
     fun setAssistantImageToolAutoApproval(enabled: Boolean) =
         offlinePromptTranslationAndChatImageCoordinator.setAssistantImageToolAutoApproval(enabled)
 
-    /**
-     * R3/C3-S14：端口具名化后，本成员只把参数交给容器适配器；决策体仍在
-     * [SendChatImageRequestOperations.sendChatImageRequest]。
-     */
-    private fun sendChatImageRequest(
-        visibleUserText: String,
-        prompt: String,
-        optionsOverride: LocalImageGenerationOptions? = null,
-        promptEnvelope: PromptEnvelope? = null,
-        contextTraceJson: String? = null
-    ) {
-        SendChatImageRequestOperations.sendChatImageRequest(
-            port = sendChatImageRequestPort,
-            visibleUserText = visibleUserText,
-            prompt = prompt,
-            optionsOverride = optionsOverride,
-            promptEnvelope = promptEnvelope,
-            contextTraceJson = contextTraceJson
-        )
-    }
-
-    /** Delegates to [chatImageSubmissionBlockMessageFor]. Signature kept verbatim. */
-    private fun chatImageSubmissionBlockMessage(state: MainUiState): String? =
-        chatImageSubmissionBlockMessageFor(state, container.runtimeAdmission, localImageGenerationCoordinator)
-
-    private fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
-        synchronized(container.runtimeAdmission.assistantImageContinuationLock) {
-            val current = findChatGeneratedImageRequestIn(_uiState.value, requestId)?.second ?: return
-            if (!current.canContinueAssistantImageTurn() ||
-                !container.runtimeAdmission.assistantImageContinuationsInFlight.add(requestId)
-            ) return
-            current
-        }
-        var reservation: UiGenerationReservation? = null
-        var started = false
-        try {
-            val (sessionId, request) = findChatGeneratedImageRequestIn(_uiState.value, requestId) ?: return
-            val pending = container.runtimeAdmission.pendingAssistantImageToolTurns[requestId]
-                ?: assistantImageContinuationCoordinator.restorePendingAssistantImageToolTurn(sessionId, request)
-                ?: run {
-                    applyChatGeneratedImageRequest(chatImageRequestPort,
-                        sessionId,
-                        requestId,
-                        request.copy(
-                            toolOutputJson = outputJson,
-                            toolContinuationStatus = ChatImageToolContinuationStatus.COMPLETED,
-                            toolContinuationStarted = true,
-                            message = "图片已保存，但聊天上下文已变化，已跳过自动续答。你可以继续发送新消息。"
-                        )
-                    )
-                    container.runtimeAdmission.pendingAssistantImageToolTurns.remove(requestId)
-                    return
-                }
-            val latest = findChatGeneratedImageRequestIn(_uiState.value, requestId)?.second ?: request
-            applyChatGeneratedImageRequest(chatImageRequestPort,
-                sessionId,
-                requestId,
-                latest.copy(toolOutputJson = outputJson)
-            )
-            val state = _uiState.value
-            if (state.activeChatSessionId != pending.chatSessionId) {
-                showStatus("图片任务已结束；请回到原对话查看结果并继续聊天。")
-                return
-            }
-            val cloudModelStillAvailable = state.cloudModels.any {
-                it.id == pending.cloudModelId && it.kind == CloudModelKind.CHAT && it.configured
-            }
-            if (!cloudModelStillAvailable) {
-                uiStateStore.update {
-                    it.copy(statusMessage = "图片已处理，但原云端聊天模型不可用；请恢复配置后继续角色回复。")
-                }
-                return
-            }
-            if (state.isGenerating) {
-                uiStateStore.update {
-                    it.copy(statusMessage = "图片已完成；当前聊天仍有生成任务，请完成或停止后再继续角色回复。")
-                }
-                return
-            }
-            // Reserve foreground UI ownership before persisting RUNNING. A background completion
-            // remains resumable and is retried by onAppForegrounded instead of being lost.
-            reservation = reserveUiGenerationStart()
-            if (reservation == null) {
-                uiStateStore.update {
-                    it.copy(statusMessage = "图片已完成；返回 MCA 后会继续角色回复。")
-                }
-                return
-            }
-            val call = pending.toolCalls.firstOrNull { it.id == pending.primaryToolCallId }
-            if (call == null) {
-                applyChatGeneratedImageRequest(chatImageRequestPort,
-                    sessionId,
-                    requestId,
-                    latest.copy(
-                        toolOutputJson = outputJson,
-                        toolContinuationStatus = ChatImageToolContinuationStatus.FAILED,
-                        toolContinuationStarted = false,
-                        message = "找不到本次工具调用记录，无法恢复角色回复。"
-                    )
-                )
-                return
-            }
-            applyChatGeneratedImageRequest(chatImageRequestPort,
-                pending.chatSessionId,
-                requestId,
-                latest.copy(
-                    toolOutputJson = outputJson,
-                    toolContinuationStatus = ChatImageToolContinuationStatus.RUNNING,
-                    toolContinuationStarted = true,
-                    message = latest.assistantTranscriptText()
-                )
-            )
-            val continuationState = _uiState.value
-            val messages = continuationState.messages + ChatMessage(Role.ASSISTANT, "")
-            val assistantSnapshot = continuationState.activeAssistantSnapshot()
-                ?: continuationState.selectedAssistant()?.toConversationSnapshot()
-            val sessions = continuationState.chatSessions.upsertSession(
-                sessionId = pending.chatSessionId,
-                messages = messages,
-                assistantId = assistantSnapshot?.assistantId ?: continuationState.selectedAssistantId,
-                assistantSnapshot = assistantSnapshot,
-                modelMode = ChatBackend.CLOUD.bindingValue(),
-                modelId = pending.cloudModelId
-            )
-            uiStateStore.update {
-                it.copy(
-                    input = "",
-                    messages = messages,
-                    chatSessions = sessions,
-                    isGenerating = true,
-                    statusMessage = null
-                ).withGenerationProgressCleared()
-            }
-            persistChatSessions(sessions)
-            started = startGeneration(
-                requestMessages = pending.originalRequestMessages,
-                reservation = reservation,
-                toolExchanges = listOf(ChatToolExchange(call, outputJson)),
-                paramsOverride = pending.params,
-                offerAssistantImageTool = false,
-                chatModelIdOverride = pending.cloudModelId,
-                continuationRequestId = requestId
-            )
-            if (!started) {
-                applyChatGeneratedImageRequest(chatImageRequestPort,
-                    pending.chatSessionId,
-                    requestId,
-                    latest.copy(
-                        toolOutputJson = outputJson,
-                        toolContinuationStatus = ChatImageToolContinuationStatus.FAILED,
-                        toolContinuationStarted = false,
-                        message = "角色回复未能启动，请检查云端模型后重试。"
-                    )
-                )
-                removeChatImageContinuationPlaceholder(pending.chatSessionId)
-            }
-        } finally {
-            if (!started) reservation?.let { chatRuns.cancelPending(it) }
-            synchronized(container.runtimeAdmission.assistantImageContinuationLock) {
-                container.runtimeAdmission.assistantImageContinuationsInFlight.remove(requestId)
-            }
-        }
-    }
-
-
-    private fun removeChatImageContinuationPlaceholder(chatSessionId: String) {
-        var updatedSessions: List<ChatSessionRecord>? = null
-        uiStateStore.update { state ->
-            if (state.activeChatSessionId != chatSessionId) return@update state
-            val last = state.messages.lastOrNull()
-            if (last?.role != Role.ASSISTANT || last.content.isNotBlank() ||
-                last.generatedImageRequest != null
-            ) return@update state
-            val messages = state.messages.dropLast(1)
-            val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@update state
-            val sessions = state.chatSessions.map { session ->
-                if (session.id == chatSessionId) {
-                    owner.copy(messages = messages, updatedAt = System.currentTimeMillis())
-                } else session
-            }.sortedForHistory()
-            updatedSessions = sessions
-            state.copy(
-                messages = messages,
-                chatSessions = sessions,
-                isGenerating = false
-            ).withGenerationProgressCleared()
-        }
-        updatedSessions?.let(::persistChatSessions)
-    }
-
-
-    /** R3-S35：聊天生图审批端口具名适配器（容器工厂装配，出清 66 行匿名类与 9 处 this@VM）。 */
-    private val chatImageRequestApprovalPort: ChatImageRequestApprovalPort =
-        container.createChatImageRequestApprovalPort(
-            store = uiStateStore,
-            imageGenerationOwnerProvider = { imageGenerationOwner },
-            chatImageRequestPortProvider = { chatImageRequestPort },
-            buildChatImageRetrySnapshot = { req, sId -> buildChatImageRetrySnapshot(req, sId) },
-            continueAssistantImageToolTurn = { reqId, json -> continueAssistantImageToolTurn(reqId, json) }
-        )
+    private fun continueAssistantImageToolTurn(requestId: String, outputJson: String) =
+        assistantImageContinuationCoordinator.continueAssistantImageToolTurn(requestId, outputJson)
 
     fun retryChatImageGeneration(requestId: String) =
-        retryChatImageGeneration(port = chatImageRequestApprovalPort, requestId = requestId)
+        assistantImageContinuationCoordinator.retryChatImageGeneration(requestId)
 
     fun approveChatImageRequest(requestId: String) =
-        approveChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
+        assistantImageContinuationCoordinator.approveChatImageRequest(requestId)
 
     fun rejectChatImageRequest(requestId: String) =
-        rejectChatImageRequest(port = chatImageRequestApprovalPort, requestId = requestId)
+        assistantImageContinuationCoordinator.rejectChatImageRequest(requestId)
+
 
     /** Resumes a terminal assistant tool turn if the process stopped before the follow-up reply. */
     fun continueAssistantImageTurn(requestId: String) =
@@ -4578,7 +4380,8 @@ class MainViewModel @JvmOverloads constructor(
             offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
             verifiedOfflineTranslationBundleRef = { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() },
             sendChatImageRequestRef = { visibleUserText, prompt, optionsOverride, promptEnvelope, contextTraceJson ->
-                sendChatImageRequest(
+                SendChatImageRequestOperations.sendChatImageRequest(
+                    port = sendChatImageRequestPort,
                     visibleUserText = visibleUserText,
                     prompt = prompt,
                     optionsOverride = optionsOverride,

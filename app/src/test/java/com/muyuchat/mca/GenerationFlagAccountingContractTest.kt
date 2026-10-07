@@ -94,6 +94,13 @@ import org.junit.Test
  * projection carries exactly one raw `isGenerating = false` reset, so that write left
  * `MainViewModel` (3 -> 2) and the accounting now also scans the lifecycle owner file (1 reset).
  * The writes are unchanged, only their file.
+ *
+ * ## Re-derivation recorded (R4-S23)
+ *
+ * Assistant image tool turn continuation moved to `AssistantImageToolContinuationOperations.kt`
+ * (`continueAssistantImageToolTurnFor`, `removeChatImageContinuationPlaceholderFor`); one raw
+ * `isGenerating = true` start site and one raw `isGenerating = false` reset left `MainViewModel`
+ * (true: 3 -> 2, false: 2 -> 1). The accounting now scans the continuation owner file (1 start, 1 reset).
  */
 class GenerationFlagAccountingContractTest {
 
@@ -119,14 +126,18 @@ class GenerationFlagAccountingContractTest {
     private val runtimeLifecycle: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/RuntimeLifecycleOperations.kt")
     }
+    /** R4-S23：助手生图后继轮次迁移至 AssistantImageToolContinuationOperations.kt。 */
+    private val assistantImageContinuation: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/AssistantImageToolContinuationOperations.kt")
+    }
 
     /**
-     * Measured baseline across the four files that own the flag's transitions.
+     * Measured baseline across the files that own the flag's transitions.
      *
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
-    private val expectedTrueInViewModel = 3
-    private val expectedFalseInViewModel = 2
+    private val expectedTrueInViewModel = 2
+    private val expectedFalseInViewModel = 1
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
     private val expectedTrueInPublisher = 0
@@ -135,6 +146,8 @@ class GenerationFlagAccountingContractTest {
     private val expectedFalseInStopOperations = 1
     private val expectedFalseInChatSessionPersistence = 1
     private val expectedFalseInRuntimeLifecycle = 1
+    private val expectedTrueInAssistantImageContinuation = 1
+    private val expectedFalseInAssistantImageContinuation = 1
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -238,6 +251,8 @@ class GenerationFlagAccountingContractTest {
         val falseInStopOperations = assignments(stopOperations).count { it.second == "false" }
         val falseInChatSessionPersistence = assignments(chatSessionPersistence).count { it.second == "false" }
         val falseInRuntimeLifecycle = assignments(runtimeLifecycle).count { it.second == "false" }
+        val trueInAssistantImageContinuation = assignments(assistantImageContinuation).count { it.second == "true" }
+        val falseInAssistantImageContinuation = assignments(assistantImageContinuation).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -255,6 +270,16 @@ class GenerationFlagAccountingContractTest {
             expectedFalseInRuntimeLifecycle,
             falseInRuntimeLifecycle
         )
+        assertEquals(
+            "AssistantImageToolContinuationOperations starts changed",
+            expectedTrueInAssistantImageContinuation,
+            trueInAssistantImageContinuation
+        )
+        assertEquals(
+            "AssistantImageToolContinuationOperations resets changed",
+            expectedFalseInAssistantImageContinuation,
+            falseInAssistantImageContinuation
+        )
     }
 
     @Test
@@ -270,8 +295,22 @@ class GenerationFlagAccountingContractTest {
         val owners = assignments(mainViewModel).filter { it.second == "true" }.map { ownerOf(it.first) }.toSet()
         assertEquals(
             "Start sites moved; this test's KDoc lists the entry points and must move with them.",
-            setOf("sendPreparedMessageAsync", "continueAssistantImageToolTurn", "regenerateLastResponse"),
+            setOf("sendPreparedMessageAsync", "regenerateLastResponse"),
             owners
+        )
+        val continuationLines = assistantImageContinuation.lines()
+        fun continuationOwnerOf(index: Int): String {
+            for (cursor in index downTo 0) {
+                Regex("""^(?:internal |private |public )?(?:suspend )?fun (\w+)\(""")
+                    .find(continuationLines[cursor])?.let { return it.groupValues[1] }
+            }
+            return "?"
+        }
+        val continuationOwners = assignments(assistantImageContinuation).filter { it.second == "true" }
+            .map { continuationOwnerOf(it.first) }.toSet()
+        assertEquals(
+            setOf("continueAssistantImageToolTurnFor"),
+            continuationOwners
         )
     }
 
@@ -283,6 +322,7 @@ class GenerationFlagAccountingContractTest {
         assertEquals("GenerationStateTransitions", 0, exceptionSafeResets(transitions))
         assertEquals("ChatGenerationUiPublisher", 0, exceptionSafeResets(publisher))
         assertEquals("ChatStopGenerationOperations", 0, exceptionSafeResets(stopOperations))
+        assertEquals("AssistantImageToolContinuationOperations", 0, exceptionSafeResets(assistantImageContinuation))
     }
 
     // ── Positive controls ───────────────────────────────────────────────────────────────
