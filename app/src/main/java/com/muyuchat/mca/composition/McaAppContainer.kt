@@ -85,9 +85,10 @@ import com.muyuchat.mca.ImageGenerationOwner
 import com.muyuchat.mca.ImageGenerationHostAdapter
 import com.muyuchat.mca.CloudImageProvider
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
-import com.muyuchat.mca.KnowledgeBaseRecord
 import com.muyuchat.mca.MainPostStartupCoordinator
 import com.muyuchat.mca.ContentImportPreviewCoordinator
+import com.muyuchat.mca.ChatSessionManagementCoordinator
+import com.muyuchat.mca.ChatInputAndAttachmentCoordinator
 import com.muyuchat.mca.ContentImportPreviewStore
 import com.muyuchat.mca.ModelImportAndDownloadCoordinator
 import com.muyuchat.mca.OfflinePromptTranslationAndChatImageCoordinator
@@ -191,6 +192,7 @@ import com.muyuchat.mca.ChatImageToolAuthorizationStore
 import com.muyuchat.mca.ChatSessionStore
 import com.muyuchat.mca.CloudApiStore
 import com.muyuchat.mca.GlobalChatAppearanceStore
+import com.muyuchat.mca.KnowledgeBaseRecord
 import com.muyuchat.mca.KnowledgeBaseStore
 import com.muyuchat.mca.LocalImageLoraStore
 import com.muyuchat.mca.LocalImageModelStore
@@ -1439,6 +1441,70 @@ internal class McaAppContainer(private val application: Application) {
             contentImportPreviewStore = contentImportPreviewStore,
             assistantProfileCoordinator = assistantProfileCoordinator,
             showStatus = showStatus
+        )
+
+    fun createChatSessionManagementCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        rejectWhileConversationMutationInProgress: () -> Boolean,
+        hasActiveAssistantImageExecutionIn: (MainUiState, String) -> Boolean,
+        showStatus: (String?) -> Unit,
+        fail: (String) -> Unit,
+        invalidatePendingChatImagePreparation: () -> Unit,
+        cancelActiveWebSearch: () -> Unit,
+        bumpContentImportSelectionRevision: () -> Unit,
+        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
+        markLocalConversationContextInvalid: () -> Unit,
+        continueAssistantImageTurn: (String) -> Unit,
+        persistChatSessions: (List<ChatSessionRecord>) -> kotlinx.coroutines.Job?
+    ): ChatSessionManagementCoordinator =
+        ChatSessionManagementCoordinator(
+            application = application,
+            scope = scope,
+            store = store,
+            container = this,
+            rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
+            hasActiveAssistantImageExecutionIn = hasActiveAssistantImageExecutionIn,
+            showStatus = showStatus,
+            fail = fail,
+            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
+            cancelActiveWebSearch = cancelActiveWebSearch,
+            bumpContentImportSelectionRevision = bumpContentImportSelectionRevision,
+            loadModelGenerationParams = loadModelGenerationParams,
+            markLocalConversationContextInvalid = markLocalConversationContextInvalid,
+            continueAssistantImageTurn = continueAssistantImageTurn,
+            persistChatSessions = persistChatSessions
+        )
+
+    fun createChatInputAndAttachmentCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        showStatus: (String?) -> Unit,
+        fail: (String) -> Unit,
+        invalidatePendingChatImagePreparation: () -> Unit,
+        awaitImageLibraryStartupReconciliation: suspend () -> Unit,
+        imageAssetWriteMutex: Mutex,
+        imageAssetDirectory: java.io.File,
+        imageLibraryCommitPort: () -> ImageLibraryCommitPort,
+        imagePromptTokenMeasurementHost: ImagePromptTokenMeasurementHost,
+        visionAttachmentPort: VisionAttachmentPort,
+        chatSessionStore: ChatSessionStore
+    ): ChatInputAndAttachmentCoordinator =
+        ChatInputAndAttachmentCoordinator(
+            application = application,
+            scope = scope,
+            store = store,
+            container = this,
+            showStatus = showStatus,
+            fail = fail,
+            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
+            awaitImageLibraryStartupReconciliation = awaitImageLibraryStartupReconciliation,
+            imageAssetWriteMutex = imageAssetWriteMutex,
+            imageAssetDirectory = imageAssetDirectory,
+            imageLibraryCommitPort = imageLibraryCommitPort,
+            imagePromptTokenMeasurementHost = imagePromptTokenMeasurementHost,
+            visionAttachmentPort = visionAttachmentPort,
+            chatSessionStore = chatSessionStore
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

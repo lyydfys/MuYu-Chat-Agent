@@ -245,112 +245,6 @@ enum class AppTab(val title: String) {
     API("本地 API"),
     SETTINGS("系统设置")
 }
-// R3/C2: private → internal：随 enqueue 体移入 ImageGenerationOwner 所需。
-internal fun chatImageCommitJournalJobId(jobId: String, imageId: String): String {
-    val safeImageId = imageId.filter { it.isLetterOrDigit() || it in "._:-" }
-        .take(128)
-        .ifBlank { "image" }
-    return "${jobId.take(120)}.$safeImageId"
-}
-
-/**
- * Widened from `private` so the conversion that builds it can live in its own file; only the
- * modifier changed. The type is still not part of any public surface.
- */
-internal data class CandidateCanaryResult(
-    val passed: Boolean,
-    val output: String,
-    val stats: RuntimeStats,
-    val detail: String,
-    val measurement: MeasurementEnvelope,
-    val safetyPassed: Boolean,
-    val signatureVerification: AuthorizedPendingSignatureVerification?,
-    val crashCount: Int = 0,
-    val anrCount: Int = 0,
-    val nativeFatalSignalCount: Int = 0,
-    val testedProfileId: String? = null,
-    val testedResolvedLoadSignature: String? = null,
-    val testedCommittedExecutionSignature: String? = null,
-    val evidenceJson: String = "{}"
-)
-
-// R3/C1: private → internal：随 captureLoadedRuntimeSnapshotFor 移入运行时缝（C1 裁定 B）。
-internal data class LoadedRuntimeSnapshot(
-    val model: ModelManifest,
-    val profile: ModelExecutionProfile,
-    val uiState: MainUiState,
-    val adaptiveRecommendation: AdaptiveTuningRecommendation?
-)
-
-private data class LocalApiApplyResult(
-    val running: Boolean,
-    val restEnabled: Boolean,
-    val failure: Throwable? = null
-)
-internal val imageAttachmentRegex = Regex("""\u3010上传图片：([^\u3011]+)\u3011(?:\s*\n描述：[^\n]+)?\s*\n(\S+)""")
-private val oldImagePlaceholderRegex = Regex("""\s*（当前文本模型会收到图片占位信息；完整识图能力后续接入多模态模型。）""")
-internal const val FILE_ATTACHMENT_MARKER = "\u3010\u4e0a\u4f20\u6587\u4ef6\uff1a"
-// `internal`, not `private`: the vision preparation that enforces this cap moved to
-// VisionAttachmentSupport.kt, and one shared cap is safer than two copies drifting apart.
-internal const val MAX_CHAT_IMAGES_PER_MESSAGE = 4
-// `internal`, not `private`: the send-boundary deduplication that reads this budget moved to
-// VisionAttachmentSupport.kt, and one shared bound is safer than two copies drifting apart.
-internal const val CHAT_SEND_ATTACHMENT_IDENTITY_MAX_BYTES = 64L * 1024L * 1024L
-
-internal data class LocalImagePromptTokenizerDescriptor(
-    val modelKey: String,
-    val bundleRoot: File,
-    val backend: ImageTokenizerBackend,
-    val route: ImagePromptTokenMeasurementRoute,
-    val tokenizerJsonPath: File?,
-    val bosId: Int,
-    val eosId: Int,
-    val padId: Int,
-    val maxTokens: Int,
-    val promptWeightingEnabled: Boolean,
-)
-
-/** Keeps UI-only tokenizer results bounded without ever caching an unavailable backend. */
-// R3/C3-S3: private → internal：随端口具名化迁入容器。
-internal class ImagePromptTokenMeasurementCache(
-    private val maximumEntries: Int = 96
-) {
-    private val entries = object : LinkedHashMap<String, ImagePromptTokenMeasurement>(
-        maximumEntries,
-        0.75f,
-        true
-    ) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<String, ImagePromptTokenMeasurement>?
-        ): Boolean = size > maximumEntries
-    }
-
-    init {
-        require(maximumEntries > 0)
-    }
-
-    fun get(key: String): ImagePromptTokenMeasurement? = synchronized(entries) { entries[key] }
-
-    fun put(key: String, value: ImagePromptTokenMeasurement) {
-        synchronized(entries) { entries[key] = value }
-    }
-}
-internal sealed interface DownloadedModelRegistration {
-    data class Chat(val model: ModelManifest) : DownloadedModelRegistration
-    data class Image(val model: LocalImageModelRecord) : DownloadedModelRegistration
-    data class VisionProjector(val model: ModelManifest, val shouldReload: Boolean) : DownloadedModelRegistration
-}
-
-internal sealed interface VisionBundleDownloadResult {
-    data class ChatModel(val model: ModelManifest) : VisionBundleDownloadResult
-    data class EngineBundle(
-        val displayName: String,
-        val bundleDir: File,
-        val report: LocalVisionNpuReport
-    ) : VisionBundleDownloadResult
-}
-
-
 class MainViewModel @JvmOverloads constructor(
     application: Application,
     private val deferStartup: Boolean = false,
@@ -358,7 +252,9 @@ class MainViewModel @JvmOverloads constructor(
     injectedEngine: McaInferenceService? = null,
     injectedLocalApiRuntimeOwner: Any? = null,
     injectedChatAppearanceCoordinator: Any? = null,
-    injectedMainPostStartupCoordinator: Any? = null
+    injectedMainPostStartupCoordinator: Any? = null,
+    injectedChatSessionManagementCoordinator: Any? = null,
+    injectedChatInputAndAttachmentCoordinator: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -573,16 +469,12 @@ class MainViewModel @JvmOverloads constructor(
 
     private var localConversationContextNeedsInvalidation: Boolean
         get() = container.runtimeAdmission.localConversationContextNeedsInvalidation
-        set(value) {
-            container.runtimeAdmission.localConversationContextNeedsInvalidation = value
-        }
+        set(value) { container.runtimeAdmission.localConversationContextNeedsInvalidation = value }
     private val localConversationContextInvalidationSequence: AtomicLong
         get() = container.runtimeAdmission.localConversationContextInvalidationSequence
     private var localConversationContextInvalidationJob: Job?
         get() = container.runtimeAdmission.localConversationContextInvalidationJob
-        set(value) {
-            container.runtimeAdmission.localConversationContextInvalidationJob = value
-        }
+        set(value) { container.runtimeAdmission.localConversationContextInvalidationJob = value }
     private val persistentPrefixCacheOperationSequence = AtomicLong(0L)
     /**
      * A destructive conversation edit is published to Room before native KV
@@ -591,49 +483,24 @@ class MainViewModel @JvmOverloads constructor(
     */
     private var conversationMutationBarrier: Job?
         get() = container.runtimeAdmission.conversationMutationBarrier
-        set(value) {
-            container.runtimeAdmission.conversationMutationBarrier = value
-        }
+        set(value) { container.runtimeAdmission.conversationMutationBarrier = value }
     private var durableChatSessions: List<ChatSessionRecord>
         get() = container.chatSessionPersistenceState.durableChatSessions
-        set(value) {
-            container.chatSessionPersistenceState.durableChatSessions = value
-        }
-    private val chatSessionPersistenceMutex: Mutex
-        get() = container.chatSessionPersistenceState.persistenceMutex
-    private val chatSessionPersistenceSequence: AtomicLong
-        get() = container.chatSessionPersistenceState.persistenceSequence
-    private val chatSessionPersistenceStateLock: Any
-        get() = container.chatSessionPersistenceState.stateLock
-    private val pendingKnowledgeBindings: MutableMap<String, Set<String>>
-        get() = container.chatSessionPersistenceState.pendingKnowledgeBindings
-    private val pendingWorldBookCleanupOwners: MutableMap<WorldBookScope, MutableSet<String>>
-        get() = container.chatSessionPersistenceState.pendingWorldBookCleanupOwners
+        set(value) { container.chatSessionPersistenceState.durableChatSessions = value }
+    private val chatSessionPersistenceMutex: Mutex get() = container.chatSessionPersistenceState.persistenceMutex
+    private val chatSessionPersistenceSequence: AtomicLong get() = container.chatSessionPersistenceState.persistenceSequence
+    private val chatSessionPersistenceStateLock: Any get() = container.chatSessionPersistenceState.stateLock
+    private val pendingKnowledgeBindings: MutableMap<String, Set<String>> get() = container.chatSessionPersistenceState.pendingKnowledgeBindings
+    private val pendingWorldBookCleanupOwners: MutableMap<WorldBookScope, MutableSet<String>> get() = container.chatSessionPersistenceState.pendingWorldBookCleanupOwners
     private var directParameterStageJob: Job?
         get() = container.runtimeAdmission.directParameterStageJob
-        set(value) {
-            container.runtimeAdmission.directParameterStageJob = value
-        }
-    private val directParameterStageMutex: Mutex
-        get() = container.runtimeAdmission.directParameterStageMutex
-    private val directParameterStageGeneration: AtomicLong
-        get() = container.runtimeAdmission.directParameterStageGeneration
+        set(value) { container.runtimeAdmission.directParameterStageJob = value }
+    private val directParameterStageMutex: Mutex get() = container.runtimeAdmission.directParameterStageMutex
+    private val directParameterStageGeneration: AtomicLong get() = container.runtimeAdmission.directParameterStageGeneration
     private val managedRuntimeReadinessRefreshGate = container.readinessRefreshGate
-    private val imageAssetWriteMutex: Mutex
-        get() = container.imageAssetWriteMutex
-    private val imageLibraryMutationMutex: Mutex
-        get() = container.imageLibraryMutationMutex
-    private val imageFavoriteMutationSequence: AtomicLong
-        get() = container.runtimeAdmission.imageFavoriteMutationSequence
-    private val latestImageFavoriteMutations: java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Boolean>>
-        get() = container.runtimeAdmission.latestImageFavoriteMutations
-    private var imageGenerationJob: Job?
-        get() = container.runtimeAdmission.imageGenerationJob
-        set(value) {
-            container.runtimeAdmission.imageGenerationJob = value
-        }
-    private val contentImportSelectionRevision: AtomicLong
-        get() = container.runtimeAdmission.contentImportSelectionRevision
+    private val imageAssetWriteMutex: Mutex get() = container.imageAssetWriteMutex
+    private val imageLibraryMutationMutex: Mutex get() = container.imageLibraryMutationMutex
+    private val contentImportSelectionRevision: AtomicLong get() = container.runtimeAdmission.contentImportSelectionRevision
     internal fun captureContentImportOwner(): ContentImportOwner = ContentImportOwner(
         sessionId = uiStateStore.current.activeChatSessionId,
         assistantId = uiStateStore.current.selectedAssistantId,
@@ -654,78 +521,39 @@ class MainViewModel @JvmOverloads constructor(
     }
     private var imageLibraryBackupJob: Job?
         get() = container.runtimeAdmission.imageLibraryBackupJob
-        set(value) {
-            container.runtimeAdmission.imageLibraryBackupJob = value
-        }
+        set(value) { container.runtimeAdmission.imageLibraryBackupJob = value }
     private val imageLibraryBackupCoordinator = ImageLibraryBackupCoordinator()
     // R3/C2：运行期准入态迁入容器 holder（同实例共享，读写语义与调用点不变）。
     private var activeRuntimeIdentity: ModelRuntimeIdentity?
         get() = container.runtimeAdmission.activeRuntimeIdentity
-        set(value) {
-            container.runtimeAdmission.activeRuntimeIdentity = value
-        }
-    private var activeVisionProjectorStamp: LoadedVisionProjectorStamp?
-        get() = container.runtimeAdmission.activeVisionProjectorStamp
-        set(value) {
-            container.runtimeAdmission.activeVisionProjectorStamp = value
-        }
+        set(value) { container.runtimeAdmission.activeRuntimeIdentity = value }
     private var activeAdaptiveRecommendation: AdaptiveTuningRecommendation?
         get() = container.runtimeAdmission.activeAdaptiveRecommendation
-        set(value) {
-            container.runtimeAdmission.activeAdaptiveRecommendation = value
-        }
-    private var pendingAdaptiveRecommendation: AdaptiveTuningRecommendation?
-        get() = container.runtimeAdmission.pendingAdaptiveRecommendation
-        set(value) {
-            container.runtimeAdmission.pendingAdaptiveRecommendation = value
-        }
+        set(value) { container.runtimeAdmission.activeAdaptiveRecommendation = value }
     private var pendingProfileTransactionId: String?
         get() = container.runtimeAdmission.pendingProfileTransactionId
-        set(value) {
-            container.runtimeAdmission.pendingProfileTransactionId = value
-        }
-    private var activeProfileTransactionId: String?
-        get() = container.runtimeAdmission.activeProfileTransactionId
-        set(value) {
-            container.runtimeAdmission.activeProfileTransactionId = value
-        }
+        set(value) { container.runtimeAdmission.pendingProfileTransactionId = value }
     private var activeModelForRuntimeProfile: ModelManifest?
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
-        set(value) {
-            container.runtimeAdmission.activeModelForRuntimeProfile = value
-        }
+        set(value) { container.runtimeAdmission.activeModelForRuntimeProfile = value }
     private val localApiIdempotencyJournalLock = Any()
     private var activeImageGenerationJobId: String?
         get() = container.runtimeAdmission.activeImageGenerationJobId
-        set(value) {
-            container.runtimeAdmission.activeImageGenerationJobId = value
-        }
+        set(value) { container.runtimeAdmission.activeImageGenerationJobId = value }
     private var activeImageGenerationBackend: ImageBackend?
         get() = container.runtimeAdmission.activeImageGenerationBackend
-        set(value) {
-            container.runtimeAdmission.activeImageGenerationBackend = value
-        }
+        set(value) { container.runtimeAdmission.activeImageGenerationBackend = value }
     private var activeImageGenerationModelId: String?
         get() = container.runtimeAdmission.activeImageGenerationModelId
-        set(value) {
-            container.runtimeAdmission.activeImageGenerationModelId = value
-        }
+        set(value) { container.runtimeAdmission.activeImageGenerationModelId = value }
     // R3-S30：activeLocalImageWorkerRequestId 已入 RuntimeAdmissionState；读点直改容器读。
     private var activeLocalApiImageModelId: String?
         get() = container.runtimeAdmission.activeLocalApiImageModelId
-        set(value) {
-            container.runtimeAdmission.activeLocalApiImageModelId = value
-        }
-    private val localImageGenerationCoordinator: LocalImageGenerationCoordinator
-        get() = container.localImageGenerationCoordinator
-    private val localImageGenerationCoordinatorObservationLock: Any
-        get() = container.localImageGenerationCoordinatorObservationLock
+        set(value) { container.runtimeAdmission.activeLocalApiImageModelId = value }
+    private val localImageGenerationCoordinator: LocalImageGenerationCoordinator get() = container.localImageGenerationCoordinator
+    private val localImageGenerationCoordinatorObservationLock: Any get() = container.localImageGenerationCoordinatorObservationLock
     private val localApiImageGenerationLifecycleLock = Any()
     private var activeLocalApiImageGenerationOwnership: LocalApiImageGenerationOwnership? = null
-    private val localImageLoraLifecycleLock: Any
-        get() = container.localImageLoraLifecycleLock
-    private val localImageTextualInversionLifecycleLock: Any
-        get() = container.localImageTextualInversionLifecycleLock
 
     private suspend fun awaitImageLibraryStartupReconciliation() {
         imageLibraryStartupReconciliation.await()
@@ -1149,7 +977,7 @@ class MainViewModel @JvmOverloads constructor(
         captureContentImportOwner = ::captureContentImportOwner,
         stageContentImportPreview = ::stageContentImportPreview,
         readAttachmentText = { uri, maxBytes -> readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes) },
-        currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() }
+        currentModelGenerationProfileKey = { GenerationPreferences.modelGenerationProfileKey(uiStateStore.current.selectedChatBackend, uiStateStore.current.currentChatModelId()) }
     )
 
     private val contextCompressionCoordinator = ContextCompressionCoordinator(
@@ -1228,6 +1056,41 @@ class MainViewModel @JvmOverloads constructor(
             skipInitialModelDiscovery = skipInitialModelDiscovery
         )
 
+    private val chatSessionManagementCoordinator: ChatSessionManagementCoordinator =
+        (injectedChatSessionManagementCoordinator as? ChatSessionManagementCoordinator)
+            ?: container.createChatSessionManagementCoordinator(
+                store = uiStateStore,
+                scope = viewModelScope,
+                rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+                hasActiveAssistantImageExecutionIn = { state, assistantId -> hasActiveAssistantImageExecutionIn(state, assistantId) },
+                showStatus = ::showStatus,
+                fail = ::fail,
+                invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
+                cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
+                bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
+                loadModelGenerationParams = { backend, modelId, defaults -> loadModelGenerationParams(backend, modelId, defaults) },
+                markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+                continueAssistantImageTurn = ::continueAssistantImageTurn,
+                persistChatSessions = { persistChatSessions(it) }
+            )
+
+    private val chatInputAndAttachmentCoordinator: ChatInputAndAttachmentCoordinator =
+        (injectedChatInputAndAttachmentCoordinator as? ChatInputAndAttachmentCoordinator)
+            ?: container.createChatInputAndAttachmentCoordinator(
+                store = uiStateStore,
+                scope = viewModelScope,
+                showStatus = ::showStatus,
+                fail = ::fail,
+                invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
+                awaitImageLibraryStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
+                imageAssetWriteMutex = imageAssetWriteMutex,
+                imageAssetDirectory = imageAssetDirectory,
+                imageLibraryCommitPort = { imageLibraryCommitPort },
+                imagePromptTokenMeasurementHost = imagePromptTokenMeasurementHost,
+                visionAttachmentPort = visionAttachmentPort,
+                chatSessionStore = chatSessionStore
+            )
+
     init {
         if (!deferStartup) startAfterConstruction()
     }
@@ -1272,26 +1135,11 @@ class MainViewModel @JvmOverloads constructor(
 
     /** Refreshes product-facing readiness; persisted verification remains advisory. */
 
-    fun onInputChange(value: String) {
-        if (value != uiStateStore.current.input &&
-            (container.runtimeAdmission.pendingImageTranslation != null || container.runtimeAdmission.pendingChatImageAction != null)
-        ) invalidatePendingChatImagePreparation()
-        val bounded = value.takeUtf8Prefix(MAX_DIRECT_COMPOSER_UTF8_BYTES)
-        uiStateStore.update {
-            it.copy(
-                input = bounded.text,
-                statusMessage = if (bounded.truncated) {
-                    "输入超过 256 KiB，已保留前半部分；较长资料请导入知识库或作为文件使用。"
-                } else {
-                    it.statusMessage
-                }
-            )
-        }
-    }
+    fun onInputChange(value: String) =
+        chatInputAndAttachmentCoordinator.onInputChange(value)
 
-    fun clearStatusMessage() {
-        showStatus(null)
-    }
+    fun clearStatusMessage() =
+        chatInputAndAttachmentCoordinator.clearStatusMessage()
 
     fun startBrowserTask(request: com.muyuchat.feature.chat.BrowserTaskLaunch) =
         startBrowserTaskFor(uiStateStore, request)
@@ -1322,20 +1170,7 @@ class MainViewModel @JvmOverloads constructor(
         contextCompressionCoordinator.setContextSummaryModel(selection)
 
     fun attachFile(uriString: String) =
-        attachFileFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            contentResolver = getApplication<Application>().contentResolver,
-            imageAssetWriteMutex = imageAssetWriteMutex,
-            imageAssetDirectory = imageAssetDirectory,
-            imageLibraryCommitPort = imageLibraryCommitPort,
-            awaitImageLibraryStartupReconciliation = ::awaitImageLibraryStartupReconciliation,
-            prepareChatInput = { it.prepareChatInput() },
-            persistFiles = ::persistFiles,
-            showStatus = ::showStatus,
-            fail = ::fail,
-            uriString = uriString
-        )
+        chatInputAndAttachmentCoordinator.attachFile(uriString)
 
 
 
@@ -1351,8 +1186,7 @@ class MainViewModel @JvmOverloads constructor(
     suspend fun measureImagePromptTokens(
         modelChoiceId: String,
         prompt: String,
-    ): ImagePromptTokenMeasurement? = measureImagePromptTokens(
-        host = imagePromptTokenMeasurementHost,
+    ): ImagePromptTokenMeasurement? = chatInputAndAttachmentCoordinator.measureImagePromptTokens(
         modelChoiceId = modelChoiceId,
         prompt = prompt
     )
@@ -1392,17 +1226,10 @@ class MainViewModel @JvmOverloads constructor(
     }
 
 
-    fun reportMissingLocalImageTextualInversionSelection() =
-        localImageLibraryAndModelCoordinator.reportMissingLocalImageTextualInversionSelection()
-
-    fun importLocalImageUpscaler(uriString: String) =
-        localImageLibraryAndModelCoordinator.importLocalImageUpscaler(uriString)
-
-    fun selectLocalImageUpscaler(id: String) =
-        localImageLibraryAndModelCoordinator.selectLocalImageUpscaler(id)
-
-    fun deleteLocalImageUpscaler(id: String) =
-        localImageLibraryAndModelCoordinator.deleteLocalImageUpscaler(id)
+    fun reportMissingLocalImageTextualInversionSelection() = localImageLibraryAndModelCoordinator.reportMissingLocalImageTextualInversionSelection()
+    fun importLocalImageUpscaler(uriString: String) = localImageLibraryAndModelCoordinator.importLocalImageUpscaler(uriString)
+    fun selectLocalImageUpscaler(id: String) = localImageLibraryAndModelCoordinator.selectLocalImageUpscaler(id)
+    fun deleteLocalImageUpscaler(id: String) = localImageLibraryAndModelCoordinator.deleteLocalImageUpscaler(id)
 
     fun generateImageAsset(
         prompt: String,
@@ -1508,15 +1335,9 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     fun deleteImageAsset(imageId: String) = deleteImageAssets(listOf(imageId))
-
-    fun deleteImageAssets(imageIds: List<String>) =
-        deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
-
-    fun setImageAssetFavorite(imageId: String, favorite: Boolean) =
-        setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)
-
-    fun clearImageLibrary() =
-        clearImageLibraryOperation(imageAssetDeletionPort)
+    fun deleteImageAssets(imageIds: List<String>) = deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
+    fun setImageAssetFavorite(imageId: String, favorite: Boolean) = setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)
+    fun clearImageLibrary() = clearImageLibraryOperation(imageAssetDeletionPort)
 
     fun exportImageLibraryBackup(uriString: String, favoritesOnly: Boolean) =
         imageLibraryBackupCoordinator.exportBackup(
@@ -1718,37 +1539,19 @@ class MainViewModel @JvmOverloads constructor(
 
     fun importChatBackground(scope: ChatAppearanceScope, uriString: String) =
         chatAppearanceCoordinator.importChatBackground(scope, uriString)
-
     fun setChatAppearance(scope: ChatAppearanceScope, appearance: ChatAppearance?) =
         chatAppearanceCoordinator.setChatAppearance(scope, appearance)
 
-
-
-    fun deleteAssistant(assistantId: String) =
-        assistantProfileCoordinator.deleteAssistant(assistantId)
-
-    fun importAssistantCard(rawJson: String) =
-        assistantProfileCoordinator.importAssistantCard(rawJson)
-
-    internal fun restorePendingContentImportPreview() =
-        contentImportPreviewCoordinator.restorePendingContentImportPreview()
-
-    fun removeLocalImageModelRecord(modelId: String) =
-        localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
-
-    private suspend fun stageContentImportPreview(preview: ContentImportPreview) =
-        contentImportPreviewCoordinator.stageContentImportPreview(preview)
-
-    fun cancelContentImportPreview(id: String) =
-        contentImportPreviewCoordinator.cancelContentImportPreview(id)
-
-    fun confirmContentImportPreview(id: String) =
-        contentImportPreviewCoordinator.confirmContentImportPreview(id) { confirmKnowledgeDocumentImport(it) }
-
+    fun deleteAssistant(assistantId: String) = assistantProfileCoordinator.deleteAssistant(assistantId)
+    fun importAssistantCard(rawJson: String) = assistantProfileCoordinator.importAssistantCard(rawJson)
+    internal fun restorePendingContentImportPreview() = contentImportPreviewCoordinator.restorePendingContentImportPreview()
+    fun removeLocalImageModelRecord(modelId: String) = localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
+    private suspend fun stageContentImportPreview(preview: ContentImportPreview) = contentImportPreviewCoordinator.stageContentImportPreview(preview)
+    fun cancelContentImportPreview(id: String) = contentImportPreviewCoordinator.cancelContentImportPreview(id)
+    fun confirmContentImportPreview(id: String) = contentImportPreviewCoordinator.confirmContentImportPreview(id) { confirmKnowledgeDocumentImport(it) }
 
     fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) =
         assistantProfileCoordinator.importAssistantCardFile(uriString, importOwner)
-
     fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) =
         assistantProfileCoordinator.importWorldBook(rawJson, scope)
 
@@ -2553,19 +2356,7 @@ class MainViewModel @JvmOverloads constructor(
         bindDefaultModel: Boolean = false
     ): Boolean {
         if (rejectWhileConversationMutationInProgress()) return false
-        val created = newChatForAssistantFor(
-            store = uiStateStore,
-            rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-            showStatus = ::showStatus,
-            invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-            cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
-            bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            persistChatSessions = { persistChatSessions(it) },
-            assistant = assistant,
-            bindDefaultModel = bindDefaultModel
-        )
+        val created = chatSessionManagementCoordinator.newChatForAssistant(assistant, bindDefaultModel)
         if (created) {
             markLocalConversationContextInvalid()
         }
@@ -2573,35 +2364,10 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun selectChatSession(sessionId: String) =
-        selectChatSession(port = selectChatSessionPort, sessionId = sessionId)
-
-
-    /** R3-S39：选择聊天会话端口具名适配器（容器工厂装配，出清 84 行匿名实现与 18 处 this@VM）。 */
-    private val selectChatSessionPort: SelectChatSessionPort =
-        container.createSelectChatSessionPort(
-            store = uiStateStore,
-            rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgress() },
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-            invalidatePendingChatImagePreparation = { invalidatePendingChatImagePreparation() },
-            cancelActiveWebSearch = { activeWebSearchDeferred?.cancel() },
-            bumpContentImportSelectionRevision = { contentImportSelectionRevision.incrementAndGet() },
-            loadModelGenerationParams = { backend, modelId, defaults ->
-                loadModelGenerationParams(backend, modelId, defaults)
-            },
-            markLocalConversationContextInvalid = { markLocalConversationContextInvalid() },
-            continueAssistantImageTurn = { continueAssistantImageTurn(it) }
-        )
+        chatSessionManagementCoordinator.selectChatSession(sessionId)
 
     fun branchMixedChatSession(sessionId: String, assistantId: String) =
-        branchMixedChatSessionFor(
-            store = uiStateStore,
-            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-            persistChatSessions = { persistChatSessions(it) },
-            selectChatSession = ::selectChatSession,
-            sessionId = sessionId,
-            assistantId = assistantId
-        )
+        chatSessionManagementCoordinator.branchMixedChatSession(sessionId, assistantId)
 
 
     fun deleteChatSession(sessionId: String) {
@@ -2619,22 +2385,10 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun renameChatSession(sessionId: String, title: String) =
-        renameChatSessionFor(
-            store = uiStateStore,
-            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            showStatus = ::showStatus,
-            persistChatSessions = { persistChatSessions(it) },
-            sessionId = sessionId,
-            title = title
-        )
+        chatSessionManagementCoordinator.renameChatSession(sessionId, title)
 
     fun toggleChatSessionPinned(sessionId: String) =
-        toggleChatSessionPinnedFor(
-            store = uiStateStore,
-            rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            persistChatSessions = { persistChatSessions(it) },
-            sessionId = sessionId
-        )
+        chatSessionManagementCoordinator.toggleChatSessionPinned(sessionId)
 
     fun clearChatHistory() {
         if (rejectWhileConversationMutationInProgress()) return
@@ -2866,58 +2620,32 @@ class MainViewModel @JvmOverloads constructor(
         diagnosticsOperations.exportDiagnosticReport(uri, viewModelScope, ::fail)
 
     fun chatSessionExportFileName(sessionId: String): String =
-        chatSessionExportFileNameFor(uiStateStore, sessionId)
+        chatSessionManagementCoordinator.chatSessionExportFileName(sessionId)
 
     fun exportChatSession(sessionId: String, uri: Uri) =
-        exportChatSessionFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            application = getApplication(),
-            fail = ::fail,
-            sessionId = sessionId,
-            uri = uri
-        )
+        chatSessionManagementCoordinator.exportChatSession(sessionId, uri)
 
 
     fun scanAgent() = agentTuningCoordinator.scanAgent()
-
     fun applyAgentRecommendation() = agentTuningCoordinator.applyAgentRecommendation()
-
     fun rollbackAgentParams() = agentTuningCoordinator.rollbackAgentParams()
-
     fun loadAgentRecommendedModel() = agentTuningCoordinator.loadAgentRecommendedModel()
-
     fun runAgentBenchmark() = agentTuningCoordinator.runAgentBenchmark()
-
     fun runAgentStabilitySmoke() = agentTuningCoordinator.runAgentStabilitySmoke()
-
     fun startAgentTuning() = agentTuningCoordinator.startAgentTuning()
-
     fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) =
         agentTuningCoordinator.startAgentTuning(mode, autoApply)
-
     fun pauseAgentTuning() = agentTuningCoordinator.pauseAgentTuning()
-
     fun resumeAgentTuning() = agentTuningCoordinator.resumeAgentTuning()
-
     fun cancelAgentTuning() = agentTuningCoordinator.cancelAgentTuning()
-
     fun queryAgentTuningJob() = agentTuningCoordinator.queryAgentTuningJob()
-
     fun applyPendingAgentProfile() = agentTuningCoordinator.applyPendingAgentProfile()
-
     fun discardPendingAgentProfile() = agentTuningCoordinator.discardPendingAgentProfile()
-
     fun rollbackAgentProfile() = agentTuningCoordinator.rollbackAgentProfile()
-
     fun runAgentQuickDebug() = agentTuningCoordinator.runAgentQuickDebug()
-
     fun runAgentStandardDebug() = agentTuningCoordinator.runAgentStandardDebug()
-
     fun runAgentDeepDebug() = agentTuningCoordinator.runAgentDeepDebug()
-
     fun runAgentPowerDebug() = agentTuningCoordinator.runAgentPowerDebug()
-
     fun showAgentDebugExplanation() = agentTuningCoordinator.showAgentDebugExplanation()
 
     fun toggleApi(enabled: Boolean) {
@@ -3354,7 +3082,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     private fun persistFiles(files: List<FileAssetRecord> = uiStateStore.current.files) =
-        persistFilesFor(chatSessionStore, uiStateStore, viewModelScope, files)
+        chatInputAndAttachmentCoordinator.persistFiles(files)
 
     private fun busy(message: String) {
         uiStateStore.update { it.copy(busy = true, statusMessage = message) }
@@ -3414,12 +3142,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun persistApiPreferences(apiEnabled: Boolean, restEnabled: Boolean) =
         GenerationPreferences.persistApiPreferences(context = getApplication(), apiEnabled = apiEnabled, restEnabled = restEnabled)
 
-    private fun modelGenerationProfileKey(backend: ChatBackend, modelId: String?): String? =
-        GenerationPreferences.modelGenerationProfileKey(backend, modelId)
-
-    private fun MainUiState.modelGenerationProfileKey(): String? =
-        modelGenerationProfileKey(selectedChatBackend, currentChatModelId())
-
     private fun loadModelGenerationParams(backend: ChatBackend, modelId: String?, defaults: GenerationParams): GenerationParams =
         loadModelGenerationParamsFor(modelGenerationProfileStore, backend, modelId, defaults)
 
@@ -3440,36 +3162,11 @@ class MainViewModel @JvmOverloads constructor(
     private fun apiUrl(host: String): String =
         localApiRuntimeOwner.apiUrl(host)
 
-    private fun MainUiState.prepareChatInput(): PreparedChatInput {
-        val matches = imageAttachmentRegex.findAll(input).toList()
-        val attachments = matches.mapNotNull { match ->
-            val name = match.groupValues.getOrNull(1).orEmpty().trim()
-            val uriString = match.groupValues.getOrNull(2).orEmpty().trim()
-            if (uriString.isBlank()) return@mapNotNull null
-            val asset = images.firstOrNull { it.uriString == uriString || it.name == name }
-            asset?.toChatAttachment(mimeTypeForUri(uriString))
-                ?: ChatImageAttachment(
-                    name = name,
-                    uriString = uriString,
-                    mimeType = mimeTypeForUri(uriString)
-                )
-        }
-        val textWithoutAttachments = imageAttachmentRegex
-            .replace(input, "")
-            .replace(oldImagePlaceholderRegex, "")
-            .trim()
-        return PreparedChatInput(
-            text = textWithoutAttachments,
-            // Keep composer parsing cheap: the send callback runs on the UI
-            // thread. Content hashes are computed by the IO-bound vision and
-            // persistence paths; display also collapses imported file copies.
-            imageAttachments = attachments.deduplicateVisionAttachmentsForDisplay()
-        )
-    }
+    private fun MainUiState.prepareChatInput(): PreparedChatInput =
+        chatInputAndAttachmentCoordinator.prepareChatInput(this)
 
-    /** Delegates to [visionMimeTypeForUri]; the Context read stays on the owner side. */
     private fun mimeTypeForUri(uriString: String): String =
-        visionMimeTypeForUri(visionAttachmentPort, uriString)
+        chatInputAndAttachmentCoordinator.mimeTypeForUri(uriString)
 
 
 
