@@ -2,6 +2,7 @@ package com.muyuchat.mca.composition
 
 import android.app.Application
 import com.muyuchat.mca.LocalApiRuntimeOwner
+import com.muyuchat.mca.ChatAppearanceCoordinator
 import com.muyuchat.mca.ChatSessionPersistencePortAdapter
 import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
@@ -1092,6 +1093,21 @@ internal class McaAppContainer(private val application: Application) {
 
     fun createLocalApiRuntimeOwner(): LocalApiRuntimeOwner =
         LocalApiRuntimeOwner()
+
+    fun createChatAppearanceCoordinator(
+        scope: CoroutineScope,
+        uiStateStore: UiStateStore,
+        showStatus: (String?) -> Unit
+    ): ChatAppearanceCoordinator =
+        ChatAppearanceCoordinator(
+            scope = scope,
+            uiStateStore = uiStateStore,
+            globalChatAppearanceStore = globalChatAppearanceStore,
+            backgroundImageStore = backgroundImageStore,
+            assistantStore = assistantStore,
+            chatSessionStore = chatSessionStore,
+            showStatus = showStatus
+        )
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()
