@@ -55,13 +55,19 @@ if(DEFINED ANDROID_ABI)
     endif()
 endif()
 
+add_library(mca_contract INTERFACE)
+target_include_directories(mca_contract INTERFACE
+        "${CMAKE_CURRENT_LIST_DIR}")
+
 add_library(mca_native SHARED native_engine.cpp)
+target_link_libraries(mca_native PRIVATE mca_contract)
 add_library(mca_prompt_handoff SHARED mnn_qnn_prompt_handoff.cpp)
 target_compile_definitions(mca_prompt_handoff PRIVATE MCA_PROMPT_HANDOFF_BUILDING=1)
+target_link_libraries(mca_prompt_handoff PRIVATE mca_contract)
 add_library(mca_mnn_native SHARED mnn_native_engine.cpp)
 add_library(mca_qnn_native SHARED qnn_native_bridge.cpp)
-target_link_libraries(mca_mnn_native PRIVATE mca_prompt_handoff)
-target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff)
+target_link_libraries(mca_mnn_native PRIVATE mca_prompt_handoff mca_contract)
+target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff mca_contract)
 target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp

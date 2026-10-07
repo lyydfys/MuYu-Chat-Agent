@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "generated_at": "2026-10-08T01:00:00Z",
+  "targets": [
+    {
+      "name": "mca_contract",
+      "type": "INTERFACE",
+      "module": "core:native",
+      "scope": "public",
+      "description": "Cross-layer C++ POD types, states, error codes, and request identity contracts.",
+      "headers": [
+        "mca/contract/request_identity.hpp",
+        "mca/contract/request_state.hpp",
+        "mca/contract/stable_error_code.hpp",
+        "mca/contract/error_envelope.hpp",
+        "mca/contract/callback_event.hpp"
+      ],
+      "dependencies": []
+    },
+    {
+      "name": "mca_common",
+      "type": "STATIC",
+      "module": "core:native",
+      "scope": "public",
+      "description": "Common RAII guards, monotonic clock, file/path safety, sequence generators (A1).",
+      "dependencies": [
+        "mca_contract"
+      ]
+    },
+    {
+      "name": "mca_jni_support",
+      "type": "STATIC",
+      "module": "core:native",
+      "scope": "public",
+      "description": "JNI exception guard, UTF-8 conversion, direct buffer utilities (A1).",
+      "dependencies": [
+        "mca_contract",
+        "mca_common"
+      ]
+    },
+    {
+      "name": "mca_observability",
+      "type": "STATIC",
+      "module": "core:native",
+      "scope": "public",
+      "description": "Metrics sink, trace context, structured log redaction (A1).",
+      "dependencies": [
+        "mca_contract",
+        "mca_common"
+      ]
+    },
+    {
+      "name": "mca_prompt_handoff",
+      "type": "SHARED",
+      "module": "core:native",
+      "scope": "provider",
+      "description": "Narrow contract for prompt token/KV handoff between MNN and QNN.",
+      "dependencies": [
+        "mca_contract"
+      ]
+    },
+    {
+      "name": "mca_native",
+      "type": "SHARED",
+      "module": "core:native",
+      "scope": "provider",
+      "description": "Llama.cpp backend runtime and legacy entrypoint wrapper.",
+      "dependencies": [
+        "mca_contract",
+        "mca_prompt_handoff"
+      ],
+      "forbidden_dependencies": [
+        "mca_qnn_native",
+        "mca_sd_native"
+      ]
+    },
+    {
+      "name": "mca_mnn_native",
+      "type": "SHARED",
+      "module": "core:native",
+      "scope": "provider",
+      "description": "MNN chat/diffusion engine provider.",
+      "dependencies": [
+        "mca_contract",
+        "mca_prompt_handoff"
+      ],
+      "forbidden_dependencies": [
+        "mca_qnn_native",
+        "mca_sd_native"
+      ]
+    },
+    {
+      "name": "mca_qnn_native",
+      "type": "SHARED",
+      "module": "core:native",
+      "scope": "provider",
+      "description": "Qualcomm AI Runtime / QNN NPU engine provider.",
+      "dependencies": [
+        "mca_contract",
+        "mca_prompt_handoff"
+      ],
+      "forbidden_dependencies": [
+        "mca_mnn_native",
+        "mca_sd_native"
+      ]
+    },
+    {
+      "name": "mca_sd_native",
+      "type": "SHARED",
+      "module": "core:sd-native",
+      "scope": "provider",
+      "description": "Stable Diffusion C++ engine provider.",
+      "dependencies": [
+        "mca_contract"
+      ],
+      "forbidden_dependencies": [
+        "mca_mnn_native",
+        "mca_qnn_native",
+        "mca_native"
+      ]
+    }
+  ],
+  "invariants": {
+    "provider_isolation": true,
+    "no_cross_provider_linkage": true,
+    "common_contract_shared_via_interface": true
+  }
+}

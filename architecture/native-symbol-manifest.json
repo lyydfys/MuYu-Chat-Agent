@@ -1,0 +1,1353 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "version": "1.0.0",
+  "generated_at": "2026-10-08T01:00:00Z",
+  "total_symbols": 64,
+  "dso_summary": {
+    "libmca_native.so": 14,
+    "libmca_mnn_native.so": 28,
+    "libmca_qnn_native.so": 14,
+    "libmca_sd_native.so": 8
+  },
+  "symbols": [
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion",
+      "method_name": "beginCompletion",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jint",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring messagesJson",
+        "jstring paramsJson"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletionWithPrefixCache",
+      "method_name": "beginCompletionWithPrefixCache",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jint",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject obj",
+        "jstring messagesJson",
+        "jstring paramsJson",
+        "jstring restoreStatePath",
+        "jstring writeStatePath",
+        "jstring fixedSystemPrompt",
+        "jboolean fullSessionState"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk",
+      "method_name": "generateNextChunk",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPersistProgressJson",
+      "method_name": "getPersistProgressJson",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPrefillProgressJson",
+      "method_name": "getPrefillProgressJson",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getRuntimeStatsJson",
+      "method_name": "getRuntimeStatsJson",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends",
+      "method_name": "initBackends",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring nativeLibDir"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_invalidateTextContext",
+      "method_name": "invalidateTextContext",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel",
+      "method_name": "loadModel",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jint",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring modelPath",
+        "jstring paramsJson"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStop",
+      "method_name": "requestStop",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStopIfActive",
+      "method_name": "requestStopIfActive",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_resetPrefillProgress",
+      "method_name": "resetPrefillProgress",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_shutdown",
+      "method_name": "shutdown",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel",
+      "method_name": "unloadModel",
+      "java_class": "NativeLlamaBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "LlamaNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion",
+      "method_name": "beginCompletion",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jint",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring messagesJson",
+        "jstring paramsJson"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk",
+      "method_name": "generateNextChunk",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getPrefillProgressJson",
+      "method_name": "getPrefillProgressJson",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson",
+      "method_name": "getRuntimeStatsJson",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends",
+      "method_name": "initBackends",
+      "java_class": "NativeMnnBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring nativeLibDir"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isGenerationRunning",
+      "method_name": "isGenerationRunning",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isRunnerReady",
+      "method_name": "isRunnerReady",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel",
+      "method_name": "loadModel",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jint",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring configPath",
+        "jstring paramsJson"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStop",
+      "method_name": "requestStop",
+      "java_class": "NativeMnnBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive",
+      "method_name": "requestStopIfActive",
+      "java_class": "NativeMnnBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress",
+      "method_name": "resetPrefillProgress",
+      "java_class": "NativeMnnBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown",
+      "method_name": "shutdown",
+      "java_class": "NativeMnnBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_unloadModel",
+      "method_name": "unloadModel",
+      "java_class": "NativeMnnBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnNativeEngineGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_cancel",
+      "method_name": "cancel",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson",
+      "method_name": "encodePromptTokenIdsWithWeightsFromJson",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring tokenizerJsonPath",
+        "jstring prompt",
+        "jstring negativePrompt",
+        "jint bosId",
+        "jint eosId",
+        "jint padId",
+        "jint maxTokens",
+        "jstring promptToEncoderClosureSha256",
+        "jstring outputPath"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings",
+      "method_name": "encodeSd15PromptEmbeddings",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring prompt",
+        "jstring negativePrompt",
+        "jstring outputPath",
+        "jstring backendMode",
+        "jint threads",
+        "jstring conditioningOrder",
+        "jboolean promptWeightingEnabled",
+        "jstring textualInversionJson"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptConditioning",
+      "method_name": "encodeSdxlPromptConditioning",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring prompt",
+        "jstring negativePrompt",
+        "jstring outputPath",
+        "jint width",
+        "jint height",
+        "jstring backendMode",
+        "jint threads",
+        "jboolean useCfg",
+        "jboolean promptWeightingEnabled",
+        "jstring textualInversionJson"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate",
+      "method_name": "generate",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring paramsJson",
+        "jstring outputPath"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getProgress",
+      "method_name": "getProgress",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getRuntimeStatsJson",
+      "method_name": "getRuntimeStatsJson",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_inspectBundle",
+      "method_name": "inspectBundle",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_isRunnerReady",
+      "method_name": "isRunnerReady",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_measurePromptTokens",
+      "method_name": "measurePromptTokens",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring tokenizerBackend",
+        "jstring tokenizerJsonPath",
+        "jstring prompt",
+        "jint bosId",
+        "jint eosId",
+        "jint padId",
+        "jint maxTokens",
+        "jboolean promptWeightingEnabled"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_resetImageCancellation",
+      "method_name": "resetImageCancellation",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke",
+      "method_name": "runUnetSmoke",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring backendMode"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIds",
+      "method_name": "tokenizePromptTokenIds",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jintArray",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring prompt"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsFromJson",
+      "method_name": "tokenizePromptTokenIdsFromJson",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jintArray",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring tokenizerJsonPath",
+        "jstring prompt",
+        "jstring negativePrompt",
+        "jint bosId",
+        "jint eosId",
+        "jint padId",
+        "jint maxTokens"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsWithConfig",
+      "method_name": "tokenizePromptTokenIdsWithConfig",
+      "java_class": "NativeMnnDiffusionBridge",
+      "return_type": "jintArray",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring prompt",
+        "jstring tokenizerRoot",
+        "jint bosId",
+        "jint eosId",
+        "jint maxTokens"
+      ],
+      "dso": "libmca_mnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "MnnDiffusionGateway",
+      "source_file": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_cancelImageGeneration",
+      "method_name": "cancelImageGeneration",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_getImageGenerationProgressJson",
+      "method_name": "getImageGenerationProgressJson",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_getRuntimeStatsJson",
+      "method_name": "getRuntimeStatsJson",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectBundle",
+      "method_name": "inspectBundle",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectContextMetadata",
+      "method_name": "inspectContextMetadata",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring contextBinaryPath",
+        "jstring runtimeDirsJson"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectRuntime",
+      "method_name": "inspectRuntime",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring runtimeDirsJson"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_isRunnerReady",
+      "method_name": "isRunnerReady",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jboolean",
+      "parameters": [
+        "JNIEnv*",
+        "jobject"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImagePipelineProbe",
+      "method_name": "runImagePipelineProbe",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeDirsJson",
+        "jstring paramsJson",
+        "jstring outputPath"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImageSemanticGenerate",
+      "method_name": "runImageSemanticGenerate",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeDirsJson",
+        "jstring paramsJson",
+        "jstring embeddingsPath",
+        "jstring outputPath"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImageSmoke",
+      "method_name": "runImageSmoke",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeDirsJson",
+        "jstring smokeSpecJson"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlEncoderPhase",
+      "method_name": "runSdxlEncoderPhase",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeProfileJson",
+        "jstring paramsJson",
+        "jstring inputTensorPath",
+        "jstring latentPath",
+        "jstring expectedVaeEncoderContextSha256"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlUnetPhase",
+      "method_name": "runSdxlUnetPhase",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeProfileJson",
+        "jstring paramsJson",
+        "jstring embeddingsPath",
+        "jstring initialLatentPath",
+        "jstring latentPath"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlVaePhase",
+      "method_name": "runSdxlVaePhase",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeProfileJson",
+        "jstring paramsJson",
+        "jstring latentPath",
+        "jstring outputPath"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runVisionSmoke",
+      "method_name": "runVisionSmoke",
+      "java_class": "NativeQnnBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv* env",
+        "jobject",
+        "jstring bundleRoot",
+        "jstring runtimeDirsJson",
+        "jstring smokeSpecJson"
+      ],
+      "dso": "libmca_qnn_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "QnnNativeBridgeGateway",
+      "source_file": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_cancel",
+      "method_name": "cancel",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate",
+      "method_name": "generate",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring model_path",
+        "jstring bundle_root",
+        "jstring params_json",
+        "jstring output_path"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getNativeConfig",
+      "method_name": "getNativeConfig",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getProgress",
+      "method_name": "getProgress",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getSystemInfo",
+      "method_name": "getSystemInfo",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_measurePromptTokens",
+      "method_name": "measurePromptTokens",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring tokenizer_kind",
+        "jstring prompt",
+        "jint max_tokens"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_shutdown",
+      "method_name": "shutdown",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "void",
+      "parameters": [
+        "JNIEnv *",
+        "jobject"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    },
+    {
+      "symbol": "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_upscale",
+      "method_name": "upscale",
+      "java_class": "NativeStableDiffusionBridge",
+      "return_type": "jstring",
+      "parameters": [
+        "JNIEnv *env",
+        "jobject",
+        "jstring upscaler_path",
+        "jstring upscaler_root",
+        "jstring input_path",
+        "jstring params_json",
+        "jstring output_path"
+      ],
+      "dso": "libmca_sd_native.so",
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "entry_owner": "StableDiffusionNativeGateway",
+      "source_file": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "migration_status": "MIGRATION_PENDING_A2",
+      "legacy_path": "ACTIVE"
+    }
+  ]
+}
