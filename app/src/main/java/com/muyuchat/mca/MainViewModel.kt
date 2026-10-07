@@ -505,7 +505,6 @@ class MainViewModel @JvmOverloads constructor(
     private val localImageWorkerClient: LocalImageWorkerClient
         get() = container.localImageWorkerClient
     private val deviceProfileReader = container.deviceProfileReader
-    private val advisor = container.advisor
     private val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
     private val agentLogger = AgentDecisionLogger(application)
     private val benchmarkHistoryLogger = container.benchmarkHistoryLogger
@@ -738,12 +737,6 @@ class MainViewModel @JvmOverloads constructor(
             container.runtimeAdmission.imageLibraryBackupJob = value
         }
     private val imageLibraryBackupCoordinator = ImageLibraryBackupCoordinator()
-    private val agentTuningCoordinator = AgentTuningCoordinator()
-    private var adaptiveTuningJob: Job?
-        get() = agentTuningCoordinator.adaptiveTuningJob
-        set(value) {
-            agentTuningCoordinator.adaptiveTuningJob = value
-        }
     // R3/C2：运行期准入态迁入容器 holder（同实例共享，读写语义与调用点不变）。
     private var activeRuntimeIdentity: ModelRuntimeIdentity?
         get() = container.runtimeAdmission.activeRuntimeIdentity
@@ -774,11 +767,6 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.runtimeAdmission.activeProfileTransactionId
         set(value) {
             container.runtimeAdmission.activeProfileTransactionId = value
-        }
-    private var activeTuningJobId: String?
-        get() = agentTuningCoordinator.activeTuningJobId
-        set(value) {
-            agentTuningCoordinator.activeTuningJobId = value
         }
     private var activeModelForRuntimeProfile: ModelManifest?
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
@@ -1177,23 +1165,63 @@ class MainViewModel @JvmOverloads constructor(
         sendPreparedMessage = ::sendPreparedMessage
     )
 
-    private val localApiControlPlaneCoordinator = LocalApiControlPlaneCoordinator(
+    private val agentTuningCoordinator: AgentTuningCoordinator = container.createAgentTuningCoordinator(
+        store = uiStateStore,
+        scope = viewModelScope,
+        engine = engine,
+        tuningOwner = tuningOwner,
+        agentLogger = agentLogger,
+        benchmarkRunner = benchmarkRunner,
+        diagnosticsOperations = diagnosticsOperations,
+        managedRuntimeReadinessPortProvider = { managedRuntimeReadinessPort },
+        localApiRuntimeOwner = localApiRuntimeOwner,
+        modelScopeClient = modelScopeClient,
+        cancelPersistedTuningJob = { localApiControlPlaneCoordinator.cancelPersistedTuningJob(it) },
+        activeRuntimeIdentity = { activeRuntimeIdentity },
+        activeAdaptiveRecommendation = { activeAdaptiveRecommendation },
+        setActiveAdaptiveRecommendation = { activeAdaptiveRecommendation = it },
+        busy = ::busy,
+        fail = ::fail,
+        showStatus = ::showStatus,
+        persistModelGenerationParams = ::persistModelGenerationParams,
+        updateParams = ::updateParams,
+        loadModel = ::loadModel,
+        timedLoadModel = ::timedLoadModel,
+        runLocalGenerationSmoke = ::runLocalGenerationSmoke,
+        cancelGenerationJob = ::cancelGenerationJob,
+        activeModelForRuntimeProfile = { activeModelForRuntimeProfile },
+        getPendingProfileTransactionId = { pendingProfileTransactionId },
+        setPendingProfileTransactionId = { pendingProfileTransactionId = it }
+    )
+
+    private val localApiControlPlaneCoordinator: LocalApiControlPlaneCoordinator = LocalApiControlPlaneCoordinator(
         container = container,
         store = uiStateStore,
         engine = engine,
         tuningOwner = tuningOwner,
         runtimeProfileStore = runtimeProfileStore,
         agentTuningCoordinator = agentTuningCoordinator,
-        getActiveTuningJobId = { activeTuningJobId },
-        setActiveTuningJobId = { activeTuningJobId = it },
-        getAdaptiveTuningJob = { adaptiveTuningJob },
-        setAdaptiveTuningJob = { adaptiveTuningJob = it },
+        getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
+        setActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId = it },
+        getAdaptiveTuningJob = { agentTuningCoordinator.adaptiveTuningJob },
+        setAdaptiveTuningJob = { agentTuningCoordinator.adaptiveTuningJob = it },
         getActiveRuntimeIdentity = { activeRuntimeIdentity },
-        applyPendingRuntimeTransaction = ::applyPendingRuntimeTransaction,
-        rollbackCommittedRuntimeProfile = ::rollbackCommittedRuntimeProfile,
+        applyPendingRuntimeTransaction = agentTuningCoordinator::applyPendingRuntimeTransaction,
+        rollbackCommittedRuntimeProfile = agentTuningCoordinator::rollbackCommittedRuntimeProfile,
         idempotencyJournalLock = localApiIdempotencyJournalLock,
         application = getApplication(),
         scope = viewModelScope
+    )
+
+    private val modelScopeHubCoordinator: ModelScopeHubCoordinator = container.createModelScopeHubCoordinator(
+        scope = viewModelScope,
+        store = uiStateStore,
+        client = modelScopeClient,
+        currentDeviceProfile = ::currentDeviceProfile,
+        busy = ::busy,
+        fail = ::fail,
+        showStatus = ::showStatus,
+        enqueueManagedDownload = ::enqueueManagedDownload
     )
 
     private val contextCompressionCoordinator = ContextCompressionCoordinator(
@@ -1809,8 +1837,8 @@ class MainViewModel @JvmOverloads constructor(
             getActiveDirectParameterStageJob = { directParameterStageJob },
             setActiveDirectParameterStageJob = { directParameterStageJob = it },
             directParameterStageMutex = directParameterStageMutex,
-            adaptiveTuningJobIsActive = { adaptiveTuningJob?.isActive == true },
-            getActiveTuningJobId = { activeTuningJobId },
+            adaptiveTuningJobIsActive = { agentTuningCoordinator.adaptiveTuningJob?.isActive == true },
+            getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
             getPendingProfileTransactionId = { pendingProfileTransactionId },
             setPendingProfileTransactionId = { pendingProfileTransactionId = it },
             params = params
@@ -2470,37 +2498,16 @@ class MainViewModel @JvmOverloads constructor(
         modelImportAndDownloadCoordinator.resumeManagedImport(requestId)
 
     fun fetchRemoteFiles() =
-        fetchRemoteFilesFor(
-            viewModelScope,
-            uiStateStore,
-            modelScopeClient,
-            ::busy,
-            ::fail,
-            uiStateStore.current.repoInput
-        )
+        modelScopeHubCoordinator.fetchRemoteFiles()
 
     fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) =
-        fetchRecommendedFilesFor(
-            viewModelScope,
-            uiStateStore,
-            modelScopeClient,
-            ::busy,
-            ::fail,
-            ::showStatus,
-            currentDeviceProfile(),
-            model
-        )
+        modelScopeHubCoordinator.fetchRecommendedFiles(model)
 
     fun downloadRecommended(model: ModelScopeRecommendedModel) =
         downloadRecommended(model, useAfterDownload = false)
 
     fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean) =
-        downloadRecommendedFor(
-            model,
-            useAfterDownload,
-            ::fail,
-            ::enqueueManagedDownload
-        )
+        modelScopeHubCoordinator.downloadRecommended(model, useAfterDownload)
 
     fun attachVisionProjector(modelId: String, uri: Uri) =
         modelImportAndDownloadCoordinator.attachVisionProjector(
@@ -2510,43 +2517,14 @@ class MainViewModel @JvmOverloads constructor(
             uiStateStore.current.selectedChatBackend
         )
 
-
-
-
-
-
-
-
-
     fun searchHubModels(reset: Boolean = true) =
-        searchHubModelsFor(
-            viewModelScope,
-            uiStateStore,
-            modelScopeClient,
-            ::busy,
-            ::fail,
-            uiStateStore.current.hubQuery,
-            uiStateStore.current.hubPage,
-            uiStateStore.current.hubModels,
-            reset
-        )
+        modelScopeHubCoordinator.searchHubModels(reset)
 
     fun fetchHubModelFiles(model: ModelScopeHubModel) =
-        fetchHubModelFilesFor(
-            viewModelScope,
-            uiStateStore,
-            modelScopeClient,
-            ::busy,
-            ::fail,
-            model
-        )
+        modelScopeHubCoordinator.fetchHubModelFiles(model)
 
     fun openModelScopePage(url: String) =
-        openModelScopePageFor(
-            getApplication(),
-            ::fail,
-            url
-        )
+        modelScopeHubCoordinator.openModelScopePage(url)
 
     fun download(remote: RemoteModelFile) =
         modelImportAndDownloadCoordinator.download(remote, uiStateStore.current.loadedModelId)
@@ -2604,7 +2582,7 @@ class MainViewModel @JvmOverloads constructor(
             modelGenerationProfileStore,
             cloudApiStore,
             tuningOwner,
-            advisor,
+            container.advisor,
             deviceProfileReader,
             managedRuntimeReadinessRefreshGate,
             managedRuntimeReadinessPort,
@@ -3466,7 +3444,7 @@ class MainViewModel @JvmOverloads constructor(
                 state
             }
         }
-        if (adaptiveTuningJob?.isActive == true) {
+        if (agentTuningCoordinator.adaptiveTuningJob?.isActive == true) {
             pauseAgentTuning()
         }
     }
@@ -3581,26 +3559,8 @@ class MainViewModel @JvmOverloads constructor(
         diagnosticsOperations.refreshDiagnostics()
     }
 
-    fun exportDiagnosticReport(uri: Uri) {
-        viewModelScope.launch(Dispatchers.IO) {
-            runCatching {
-                val report = diagnosticsOperations.buildDiagnosticReport()
-                getApplication<Application>().contentResolver.openOutputStream(uri)?.use { stream ->
-                    stream.write(report.toByteArray(Charsets.UTF_8))
-                } ?: error("无法写入所选位置。")
-                report
-            }.onSuccess { report ->
-                uiStateStore.update {
-                    it.copy(
-                        diagnosticReport = report,
-                        statusMessage = "诊断报告已导出"
-                    )
-                }
-            }.onFailure { error ->
-                fail("诊断报告导出失败：${error.message}")
-            }
-        }
-    }
+    fun exportDiagnosticReport(uri: Uri) =
+        diagnosticsOperations.exportDiagnosticReport(uri, viewModelScope, ::fail)
 
     fun chatSessionExportFileName(sessionId: String): String =
         chatSessionExportFileNameFor(uiStateStore, sessionId)
@@ -3616,152 +3576,46 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    fun scanAgent() = scanAgentFor(
-        store = uiStateStore,
-        scope = viewModelScope,
-        tuningOwner = tuningOwner,
-        modelScopeClient = modelScopeClient,
-        agentLogger = agentLogger,
-        currentDeviceProfile = ::currentDeviceProfile,
-        buildRecommendation = ::buildRecommendation,
-        activeRuntimeIdentity = { activeRuntimeIdentity },
-        setActiveAdaptiveRecommendation = { activeAdaptiveRecommendation = it },
-        busy = ::busy,
-        fail = ::fail
-    )
+    fun scanAgent() = agentTuningCoordinator.scanAgent()
 
-    fun applyAgentRecommendation() = applyAgentRecommendationFor(
-        store = uiStateStore,
-        application = getApplication(),
-        agentLogger = agentLogger,
-        activeAdaptiveRecommendation = activeAdaptiveRecommendation,
-        currentDeviceProfile = ::currentDeviceProfile,
-        persistModelGenerationParams = ::persistModelGenerationParams
-    )
+    fun applyAgentRecommendation() = agentTuningCoordinator.applyAgentRecommendation()
 
-    fun rollbackAgentParams() = rollbackAgentParamsFor(
-        store = uiStateStore,
-        application = getApplication(),
-        persistModelGenerationParams = ::persistModelGenerationParams
-    )
+    fun rollbackAgentParams() = agentTuningCoordinator.rollbackAgentParams()
 
-    fun loadAgentRecommendedModel() = loadAgentRecommendedModelFor(
-        store = uiStateStore,
-        loadModel = ::loadModel
-    )
+    fun loadAgentRecommendedModel() = agentTuningCoordinator.loadAgentRecommendedModel()
 
-    fun runAgentBenchmark() = runAgentBenchmarkFor(
-        store = uiStateStore,
-        scope = viewModelScope,
-        engine = engine,
-        benchmarkRunner = benchmarkRunner,
-        benchmarkHistoryLogger = benchmarkHistoryLogger,
-        currentDeviceProfile = ::currentDeviceProfile,
-        busy = ::busy,
-        fail = ::fail
-    )
+    fun runAgentBenchmark() = agentTuningCoordinator.runAgentBenchmark()
 
-    /** Delegates to [runAgentStabilitySmokeFor]. Signature kept verbatim. */
-    fun runAgentStabilitySmoke() =
-        runAgentStabilitySmokeFor(
-            viewModelScope,
-            uiStateStore,
-            engine,
-            modelStore,
-            cloudApiStore,
-            managedRuntimeReadinessRefreshGate,
-            managedRuntimeReadinessPort,
-            deviceProfileReader,
-            diagnosticsOperations,
-            cancelGeneration = { cancelGenerationJob() },
-            busy = { busy(it) },
-            loadSmoke = { model, runtime, params -> timedLoadModel(model, runtime, params) },
-            generationSmoke = { params -> runLocalGenerationSmoke(params) },
-            apiSmoke = { localApiRuntimeOwner.runLoopbackApiStreamSmoke() },
-            engineSmoke = { params -> localApiRuntimeOwner.runLoopbackEngineStreamSmoke(params) }
-        )
+    fun runAgentStabilitySmoke() = agentTuningCoordinator.runAgentStabilitySmoke()
 
-    fun startAgentTuning() =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.QUICK, false, uiStateStore)
+    fun startAgentTuning() = agentTuningCoordinator.startAgentTuning()
 
     fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, mode, autoApply, uiStateStore)
+        agentTuningCoordinator.startAgentTuning(mode, autoApply)
 
-    fun pauseAgentTuning() =
-        agentTuningCoordinator.pauseAgentTuning(runtimeProfileStore, uiStateStore, viewModelScope)
+    fun pauseAgentTuning() = agentTuningCoordinator.pauseAgentTuning()
 
-    fun resumeAgentTuning() =
-        agentTuningCoordinator.resumeAgentTuning(runtimeProfileStore, uiStateStore, viewModelScope)
+    fun resumeAgentTuning() = agentTuningCoordinator.resumeAgentTuning()
 
-    fun cancelAgentTuning() =
-        agentTuningCoordinator.cancelAgentTuning(localApiControlPlaneCoordinator::cancelPersistedTuningJob, uiStateStore, viewModelScope)
+    fun cancelAgentTuning() = agentTuningCoordinator.cancelAgentTuning()
 
-    fun queryAgentTuningJob() =
-        agentTuningCoordinator.queryAgentTuningJob(runtimeProfileStore, uiStateStore, viewModelScope, activeRuntimeIdentity)
+    fun queryAgentTuningJob() = agentTuningCoordinator.queryAgentTuningJob()
 
-    fun applyPendingAgentProfile() =
-        agentTuningCoordinator.applyPendingAgentProfile(
-            runtimeProfileStore = runtimeProfileStore,
-            scope = viewModelScope,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            showStatus = ::showStatus,
-            applyPendingRuntimeTransaction = ::applyPendingRuntimeTransaction
-        )
+    fun applyPendingAgentProfile() = agentTuningCoordinator.applyPendingAgentProfile()
 
-    fun discardPendingAgentProfile() =
-        agentTuningCoordinator.discardPendingAgentProfile(
-            runtimeProfileStore = runtimeProfileStore,
-            store = uiStateStore,
-            scope = viewModelScope,
-            application = getApplication(),
-            engine = engine,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            getPendingProfileTransactionId = { pendingProfileTransactionId },
-            setPendingProfileTransactionId = { pendingProfileTransactionId = it }
-        )
+    fun discardPendingAgentProfile() = agentTuningCoordinator.discardPendingAgentProfile()
 
-    fun rollbackAgentProfile() =
-        agentTuningCoordinator.rollbackAgentProfile(
-            scope = viewModelScope,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            activeModelForRuntimeProfile = activeModelForRuntimeProfile,
-            rollbackCommittedRuntimeProfile = ::rollbackCommittedRuntimeProfile
-        )
+    fun rollbackAgentProfile() = agentTuningCoordinator.rollbackAgentProfile()
 
-    fun runAgentQuickDebug() =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.QUICK, false, uiStateStore)
+    fun runAgentQuickDebug() = agentTuningCoordinator.runAgentQuickDebug()
 
-    fun runAgentStandardDebug() =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.STANDARD, false, uiStateStore)
+    fun runAgentStandardDebug() = agentTuningCoordinator.runAgentStandardDebug()
 
-    fun runAgentDeepDebug() =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.DEEP, false, uiStateStore)
+    fun runAgentDeepDebug() = agentTuningCoordinator.runAgentDeepDebug()
 
-    fun runAgentPowerDebug() =
-        agentTuningCoordinator.startAgentTuning(tuningOwner, AgentTuningMode.POWER_SAVE, false, uiStateStore)
+    fun runAgentPowerDebug() = agentTuningCoordinator.runAgentPowerDebug()
 
-    private val runtimeProfileTransactionPort: RuntimeProfileTransactionPort =
-        container.createRuntimeProfileTransactionPort(
-            store = uiStateStore,
-            engine = engine,
-            tuningOwner = tuningOwner,
-            showStatusAction = ::showStatus
-        )
-
-    private suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) =
-        applyPendingRuntimeTransaction(port = runtimeProfileTransactionPort, pending = pending)
-
-    private suspend fun rollbackCommittedRuntimeProfile(
-        identity: ModelRuntimeIdentity,
-        model: ModelManifest
-    ) = rollbackCommittedRuntimeProfile(port = runtimeProfileTransactionPort, identity = identity, model = model)
-
-    fun showAgentDebugExplanation() =
-        uiStateStore.update {
-            it.copy(
-                statusMessage = "智能调试由规则包执行参数搜索，当前已加载模型只用于解释调试结果。"
-            )
-        }
+    fun showAgentDebugExplanation() = agentTuningCoordinator.showAgentDebugExplanation()
 
     fun toggleApi(enabled: Boolean) {
         val restEnabled = if (enabled) uiStateStore.current.restEnabled else false
@@ -4439,27 +4293,10 @@ class MainViewModel @JvmOverloads constructor(
     private suspend fun recoverInterruptedRuntimeProfiles() =
         recoverInterruptedRuntimeProfilesFor(runtimeProfileStore, pendingRuntimeRecoveries, uiStateStore)
 
+    fun currentDeviceProfile(): DeviceProfile = agentTuningCoordinator.currentDeviceProfile()
 
-
-
-
-    private fun currentDeviceProfile(): DeviceProfile =
-        deviceProfileReader.read()
-
-
-
-
-    private fun buildRecommendation(
+    fun buildRecommendation(
         preference: UserPreference,
-        device: DeviceProfile = currentDeviceProfile(),
-        lastDecodeTps: Double? = uiStateStore.current.benchmark?.decodeTps?.takeIf { it > 0.0 }
-            ?: uiStateStore.current.stats.decodeTps.takeIf { it > 0.0 }
-    ): AgentRecommendation =
-        advisor.recommend(
-            device = device,
-            localModels = modelStore.listModels(),
-            remoteFiles = uiStateStore.current.remoteFiles,
-            preference = preference,
-            lastDecodeTps = lastDecodeTps
-        )
+        device: DeviceProfile = currentDeviceProfile()
+    ): AgentRecommendation = agentTuningCoordinator.buildRecommendation(preference, device)
 }

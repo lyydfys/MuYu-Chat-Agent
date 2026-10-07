@@ -1,10 +1,14 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import android.net.Uri
 import com.muyuchat.core.advisor.AgentDecisionLog
 import com.muyuchat.core.benchmark.BenchmarkHistoryRecord
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.McaInferenceService
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -87,5 +91,30 @@ internal class DiagnosticsOperations(
             .put("lastAutoTuningSummary", state.lastAutoTuningSummary)
             .put("localStabilitySmokeSummary", state.localStabilitySmokeSummary)
             .toString(2)
+    }
+
+    fun exportDiagnosticReport(
+        uri: Uri,
+        scope: CoroutineScope,
+        fail: (String) -> Unit
+    ) {
+        scope.launch(Dispatchers.IO) {
+            runCatching {
+                val report = buildDiagnosticReport()
+                application.contentResolver.openOutputStream(uri)?.use { stream ->
+                    stream.write(report.toByteArray(Charsets.UTF_8))
+                } ?: error("无法写入所选位置。")
+                report
+            }.onSuccess { report ->
+                updateUiState {
+                    it.copy(
+                        diagnosticReport = report,
+                        statusMessage = "诊断报告已导出"
+                    )
+                }
+            }.onFailure { error ->
+                fail("诊断报告导出失败：${error.message}")
+            }
+        }
     }
 }

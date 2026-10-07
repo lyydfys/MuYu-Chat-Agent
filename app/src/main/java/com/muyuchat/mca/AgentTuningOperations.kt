@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import com.muyuchat.core.advisor.AgentAdvisor
+import com.muyuchat.core.advisor.AgentDecisionLog
 import com.muyuchat.core.advisor.AgentDecisionLogger
 import com.muyuchat.core.advisor.AgentRecommendation
 import com.muyuchat.core.benchmark.BenchmarkHistoryLogger
@@ -18,6 +20,10 @@ import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.feature.agent.AgentTuningJobState
 import com.muyuchat.feature.agent.AgentTuningMode
+import com.muyuchat.core.engine.LoadParams
+import com.muyuchat.core.engine.LocalChatRuntime
+import com.muyuchat.core.modelstore.ModelStoreRepository
+import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -28,7 +34,43 @@ import java.util.concurrent.atomic.AtomicBoolean
  * R4-S16：调优与建议整族下沉 (AgentTuningOperations)。
  * 统一管理调优任务生命周期、状态机、建议应用与基准评测。
  */
-internal class AgentTuningCoordinator {
+internal class AgentTuningCoordinator(
+    private val application: Application,
+    private val store: UiStateStore,
+    private val scope: CoroutineScope,
+    private val engine: McaInferenceService,
+    private val tuningOwner: TuningOwner,
+    private val modelStore: ModelStoreRepository,
+    private val cloudApiStore: CloudApiStore,
+    private val runtimeProfileStore: ModelRuntimeProfileStore,
+    private val modelScopeClient: ModelScopeClient,
+    private val advisor: AgentAdvisor,
+    private val agentLogger: AgentDecisionLogger,
+    private val benchmarkRunner: BenchmarkRunner,
+    private val benchmarkHistoryLogger: BenchmarkHistoryLogger,
+    private val deviceProfileReader: DeviceProfileReader,
+    private val diagnosticsOperations: DiagnosticsOperations,
+    private val managedRuntimeReadinessRefreshGate: ManagedRuntimeReadinessRefreshGate,
+    private val managedRuntimeReadinessPort: () -> ManagedRuntimeReadinessPort,
+    private val localApiRuntimeOwner: LocalApiRuntimeOwner,
+    private val cancelPersistedTuningJob: suspend (String) -> TuningJobEntity,
+    private val activeRuntimeIdentity: () -> ModelRuntimeIdentity?,
+    private val activeAdaptiveRecommendation: () -> AdaptiveTuningRecommendation?,
+    private val setActiveAdaptiveRecommendation: (AdaptiveTuningRecommendation?) -> Unit,
+    private val busy: (String) -> Unit,
+    private val fail: (String) -> Unit,
+    private val showStatus: (String) -> Unit,
+    private val persistModelGenerationParams: (ChatBackend, String?, GenerationParams) -> Unit,
+    private val updateParams: (GenerationParams) -> Unit,
+    private val loadModel: (ModelManifest) -> Unit,
+    private val timedLoadModel: suspend (ModelManifest, LocalChatRuntime, LoadParams) -> Long,
+    private val runLocalGenerationSmoke: suspend (GenerationParams) -> LocalGenerationSmokeResult,
+    private val cancelGenerationJob: () -> Unit,
+    private val activeModelForRuntimeProfile: () -> ModelManifest?,
+    private val runtimeProfileTransactionPort: RuntimeProfileTransactionPort,
+    private val getPendingProfileTransactionId: () -> String?,
+    private val setPendingProfileTransactionId: (String?) -> Unit
+) {
     @Volatile
     var activeTuningJobId: String? = null
 
@@ -38,12 +80,139 @@ internal class AgentTuningCoordinator {
     val adaptiveTuningPauseRequested = AtomicBoolean(false)
     val adaptiveTuningCancelRequested = AtomicBoolean(false)
 
-    fun startAgentTuning(
-        tuningOwner: TuningOwner,
-        mode: AgentTuningMode,
-        autoApply: Boolean,
-        store: UiStateStore
-    ) {
+    suspend fun applyPendingRuntimeTransaction(pending: PendingRuntimeProfileTransaction) =
+        applyPendingRuntimeTransaction(port = runtimeProfileTransactionPort, pending = pending)
+
+    suspend fun rollbackCommittedRuntimeProfile(
+        identity: ModelRuntimeIdentity,
+        model: ModelManifest
+    ) = rollbackCommittedRuntimeProfile(port = runtimeProfileTransactionPort, identity = identity, model = model)
+
+    fun currentDeviceProfile(): DeviceProfile = deviceProfileReader.read()
+
+    fun buildRecommendation(
+        preference: UserPreference,
+        device: DeviceProfile = currentDeviceProfile(),
+        lastDecodeTps: Double? = store.current.benchmark?.decodeTps?.takeIf { it > 0.0 }
+            ?: store.current.stats.decodeTps.takeIf { it > 0.0 }
+    ): AgentRecommendation = advisor.recommend(
+        device = device,
+        localModels = modelStore.listModels(),
+        remoteFiles = store.current.remoteFiles,
+        preference = preference,
+        lastDecodeTps = lastDecodeTps
+    )
+
+    fun updateAgentPreference(preference: UserPreference) {
+        val state = store.current
+        val recommendation = runCatching { buildRecommendation(preference) }.getOrNull()
+        val updatedParams = recommendation?.tuningPlan?.applyTo(state.params)
+        val paramsChanged = updatedParams != null && updatedParams != state.params
+        if (updatedParams != null) updateParams(updatedParams)
+        store.update { current ->
+            current.copy(
+                preference = preference,
+                agentRecommendation = recommendation,
+                rollbackParams = if (paramsChanged) {
+                    state.rollbackParams ?: state.params
+                } else {
+                    current.rollbackParams
+                },
+                statusMessage = when {
+                    updatedParams == null -> recommendation?.explanation ?: current.statusMessage
+                    current.reloadRequired ->
+                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}；需要重新加载，当前模型继续使用原配置。"
+                    paramsChanged && current.loadedModelId == null ->
+                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}；已保存，下次加载模型时生效。"
+                    else ->
+                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}，n_predict=${updatedParams.nPredict}。"
+                }
+            )
+        }
+    }
+
+    fun scanAgent() {
+        scanAgentFor(
+            store = store,
+            scope = scope,
+            tuningOwner = tuningOwner,
+            modelScopeClient = modelScopeClient,
+            agentLogger = agentLogger,
+            currentDeviceProfile = ::currentDeviceProfile,
+            buildRecommendation = ::buildRecommendation,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            setActiveAdaptiveRecommendation = setActiveAdaptiveRecommendation,
+            busy = busy,
+            fail = fail
+        )
+    }
+
+    fun applyAgentRecommendation() {
+        applyAgentRecommendationFor(
+            store = store,
+            application = application,
+            agentLogger = agentLogger,
+            activeAdaptiveRecommendation = activeAdaptiveRecommendation(),
+            currentDeviceProfile = ::currentDeviceProfile,
+            persistModelGenerationParams = { state, params ->
+                persistModelGenerationParams(state.selectedChatBackend, state.loadedModelId, params)
+            }
+        )
+    }
+
+    fun rollbackAgentParams() {
+        rollbackAgentParamsFor(
+            store = store,
+            application = application,
+            persistModelGenerationParams = { state, params ->
+                persistModelGenerationParams(state.selectedChatBackend, state.loadedModelId, params)
+            }
+        )
+    }
+
+    fun loadAgentRecommendedModel() {
+        loadAgentRecommendedModelFor(
+            store = store,
+            loadModel = loadModel
+        )
+    }
+
+    fun runAgentBenchmark() {
+        runAgentBenchmarkFor(
+            store = store,
+            scope = scope,
+            engine = engine,
+            benchmarkRunner = benchmarkRunner,
+            benchmarkHistoryLogger = benchmarkHistoryLogger,
+            currentDeviceProfile = ::currentDeviceProfile,
+            busy = busy,
+            fail = fail
+        )
+    }
+
+    fun runAgentStabilitySmoke() {
+        runAgentStabilitySmokeFor(
+            scope,
+            store,
+            engine,
+            modelStore,
+            cloudApiStore,
+            managedRuntimeReadinessRefreshGate,
+            managedRuntimeReadinessPort(),
+            deviceProfileReader,
+            diagnosticsOperations,
+            cancelGeneration = { cancelGenerationJob() },
+            busy = { busy(it) },
+            loadSmoke = { model, runtime, params -> timedLoadModel(model, runtime, params) },
+            generationSmoke = { params -> runLocalGenerationSmoke(params) },
+            apiSmoke = { localApiRuntimeOwner.runLoopbackApiStreamSmoke() },
+            engineSmoke = { params -> localApiRuntimeOwner.runLoopbackEngineStreamSmoke(params) }
+        )
+    }
+
+    fun startAgentTuning() = startAgentTuning(AgentTuningMode.QUICK, false)
+
+    fun startAgentTuning(mode: AgentTuningMode, autoApply: Boolean) {
         val debugMode = when (mode) {
             AgentTuningMode.QUICK -> AgentDebugMode.Quick
             AgentTuningMode.STANDARD -> AgentDebugMode.Standard
@@ -56,11 +225,7 @@ internal class AgentTuningCoordinator {
         tuningOwner.startAgentTuning(debugMode = debugMode, autoApply = autoApply)
     }
 
-    fun pauseAgentTuning(
-        runtimeProfileStore: ModelRuntimeProfileStore,
-        store: UiStateStore,
-        scope: CoroutineScope
-    ) {
+    fun pauseAgentTuning() {
         adaptiveTuningPauseRequested.set(true)
         val jobId = activeTuningJobId
         if (jobId != null) {
@@ -81,11 +246,7 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun resumeAgentTuning(
-        runtimeProfileStore: ModelRuntimeProfileStore,
-        store: UiStateStore,
-        scope: CoroutineScope
-    ) {
+    fun resumeAgentTuning() {
         adaptiveTuningPauseRequested.set(false)
         val jobId = activeTuningJobId
         if (jobId != null) {
@@ -106,16 +267,12 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun cancelAgentTuning(
-        cancelPersistedJob: suspend (String) -> TuningJobEntity,
-        store: UiStateStore,
-        scope: CoroutineScope
-    ) {
+    fun cancelAgentTuning() {
         adaptiveTuningCancelRequested.set(true)
         val jobId = activeTuningJobId
         if (jobId != null) {
             scope.launch(Dispatchers.IO) {
-                runCatching { cancelPersistedJob(jobId) }
+                runCatching { cancelPersistedTuningJob(jobId) }
                     .onSuccess { canceled ->
                         store.update {
                             it.copy(
@@ -135,13 +292,8 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun queryAgentTuningJob(
-        runtimeProfileStore: ModelRuntimeProfileStore,
-        store: UiStateStore,
-        scope: CoroutineScope,
-        activeRuntimeIdentity: ModelRuntimeIdentity?
-    ) {
-        val identity = activeRuntimeIdentity ?: return
+    fun queryAgentTuningJob() {
+        val identity = activeRuntimeIdentity() ?: return
         scope.launch(Dispatchers.IO) {
             runCatching { runtimeProfileStore.currentRuntimeState(identity.identityHash) }
                 .onSuccess { snapshot ->
@@ -158,14 +310,8 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun applyPendingAgentProfile(
-        runtimeProfileStore: ModelRuntimeProfileStore,
-        scope: CoroutineScope,
-        activeRuntimeIdentity: ModelRuntimeIdentity?,
-        showStatus: (String) -> Unit,
-        applyPendingRuntimeTransaction: suspend (PendingRuntimeProfileTransaction) -> Unit
-    ) {
-        val identity = activeRuntimeIdentity ?: return
+    fun applyPendingAgentProfile() {
+        val identity = activeRuntimeIdentity() ?: return
         if (adaptiveTuningJob?.isActive == true) {
             showStatus("运行时正在执行其他调优生命周期操作。")
             return
@@ -175,7 +321,7 @@ internal class AgentTuningCoordinator {
                 val pending = runCatching { runtimeProfileStore.pendingTransaction(identity.identityHash) }
                     .getOrNull()
                 if (pending == null) {
-                    showStatus("当前没有可应用的 pending profile。")
+                    showStatus("当前没有待确认的调优建议。")
                     return@launch
                 }
                 applyPendingRuntimeTransaction(pending)
@@ -186,17 +332,8 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun discardPendingAgentProfile(
-        runtimeProfileStore: ModelRuntimeProfileStore,
-        store: UiStateStore,
-        scope: CoroutineScope,
-        application: Application,
-        engine: McaInferenceService,
-        activeRuntimeIdentity: ModelRuntimeIdentity?,
-        getPendingProfileTransactionId: () -> String?,
-        setPendingProfileTransactionId: (String?) -> Unit
-    ) {
-        val identity = activeRuntimeIdentity ?: return
+    fun discardPendingAgentProfile() {
+        val identity = activeRuntimeIdentity() ?: return
         scope.launch(Dispatchers.IO) {
             runCatching {
                 val pending = runtimeProfileStore.pendingTransaction(identity.identityHash)
@@ -238,16 +375,24 @@ internal class AgentTuningCoordinator {
         }
     }
 
-    fun rollbackAgentProfile(
-        scope: CoroutineScope,
-        activeRuntimeIdentity: ModelRuntimeIdentity?,
-        activeModelForRuntimeProfile: ModelManifest?,
-        rollbackCommittedRuntimeProfile: suspend (ModelRuntimeIdentity, ModelManifest) -> Unit
-    ) {
-        val identity = activeRuntimeIdentity ?: return
-        val model = activeModelForRuntimeProfile ?: return
+    fun rollbackAgentProfile() {
+        val identity = activeRuntimeIdentity() ?: return
+        val model = activeModelForRuntimeProfile() ?: return
         scope.launch(Dispatchers.IO) {
             rollbackCommittedRuntimeProfile(identity, model)
+        }
+    }
+
+    fun runAgentQuickDebug() = startAgentTuning(AgentTuningMode.QUICK, false)
+    fun runAgentStandardDebug() = startAgentTuning(AgentTuningMode.STANDARD, false)
+    fun runAgentDeepDebug() = startAgentTuning(AgentTuningMode.DEEP, false)
+    fun runAgentPowerDebug() = startAgentTuning(AgentTuningMode.POWER_SAVE, false)
+
+    fun showAgentDebugExplanation() {
+        store.update {
+            it.copy(
+                statusMessage = "智能调试由规则包执行参数搜索，当前已加载模型只用于解释调试结果。"
+            )
         }
     }
 }

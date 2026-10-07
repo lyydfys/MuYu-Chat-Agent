@@ -12,6 +12,59 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
+ * Coordinator for ModelScope Hub exploration, search, recommendation inspection,
+ * and external page navigation.
+ */
+internal class ModelScopeHubCoordinator(
+    private val scope: CoroutineScope,
+    private val store: UiStateStore,
+    private val client: ModelScopeClient,
+    private val application: Application,
+    private val currentDeviceProfile: () -> DeviceProfile,
+    private val busy: (String) -> Unit,
+    private val fail: (String) -> Unit,
+    private val showStatus: (String) -> Unit,
+    private val enqueueManagedDownload: (ManagedDownloadRequest, Boolean) -> Unit
+) {
+    fun fetchRemoteFiles() =
+        fetchRemoteFilesFor(scope, store, client, busy, fail, store.current.repoInput)
+
+    fun fetchRecommendedFiles(model: ModelScopeRecommendedModel) =
+        fetchRecommendedFilesFor(
+            scope,
+            store,
+            client,
+            busy,
+            fail,
+            showStatus,
+            currentDeviceProfile(),
+            model
+        )
+
+    fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean = false) =
+        downloadRecommendedFor(model, useAfterDownload, fail, enqueueManagedDownload)
+
+    fun searchHubModels(reset: Boolean = true) =
+        searchHubModelsFor(
+            scope,
+            store,
+            client,
+            busy,
+            fail,
+            store.current.hubQuery,
+            store.current.hubPage,
+            store.current.hubModels,
+            reset
+        )
+
+    fun fetchHubModelFiles(model: ModelScopeHubModel) =
+        fetchHubModelFilesFor(scope, store, client, busy, fail, model)
+
+    fun openModelScopePage(url: String) =
+        openModelScopePageFor(application, fail, url)
+}
+
+/**
  * Operations for ModelScope Hub exploration, search, recommendation inspection,
  * and external page navigation.
  */

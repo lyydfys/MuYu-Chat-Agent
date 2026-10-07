@@ -1,6 +1,16 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.download.ModelScopeClient
+import com.muyuchat.mca.AgentTuningCoordinator
+import com.muyuchat.mca.ManagedDownloadRequest
+import com.muyuchat.mca.ModelScopeHubCoordinator
+import com.muyuchat.core.advisor.AgentDecisionLogger
+import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
+import com.muyuchat.core.engine.LoadParams
+import com.muyuchat.mca.DiagnosticsOperations
+import com.muyuchat.mca.LocalGenerationSmokeResult
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatAppearanceCoordinator
 import com.muyuchat.mca.ChatSessionPersistencePortAdapter
@@ -1107,6 +1117,99 @@ internal class McaAppContainer(private val application: Application) {
             assistantStore = assistantStore,
             chatSessionStore = chatSessionStore,
             showStatus = showStatus
+        )
+
+    fun createAgentTuningCoordinator(
+        store: UiStateStore,
+        scope: CoroutineScope,
+        engine: McaInferenceService,
+        tuningOwner: TuningOwner,
+        agentLogger: AgentDecisionLogger,
+        benchmarkRunner: BenchmarkRunner,
+        diagnosticsOperations: DiagnosticsOperations,
+        managedRuntimeReadinessPortProvider: () -> ManagedRuntimeReadinessPort,
+        localApiRuntimeOwner: LocalApiRuntimeOwner,
+        modelScopeClient: ModelScopeClient,
+        cancelPersistedTuningJob: suspend (String) -> TuningJobEntity,
+        activeRuntimeIdentity: () -> ModelRuntimeIdentity?,
+        activeAdaptiveRecommendation: () -> AdaptiveTuningRecommendation?,
+        setActiveAdaptiveRecommendation: (AdaptiveTuningRecommendation?) -> Unit,
+        busy: (String) -> Unit,
+        fail: (String) -> Unit,
+        showStatus: (String) -> Unit,
+        persistModelGenerationParams: (ChatBackend, String?, GenerationParams) -> Unit,
+        updateParams: (GenerationParams) -> Unit,
+        loadModel: (ModelManifest) -> Unit,
+        timedLoadModel: suspend (ModelManifest, LocalChatRuntime, LoadParams) -> Long,
+        runLocalGenerationSmoke: suspend (GenerationParams) -> LocalGenerationSmokeResult,
+        cancelGenerationJob: () -> Unit,
+        activeModelForRuntimeProfile: () -> ModelManifest?,
+        getPendingProfileTransactionId: () -> String?,
+        setPendingProfileTransactionId: (String?) -> Unit
+    ): AgentTuningCoordinator =
+        AgentTuningCoordinator(
+            application = application,
+            store = store,
+            scope = scope,
+            engine = engine,
+            tuningOwner = tuningOwner,
+            modelStore = modelStore,
+            cloudApiStore = cloudApiStore,
+            runtimeProfileStore = runtimeProfileStore,
+            modelScopeClient = modelScopeClient,
+            advisor = advisor,
+            agentLogger = agentLogger,
+            benchmarkRunner = benchmarkRunner,
+            benchmarkHistoryLogger = benchmarkHistoryLogger,
+            deviceProfileReader = deviceProfileReader,
+            diagnosticsOperations = diagnosticsOperations,
+            managedRuntimeReadinessRefreshGate = readinessRefreshGate,
+            managedRuntimeReadinessPort = managedRuntimeReadinessPortProvider,
+            localApiRuntimeOwner = localApiRuntimeOwner,
+            cancelPersistedTuningJob = cancelPersistedTuningJob,
+            activeRuntimeIdentity = activeRuntimeIdentity,
+            activeAdaptiveRecommendation = activeAdaptiveRecommendation,
+            setActiveAdaptiveRecommendation = setActiveAdaptiveRecommendation,
+            busy = busy,
+            fail = fail,
+            showStatus = showStatus,
+            persistModelGenerationParams = persistModelGenerationParams,
+            updateParams = updateParams,
+            loadModel = loadModel,
+            timedLoadModel = timedLoadModel,
+            runLocalGenerationSmoke = runLocalGenerationSmoke,
+            cancelGenerationJob = cancelGenerationJob,
+            activeModelForRuntimeProfile = activeModelForRuntimeProfile,
+            runtimeProfileTransactionPort = createRuntimeProfileTransactionPort(
+                store = store,
+                engine = engine,
+                tuningOwner = tuningOwner,
+                showStatusAction = showStatus
+            ),
+            getPendingProfileTransactionId = getPendingProfileTransactionId,
+            setPendingProfileTransactionId = setPendingProfileTransactionId
+        )
+
+    internal fun createModelScopeHubCoordinator(
+        scope: kotlinx.coroutines.CoroutineScope,
+        store: com.muyuchat.mca.UiStateStore,
+        client: ModelScopeClient,
+        currentDeviceProfile: () -> DeviceProfile,
+        busy: (String) -> Unit,
+        fail: (String) -> Unit,
+        showStatus: (String) -> Unit,
+        enqueueManagedDownload: (ManagedDownloadRequest, Boolean) -> Unit
+    ): ModelScopeHubCoordinator =
+        ModelScopeHubCoordinator(
+            scope = scope,
+            store = store,
+            client = client,
+            application = application,
+            currentDeviceProfile = currentDeviceProfile,
+            busy = busy,
+            fail = fail,
+            showStatus = showStatus,
+            enqueueManagedDownload = enqueueManagedDownload
         )
 
     val runtimeAdmission = RuntimeAdmissionState(
