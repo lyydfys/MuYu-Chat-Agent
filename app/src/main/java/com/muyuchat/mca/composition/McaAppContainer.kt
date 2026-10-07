@@ -1,6 +1,7 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
+import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatSessionPersistencePortAdapter
 import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
@@ -1088,6 +1089,9 @@ internal class McaAppContainer(private val application: Application) {
             runners = runners,
             installationScopeId = installationScopeId
         )
+
+    fun createLocalApiRuntimeOwner(): LocalApiRuntimeOwner =
+        LocalApiRuntimeOwner()
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()

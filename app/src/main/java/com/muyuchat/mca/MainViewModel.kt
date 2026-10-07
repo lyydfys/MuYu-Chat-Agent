@@ -355,7 +355,8 @@ class MainViewModel @JvmOverloads constructor(
     application: Application,
     private val deferStartup: Boolean = false,
     private val skipInitialModelDiscovery: Boolean = false,
-    injectedEngine: McaInferenceService? = null
+    injectedEngine: McaInferenceService? = null,
+    injectedLocalApiRuntimeOwner: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -434,7 +435,8 @@ class MainViewModel @JvmOverloads constructor(
         installationScopeId = installationScopeId
     )
     private val apiKey = GenerationPreferences.loadOrCreateApiKey(application)
-    private val localApiRuntimeOwner = Any()
+    private val localApiRuntimeOwner: LocalApiRuntimeOwner =
+        (injectedLocalApiRuntimeOwner as? LocalApiRuntimeOwner) ?: container.createLocalApiRuntimeOwner()
     private val initialApiPreferences = loadApiPreferences(application)
     /** Listener, notification, persisted intent, and UI state share this single lifecycle gate. */
     private val apiLifecycleMutex = Mutex()
@@ -1277,13 +1279,10 @@ class MainViewModel @JvmOverloads constructor(
             )
         }
         installChatLocalApiProviders(chatLocalApiProviderPort)
-        installLocalApiAuxProviders(localApiAuxProviderPort)
-        LocalApiRuntime.controlPlane = localApiControlPlaneCoordinator.createControlPlane()
-
-        // Every provider above is now installed. Publish them as one immutable set so a runtime call
-        // that starts from here on can never observe a half-installed owner (for example the new
-        // chat stream paired with the previous owner's stop handle).
-        LocalApiRuntime.publishBindings()
+        localApiRuntimeOwner.publishBindings(
+            auxProviderPort = localApiAuxProviderPort,
+            controlPlane = localApiControlPlaneCoordinator.createControlPlane()
+        )
 
         launchModelOperation("恢复运行记录失败") {
             recoverInterruptedRuntimeProfiles()
@@ -3824,8 +3823,8 @@ class MainViewModel @JvmOverloads constructor(
             busy = { busy(it) },
             loadSmoke = { model, runtime, params -> timedLoadModel(model, runtime, params) },
             generationSmoke = { params -> runLocalGenerationSmoke(params) },
-            apiSmoke = { runLoopbackApiStreamSmoke() },
-            engineSmoke = { params -> runLoopbackEngineStreamSmoke(params) }
+            apiSmoke = { localApiRuntimeOwner.runLoopbackApiStreamSmoke() },
+            engineSmoke = { params -> localApiRuntimeOwner.runLoopbackEngineStreamSmoke(params) }
         )
 
     fun startAgentTuning() =
@@ -3955,6 +3954,7 @@ class MainViewModel @JvmOverloads constructor(
             stopForegroundService = false,
             forceServerStop = false
         )
+        localApiRuntimeOwner.release()
         localImageWorkerClient.close()
         container.isolatedLocalChatRunners.close()
         super.onCleared()
@@ -4516,7 +4516,7 @@ class MainViewModel @JvmOverloads constructor(
         applyAssistantDefaultModelFor(uiStateStore, ::showStatus, ::selectCloudChatModel, ::loadModel, assistant)
 
     private fun apiUrl(host: String): String =
-        "http://$host:$REST_PORT/v1"
+        localApiRuntimeOwner.apiUrl(host)
 
     private fun MainUiState.prepareChatInput(): PreparedChatInput {
         val matches = imageAttachmentRegex.findAll(input).toList()
@@ -4557,7 +4557,7 @@ class MainViewModel @JvmOverloads constructor(
 
 
     private fun currentOpenApiAddress(): String =
-        apiUrl(detectLanIpAddress() ?: "本机局域网IP")
+        localApiRuntimeOwner.currentOpenApiAddress(detectLanIpAddress())
 
 
 
@@ -4581,12 +4581,6 @@ class MainViewModel @JvmOverloads constructor(
 
     private suspend fun runLocalGenerationSmoke(params: GenerationParams): LocalGenerationSmokeResult =
         runLocalGenerationSmokeFor(engine, params)
-
-    private suspend fun runLoopbackApiStreamSmoke(): LocalApiStreamSmokeResult =
-        runLoopbackApiStreamSmokeFor()
-
-    private suspend fun runLoopbackEngineStreamSmoke(params: GenerationParams): LocalApiStreamSmokeResult =
-        runLoopbackEngineStreamSmokeFor(params)
 
     private suspend fun recoverInterruptedRuntimeProfiles() =
         recoverInterruptedRuntimeProfilesFor(runtimeProfileStore, pendingRuntimeRecoveries, uiStateStore)
