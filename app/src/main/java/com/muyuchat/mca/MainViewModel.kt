@@ -466,20 +466,8 @@ class MainViewModel @JvmOverloads constructor(
     private val chatImageCommitRecoveryPort: ChatImageCommitRecoveryPort =
         container.createChatImageCommitRecoveryPort({ chatImageCommitJournal }, chatSessionStore)
     private val assistantStore = container.assistantStore
-    private val assistantSaveMutex = Mutex()
 
-    private fun persistAssistantsAsync() {
-        viewModelScope.launch(Dispatchers.IO) {
-            assistantSaveMutex.withLock {
-                runCatching { assistantStore.saveAssistants(uiStateStore.current.assistants) }
-                    .onFailure { error ->
-                        uiStateStore.update { it.copy(
-                            statusMessage = "助手保存失败：${error.message ?: "请重试"}"
-                        ) }
-                    }
-            }
-        }
-    }
+
     private val cloudApiStore = container.cloudApiStore
     private val cloudChatProvider = container.cloudChatProvider
     private val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -1224,6 +1212,54 @@ class MainViewModel @JvmOverloads constructor(
         enqueueManagedDownload = ::enqueueManagedDownload
     )
 
+    private val assistantProfileCoordinator: AssistantProfileCoordinator = container.createAssistantProfileCoordinator(
+        store = uiStateStore,
+        scope = viewModelScope,
+        modelGenerationProfileStore = modelGenerationProfileStore,
+        chatSessionStore = chatSessionStore,
+        knowledgeLibraryPort = knowledgeLibraryPort,
+        chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
+        pendingWorldBookCleanupOwners = pendingWorldBookCleanupOwners,
+        engine = engine,
+        characterMemorySummaryCoordinator = characterMemorySummaryCoordinator,
+        chatSessionPersistenceMutex = chatSessionPersistenceMutex,
+        chatSessionPersistenceSequence = chatSessionPersistenceSequence,
+        getPendingKnowledgeBindings = { pendingKnowledgeBindings },
+        setDurableChatSessions = { durableChatSessions = it },
+        conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
+        contentImportSelectionRevision = contentImportSelectionRevision,
+        activeRuntimeIdentity = { activeRuntimeIdentity },
+        runtimeUserOverrideFields = runtimeUserOverrideFields,
+        directParameterStageGeneration = directParameterStageGeneration,
+        getActiveDirectParameterStageJob = { directParameterStageJob },
+        setActiveDirectParameterStageJob = { directParameterStageJob = it },
+        directParameterStageMutex = directParameterStageMutex,
+        adaptiveTuningJobIsActive = { agentTuningCoordinator.adaptiveTuningJob?.isActive == true },
+        getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
+        getPendingProfileTransactionId = { pendingProfileTransactionId },
+        setPendingProfileTransactionId = { pendingProfileTransactionId = it },
+        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+        showStatus = ::showStatus,
+        persistModelGenerationParams = { state, params -> persistModelGenerationParams(state, params) },
+        persistChatSessions = { sessions -> persistChatSessions(sessions) },
+        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
+        onLocalConversationContextNeedsInvalidation = {
+            localConversationContextNeedsInvalidation = true
+            localConversationContextInvalidationSequence.incrementAndGet()
+        },
+        selectChatSession = ::selectChatSession,
+        loadModel = ::loadModel,
+        selectCloudChatModel = ::selectCloudChatModel,
+        newChatForAssistant = ::newChatForAssistant,
+        invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
+        chatAppearanceMutex = chatAppearanceCoordinator.mutex,
+        cleanupUnusedChatBackgrounds = { chatAppearanceCoordinator.cleanupUnusedChatBackgrounds() },
+        captureContentImportOwner = ::captureContentImportOwner,
+        stageContentImportPreview = ::stageContentImportPreview,
+        readAttachmentText = { uri, maxBytes -> readAttachmentText(uri, maxBytes) },
+        currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() }
+    )
+
     private val contextCompressionCoordinator = ContextCompressionCoordinator(
         store = uiStateStore,
         engine = engine,
@@ -1815,7 +1851,7 @@ class MainViewModel @JvmOverloads constructor(
                 }
             )
         }
-        persistAssistantsAsync()
+        assistantProfileCoordinator.persistAssistantsAsync()
         if (reloadRequired && changedRuntimeFields.isNotEmpty()) {
             stageDirectParameterProfile(scopedParams)
         } else if (!reloadRequired && changedRuntimeFields.isNotEmpty()) {
@@ -1825,25 +1861,8 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private fun stageDirectParameterProfile(params: GenerationParams) {
-        stageDirectParameterProfileFor(
-            store = uiStateStore,
-            scope = viewModelScope,
-            engine = engine,
-            runtimeProfileStore = runtimeProfileStore,
-            activeRuntimeIdentity = { activeRuntimeIdentity },
-            runtimeUserOverrideFields = runtimeUserOverrideFields,
-            directParameterStageGeneration = directParameterStageGeneration,
-            getActiveDirectParameterStageJob = { directParameterStageJob },
-            setActiveDirectParameterStageJob = { directParameterStageJob = it },
-            directParameterStageMutex = directParameterStageMutex,
-            adaptiveTuningJobIsActive = { agentTuningCoordinator.adaptiveTuningJob?.isActive == true },
-            getActiveTuningJobId = { agentTuningCoordinator.activeTuningJobId },
-            getPendingProfileTransactionId = { pendingProfileTransactionId },
-            setPendingProfileTransactionId = { pendingProfileTransactionId = it },
-            params = params
-        )
-    }
+    private fun stageDirectParameterProfile(params: GenerationParams) =
+        assistantProfileCoordinator.stageDirectParameterProfile(params)
 
     fun saveAssistantProfile(
         id: String?,
@@ -1867,83 +1886,19 @@ class MainViewModel @JvmOverloads constructor(
         memorySummaryInterval: Int,
         webSearchEnabled: Boolean,
         fileContextEnabled: Boolean
-    ) = saveAssistantProfileFor(
-        store = uiStateStore,
-        assistantStore = assistantStore,
-        application = getApplication(),
-        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-        showStatus = ::showStatus,
-        persistModelGenerationParams = ::persistModelGenerationParams,
-        persistAssistantsAsync = ::persistAssistantsAsync,
-        persistChatSessions = ::persistChatSessions,
-        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        selectAssistant = ::selectAssistant,
-        applyAssistantDefaultModel = ::applyAssistantDefaultModel,
-        id = id, name = name, avatar = avatar, tag = tag, systemPrompt = systemPrompt,
-        defaultModelMode = defaultModelMode, defaultModelId = defaultModelId,
-        temperature = temperature, topP = topP, nPredict = nPredict, topK = topK,
-        minP = minP, repeatPenalty = repeatPenalty, presencePenalty = presencePenalty,
-        frequencyPenalty = frequencyPenalty, stopWords = stopWords,
-        reasoningMode = reasoningMode, memoryEnabled = memoryEnabled,
-        memorySummaryInterval = memorySummaryInterval, webSearchEnabled = webSearchEnabled,
-        fileContextEnabled = fileContextEnabled
+    ) = assistantProfileCoordinator.saveAssistantProfile(
+        id, name, avatar, tag, systemPrompt, defaultModelMode, defaultModelId,
+        temperature, topP, nPredict, topK, minP, repeatPenalty, presencePenalty,
+        frequencyPenalty, stopWords, reasoningMode, memoryEnabled, memorySummaryInterval,
+        webSearchEnabled, fileContextEnabled
     )
 
     fun upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) =
-        upsertAssistantMemoryFor(uiStateStore, viewModelScope, chatSessionStore, ::showStatus, ::markLocalConversationContextInvalid, assistantId, id, scope, content)
+        assistantProfileCoordinator.upsertAssistantMemory(assistantId, id, scope, content)
 
     fun deleteAssistantMemory(assistantId: String, id: String) =
-        deleteAssistantMemoryFor(uiStateStore, viewModelScope, chatSessionStore, ::showStatus, ::markLocalConversationContextInvalid, assistantId, id)
+        assistantProfileCoordinator.deleteAssistantMemory(assistantId, id)
 
-    private fun recordCompletedCharacterMemoryTurn(
-        assistantId: String,
-        sessionId: String,
-        assistantSnapshot: AssistantConversationSnapshot,
-        user: ChatMessage,
-        assistant: ChatMessage,
-        conversationPersistJob: Job?,
-        backend: ChatBackend,
-        params: GenerationParams,
-        cloudConfig: CloudApiConfig?,
-        localIdentity: String?
-    ) = recordCompletedCharacterMemoryTurnFor(
-        store = uiStateStore, scope = viewModelScope, chatSessionStore = chatSessionStore,
-        scheduleCharacterMemorySummary = ::scheduleCharacterMemorySummary,
-        assistantId = assistantId, sessionId = sessionId, assistantSnapshot = assistantSnapshot,
-        user = user, assistant = assistant, conversationPersistJob = conversationPersistJob,
-        backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
-    )
-
-    private fun scheduleCharacterMemorySummary(
-        assistantId: String,
-        backend: ChatBackend,
-        params: GenerationParams,
-        cloudConfig: CloudApiConfig?,
-        localIdentity: String?
-    ) = characterMemorySummaryCoordinator.schedule(
-        scope = viewModelScope, summarizeCharacterMemory = ::summarizeCharacterMemory,
-        assistantId = assistantId, backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
-    )
-
-    private suspend fun summarizeCharacterMemory(
-        assistantId: String,
-        backend: ChatBackend,
-        params: GenerationParams,
-        cloudConfig: CloudApiConfig?,
-        localIdentity: String?
-    ) = summarizeCharacterMemoryFor(
-        store = uiStateStore, chatSessionStore = chatSessionStore, cloudChatProvider = cloudChatProvider,
-        engine = engine, chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-        activeRuntimeIdentity = { activeRuntimeIdentity },
-        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        onLocalConversationContextNeedsInvalidation = {
-            localConversationContextNeedsInvalidation = true
-            localConversationContextInvalidationSequence.incrementAndGet()
-        },
-        recordReschedule = characterMemorySummaryCoordinator::recordReschedule,
-        assistantId = assistantId, backend = backend, params = params, cloudConfig = cloudConfig, localIdentity = localIdentity
-    )
 
     fun saveWebSearchConfig(
         enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
@@ -2007,18 +1962,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     private fun finishSelectingNewAssistant(assistant: AssistantRecord) =
-        finishSelectingNewAssistantFor(
-            store = uiStateStore,
-            assistantStore = assistantStore,
-            modelGenerationProfileStore = modelGenerationProfileStore,
-            application = getApplication(),
-            invalidatePendingChatImagePreparation = ::invalidatePendingChatImagePreparation,
-            contentImportSelectionRevision = contentImportSelectionRevision,
-            markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-            applyAssistantDefaultModel = ::applyAssistantDefaultModel,
-            currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() },
-            assistant = assistant
-        )
+        assistantProfileCoordinator.finishSelectingNewAssistant(assistant)
 
     fun importChatBackground(scope: ChatAppearanceScope, uriString: String) {
         chatAppearanceCoordinator.importChatBackground(scope, uriString)
@@ -2028,53 +1972,12 @@ class MainViewModel @JvmOverloads constructor(
         chatAppearanceCoordinator.setChatAppearance(scope, appearance)
     }
 
-    private fun queueWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) {
-        require(scope != WorldBookScope.GLOBAL) { "Global world books are not owner-scoped." }
-        val normalizedOwnerIds = ownerIds.asSequence()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
-            .toSet()
-        if (normalizedOwnerIds.isEmpty()) return
-        synchronized(chatSessionPersistenceStateLock) {
-            pendingWorldBookCleanupOwners
-                .getOrPut(scope) { linkedSetOf() }
-                .addAll(normalizedOwnerIds)
-        }
-    }
 
-    private fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) =
-        cancelPendingWorldBookCleanupIn(container.chatSessionPersistenceState, scope, ownerIds)
-
-    /**
-     * World books are secondary data.  They are removed only after the Room
-     * owner snapshot has committed; failed/skipped writes keep this queue for
-     * the next authoritative snapshot.
-     */
-    private fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
-        cleanupPendingWorldBooksAfterOwnerCommitFor(container.chatSessionPersistenceState, worldBookStore, uiStateStore, scope, retainedOwnerIds)
-
-    fun deleteAssistant(assistantId: String) = deleteAssistantFor(
-        store = uiStateStore,
-        assistantStore = assistantStore,
-        modelGenerationProfileStore = modelGenerationProfileStore,
-        chatSessionStore = chatSessionStore,
-        application = getApplication(),
-        scope = viewModelScope,
-        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-        showStatus = ::showStatus,
-        queueWorldBookCleanup = ::queueWorldBookCleanup,
-        cleanupPendingWorldBooksAfterOwnerCommit = ::cleanupPendingWorldBooksAfterOwnerCommit,
-        selectAssistant = ::selectAssistant,
-        persistChatSessions = ::persistChatSessions,
-        chatAppearanceMutex = chatAppearanceCoordinator.mutex,
-        cleanupUnusedChatBackgrounds = { chatAppearanceCoordinator.cleanupUnusedChatBackgrounds() },
-        currentModelGenerationProfileKey = { uiStateStore.current.modelGenerationProfileKey() },
-        assistantId = assistantId
-    )
+    fun deleteAssistant(assistantId: String) =
+        assistantProfileCoordinator.deleteAssistant(assistantId)
 
     fun importAssistantCard(rawJson: String) =
-        importAssistantCardFor(uiStateStore, viewModelScope, ::showStatus, ::captureContentImportOwner, ::finishCharacterCardImport, rawJson)
+        assistantProfileCoordinator.importAssistantCard(rawJson)
 
     internal fun restorePendingContentImportPreview() {
         viewModelScope.launch {
@@ -2129,9 +2032,9 @@ class MainViewModel @JvmOverloads constructor(
                             val originalSource = (parsed as? CharacterCardParseResult.Success)?.copy(
                                 source = preview.sourceKind ?: CharacterCardSource.JSON
                             ) ?: parsed
-                            finishCharacterCardImport(originalSource, preview.owner, preview.id)
+                            assistantProfileCoordinator.finishCharacterCardImport(originalSource, preview.owner, preview.id)
                         }
-                        "world_book" -> importWorldBookOwned(
+                        "world_book" -> assistantProfileCoordinator.importWorldBookOwned(
                             preview.rawSource, requireNotNull(preview.scope), preview.owner, preview.id
                         )
                         "knowledge_document" -> confirmKnowledgeDocumentImport(preview)
@@ -2152,36 +2055,10 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) =
-        importAssistantCardFileFor(uiStateStore, viewModelScope, getApplication(), ::showStatus, ::captureContentImportOwner, ::finishCharacterCardImport, uriString, importOwner)
+        assistantProfileCoordinator.importAssistantCardFile(uriString, importOwner)
 
-    private suspend fun finishCharacterCardImport(
-        result: CharacterCardParseResult,
-        owner: ContentImportOwner,
-        commitId: String? = null
-    ): Boolean = finishCharacterCardImportFor(
-        store = uiStateStore,
-        assistantStore = assistantStore,
-        worldBookStore = worldBookStore,
-        chatSessionStore = chatSessionStore,
-        chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-        chatSessionPersistenceSequence = chatSessionPersistenceSequence,
-        getPendingKnowledgeBindings = { pendingKnowledgeBindings },
-        setDurableChatSessions = { durableChatSessions = it },
-        chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
-        stageContentImportPreview = { stageContentImportPreview(it) },
-        conversationMutationBarrierIsActive = { conversationMutationBarrier?.isActive == true },
-        hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
-        currentOwnerIsCurrent = { owner.isCurrent(uiStateStore.current) },
-        selectAssistant = ::selectAssistant,
-        result = result,
-        owner = owner,
-        commitId = commitId
-    )
-
-    fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
-        val owner = captureContentImportOwner()
-        viewModelScope.launch { importWorldBookOwned(rawJson, scope, owner) }
-    }
+    fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) =
+        assistantProfileCoordinator.importWorldBook(rawJson, scope)
 
     fun updateChatImageLoraSelection(selections: List<Pair<String, Double>>?) {
         val frozen = selections?.toList()
@@ -2189,45 +2066,17 @@ class MainViewModel @JvmOverloads constructor(
         uiStateStore.update { it.copy(chatImageLoraSelections = frozen.takeIf { valid }) }
     }
 
-    private suspend fun importWorldBookOwned(
-        rawJson: String,
-        scope: WorldBookScope,
-        owner: ContentImportOwner,
-        commitId: String? = null
-    ): Boolean = importWorldBookOwnedFor(
-        knowledgeLibraryPort = knowledgeLibraryPort,
-        uiStateStore = uiStateStore,
-        currentState = { uiStateStore.current },
-        stageContentImportPreview = { stageContentImportPreview(it) },
-        markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
-        ownerIsCurrent = { it.isCurrent(uiStateStore.current) },
-        rawJson = rawJson,
-        scope = scope,
-        owner = owner,
-        commitId = commitId
-    )
-
     fun importWorldBookFile(
         uriString: String,
         scope: WorldBookScope = WorldBookScope.ASSISTANT,
         importOwner: ContentImportOwner? = null
-    ) = importWorldBookFileFor(
-        scope = viewModelScope,
-        isGenerating = { uiStateStore.current.isGenerating },
-        showStatus = ::showStatus,
-        captureContentImportOwner = ::captureContentImportOwner,
-        importWorldBookOwned = ::importWorldBookOwned,
-        readAttachmentText = ::readAttachmentText,
-        uriString = uriString,
-        scopeKind = scope,
-        importOwner = importOwner
-    )
+    ) = assistantProfileCoordinator.importWorldBookFile(uriString, scope, importOwner)
 
     fun deleteWorldBook(worldBookId: String) =
-        deleteWorldBookFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, worldBookId)
+        assistantProfileCoordinator.deleteWorldBook(worldBookId)
 
     fun createKnowledgeBase(name: String, description: String = "") =
-        createKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, name, description)
+        assistantProfileCoordinator.createKnowledgeBase(name, description)
 
     fun importKnowledgeDocument(
         knowledgeBaseId: String,
@@ -2337,7 +2186,7 @@ class MainViewModel @JvmOverloads constructor(
         setKnowledgeBaseSelectedFor(uiStateStore, { uiStateStore.current }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
 
     fun deleteKnowledgeBase(knowledgeBaseId: String) =
-        deleteKnowledgeBaseFor(knowledgeLibraryPort, uiStateStore, viewModelScope, { uiStateStore.current.knowledgeLibrarySnapshot() }, knowledgeBaseId)
+        assistantProfileCoordinator.deleteKnowledgeBase(knowledgeBaseId)
 
     fun updateReasoningMode(mode: ReasoningMode) =
         updateReasoningModeFor(
@@ -3292,7 +3141,7 @@ class MainViewModel @JvmOverloads constructor(
             hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
             pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
-            queueWorldBookCleanup = ::queueWorldBookCleanup,
+            queueWorldBookCleanup = assistantProfileCoordinator::queueWorldBookCleanup,
             persistConversationMutation = { remaining, rollback ->
                 persistConversationMutation(remaining, rollback)
             },
@@ -3331,7 +3180,7 @@ class MainViewModel @JvmOverloads constructor(
             showStatus = ::showStatus,
             hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) },
             manualContextCompressionRequests = manualContextCompressionRequests,
-            queueWorldBookCleanup = ::queueWorldBookCleanup,
+            queueWorldBookCleanup = assistantProfileCoordinator::queueWorldBookCleanup,
             pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
             persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
             chatImageToolAuthorizationStore = chatImageToolAuthorizationStore
@@ -3917,7 +3766,7 @@ class MainViewModel @JvmOverloads constructor(
             attachContextAssemblyTraceRef = ::attachContextAssemblyTrace,
             promptContextUsageForRef = contextCompressionCoordinator::promptContextUsageFor,
             appendWebSearchDiagnosticRef = webSearchWorkflowCoordinator::appendDiagnostic,
-            recordCompletedCharacterMemoryTurnRef = ::recordCompletedCharacterMemoryTurn,
+            recordCompletedCharacterMemoryTurnRef = assistantProfileCoordinator::recordCompletedCharacterMemoryTurn,
             summarizeContextForGenerationRef = contextCompressionCoordinator::summarizeContextForGeneration,
             ensureLocalConversationContextInvalidatedRef = ::ensureLocalConversationContextInvalidated,
             loadContextCompressionThresholdRef = contextCompressionCoordinator::loadContextCompressionThreshold,
@@ -4218,10 +4067,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun loadPersistentPrefixCacheEnabled(application: Application): Boolean =
         GenerationPreferences.loadPersistentPrefixCacheEnabled(application)
 
-
-
-    private fun applyAssistantDefaultModel(assistant: AssistantRecord) =
-        applyAssistantDefaultModelFor(uiStateStore, ::showStatus, ::selectCloudChatModel, ::loadModel, assistant)
 
     private fun apiUrl(host: String): String =
         localApiRuntimeOwner.apiUrl(host)
