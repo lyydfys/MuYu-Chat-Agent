@@ -91,7 +91,7 @@ def main():
         }
     }
 
-    FINAL_REPORT_PATH.write_text(json.dumps(final_report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    FINAL_REPORT_PATH.write_bytes((json.dumps(final_report, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
     print(f"\nFinal Audit Report written to: {FINAL_REPORT_PATH}")
 
     print("\n-----------------------------------------------------------------")

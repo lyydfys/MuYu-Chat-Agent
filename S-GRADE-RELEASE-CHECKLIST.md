@@ -46,7 +46,7 @@
 | **A8** | Local API / Worker Boundary | `cad6baf` | API 鉴权拦截、SSE 桥接、WorkManager 隔离 | `E:\MAC_REFACTOR_EVIDENCE\A8-local-api-worker-physical-module-boundary.md`| **VERIFIED** |
 | **A9** | Reliability / CI / Release | `8526c10` | 22 场景故障注入、SPDX SBOM、16KB 对齐审计 | `E:\MAC_REFACTOR_EVIDENCE\A9-reliability-ci-release-supply-chain.md` | **VERIFIED** |
 | **A10**| UI-last MVI Architecture | `e63e379` | `Intent → Facade → State/Effect` 单向架构 | `E:\MAC_REFACTOR_EVIDENCE\A10-ui-last-intent-effect-unidirectional.md` | **VERIFIED** |
-| **A11**| Final Integration / Gate | `PENDING` | 最终整合门禁、发布候选清单与审计报告 | `E:\MAC_REFACTOR_EVIDENCE\A11-final-integration-release-candidate.md` | **VERIFIED** |
+| **A11**| Final Integration / Gate | `2b2189d` | 最终整合门禁、发布候选清单与审计报告 | `E:\MAC_REFACTOR_EVIDENCE\A11-final-integration-release-candidate.md` | **VERIFIED** |
 
 ---
 

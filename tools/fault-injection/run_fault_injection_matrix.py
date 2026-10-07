@@ -275,7 +275,7 @@ def main():
     }
 
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(json.dumps(report_data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    REPORT_PATH.write_bytes((json.dumps(report_data, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
     print(f"Fault matrix report written to: {REPORT_PATH}")
     print(f"\nSummary: {verified_count}/{len(FAULT_SCENARIOS)} scenarios verified (100% compliance).")
 
