@@ -1,0 +1,154 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "MuYu-Chat-Agent-SBOM",
+  "documentNamespace": "https://muyuchat.com/spdxdocs/mca-2026-10-07T20:41:10Z",
+  "creationInfo": {
+    "created": "2026-10-07T20:41:10Z",
+    "creators": [
+      "Tool: MCA-SBOM-Generator-1.0",
+      "Organization: MuYuChat Engineering Team"
+    ],
+    "licenseListVersion": "3.23"
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-MCA-Core-Engine",
+      "name": "mca-core-engine",
+      "versionInfo": "1.0.0-sgrade",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: MuYuChat MCA Team",
+      "originator": "Organization: MuYuChat MCA Team",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: MuYuChat MCA Team",
+      "description": "Pure Kotlin domain engine runtime lifecycle and contract module."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-MCA-Native-Common",
+      "name": "mca-native-common",
+      "versionInfo": "1.0.0-sgrade",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: MuYuChat MCA Team",
+      "originator": "Organization: MuYuChat MCA Team",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: MuYuChat MCA Team",
+      "description": "C++17 RAII guards, clock, safe path, logging, and error envelope adapters."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Qualcomm-QAIRT-SDK",
+      "name": "qairt-sdk",
+      "versionInfo": "2.45.0.260326",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: Qualcomm Technologies, Inc.",
+      "originator": "Organization: Qualcomm Technologies, Inc.",
+      "licenseConcluded": "LicenseRef-Qualcomm-Proprietary",
+      "licenseDeclared": "LicenseRef-Qualcomm-Proprietary",
+      "copyrightText": "Copyright (c) 2026 Organization: Qualcomm Technologies, Inc.",
+      "description": "Qualcomm AI Runtime (QNN) backend and execution library headers."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Alibaba-MNN",
+      "name": "alibaba-mnn",
+      "versionInfo": "2.9.0-mca-patched",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: Alibaba Group",
+      "originator": "Organization: Alibaba Group",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: Alibaba Group",
+      "description": "Mobile Neural Network inference engine with KleidiAI / ARM64 optimizations."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Llama-Cpp",
+      "name": "llama-cpp",
+      "versionInfo": "b3800-mca-patched",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Person: Georgi Gerganov and contributors",
+      "originator": "Person: Georgi Gerganov",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2026 Person: Georgi Gerganov and contributors",
+      "description": "Port of LLaMA model in pure C/C++ with KleidiAI k-quant support."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Stable-Diffusion-Cpp",
+      "name": "stable-diffusion-cpp",
+      "versionInfo": "master-mca-pinned",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: leejet and contributors",
+      "originator": "Person: leejet",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) 2026 Organization: leejet and contributors",
+      "description": "Stable Diffusion in pure C/C++ with text2img, img2img, and ControlNet pipelines."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Google-LiteRT",
+      "name": "litert-android-runtime",
+      "versionInfo": "1.4.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: Google LLC",
+      "originator": "Organization: Google LLC",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: Google LLC",
+      "description": "Google LiteRT On-Device LLM and GenAI inference runtime."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Kotlinx-Coroutines",
+      "name": "kotlinx-coroutines",
+      "versionInfo": "1.9.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: JetBrains s.r.o.",
+      "originator": "Organization: JetBrains s.r.o.",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: JetBrains s.r.o.",
+      "description": "Coroutines support libraries for Kotlin."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-AndroidX-WorkManager",
+      "name": "androidx-workmanager",
+      "versionInfo": "2.10.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: Google LLC",
+      "originator": "Organization: Google LLC",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: Google LLC",
+      "description": "AndroidX WorkManager background task execution architecture component."
+    },
+    {
+      "SPDXID": "SPDXRef-Package-AndroidX-Room",
+      "name": "androidx-room",
+      "versionInfo": "2.7.0",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "supplier": "Organization: Google LLC",
+      "originator": "Organization: Google LLC",
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "copyrightText": "Copyright (c) 2026 Organization: Google LLC",
+      "description": "AndroidX Room SQLite persistence library."
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-MCA-Core-Engine"
+    }
+  ]
+}

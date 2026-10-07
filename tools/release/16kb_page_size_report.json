@@ -1,0 +1,3089 @@
+{
+  "title": "MCA 16 KB Page-Size Alignment Audit Report",
+  "target_page_size_bytes": 16384,
+  "total_binaries_scanned": 385,
+  "compliant_binaries": 381,
+  "legacy_or_unaligned_binaries": 4,
+  "binaries": [
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/generated/mcaMnnJniLibs/main/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/2k2r1d1e/obj/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/43311vo2/obj/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/cxx/Release/6n2r261m/obj/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_jni_libs/debug/mergeDebugJniLibFolders/out/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv8.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv8.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv8.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv8.6_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv9.0_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv9.2_1.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-cpu-android_armv9.2_2.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml-opencl-mca.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libllm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libMNN.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libMNN_CL.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libMNN_Express.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libMNNAudio.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libMNNOpenCV.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-base.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-alderlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-cannonlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-cascadelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-cooperlake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-haswell.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-icelake.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-ivybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-piledriver.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-sandybridge.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-sapphirerapids.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-skylakex.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-sse42.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-x64.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml-cpu-zen4.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libggml.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libllama-common.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libllama.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libmca_mnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libmca_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libmca_prompt_handoff.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libmca_qnn_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/cxx/Release/2f22365k/obj/arm64-v8a/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/cxx/Release/2f22365k/obj/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/cxx/Release/2f22365k/obj/x86_64/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_and_local_jars_jni/debug/copyDebugJniLibsProjectAndLocalJars/jni/x86_64/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/library_jni/debug/copyDebugJniLibsProjectOnly/jni/x86_64/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/x86_64/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/arm64-v8a/libomp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "core/sd-native/build/intermediates/stripped_native_libs/debug/stripDebugDebugSymbols/out/lib/x86_64/libmca_sd_native.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/jniLibs/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/jniLibs/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libQnnHtp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libQnnHtpV81Skel.so",
+      "is_elf64": false,
+      "max_align": 0,
+      "is_16kb_compliant": false,
+      "status": "NON_COMPLIANT",
+      "details": "Not 64-bit ELF (class=1)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libQnnHtpV81Stub.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/arm64-v8a/libQnnSystem.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libQnnHtp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libQnnHtpV73Skel.so",
+      "is_elf64": false,
+      "max_align": 0,
+      "is_16kb_compliant": false,
+      "status": "NON_COMPLIANT",
+      "details": "Not 64-bit ELF (class=1)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libQnnHtpV73Stub.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v73/arm64-v8a/libQnnSystem.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libQnnHtp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libQnnHtpV75Skel.so",
+      "is_elf64": false,
+      "max_align": 0,
+      "is_16kb_compliant": false,
+      "status": "NON_COMPLIANT",
+      "details": "Not 64-bit ELF (class=1)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libQnnHtpV75Stub.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v75/arm64-v8a/libQnnSystem.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libLiteRtCompilerPlugin_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libLiteRtDispatch_Qualcomm.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libQnnHtp.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libQnnHtpV79Skel.so",
+      "is_elf64": false,
+      "max_align": 0,
+      "is_16kb_compliant": false,
+      "status": "NON_COMPLIANT",
+      "details": "Not 64-bit ELF (class=1)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libQnnHtpV79Stub.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/litert/qualcomm/runtime-assets/v79/arm64-v8a/libQnnSystem.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "4 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/qwen-image-2.1/arm64-v8a/libc++_shared.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/qwen-image-2.1/arm64-v8a/libmca_qwenimage21_mnn.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    },
+    {
+      "path": "vendor/qwen-image-2.1/arm64-v8a/libqwenimage21_jni.so",
+      "is_elf64": true,
+      "max_align": 16384,
+      "is_16kb_compliant": true,
+      "status": "COMPLIANT",
+      "details": "3 PT_LOAD segments found (max_align=0x4000)"
+    }
+  ]
+}

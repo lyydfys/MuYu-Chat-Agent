@@ -1,0 +1,70 @@
+# MCA Enterprise S-Grade CI/CD Verification Pipeline Matrix
+# Formal specification of the 9-stage progressive verification lanes
+
+version: "2026-10-08"
+pipeline_lanes:
+  - stage: 1
+    name: "fast-static"
+    description: "Architecture rules, import purity, file LOC limits, local exclusions, LF line endings"
+    command: "python tools/architecture/check_architecture_rules.py"
+    blocking: true
+    produces_artifact: false
+
+  - stage: 2
+    name: "host"
+    description: "C++ host portable tests, Kotlin pure domain contracts and state machine property tests"
+    command: "powershell -File ./scripts/verify-code.ps1 -FullTests"
+    blocking: true
+    produces_artifact: false
+
+  - stage: 3
+    name: "jni"
+    description: "JNI handle boundary, exception safety, buffer ownership and type safety verification"
+    command: "gradlew :core:native:testDebugUnitTest"
+    blocking: true
+    produces_artifact: false
+
+  - stage: 4
+    name: "android"
+    description: "Android instrumentation, Room migrations, ViewModels and UI state store tests"
+    command: "gradlew :app:testDebugUnitTest"
+    blocking: true
+    produces_artifact: false
+
+  - stage: 5
+    name: "arm64-smoke"
+    description: "Physical ARM64 device or emulator real dlopen, QNN/MNN graph compilation and token inference"
+    command: "powershell -File ./tools/device/run-device-smoke.ps1"
+    blocking: true
+    required_hardware: "arm64-v8a"
+    fallback_policy: "Mark UNVERIFIED_NATIVE if device unavailable; never falsify green"
+
+  - stage: 6
+    name: "api-worker"
+    description: "Local API Loopback HTTP/SSE contract, auth gate, WorkManager result persistence"
+    command: "gradlew :api:local:testDebugUnitTest :app:testDebugUnitTest --tests *WorkerBoundaryTest"
+    blocking: true
+    produces_artifact: false
+
+  - stage: 7
+    name: "fault-injection"
+    description: "Full 22-scenario fault injection matrix (OOM, SIGKILL, cancel race, disk full, corrupt package)"
+    command: "python tools/fault-injection/run_fault_injection_matrix.py"
+    blocking: true
+    produces_artifact: true
+    artifact_path: "tools/fault-injection/fault_matrix_report.json"
+
+  - stage: 8
+    name: "soak"
+    description: "24h/72h continuous inference soak, memory leak verification (+5% baseline tolerance)"
+    command: "python tools/device/run_soak_test.py"
+    blocking: true
+    required_hardware: "physical-arm64"
+
+  - stage: 9
+    name: "release"
+    description: "SPDX 2.3 SBOM generation, 16 KB page-size compliance, APK signature and integrity checks"
+    command: "python tools/release/verify_release_integrity.py"
+    blocking: true
+    produces_artifact: true
+    artifact_path: "tools/sbom/mca-sbom.spdx.json"
