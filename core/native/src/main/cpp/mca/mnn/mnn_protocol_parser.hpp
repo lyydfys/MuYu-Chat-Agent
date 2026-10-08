@@ -15,6 +15,7 @@
 #endif
 
 #include "diffusion_scheduler_config.hpp"
+#include "execution_asset_binding.hpp"
 
 namespace mca {
 namespace mnn {
@@ -86,6 +87,71 @@ inline bool mnn_contract_uses_community_clip(const MnnSemanticExecutionContract&
     return contract.embedding_disk_data_type == "FP16" ||
            contract.embedding_disk_data_type == "FP32";
 }
+
+struct MnnTextEncoderAssetEvidence {
+    bool consumed = false;
+    std::string path;
+    std::string sha256;
+    uint64_t size_bytes = 0U;
+    std::string expected_sha256;
+    uint64_t expected_size_bytes = 0U;
+    bool has_weight = false;
+    std::string weight_path;
+    std::string weight_sha256;
+    uint64_t weight_size_bytes = 0U;
+    std::string expected_weight_sha256;
+    uint64_t expected_weight_size_bytes = 0U;
+};
+
+struct MnnNativeExecutionEvidence {
+    size_t timetable_count = 0;
+    size_t unet_execution_count = 0;
+    size_t graph_invocation_count = 0;
+    std::string tokenizer_backend;
+    size_t token_count = 0;
+    bool prompt_weighting_applied = false;
+    size_t positive_weighted_token_count = 0;
+    size_t negative_weighted_token_count = 0;
+    std::string prompt_weight_fingerprint;
+    std::string native_prompt_execution_sha256;
+    std::string embedding_disk_data_type;
+    std::vector<double> timesteps;
+    std::vector<double> sigmas;
+    double init_noise_sigma = 1.0;
+    nlohmann::json textual_inversions = nlohmann::json::array();
+    nlohmann::json textual_inversion_evidence = nullptr;
+    mca::image::execution_assets::Binding execution_assets;
+    bool has_execution_assets = false;
+    MnnTextEncoderAssetEvidence text_encoder_asset;
+};
+
+std::string mnn_consumed_text_encoder_closure_sha256(
+        const MnnTextEncoderAssetEvidence& evidence);
+
+const char* mnn_scheduler_wire_name(mca::diffusion::SchedulerAlgorithm algorithm);
+const char* mnn_scheduler_product_name(mca::diffusion::SchedulerAlgorithm algorithm);
+const char* mnn_prediction_wire_name(mca::diffusion::PredictionType prediction);
+const char* mnn_vae_scaling_wire_name(MnnVaeScalingLocation location);
+
+nlohmann::json mnn_native_effective_json(
+        const MnnSemanticExecutionContract& contract,
+        const MnnNativeExecutionEvidence& evidence);
+
+bool mnn_sana_native_effective_json(
+        const nlohmann::json& params,
+        int completedSteps,
+        int graphInvocationCount,
+        int conditioningSequenceLength,
+        int conditioningBatchSize,
+        const std::string& conditioningOrder,
+        int tokenizerInputSequenceLength,
+        int tokenizerInputBatchSize,
+        int tokenizerNonPaddingTokenCount,
+        const std::string& tokenizerInputOrder,
+        const std::string& conditioningArtifactSha256,
+        bool requireExecutionEvidence,
+        nlohmann::json& nativeEffective,
+        std::string& error);
 
 void append_mnn_u32_little_endian(uint32_t value, std::vector<uint8_t>& payload);
 void append_mnn_u64_little_endian(uint64_t value, std::vector<uint8_t>& payload);
