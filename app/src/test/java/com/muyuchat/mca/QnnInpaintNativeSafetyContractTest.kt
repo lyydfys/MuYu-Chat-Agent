@@ -82,10 +82,12 @@ class QnnInpaintNativeSafetyContractTest {
     @Test
     fun `split sdxl preserves source before preview and pixel blends before png`() {
         val split = source("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
-        val unet = split.substring(
-            split.indexOf("std::string qnn_sdxl_unet_phase_json("),
-            split.indexOf("std::string qnn_sdxl_vae_phase_json("),
-        )
+        val unet = runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp") }.getOrElse {
+            split.substring(
+                split.indexOf("std::string qnn_sdxl_unet_phase_json("),
+                split.indexOf("std::string qnn_sdxl_vae_phase_json("),
+            )
+        }
         assertOrdered(
             unet,
             "scheduler.step(",
@@ -98,7 +100,9 @@ class QnnInpaintNativeSafetyContractTest {
         assertFalse(unet.contains("ConcatenatedLatent9"))
         assertFalse(unet.contains("SeparateMaskInput"))
 
-        val vae = split.substring(split.indexOf("std::string qnn_sdxl_vae_phase_json("))
+        val vae = runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_decoder_phase.hpp") }.getOrElse {
+            split.substring(split.indexOf("std::string qnn_sdxl_vae_phase_json("))
+        }
         assertOrdered(
             vae,
             "load_sdxl_inpaint_pixel_artifacts(",

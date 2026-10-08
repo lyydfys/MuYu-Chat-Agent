@@ -60,12 +60,14 @@ class QnnSharedImg2ImgNativeSafetyContractTest {
             "Shared QNN VAE encoder resources did not release cleanly after load failure."
         ))
 
-        val metadataPreflight = bridge.indexOf("if (!probe_htp)")
-        val preflightClose = bridge.indexOf(
+        val probeSource = runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_capability_probe.cpp") }.getOrDefault("")
+        val probeContext = if (probeSource.isNotEmpty()) probeSource else bridge
+        val metadataPreflight = probeContext.indexOf("if (!probe_htp)")
+        val preflightClose = probeContext.indexOf(
             "if (!system_handle.close_checked(&unload_error))",
             metadataPreflight
         )
-        val preflightReturn = bridge.indexOf("return result;", preflightClose)
+        val preflightReturn = probeContext.indexOf("return result;", preflightClose)
         assertTrue(
             metadataPreflight >= 0 && preflightClose > metadataPreflight &&
                 preflightReturn > preflightClose
@@ -103,7 +105,8 @@ class QnnSharedImg2ImgNativeSafetyContractTest {
         assertTrue(helperStart >= 0 && helperEnd > helperStart)
         val helper = bridge.substring(helperStart, helperEnd)
 
-        assertTrue(bridge.contains("bool release_failed = false;"))
+        val fullSource = bridge + runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_tensor_codec.hpp") }.getOrDefault("")
+        assertTrue(fullSource.contains("bool release_failed = false;"))
         assertTrue(bridge.contains("void abandon_without_unload() { handle_ = nullptr; }"))
         assertTrue(helper.contains("const Qnn_ErrorHandle_t free_status = api.systemContextFree(sys_context);"))
         assertTrue(helper.contains("if (free_status != QNN_SUCCESS)"))

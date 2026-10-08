@@ -1391,13 +1391,25 @@ class MainViewModel @JvmOverloads constructor(
         offlinePromptTranslationAndChatImageCoordinator.sendChatImagePrompt()
 
     /** Delegates to [runChatImagePromptBridge]. Signature kept verbatim. */
-    internal fun sendChatImageRequestWithPromptBridge(
+    private fun sendChatImageRequestWithPromptBridge(
         visibleUserText: String,
         prompt: String,
         requestedOutputCount: Int? = null,
         allowCloudTranslationFallback: Boolean = false
     ) = runChatImagePromptBridge(
         port = chatImagePromptBridgePort,
+        visibleUserText = visibleUserText,
+        prompt = prompt,
+        requestedOutputCount = requestedOutputCount,
+        allowCloudTranslationFallback = allowCloudTranslationFallback
+    )
+
+    internal fun hostSendChatImageRequestWithPromptBridge(
+        visibleUserText: String,
+        prompt: String,
+        requestedOutputCount: Int? = null,
+        allowCloudTranslationFallback: Boolean = false
+    ) = sendChatImageRequestWithPromptBridge(
         visibleUserText = visibleUserText,
         prompt = prompt,
         requestedOutputCount = requestedOutputCount,
@@ -2308,11 +2320,17 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
-    internal fun persistChatSessions(
+    private fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
     ): Job? = runChatSessionPersistence(chatSessionPersistencePort, sessions, knowledgeBinding, generationRunId)
+
+    internal fun hostPersistChatSessions(
+        sessions: List<ChatSessionRecord>? = null,
+        knowledgeBinding: Pair<String, Set<String>>? = null,
+        generationRunId: Long? = null
+    ): Job? = persistChatSessions(sessions, knowledgeBinding, generationRunId)
     /** Delegates to [runPersistConversationMutation]. Signature kept verbatim. */
     private fun persistConversationMutation(
         sessions: List<ChatSessionRecord>,

@@ -9,8 +9,7 @@ class KnowledgeBaseImportUxContractTest {
     fun knowledgeImportTracksProgressAndActivatesTheImportedBase() {
         val source = mainViewModelSource()
         val body = functionBody(source, "importKnowledgeDocument")
-        val coordinator = contentImportPreviewCoordinatorSource()
-        val confirm = functionBody(coordinator, "confirmKnowledgeDocumentImport")
+        val confirm = functionBody(source, "confirmKnowledgeDocumentImport")
 
         assertTrue(body.contains("knowledgeBaseImportingIds"))
         assertTrue(body.contains("stageContentImportPreview(preview)"))

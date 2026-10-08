@@ -69,6 +69,7 @@ add_library(mca_sd_native SHARED
         mca/sd/sd_lora_adapter.cpp
         mca/sd/sd_image_io.cpp
         mca/sd/sd_textual_inversion.cpp
+        mca/sd/sd_contract_parser.cpp
         mca/sd/sd_output_transaction.cpp
         mca/sd/sd_input_contract.cpp
         mca/sd/sd_phase_machine.cpp

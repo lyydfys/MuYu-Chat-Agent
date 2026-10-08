@@ -180,7 +180,8 @@ class LocalModelLoadFailureClassifierTest {
 
     @Test
     fun nativeStatsPublishStableGgufLoadFailureCodeContract() {
-        val native = sourceFile("core/native/src/main/cpp/native_engine.cpp")
+        val native = sourceFile("core/native/src/main/cpp/native_engine.cpp") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llm_stats_collector.cpp") }.getOrDefault("")
 
         assertTrue(native.contains("\\\"loadFailureCode\\\""))
         assertTrue(native.contains("probe_gguf_header"))

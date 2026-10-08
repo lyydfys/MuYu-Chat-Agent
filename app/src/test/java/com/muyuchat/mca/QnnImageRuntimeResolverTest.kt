@@ -71,7 +71,8 @@ class QnnImageRuntimeResolverTest {
             "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/" +
                 "DeviceAccelerationProfile.kt"
         ).readText()
-        val nativeSource = projectFile("core/native/src/main/cpp/qnn_native_bridge.cpp").readText()
+        val nativeSource = projectFile("core/native/src/main/cpp/qnn_native_bridge.cpp").readText() +
+            runCatching { projectFile("core/native/src/main/cpp/mca/qnn/qnn_capability_probe.cpp").readText() }.getOrDefault("")
         val kotlinBlock = kotlinSource
             .substringAfter("QNN_PLATFORM_RUNTIME_DIRECTORY_PREFIXES = listOf(")
             .substringBefore("\n)")

@@ -199,7 +199,7 @@ internal class ChatWorkflowCoordinator(
                 showStatus("请在 /image 后输入图片描述，再发送。")
                 return
             }
-            viewModel.sendChatImageRequestWithPromptBridge(
+            viewModel.hostSendChatImageRequestWithPromptBridge(
                 visibleUserText = preparedInput.text,
                 prompt = imageIntent.sourceText,
                 requestedOutputCount = classifyChatImageIntent(preparedInput.text).requestedOutputCount
@@ -225,7 +225,7 @@ internal class ChatWorkflowCoordinator(
             when (imageDecision.route) {
                 ChatImageIntentRoute.GENERATE -> {
                     imageDecision.intent?.let { intent ->
-                        viewModel.sendChatImageRequestWithPromptBridge(
+                        viewModel.hostSendChatImageRequestWithPromptBridge(
                             visibleUserText = preparedInput.text,
                             prompt = intent.sourceText,
                             requestedOutputCount = imageDecision.requestedOutputCount
@@ -415,7 +415,7 @@ internal class ChatWorkflowCoordinator(
                 statusMessage = null
             ).withGenerationProgressCleared()
         }
-        viewModel.persistChatSessions(
+        viewModel.hostPersistChatSessions(
             sessions = sessionsToPersist,
             knowledgeBinding = chatSessionIdForKnowledgeBinding?.let { sessionId ->
                 sessionId to selectedKnowledgeBaseIdsForBinding

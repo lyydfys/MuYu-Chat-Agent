@@ -61,8 +61,11 @@ class SdxlUltraFixPhaseContractTest {
 
     @Test
     fun `isolated native ultrafix keeps all refinement steps in one unet worker`() {
-        val native = repositoryFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
-            .readText()
+        val native = repositoryFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp").readText() +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp").readText() }.getOrDefault("") +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_decoder_phase.hpp").readText() }.getOrDefault("") +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_encoder_phase.hpp").readText() }.getOrDefault("") +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_tiler.hpp").readText() }.getOrDefault("")
         val coordinator = repositoryFile(
             "app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt"
         ).readText() + repositoryFile(
@@ -109,12 +112,14 @@ class SdxlUltraFixPhaseContractTest {
         ).forEach { needle ->
             assertTrue("Missing split UltraFix native contract: $needle", native.contains(needle))
         }
+        val vaePhaseStart = native.indexOf("execute_sdxl_vae_phase").takeIf { it >= 0 }
+            ?: native.indexOf("std::string qnn_sdxl_vae_phase_json")
         assertTrue(native.indexOf("write_vae_tensor_png") < native.indexOf("::rename(",
-            startIndex = native.indexOf("std::string qnn_sdxl_vae_phase_json")))
+            startIndex = vaePhaseStart))
         assertTrue(native.indexOf("::rename(",
-            startIndex = native.indexOf("std::string qnn_sdxl_vae_phase_json")) <
+            startIndex = vaePhaseStart) <
             native.indexOf("qnn_file_sha256(",
-                startIndex = native.indexOf("std::string qnn_sdxl_vae_phase_json")))
+                startIndex = vaePhaseStart))
 
         listOf(
             "ultraFixTilePlanSha256",

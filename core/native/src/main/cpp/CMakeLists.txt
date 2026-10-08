@@ -133,7 +133,8 @@ add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_vision_adapter.cpp
         mca/mnn/mnn_stats_collector.cpp
         mca/mnn/mnn_prompt_cache_manager.cpp
-        mca/mnn/mnn_protocol_parser.cpp)
+        mca/mnn/mnn_protocol_parser.cpp
+        mca/mnn/mnn_clip_tokenizer.cpp)
 target_include_directories(mca_mnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
