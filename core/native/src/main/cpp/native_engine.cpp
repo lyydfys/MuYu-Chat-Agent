@@ -24,6 +24,9 @@
 #include "llama_load_failure_policy.hpp"
 #include "llama_model_memory_policy.hpp"
 #include "jni_utf8_codec.hpp"
+#include "mca/request/llama_request_parser.hpp"
+#include "mca/llm/llm_prefill_tracker.hpp"
+#include "mca/llm/llm_prefix_cache_manager.hpp"
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
@@ -95,11 +98,6 @@ long long g_completion_tokens = 0;
 long long g_context_shifts = 0;
 long long g_prefill_started_ms = 0;
 long long g_prefill_finished_ms = 0;
-// These snapshots are intentionally atomic: beginCompletion() holds g_mutex
-// for the entire native prefill, while the UI polls this small progress record
-// from another JVM thread. Do not use them to infer cache state or timing.
-std::atomic<int> g_prefill_progress_completed_tokens{0};
-std::atomic<int> g_prefill_progress_total_tokens{0};
 
 // KV cache serialization progress reported to the UI. Plain atomics so the
 // poll getter observes intermediate values without taking g_mutex (which the
@@ -190,59 +188,19 @@ bool g_vision_ready = false;
 std::string g_mmproj_path;
 
 void reset_prefill_progress() {
-    g_prefill_progress_completed_tokens.store(0, std::memory_order_release);
-    g_prefill_progress_total_tokens.store(0, std::memory_order_release);
+    mca::llm::PrefillProgressTracker::instance().reset();
 }
 
 void begin_prefill_progress(size_t total_tokens, size_t completed_tokens = 0) {
-    const int total = total_tokens > (size_t) std::numeric_limits<int>::max()
-                      ? std::numeric_limits<int>::max()
-                      : (int) total_tokens;
-    const int completed = std::min(
-            total,
-            completed_tokens > (size_t) std::numeric_limits<int>::max()
-            ? std::numeric_limits<int>::max()
-            : (int) completed_tokens);
-    g_prefill_progress_total_tokens.store(total, std::memory_order_release);
-    g_prefill_progress_completed_tokens.store(completed, std::memory_order_release);
+    mca::llm::PrefillProgressTracker::instance().begin(total_tokens, completed_tokens);
 }
 
 void advance_prefill_progress(size_t decoded_tokens) {
-    const int total = g_prefill_progress_total_tokens.load(std::memory_order_acquire);
-    if (total <= 0 || decoded_tokens == 0) return;
-    const int increment = decoded_tokens > (size_t) std::numeric_limits<int>::max()
-                          ? std::numeric_limits<int>::max()
-                          : (int) decoded_tokens;
-    int observed = g_prefill_progress_completed_tokens.load(std::memory_order_acquire);
-    while (observed < total) {
-        const int next = std::min(total, observed > total - increment ? total : observed + increment);
-        if (g_prefill_progress_completed_tokens.compare_exchange_weak(
-                observed,
-                next,
-                std::memory_order_release,
-                std::memory_order_acquire)) {
-            return;
-        }
-    }
+    mca::llm::PrefillProgressTracker::instance().advance(decoded_tokens);
 }
 
 void report_reused_prefill_tokens(size_t reused_tokens) {
-    const int total = g_prefill_progress_total_tokens.load(std::memory_order_acquire);
-    if (total <= 0) return;
-    const int reused = reused_tokens > (size_t) std::numeric_limits<int>::max()
-                       ? std::numeric_limits<int>::max()
-                       : (int) reused_tokens;
-    int observed = g_prefill_progress_completed_tokens.load(std::memory_order_acquire);
-    const int target = std::min(total, reused);
-    while (observed < target) {
-        if (g_prefill_progress_completed_tokens.compare_exchange_weak(
-                observed,
-                target,
-                std::memory_order_release,
-                std::memory_order_acquire)) {
-            return;
-        }
-    }
+    mca::llm::PrefillProgressTracker::instance().report_reused(reused_tokens);
 }
 
 struct RuntimeConfig {
@@ -322,13 +280,7 @@ constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = true;
 constexpr bool LLAMA_RUNTIME_FEATURES_COMPILED = false;
 #endif
 
-struct PersistentPrefixCacheNativeRequest {
-    bool requested = false;
-    std::string restore_state_path;
-    std::string write_state_path;
-    std::string fixed_system_prompt;
-    bool full_session_state = false;
-};
+using mca::llm::PersistentPrefixCacheNativeRequest;
 
 std::string g_pending_full_session_write_path;
 
@@ -459,309 +411,25 @@ long long now_ms() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-int parse_int(const std::string &json, const std::string &key, int fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace((unsigned char) json[pos])) pos++;
-    std::string number;
-    while (pos < json.size() && (std::isdigit((unsigned char) json[pos]) || json[pos] == '-')) {
-        number.push_back(json[pos++]);
-    }
-    if (number.empty()) return fallback;
-    try { return std::stoi(number); } catch (...) { return fallback; }
-}
-
-float parse_float(const std::string &json, const std::string &key, float fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace((unsigned char) json[pos])) pos++;
-    std::string number;
-    while (pos < json.size() &&
-           (std::isdigit((unsigned char) json[pos]) || json[pos] == '-' || json[pos] == '.')) {
-        number.push_back(json[pos++]);
-    }
-    if (number.empty()) return fallback;
-    try { return std::stof(number); } catch (...) { return fallback; }
-}
-
-float parse_float_any(const std::string &json, const std::vector<std::string> &keys, float fallback) {
-    for (const auto &key: keys) {
-        if (json.find("\"" + key + "\"") == std::string::npos) continue;
-        return parse_float(json, key, fallback);
-    }
-    return fallback;
-}
-
-int parse_int_any(const std::string &json, const std::vector<std::string> &keys, int fallback) {
-    for (const auto &key: keys) {
-        if (json.find("\"" + key + "\"") == std::string::npos) continue;
-        return parse_int(json, key, fallback);
-    }
-    return fallback;
-}
-
-bool parse_bool(const std::string &json, const std::string &key, bool fallback) {
-    const auto key_pos = json.find("\"" + key + "\"");
-    if (key_pos == std::string::npos) return fallback;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return fallback;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace((unsigned char) json[pos])) pos++;
-    if (json.compare(pos, 4, "true") == 0) return true;
-    if (json.compare(pos, 5, "false") == 0) return false;
-    return fallback;
-}
-
-std::string parse_json_string_after(const std::string &json, const std::string &key, size_t start) {
-    const auto key_pos = json.find("\"" + key + "\"", start);
-    if (key_pos == std::string::npos) return "";
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return "";
-    auto pos = json.find('"', colon + 1);
-    if (pos == std::string::npos) return "";
-    pos++;
-    std::string out;
-    while (pos < json.size()) {
-        const char c = json[pos++];
-        if (c == '"') break;
-        if (c == '\\' && pos < json.size()) {
-            const char escaped = json[pos++];
-            switch (escaped) {
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                case '"': out.push_back('"'); break;
-                case '\\': out.push_back('\\'); break;
-                default: out.push_back(escaped); break;
-            }
-        } else {
-            out.push_back(c);
-        }
-    }
-    return out;
-}
-
-std::string parse_string(const std::string &json, const std::string &key, const std::string &fallback) {
-    const auto value = parse_json_string_after(json, key, 0);
-    return value.empty() ? fallback : value;
-}
-
-struct ParsedMessage {
-    std::string role;
-    std::string content;
-    std::vector<std::string> image_paths;
-};
-
-bool starts_with(const std::string &value, const std::string &prefix) {
-    return value.rfind(prefix, 0) == 0;
-}
-
-int hex_value(char c) {
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-    return -1;
-}
-
-std::string url_decode(const std::string &value) {
-    std::string out;
-    out.reserve(value.size());
-    for (size_t i = 0; i < value.size(); i++) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            const int high = hex_value(value[i + 1]);
-            const int low = hex_value(value[i + 2]);
-            if (high >= 0 && low >= 0) {
-                out.push_back((char) ((high << 4) | low));
-                i += 2;
-                continue;
-            }
-        }
-        out.push_back(value[i]);
-    }
-    return out;
-}
-
-std::string local_image_path_from_url(const std::string &url) {
-    if (starts_with(url, "file://")) {
-        return url_decode(url.substr(7));
-    }
-    if (starts_with(url, "file:")) {
-        auto path = url_decode(url.substr(5));
-        while (path.rfind("//", 0) == 0) path.erase(path.begin());
-        return path;
-    }
-    return url;
-}
-
-// Keep direct native/API callers on the same one-image-per-attachment
-// contract as the Android serializer.  `file:///x/a.png` and `/x/a.png` are
-// equivalent local references after URI decoding; lexical normalization here
-// avoids allocating or opening image files while parsing a request.
-std::string canonical_local_image_reference(std::string value) {
-    value = local_image_path_from_url(value);
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
-        value.erase(value.begin());
-    }
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
-        value.pop_back();
-    }
-    std::replace(value.begin(), value.end(), '\\', '/');
-    while (value.find("/./") != std::string::npos) {
-        value.replace(value.find("/./"), 3, "/");
-    }
-    while (value.size() > 1 && value.back() == '/') value.pop_back();
-    return value;
-}
-
-size_t find_object_end(const std::string &json, size_t start) {
-    int depth = 0;
-    bool in_string = false;
-    bool escaped = false;
-    for (size_t i = start; i < json.size(); i++) {
-        const char c = json[i];
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-        if (c == '"') {
-            in_string = true;
-        } else if (c == '{') {
-            depth++;
-        } else if (c == '}') {
-            depth--;
-            if (depth == 0) return i + 1;
-        }
-    }
-    return json.size();
-}
-
-size_t value_start_after_key(const std::string &json, const std::string &key, size_t start) {
-    const auto key_pos = json.find("\"" + key + "\"", start);
-    if (key_pos == std::string::npos) return std::string::npos;
-    const auto colon = json.find(':', key_pos);
-    if (colon == std::string::npos) return std::string::npos;
-    auto pos = colon + 1;
-    while (pos < json.size() && std::isspace((unsigned char) json[pos])) pos++;
-    return pos;
-}
-
-void parse_content_parts(const std::string &segment, ParsedMessage &message) {
-    size_t pos = 0;
-    while (true) {
-        const auto type_pos = segment.find("\"type\"", pos);
-        if (type_pos == std::string::npos) break;
-        const auto part_start = segment.rfind('{', type_pos);
-        if (part_start == std::string::npos) break;
-        const auto part_end = find_object_end(segment, part_start);
-        const auto part = segment.substr(part_start, part_end - part_start);
-        const auto type = parse_json_string_after(part, "type", 0);
-        if (type == "text") {
-            const auto text = parse_json_string_after(part, "text", 0);
-            if (!text.empty()) {
-                if (!message.content.empty()) message.content += "\n";
-                message.content += text;
-            }
-        } else if (type == "image_url" || type == "input_image" || type == "image") {
-            // Normalize the common OpenAI-compatible image part spellings at
-            // the JNI boundary.  The app serializer emits image_url, while
-            // direct Local API/native callers may use input_image or image.
-            // A nested object is handled by looking for its url first; a
-            // scalar image field is handled by the corresponding fallback.
-            std::string url;
-            for (const auto *key : {"url", "image_url", "image", "input_image"}) {
-                url = parse_json_string_after(part, key, 0);
-                if (!url.empty()) break;
-            }
-            if (!url.empty() && !starts_with(url, "data:")) {
-                const auto path = local_image_path_from_url(url);
-                const auto key = canonical_local_image_reference(path);
-                const bool duplicate = !key.empty() && std::any_of(
-                        message.image_paths.begin(),
-                        message.image_paths.end(),
-                        [&](const std::string &previous) {
-                            return canonical_local_image_reference(previous) == key;
-                        });
-                if (!duplicate) message.image_paths.push_back(path);
-            }
-        }
-        pos = part_end;
-    }
-}
-
-std::vector<ParsedMessage> parse_messages(const std::string &messages_json) {
-    std::vector<ParsedMessage> messages;
-    size_t pos = 0;
-    while (true) {
-        const auto role_pos = messages_json.find("\"role\"", pos);
-        if (role_pos == std::string::npos) break;
-        const auto object_start = messages_json.rfind('{', role_pos);
-        const auto object_end = find_object_end(messages_json, object_start == std::string::npos ? role_pos : object_start);
-        const auto segment = messages_json.substr(role_pos, object_end - role_pos);
-        const auto role = parse_json_string_after(messages_json, "role", role_pos);
-        ParsedMessage message{role.empty() ? "user" : role, ""};
-        const auto content_start = value_start_after_key(segment, "content", 0);
-        if (content_start != std::string::npos) {
-            if (content_start < segment.size() && segment[content_start] == '"') {
-                message.content = parse_json_string_after(segment, "content", 0);
-            } else if (content_start < segment.size() && segment[content_start] == '[') {
-                parse_content_parts(segment.substr(content_start), message);
-            }
-        }
-        if (!message.content.empty() || !message.image_paths.empty()) {
-            messages.push_back(message);
-        }
-        pos = object_end;
-    }
-    if (messages.empty()) messages.push_back({"user", messages_json});
-    return messages;
-}
-
-bool is_valid_utf8(const char *string) {
-    if (!string) return true;
-    const auto *bytes = (const unsigned char *) string;
-    int num;
-    while (*bytes != 0x00) {
-        if ((*bytes & 0x80) == 0x00) num = 1;
-        else if ((*bytes & 0xE0) == 0xC0) num = 2;
-        else if ((*bytes & 0xF0) == 0xE0) num = 3;
-        else if ((*bytes & 0xF8) == 0xF0) num = 4;
-        else return false;
-        bytes += 1;
-        for (int i = 1; i < num; ++i) {
-            if ((*bytes & 0xC0) != 0x80) return false;
-            bytes += 1;
-        }
-    }
-    return true;
-}
-
-std::string json_escape(const std::string &value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (const char c: value) {
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"': out += "\\\""; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default: out.push_back(c); break;
-        }
-    }
-    return out;
-}
+using mca::request::ParsedMessage;
+using mca::request::parse_int;
+using mca::request::parse_float;
+using mca::request::parse_float_any;
+using mca::request::parse_int_any;
+using mca::request::parse_bool;
+using mca::request::parse_json_string_after;
+using mca::request::parse_string;
+using mca::request::starts_with;
+using mca::request::hex_value;
+using mca::request::url_decode;
+using mca::request::local_image_path_from_url;
+using mca::request::canonical_local_image_reference;
+using mca::request::find_object_end;
+using mca::request::value_start_after_key;
+using mca::request::parse_content_parts;
+using mca::request::parse_messages;
+using mca::request::is_valid_utf8;
+using mca::request::json_escape;
 
 bool runtime_config_equal_load_bound(const RuntimeConfig &a, const RuntimeConfig &b) {
     return a.n_ctx == b.n_ctx &&
@@ -2119,11 +1787,7 @@ int thinking_budget_for_mode(const std::string &params_json) {
     return 192;
 }
 
-struct ChatTemplateOptions {
-    bool use_jinja = true;
-    bool enable_thinking = true;
-    int thinking_budget = 1024;
-};
+using mca::llm::ChatTemplateOptions;
 
 // Openers mirror REASONING_OPEN_MARKERS in the Kotlin ReasoningContentFilter.
 // Trailing whitespace (templates usually append "\n" after the opener) is
@@ -2191,238 +1855,76 @@ std::string format_messages(const std::vector<ParsedMessage> &messages, const Ch
     return formatted;
 }
 
-struct PersistentPrefixPreparation {
-    bool handled = false;
-    size_t reused_tokens = 0;
-};
+using PersistentPrefixPreparation = mca::llm::PrefixCacheDecision;
 
 /**
  * Restores or materializes only the stable system/persona prefix. The full
  * prompt is still token-prefix checked before any state is accepted; a
  * template/tokenizer boundary that cannot be proven is a normal cache miss.
  */
+PersistentPrefixPreparation resolve_persistent_prefix_cache_locked(
+        const std::vector<ParsedMessage> &messages,
+        const ChatTemplateOptions &chat_options,
+        const llama_tokens &full_tokens,
+        const PersistentPrefixCacheNativeRequest &request) {
+    mca::llm::PrefixCacheEnvironment env;
+    env.ctx = g_context;
+    env.n_ctx = g_n_ctx;
+    env.context_shifts = g_context_shifts;
+    env.current_position = &g_current_position;
+    env.context_tokens = &g_context_tokens;
+    env.cache_state_valid = &g_cache_state_valid;
+    env.cache_reuse_hit = &g_cache_reuse_hit;
+    env.cache_reused_tokens = &g_cache_reused_tokens;
+    env.cache_reuse_hits = &g_cache_reuse_hits;
+    env.cache_reuse_reason = &g_cache_reuse_reason;
+    env.persistent_prefix_cache_attempted = &g_persistent_prefix_cache_attempted;
+    env.persistent_prefix_cache_hit = &g_persistent_prefix_cache_hit;
+    env.persistent_prefix_cache_tokens = &g_persistent_prefix_cache_tokens;
+    env.persistent_prefix_cache_saved = &g_persistent_prefix_cache_saved;
+    env.persistent_prefix_cache_reason = &g_persistent_prefix_cache_reason;
+    env.pending_full_session_write_path = &g_pending_full_session_write_path;
+
+    env.clear_target_context = [](const std::string &reason) {
+        clear_target_context_locked(reason);
+    };
+    env.trim_context = [](llama_pos pos, const char *label) {
+        return trim_context_locked(g_context, pos, label);
+    };
+    env.format_messages = [](const std::vector<mca::request::ParsedMessage> &msgs,
+                             const mca::llm::ChatTemplateOptions &opts) {
+        return format_messages(msgs, opts);
+    };
+    env.tokenize = [](const std::string &text) {
+        return common_tokenize(g_context, text, true, true);
+    };
+    env.decode_tokens = [](const llama_tokens &tokens) {
+        return decode_tokens(tokens, false);
+    };
+    env.save_state = [](const std::string &path, const llama_tokens &tokens) {
+        return save_llama_state_with_progress_locked(
+                g_context,
+                path.c_str(),
+                0,
+                tokens.data(),
+                tokens.size(),
+                LLAMA_STATE_SEQ_FLAGS_NONE);
+    };
+    env.load_state_file = [](const char *path, llama_token *tokens_out, size_t n_tokens_max, size_t *n_tokens_out) {
+        return llama_state_seq_load_file(g_context, path, 0, tokens_out, n_tokens_max, n_tokens_out);
+    };
+
+    return mca::llm::resolve_persistent_prefix_cache_locked(
+            messages, chat_options, full_tokens, request, env);
+}
+
 PersistentPrefixPreparation prepare_persistent_prefix_locked(
         const std::vector<ParsedMessage> &messages,
         const ChatTemplateOptions &chat_options,
         const llama_tokens &full_tokens,
         const PersistentPrefixCacheNativeRequest &request) {
-    PersistentPrefixPreparation result;
-    if (!request.requested) return result;
-    g_persistent_prefix_cache_attempted = true;
-
-    if (request.full_session_state) {
-        if (full_tokens.empty()) {
-            g_persistent_prefix_cache_reason = "empty_session_prompt";
-            return result;
-        }
-        clear_target_context_locked("persistent_session_prepare");
-        if (!request.restore_state_path.empty()) {
-            try {
-                size_t restored_count = 0;
-                const size_t header_size = llama_state_seq_load_file(
-                        g_context,
-                        request.restore_state_path.c_str(),
-                        0,
-                        nullptr,
-                        0,
-                        &restored_count);
-                if (header_size > 0 && restored_count > 0 &&
-                    restored_count <= static_cast<size_t>(g_n_ctx)) {
-                    llama_tokens restored(restored_count);
-                    size_t loaded_count = 0;
-                    const size_t loaded = llama_state_seq_load_file(
-                            g_context,
-                            request.restore_state_path.c_str(),
-                            0,
-                            restored.data(),
-                            restored.size(),
-                            &loaded_count);
-                    if (loaded > 0 && loaded_count == restored_count) {
-                        const size_t reusable = mca::llama::reusableSessionTokenPrefix(
-                                full_tokens, restored);
-                        if (reusable > 0 &&
-                            (reusable == restored_count || trim_context_locked(
-                                    g_context,
-                                    static_cast<llama_pos>(reusable),
-                                    "persistent session"))) {
-                            restored.resize(reusable);
-                            g_current_position = static_cast<llama_pos>(reusable);
-                            g_context_tokens = std::move(restored);
-                            g_cache_state_valid = true;
-                            g_cache_reuse_hit = true;
-                            g_cache_reused_tokens = static_cast<int>(reusable);
-                            g_cache_reuse_hits++;
-                            g_cache_reuse_reason = "persistent_session_hit";
-                            g_persistent_prefix_cache_hit = true;
-                            g_persistent_prefix_cache_tokens = static_cast<int>(reusable);
-                            g_persistent_prefix_cache_reason = "session_state_loaded";
-                            g_pending_full_session_write_path = request.write_state_path;
-                            result.handled = true;
-                            result.reused_tokens = reusable;
-                            return result;
-                        }
-                        g_persistent_prefix_cache_reason = reusable > 0
-                                ? "session_state_trim_failed"
-                                : "session_state_token_mismatch";
-                    } else {
-                        g_persistent_prefix_cache_reason = "session_state_load_failed";
-                    }
-                } else {
-                    g_persistent_prefix_cache_reason = "session_state_load_failed";
-                }
-            } catch (...) {
-                g_persistent_prefix_cache_reason = "session_state_load_failed";
-            }
-            clear_target_context_locked("persistent_session_restore_failed");
-        } else {
-            g_persistent_prefix_cache_reason = "session_state_cold_start";
-        }
-        g_pending_full_session_write_path = request.write_state_path;
-        result.handled = true;
-        result.reused_tokens = 0;
-        return result;
-    }
-
-    if (request.fixed_system_prompt.empty() || messages.empty() ||
-        lower_ascii(messages.front().role) != "system" ||
-        messages.front().content.rfind(request.fixed_system_prompt, 0) != 0) {
-        g_persistent_prefix_cache_reason = "fixed_system_prefix_unavailable";
-        return result;
-    }
-
-    // The marker is used only for a probe render and is never sent to the
-    // model. Several candidates avoid treating user-supplied marker text as a
-    // boundary; token-prefix equality remains the final acceptance check.
-    std::string probe_formatted;
-    size_t marker_position = std::string::npos;
-    for (int attempt = 0; attempt < 8 && marker_position == std::string::npos; ++attempt) {
-        const std::string marker =
-                "MCA_PREFIX_CACHE_BOUNDARY_V1_" + std::to_string(attempt) + "_9f2a";
-        bool marker_in_input = false;
-        for (const auto &message : messages) {
-            if (message.content.find(marker) != std::string::npos) {
-                marker_in_input = true;
-                break;
-            }
-        }
-        if (marker_in_input) continue;
-        auto probe_messages = messages;
-        probe_messages.front().content = request.fixed_system_prompt + marker;
-        try {
-            probe_formatted = format_messages(probe_messages, chat_options);
-        } catch (...) {
-            probe_formatted.clear();
-        }
-        const size_t first = probe_formatted.find(marker);
-        if (first != std::string::npos && probe_formatted.find(marker, first + marker.size()) == std::string::npos) {
-            marker_position = first;
-        }
-    }
-    if (marker_position == std::string::npos || probe_formatted.empty()) {
-        g_persistent_prefix_cache_reason = "template_boundary_unavailable";
-        return result;
-    }
-
-    // Tokenize the complete probe instead of the prefix substring. A BPE token
-    // can span the textual boundary, so the substring's final token is not
-    // necessarily a prefix of the full prompt. The common token prefix is the
-    // largest portion proven to be both stable and exactly reusable.
-    llama_tokens probe_tokens;
-    try {
-        probe_tokens = common_tokenize(g_context, probe_formatted, true, true);
-    } catch (...) {
-        probe_tokens.clear();
-    }
-    const size_t stable_prefix_tokens = mca::llama::longestCommonTokenPrefix(
-            full_tokens,
-            probe_tokens);
-    if (stable_prefix_tokens == 0 || stable_prefix_tokens >= full_tokens.size()) {
-        g_persistent_prefix_cache_reason = "token_prefix_mismatch";
-        return result;
-    }
-    llama_tokens prefix_tokens(
-            full_tokens.begin(),
-            full_tokens.begin() + static_cast<llama_tokens::difference_type>(stable_prefix_tokens));
-
-    // A sequence state file contains the complete attention/recurrent state;
-    // it must be loaded into a clean sequence and validated against the exact
-    // token prefix before the dynamic suffix is evaluated.
-    clear_target_context_locked("persistent_prefix_prepare");
-    if (!request.restore_state_path.empty()) {
-        try {
-            llama_tokens restored(prefix_tokens.size());
-            size_t restored_count = 0;
-            const size_t loaded = llama_state_seq_load_file(
-                    g_context,
-                    request.restore_state_path.c_str(),
-                    0,
-                    restored.data(),
-                    restored.size(),
-                    &restored_count);
-            const bool restored_tokens_match =
-                    std::equal(restored.begin(), restored.end(), prefix_tokens.begin());
-            const bool full_prompt_prefix_matches =
-                    mca::llama::tokenPrefixMatches(full_tokens, restored);
-            if (loaded > 0 && mca::llama::canRestorePersistentPrefixState(
-                    prefix_tokens.size(),
-                    restored_count,
-                    restored_tokens_match,
-                    full_prompt_prefix_matches)) {
-                g_current_position = (llama_pos) restored_count;
-                g_context_tokens = prefix_tokens;
-                g_cache_state_valid = true;
-                g_cache_reuse_hit = true;
-                g_cache_reused_tokens = (int) restored_count;
-                g_cache_reuse_hits++;
-                g_cache_reuse_reason = "persistent_prefix_hit";
-                g_persistent_prefix_cache_hit = true;
-                g_persistent_prefix_cache_tokens = (int) restored_count;
-                g_persistent_prefix_cache_reason = "state_loaded";
-                result.handled = true;
-                result.reused_tokens = restored_count;
-                return result;
-            }
-            g_persistent_prefix_cache_reason = "state_token_mismatch";
-        } catch (...) {
-            g_persistent_prefix_cache_reason = "state_load_failed";
-        }
-        clear_target_context_locked("persistent_state_load_failed");
-    }
-
-    const int prefix_rc = decode_tokens(prefix_tokens, false);
-    if (prefix_rc != 0 || g_context_shifts != 0) {
-        g_persistent_prefix_cache_reason = prefix_rc == 0
-                                            ? "prefix_context_shifted"
-                                            : "prefix_prefill_failed";
-        clear_target_context_locked(g_persistent_prefix_cache_reason);
-        return result;
-    }
-
-    g_persistent_prefix_cache_tokens = (int) prefix_tokens.size();
-    if (!request.write_state_path.empty()) {
-        try {
-            const size_t saved = save_llama_state_with_progress_locked(
-                    g_context,
-                    request.write_state_path.c_str(),
-                    0,
-                    prefix_tokens.data(),
-                    prefix_tokens.size(),
-                    LLAMA_STATE_SEQ_FLAGS_NONE);
-            if (saved > 0) {
-                g_persistent_prefix_cache_saved = true;
-                g_persistent_prefix_cache_reason = "state_saved";
-            } else {
-                g_persistent_prefix_cache_reason = "state_save_failed";
-            }
-        } catch (...) {
-            g_persistent_prefix_cache_reason = "state_save_failed";
-        }
-    } else {
-        g_persistent_prefix_cache_reason = "no_write_path";
-    }
-    result.handled = true;
-    result.reused_tokens = prefix_tokens.size();
-    return result;
+    return resolve_persistent_prefix_cache_locked(
+            messages, chat_options, full_tokens, request);
 }
 
 bool messages_have_images(const std::vector<ParsedMessage> &messages) {
@@ -4211,17 +3713,7 @@ Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletionWithPrefixC
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPrefillProgressJson(JNIEnv *env, jobject) {
-    const int total = std::max(
-            0,
-            g_prefill_progress_total_tokens.load(std::memory_order_acquire));
-    const int completed = std::clamp(
-            g_prefill_progress_completed_tokens.load(std::memory_order_acquire),
-            0,
-            total);
-    std::ostringstream out;
-    out << "{\"completedTokens\":" << completed
-        << ",\"totalTokens\":" << total << "}";
-    return string_to_jstring(env, out.str());
+    return string_to_jstring(env, mca::llm::PrefillProgressTracker::instance().to_json());
 }
 
 extern "C" JNIEXPORT jstring JNICALL

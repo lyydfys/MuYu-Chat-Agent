@@ -23,6 +23,12 @@ inline constexpr int32_t kMaxDimension = 4096;
 inline constexpr int32_t kMaxSteps = 150;
 inline constexpr double kMaxCfgScale = 30.0;
 
+inline bool is_sha256(const std::string& value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isxdigit(c) != 0;
+    });
+}
+
 /**
  * Validates image input contracts without performing device-level admission rejection.
  * Universal device admission invariant: unknown chipset or device profile is NOT an error.

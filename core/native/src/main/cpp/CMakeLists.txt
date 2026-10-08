@@ -87,18 +87,22 @@ add_library(mca_runtime_lifecycle STATIC
         mca/runtime/engine.cpp
         mca/runtime/engine_session.cpp
         mca/request/native_request_context.cpp
+        mca/request/llama_request_parser.cpp
         mca/callback/callback_router.cpp)
 target_include_directories(mca_runtime_lifecycle PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract mca_jni_boundary)
 
-add_library(mca_native SHARED native_engine.cpp)
+add_library(mca_native SHARED
+        native_engine.cpp
+        mca/llm/llm_prefill_tracker.cpp
+        mca/llm/llm_prefix_cache_manager.cpp)
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
 add_library(mca_prompt_handoff SHARED
         mnn_qnn_prompt_handoff.cpp
         mca/prompt/mnn_qnn_prompt_gateway.cpp)
 target_compile_definitions(mca_prompt_handoff PRIVATE MCA_PROMPT_HANDOFF_BUILDING=1)
-target_link_libraries(mca_prompt_handoff PRIVATE mca_contract)
+target_link_libraries(mca_prompt_handoff PRIVATE mca_contract mca_common)
 
 add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_runtime_loader.cpp
@@ -106,7 +110,10 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_backend_owner.cpp
         mca/qnn/qnn_engine.cpp
         mca/qnn/qnn_session.cpp
-        mca/qnn/qnn_request.cpp)
+        mca/qnn/qnn_request.cpp
+        mca/qnn/qnn_preview_manager.cpp
+        mca/qnn/qnn_bundle_files.cpp
+        mca/qnn/qnn_sdxl_phase_support.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
@@ -118,9 +125,15 @@ add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_session.cpp
         mca/mnn/mnn_request.cpp
         mca/mnn/mnn_stream_router.cpp
-        mca/mnn/mnn_token_emitter.cpp)
+        mca/mnn/mnn_token_emitter.cpp
+        mca/mnn/mnn_bundle_config.cpp
+        mca/mnn/mnn_template_parser.cpp
+        mca/mnn/mnn_vision_adapter.cpp
+        mca/mnn/mnn_stats_collector.cpp
+        mca/mnn/mnn_prompt_cache_manager.cpp)
 target_include_directories(mca_mnn_runtime PUBLIC
-        "${CMAKE_CURRENT_LIST_DIR}")
+        "${CMAKE_CURRENT_LIST_DIR}"
+        "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
 target_link_libraries(mca_mnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
 
 add_library(mca_mnn_native SHARED mnn_native_engine.cpp)

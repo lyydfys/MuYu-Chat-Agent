@@ -9,7 +9,8 @@ class KnowledgeBaseImportUxContractTest {
     fun knowledgeImportTracksProgressAndActivatesTheImportedBase() {
         val source = mainViewModelSource()
         val body = functionBody(source, "importKnowledgeDocument")
-        val confirm = functionBody(source, "confirmKnowledgeDocumentImport")
+        val coordinator = contentImportPreviewCoordinatorSource()
+        val confirm = functionBody(coordinator, "confirmKnowledgeDocumentImport")
 
         assertTrue(body.contains("knowledgeBaseImportingIds"))
         assertTrue(body.contains("stageContentImportPreview(preview)"))
@@ -36,6 +37,18 @@ class KnowledgeBaseImportUxContractTest {
             root = root.parentFile ?: return@repeat
         }
         error("Unable to locate MainViewModel.kt")
+    }
+
+    private fun contentImportPreviewCoordinatorSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ContentImportPreviewCoordinator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ContentImportPreviewCoordinator.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate ContentImportPreviewCoordinator.kt")
     }
 
     private fun functionBody(source: String, functionName: String): String {

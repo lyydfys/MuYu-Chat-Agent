@@ -44,6 +44,11 @@
 #include "mnn_legacy_chat_template_policy.hpp"
 #include "mnn_embedding_bundle_policy.hpp"
 #include "mnn_bundle_path_policy.hpp"
+#include "mca/mnn/mnn_bundle_config.hpp"
+#include "mca/mnn/mnn_template_parser.hpp"
+#include "mca/mnn/mnn_vision_adapter.hpp"
+#include "mca/mnn/mnn_stats_collector.hpp"
+#include "mca/mnn/mnn_prompt_cache_manager.hpp"
 #include "mnn_qnn_prompt_handoff.hpp"
 #include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
@@ -242,27 +247,7 @@ std::atomic<int> g_mnn_prefill_total_tokens{0};
 #if MCA_WITH_MNN_LLM
 MNN::Transformer::Llm* g_llm = nullptr;
 
-struct MnnPromptCacheRuntimeState {
-    int completion_tokens_before_rollback = -1;
-    std::vector<MNN::Transformer::ChatMessage> committed_messages;
-    std::vector<MNN::Transformer::ChatMessage> request_messages;
-    size_t kv_history_before = 0;
-    size_t token_history_before = 0;
-    size_t token_history_after_prefill = 0;
-    size_t generation_history_start = 0;
-    int prefilled_tokens = 0;
-    int reused_tokens = 0;
-    bool request_active = false;
-    bool enabled = false;
-    bool hit = false;
-    bool committed = false;
-    bool rolled_back = false;
-    bool prefix_extended = false;
-    bool last_request_multimodal = false;
-    bool reset_before_next_text = false;
-    std::string state = "cold";
-    std::string reason = "model_not_loaded";
-};
+using mca::mnn::MnnPromptCacheRuntimeState;
 
 MnnPromptCacheRuntimeState g_mnn_prompt_cache;
 long long g_mnn_prompt_cache_hits = 0;
@@ -450,32 +435,8 @@ jstring utf8_to_jstring(JNIEnv* env, const std::string& value) {
     return utf16_to_jstring(env, mca::utf8::decode_to_utf16(value, false).utf16);
 }
 
-const std::vector<std::string>& default_mnn_stop_markers() {
-    // These are true end-of-turn tokens. Role-start tokens are handled by the
-    // stream protocol filter: they can prefix a valid assistant answer, so
-    // treating them as unconditional EOS would drop the answer itself.
-    static const std::vector<std::string> markers = {
-            "<eop>",
-            "<|endoftext|>",
-            "<|im_end|>",
-            "<|end_of_turn|>",
-            "<end_of_turn>",
-            "<|eot_id|>"
-    };
-    return markers;
-}
-
-void append_stop_marker(std::vector<std::string>& target, const std::string& marker) {
-    // Model configuration is untrusted downloaded data. A bounded marker keeps
-    // the streaming suffix scan linear and prevents a malformed package from
-    // retaining an arbitrary amount of user-visible output.
-    constexpr size_t kMaxStopMarkerBytes = 256;
-    if (marker.empty() || marker.size() > kMaxStopMarkerBytes ||
-            mca::mnn::is_role_header_marker(marker)) return;
-    if (std::find(target.begin(), target.end(), marker) == target.end()) {
-        target.push_back(marker);
-    }
-}
+using mca::mnn::default_mnn_stop_markers;
+using mca::mnn::append_stop_marker;
 
 void reset_active_stop_markers_locked() {
     g_model_stop_markers = default_mnn_stop_markers();
@@ -501,48 +462,8 @@ jstring take_pending_utf8_locked(JNIEnv* env, bool flush, bool* emitted) {
     return result;
 }
 
-std::string escape_json(const std::string& input) {
-    std::ostringstream out;
-    static constexpr char kHex[] = "0123456789abcdef";
-    for (const unsigned char ch : input) {
-        switch (ch) {
-            case '\\':
-                out << "\\\\";
-                break;
-            case '"':
-                out << "\\\"";
-                break;
-            case '\n':
-                out << "\\n";
-                break;
-            case '\r':
-                out << "\\r";
-                break;
-            case '\t':
-                out << "\\t";
-                break;
-            default:
-                // JSON strings cannot contain unescaped C0 controls. This is
-                // especially important for the bounded native diagnostic
-                // trace, which intentionally preserves the model's raw bytes.
-                if (ch < 0x20) {
-                    out << "\\u00" << kHex[(ch >> 4) & 0x0F] << kHex[ch & 0x0F];
-                } else {
-                    out << static_cast<char>(ch);
-                }
-                break;
-        }
-    }
-    return out.str();
-}
-
-std::string sanitize_utf8_for_diagnostics(const std::string& input) {
-    // Native model output is expected to be UTF-8, but an interrupted stream
-    // can end in a partial sequence. Decode/encode with replacement before
-    // putting it into JSON so a debug trace can never corrupt stats parsing.
-    const auto decoded = mca::utf8::decode_to_utf16(input, false);
-    return mca::utf8::encode_from_utf16(decoded.utf16.data(), decoded.utf16.size());
-}
+using mca::mnn::escape_json;
+using mca::mnn::sanitize_utf8_for_diagnostics;
 
 std::string parent_dir(const std::string& path) {
     const auto pos = path.find_last_of("/\\");
@@ -635,595 +556,27 @@ bool validate_finite_float_vector(
     return true;
 }
 
-std::string normalize_mnn_model_path(const std::string& path) {
-    if (path.empty()) return path;
-    if (directory_exists(path) && path.back() != '/' && path.back() != '\\') {
-        return path + "/";
-    }
-    return path;
-}
-
-std::string join_path(const std::string& dir, const std::string& name) {
-    if (dir.empty()) return name;
-    if (dir.back() == '/' || dir.back() == '\\') return dir + name;
-    return dir + "/" + name;
-}
-
-std::string resolve_mnn_config_path(const std::string& path) {
-    const auto normalized = normalize_mnn_model_path(path);
-    if (directory_exists(normalized)) {
-        return join_path(normalized, "config.json");
-    }
-    return normalized;
-}
-
-json read_json_file_or_empty(const std::string& path) {
-    std::ifstream input(path.c_str(), std::ios::binary);
-    if (!input.good()) return json::object();
-    json parsed = json::parse(input, nullptr, false);
-    if (!parsed.is_object()) return json::object();
-    return parsed;
-}
-
-bool read_mnn_config_object(
-        const std::string& path,
-        const std::string& label,
-        json& output,
-        std::string& error) {
-    struct stat info {};
-    if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0) {
-        error = label + " is missing, empty, or not a regular file: " + path;
-        return false;
-    }
-    std::ifstream input(path.c_str(), std::ios::binary);
-    if (!input.good()) {
-        error = label + " cannot be opened: " + path;
-        return false;
-    }
-    output = json::parse(input, nullptr, false);
-    if (!output.is_object()) {
-        error = label + " must contain a JSON object: " + path;
-        return false;
-    }
-    return true;
-}
-
-void merge_mnn_config(json& target, const json& source) {
-    if (!target.is_object() || !source.is_object()) return;
-    for (auto it = source.begin(); it != source.end(); ++it) {
-        auto existing = target.find(it.key());
-        if (existing != target.end() && existing->is_object() && it.value().is_object()) {
-            merge_mnn_config(*existing, it.value());
-        } else {
-            target[it.key()] = it.value();
-        }
-    }
-}
-
-void relocate_mnn_component_declarations(
-        json& config, const std::string& root, const std::string& prefix, size_t depth = 0) {
-    if (depth > 32U) throw std::invalid_argument("MNN configuration nesting exceeds the safe path inspection limit.");
-    if (config.is_array()) {
-        for (auto& child : config) relocate_mnn_component_declarations(child, root, prefix, depth + 1);
-        return;
-    }
-    if (!config.is_object()) return;
-    for (const auto* key : {
-             "llm_config", "llm_model", "llm_weight", "block_model", "lm_model",
-             "embedding_model", "embedding_file", "tokenizer_file", "visual_model",
-             "vision_model", "visual_encoder", "vision_encoder", "audio_model",
-             "visual_weight", "audio_weight", "projector_model", "projector_weight",
-             "context_file", "ple_model", "ple_weight", "ple_embed_file", "talker_model", "talker_weight",
-             "talker_embedding_file", "predit_model", "dit_model", "bigvgan_model",
-             "spk_dict", "lookup_file", "draft_model", "mtp_model", "eagle_model",
-             "eagle_fc", "eagle_d2t", "dflash_model", "dflash_fc", "dflash_lmhead"}) {
-        const auto it = config.find(key);
-        if (it == config.end()) continue;
-        if (!it->is_string()) {
-            throw std::invalid_argument(std::string("MNN config field '") + key + "' must be a relative path.");
-        }
-        if (it->get<std::string>().empty()) continue; // Optional upstream paths may be disabled with "".
-        const auto relative = mca::mnn::mnnBundleRelativeComponent(prefix, it->get<std::string>());
-        mca::mnn::confinedMnnBundlePath(root, relative);
-        *it = relative;
-    }
-    const auto npuDir = config.find("npu_model_dir");
-    if (npuDir != config.end()) {
-        if (!npuDir->is_string()) throw std::invalid_argument("MNN npu_model_dir must be a relative path.");
-        const auto relative = mca::mnn::normalizeMnnBundleRelativePath(npuDir->get<std::string>(), true);
-        *npuDir = prefix.empty() ? relative : prefix + (relative.empty() ? "" : "/" + relative);
-        mca::mnn::confinedMnnBundlePath(root, npuDir->get<std::string>(), true);
-    }
-    config.erase("base_dir");
-    for (auto& child : config) {
-        if (child.is_object() || child.is_array()) {
-            relocate_mnn_component_declarations(child, root, prefix, depth + 1);
-        }
-    }
-}
-
-void read_relocated_mnn_configs(const std::string& configPath, json& config, json& modelConfig) {
-    const auto root = parent_dir(configPath);
-    std::string error;
-    if (!read_mnn_config_object(configPath, "MNN config.json", config, error)) {
-        throw std::invalid_argument(error);
-    }
-    const auto base = config.find("base_dir");
-    if (base != config.end() && !base->is_null() && !base->is_string()) {
-        throw std::invalid_argument("MNN base_dir must be a directory path.");
-    }
-    const auto prefix = mca::mnn::relocatedMnnBasePrefix(
-            base == config.end() || base->is_null() ? std::string() : base->get<std::string>());
-    mca::mnn::confinedMnnBundlePath(root, prefix, true);
-    if (!config.contains("llm_config")) config["llm_config"] = "llm_config.json";
-    relocate_mnn_component_declarations(config, root, prefix);
-    const auto llmPath = mca::mnn::confinedMnnBundlePath(root, config["llm_config"].get<std::string>());
-    if (!read_mnn_config_object(llmPath.string(), "MNN llm_config", modelConfig, error)) {
-        throw std::invalid_argument(error);
-    }
-    // Upstream fixes base_dir_ from the root before merging llm_config. Use
-    // that same prefix for both documents; do not let a model-side base_dir
-    // revive the export machine's directory when creating the runtime copy.
-    relocate_mnn_component_declarations(modelConfig, root, prefix);
-    for (const auto& entry : {
-             std::pair<const char*, const char*>{"llm_model", "llm.mnn"},
-             {"llm_weight", "llm.mnn.weight"}, {"embedding_file", "embeddings_bf16.bin"},
-             {"block_model", "block_"}, {"lm_model", "lm.mnn"}, {"embedding_model", "embedding.mnn"},
-             {"context_file", "context.json"}, {"talker_model", "talker.mnn"},
-             {"talker_weight", "talker.mnn.weight"}, {"talker_embedding_file", "talker_embeddings_bf16.bin"},
-             {"predit_model", "predit.mnn"}, {"dit_model", "dit.mnn"}, {"bigvgan_model", "bigvgan.mnn"},
-             {"spk_dict", "spk_dict.mnn"}, {"lookup_file", "lookup_file.txt"}, {"mtp_model", "mtp.mnn"},
-             {"eagle_model", "eagle.mnn"}, {"eagle_fc", "eagle_fc.mnn"}, {"eagle_d2t", "eagle_d2t.mnn"},
-             {"dflash_model", "dflash.mnn"}, {"dflash_fc", "dflash_fc.mnn"}}) {
-        if (!config.contains(entry.first) && !modelConfig.contains(entry.first)) {
-            config[entry.first] = mca::mnn::mnnBundleRelativeComponent(prefix, entry.second);
-        }
-    }
-    if (!prefix.empty() && !config.contains("npu_model_dir") && !modelConfig.contains("npu_model_dir")) {
-        config["npu_model_dir"] = prefix;
-    }
-    if (!config.contains("tokenizer_file") && !modelConfig.contains("tokenizer_file")) {
-        const auto txt = mca::mnn::mnnBundleRelativeComponent(prefix, "tokenizer.txt");
-        const auto mtok = mca::mnn::mnnBundleRelativeComponent(prefix, "tokenizer.mtok");
-        config["tokenizer_file"] = !nonempty_regular_file_exists(
-                mca::mnn::confinedMnnBundlePath(root, txt).string()) && nonempty_regular_file_exists(
-                mca::mnn::confinedMnnBundlePath(root, mtok).string()) ? mtok : txt;
-    }
-    for (const auto& entry : {
-             std::pair<const char*, const char*>{"visual_model", "is_visual"}, {"audio_model", "is_audio"}}) {
-        const bool enabled = modelConfig.contains(entry.second)
-                ? modelConfig.value(entry.second, false) : config.value(entry.second, false);
-        if (enabled && !config.contains(entry.first) && !modelConfig.contains(entry.first)) {
-            config[entry.first] = mca::mnn::mnnBundleRelativeComponent(
-                    prefix, std::string(entry.first) == "visual_model" ? "visual.mnn" : "audio.mnn");
-        }
-    }
-}
-
-bool mnn_configured_component_path(
-        const json& config,
-        const std::string& root,
-        const char* key,
-        const char* fallback,
-        std::string& relative,
-        std::string& absolute,
-        std::string& error) {
-    std::string raw = fallback;
-    const auto value = config.find(key);
-    if (value != config.end()) {
-        if (!value->is_string() || value->get<std::string>().empty()) {
-            error = std::string("MNN config field '") + key + "' must be a non-empty relative path.";
-            return false;
-        }
-        raw = value->get<std::string>();
-    }
-    try {
-        relative = mca::mnn::normalizeMnnBundleRelativePath(raw);
-        absolute = mca::mnn::confinedMnnBundlePath(root, relative).string();
-    } catch (const std::exception& e) {
-        error = std::string("MNN config field '") + key +
-                "' contains an unsafe component path: " + raw + ". " + e.what();
-        return false;
-    }
-    return true;
-}
-
-bool require_mnn_component(
-        const json& config,
-        const std::string& root,
-        const char* key,
-        const char* fallback,
-        std::string& relative,
-        std::string& absolute,
-        std::string& error) {
-    if (!mnn_configured_component_path(
-            config, root, key, fallback, relative, absolute, error)) {
-        return false;
-    }
-    if (!nonempty_regular_file_exists(absolute)) {
-        error = std::string("Required MNN component '") + relative +
-                "' is missing, empty, or not a regular file.";
-        return false;
-    }
-    return true;
-}
-
-bool mnn_json_exact_int64(const json& value, int64_t& output) {
-    if (value.is_number_unsigned()) {
-        const auto raw = value.get<uint64_t>();
-        if (raw > static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) return false;
-        output = static_cast<int64_t>(raw);
-        return true;
-    }
-    if (value.is_number_integer()) {
-        output = value.get<int64_t>();
-        return true;
-    }
-    return false;
-}
-
-bool parse_mnn_tie_embedding_descriptor(
-        const json& value,
-        mca::mnn::TieEmbeddingDescriptor& descriptor,
-        std::string& error) {
-    const auto read = [&error](const json& raw, const char* name, int64_t& target) {
-        if (!mnn_json_exact_int64(raw, target)) {
-            error = std::string("tie_embeddings field '") + name + "' must be an exact integer.";
-            return false;
-        }
-        return true;
-    };
-    if (value.is_array()) {
-        if (value.size() < 5U ||
-            !read(value[0], "weight_offset", descriptor.weight_offset) ||
-            !read(value[1], "alpha_offset", descriptor.alpha_offset) ||
-            !read(value[2], "alpha_size", descriptor.alpha_size) ||
-            !read(value[3], "quant_bit", descriptor.quant_bit) ||
-            !read(value[4], "quant_block", descriptor.quant_block)) {
-            if (error.empty()) {
-                error = "legacy tie_embeddings must contain at least five exact integers.";
-            }
-            return false;
-        }
-        if (value.size() >= 6U) {
-            if (value[5].is_boolean()) {
-                descriptor.alpha_fp16 = value[5].get<bool>();
-            } else {
-                int64_t alphaFp16 = 0;
-                if (!read(value[5], "alpha_fp16", alphaFp16)) return false;
-                descriptor.alpha_fp16 = alphaFp16 != 0;
-            }
-        }
-        return true;
-    }
-    if (!value.is_object()) {
-        error = "tie_embeddings must be an array or object.";
-        return false;
-    }
-    for (const auto* name : {
-             "weight_offset", "alpha_offset", "alpha_size", "quant_bit", "quant_block"}) {
-        const auto field = value.find(name);
-        if (field == value.end()) {
-            error = std::string("tie_embeddings is missing field '") + name + "'.";
-            return false;
-        }
-        int64_t* target = nullptr;
-        if (std::strcmp(name, "weight_offset") == 0) target = &descriptor.weight_offset;
-        else if (std::strcmp(name, "alpha_offset") == 0) target = &descriptor.alpha_offset;
-        else if (std::strcmp(name, "alpha_size") == 0) target = &descriptor.alpha_size;
-        else if (std::strcmp(name, "quant_bit") == 0) target = &descriptor.quant_bit;
-        else target = &descriptor.quant_block;
-        if (!read(*field, name, *target)) return false;
-    }
-    const auto alphaDtypeIt = value.find("alpha_dtype");
-    if (alphaDtypeIt != value.end() && !alphaDtypeIt->is_string()) {
-        error = "tie_embeddings alpha_dtype must be a string.";
-        return false;
-    }
-    const auto alphaDtype = alphaDtypeIt == value.end()
-            ? std::string("fp32")
-            : alphaDtypeIt->get<std::string>();
-    if (alphaDtype != "fp16" && alphaDtype != "fp32") {
-        error = "tie_embeddings alpha_dtype must be fp16 or fp32.";
-        return false;
-    }
-    descriptor.alpha_fp16 = alphaDtype == "fp16";
-    return true;
-}
-
-std::string mnn_chat_bundle_preflight_message(const std::string& configPath) {
-    const auto root = parent_dir(configPath);
-    json rootConfig;
-    std::string error;
-    if (!read_mnn_config_object(configPath, "MNN config.json", rootConfig, error)) return error;
-
-    std::string llmConfigRelative;
-    std::string llmConfigPath;
-    if (!require_mnn_component(
-            rootConfig,
-            root,
-            "llm_config",
-            "llm_config.json",
-            llmConfigRelative,
-            llmConfigPath,
-            error)) {
-        return error;
-    }
-    json modelConfig;
-    if (!read_mnn_config_object(llmConfigPath, "MNN llm_config", modelConfig, error)) return error;
-
-    json effective = rootConfig;
-    merge_mnn_config(effective, modelConfig);
-    std::string modelRelative;
-    std::string modelPath;
-    if (!require_mnn_component(
-            effective, root, "llm_model", "llm.mnn", modelRelative, modelPath, error)) {
-        return error;
-    }
-    std::string weightRelative;
-    std::string weightPath;
-    if (!require_mnn_component(
-            effective, root, "llm_weight", "llm.mnn.weight", weightRelative, weightPath, error)) {
-        return error;
-    }
-    std::string tokenizerRelative;
-    std::string tokenizerPath;
-    if (!require_mnn_component(
-            effective, root, "tokenizer_file", "tokenizer.txt", tokenizerRelative, tokenizerPath, error)) {
-        return error;
-    }
-
-    if (effective.contains("ple_embed_file")) {
-        std::string pleRelative;
-        std::string plePath;
-        if (!require_mnn_component(
-                effective, root, "ple_embed_file", "", pleRelative, plePath, error)) {
-            return error;
-        }
-    }
-    if (effective.value("is_visual", false)) {
-        std::string visualRelative;
-        std::string visualPath;
-        if (!require_mnn_component(
-                effective, root, "visual_model", "visual.mnn", visualRelative, visualPath, error)) {
-            return error;
-        }
-    }
-    if (effective.value("is_audio", false)) {
-        std::string audioRelative;
-        std::string audioPath;
-        if (!require_mnn_component(
-                effective, root, "audio_model", "audio.mnn", audioRelative, audioPath, error)) {
-            return error;
-        }
-    }
-
-    const auto tie = effective.find("tie_embeddings");
-    if (tie == effective.end()) {
-        std::string embeddingRelative;
-        std::string embeddingPath;
-        if (!require_mnn_component(
-                effective,
-                root,
-                "embedding_file",
-                "embeddings_bf16.bin",
-                embeddingRelative,
-                embeddingPath,
-                error)) {
-            return error;
-        }
-        return "";
-    }
-
-    mca::mnn::TieEmbeddingDescriptor descriptor;
-    if (!parse_mnn_tie_embedding_descriptor(*tie, descriptor, error)) {
-        return "Invalid MNN tie_embeddings metadata: " + error;
-    }
-    const bool tiedToLlmWeight = descriptor.weight_offset > 0;
-    std::string storageRelative = weightRelative;
-    std::string storagePath = weightPath;
-    if (!tiedToLlmWeight &&
-        !require_mnn_component(
-                effective,
-                root,
-                "embedding_file",
-                "embeddings_bf16.bin",
-                storageRelative,
-                storagePath,
-                error)) {
-        return error;
-    }
-    struct stat storageInfo {};
-    if (stat(storagePath.c_str(), &storageInfo) != 0 || !S_ISREG(storageInfo.st_mode) ||
-        storageInfo.st_size <= 0) {
-        return "MNN tie_embeddings backing file is missing or empty: " + storageRelative;
-    }
-    int64_t hiddenSize = 0;
-    const auto hidden = effective.find("hidden_size");
-    if (hidden == effective.end() || !mnn_json_exact_int64(*hidden, hiddenSize)) {
-        return "MNN tie_embeddings requires an exact integer hidden_size.";
-    }
-    const auto validation = mca::mnn::validateTieEmbedding(
-            descriptor,
-            hiddenSize,
-            static_cast<uint64_t>(storageInfo.st_size));
-    if (!validation.valid) {
-        return "Invalid MNN tie_embeddings metadata for '" + storageRelative + "': " +
-                validation.error;
-    }
-    return "";
-}
-
-struct MnnPublishedImageEvidence {
-    long long bytes = 0;
-    std::string sha256;
-};
-
-bool collect_mnn_published_image_evidence(
-        const std::string& path,
-        MnnPublishedImageEvidence& evidence,
-        std::string& error) {
-    constexpr long long kMinPngBytes = 57LL;
-    constexpr long long kMaxPngBytes = 64LL * 1024LL * 1024LL;
-    struct stat info {};
-    if (path.empty() || ::lstat(path.c_str(), &info) != 0 ||
-        !S_ISREG(info.st_mode) || info.st_size < kMinPngBytes ||
-        info.st_size > kMaxPngBytes) {
-        error = "MNN-Diffusion output is not a bounded regular PNG file.";
-        return false;
-    }
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        error = "MNN-Diffusion output could not be opened for publication proof.";
-        return false;
-    }
-    std::vector<uint8_t> bytes(static_cast<size_t>(info.st_size));
-    input.read(reinterpret_cast<char*>(bytes.data()), info.st_size);
-    if (input.gcount() != info.st_size || input.peek() != std::char_traits<char>::eof()) {
-        error = "MNN-Diffusion output changed while publication proof was collected.";
-        return false;
-    }
-    struct stat after {};
-    if (::lstat(path.c_str(), &after) != 0 || !S_ISREG(after.st_mode) ||
-        after.st_dev != info.st_dev || after.st_ino != info.st_ino ||
-        after.st_size != info.st_size) {
-        error = "MNN-Diffusion output identity changed before publication.";
-        return false;
-    }
-    static constexpr std::array<uint8_t, 8> kPngSignature = {
-        UINT8_C(0x89), UINT8_C(0x50), UINT8_C(0x4e), UINT8_C(0x47),
-        UINT8_C(0x0d), UINT8_C(0x0a), UINT8_C(0x1a), UINT8_C(0x0a),
-    };
-    if (bytes.size() < kPngSignature.size() ||
-        !std::equal(kPngSignature.begin(), kPngSignature.end(), bytes.begin())) {
-        error = "MNN-Diffusion output does not have a PNG signature.";
-        return false;
-    }
-    evidence.bytes = static_cast<long long>(bytes.size());
-    evidence.sha256 = mca::image::sha256_hex_bytes(bytes);
-    if (evidence.sha256.size() != 64U) {
-        error = "MNN-Diffusion output SHA-256 proof could not be produced.";
-        return false;
-    }
-    error.clear();
-    return true;
-}
-
-void collect_mnn_visual_path_declarations(
-        const json& value,
-        std::vector<std::string>& paths,
-        int depth = 0,
-        bool allowGenericModelPath = false) {
-    // Model-side configs occasionally nest visual_model under a `vision`,
-    // `visual`, or `projector` object.  Walk JSON objects/arrays rather than
-    // assuming one fixed exporter layout, but keep a depth bound so malformed
-    // metadata cannot turn preflight into an unbounded traversal.
-    if (depth > 8) return;
-    if (value.is_array()) {
-        for (const auto& item : value) {
-            collect_mnn_visual_path_declarations(item, paths, depth + 1, allowGenericModelPath);
-        }
-        return;
-    }
-    if (!value.is_object()) return;
-    for (auto it = value.begin(); it != value.end(); ++it) {
-        const auto key = mca::mnn::lowerAscii(it.key());
-        if ((mca::mnn::isMnnVisualPathKey(it.key()) ||
-             (allowGenericModelPath && (key == "model" || key == "path"))) &&
-            it.value().is_string()) {
-            mca::mnn::appendUniqueMnnVisualPath(it.value().get<std::string>(), paths);
-        }
-        if (it.value().is_object() || it.value().is_array()) {
-            const bool childAllowsGeneric = key == "vision" || key == "visual" ||
-                    key == "image_encoder" ||
-                    key == "vision_encoder" || key == "visual_encoder";
-            collect_mnn_visual_path_declarations(
-                    it.value(), paths, depth + 1, childAllowsGeneric || allowGenericModelPath);
-        }
-    }
-}
-
-std::vector<std::string> mnn_visual_path_declarations(
-        const std::string& root,
-        const json& config) {
-    std::vector<std::string> paths;
-    collect_mnn_visual_path_declarations(config, paths);
-
-    // The root config points at the model-side llm_config.json in most MNN
-    // bundles.  Inspect it too because several exporters keep the visual
-    // encoder declaration there rather than in config.json.
-    std::string llmConfigPath = "llm_config.json";
-    const auto llmConfigIt = config.find("llm_config");
-    if (llmConfigIt != config.end() && llmConfigIt->is_string()) {
-        const auto normalized = mca::mnn::normalizeMnnVisualRelativePath(
-                llmConfigIt->get<std::string>());
-        if (!normalized.empty()) llmConfigPath = normalized;
-    }
-    const auto llmConfig = read_json_file_or_empty(join_path(root, llmConfigPath));
-    collect_mnn_visual_path_declarations(llmConfig, paths);
-    return paths;
-}
-
-std::string select_mnn_visual_model_path(
-        const std::string& root,
-        const json& config,
-        const std::string& configuredVisual) {
-    const auto declared = mnn_visual_path_declarations(root, config);
-    return mca::mnn::selectMnnVisualModelPath(
-            configuredVisual,
-            declared,
-            [&root](const std::string& relativePath) {
-                return nonempty_regular_file_exists(join_path(root, relativePath));
-            });
-}
-
-bool is_mnn_stop_marker_key(const std::string& rawKey) {
-    std::string key;
-    key.reserve(rawKey.size());
-    for (const unsigned char ch : rawKey) {
-        key.push_back(static_cast<char>(std::tolower(ch)));
-    }
-    return key == "eos_token" ||
-           key == "eod_token" ||
-           key == "end_token" ||
-           key == "end_of_turn_token" ||
-           key == "stop" ||
-           key == "stops" ||
-           key == "stop_word" ||
-           key == "stop_words" ||
-           key == "stop_token" ||
-           key == "stop_tokens";
-}
-
-void append_mnn_stop_markers_from_json(const json& value, std::vector<std::string>& target, int depth = 0) {
-    // Only inspect known stop-token fields rather than arbitrary template text:
-    // chat templates contain user-facing role strings that are not stop tokens.
-    if (depth > 4) return;
-    if (value.is_string()) {
-        append_stop_marker(target, value.get<std::string>());
-        return;
-    }
-    if (value.is_array()) {
-        for (const auto& item : value) {
-            append_mnn_stop_markers_from_json(item, target, depth + 1);
-        }
-        return;
-    }
-    if (!value.is_object()) return;
-    for (auto it = value.begin(); it != value.end(); ++it) {
-        if (is_mnn_stop_marker_key(it.key())) {
-            append_mnn_stop_markers_from_json(it.value(), target, depth + 1);
-        } else if (it.value().is_object()) {
-            append_mnn_stop_markers_from_json(it.value(), target, depth + 1);
-        }
-    }
-}
-
-std::vector<std::string> mnn_model_stop_markers(const std::string& configPath) {
-    auto markers = default_mnn_stop_markers();
-    append_mnn_stop_markers_from_json(read_json_file_or_empty(configPath), markers);
-    return markers;
-}
+using mca::mnn::MnnPublishedImageEvidence;
+using mca::mnn::normalize_mnn_model_path;
+using mca::mnn::join_path;
+using mca::mnn::resolve_mnn_config_path;
+using mca::mnn::read_json_file_or_empty;
+using mca::mnn::read_mnn_config_object;
+using mca::mnn::merge_mnn_config;
+using mca::mnn::relocate_mnn_component_declarations;
+using mca::mnn::read_relocated_mnn_configs;
+using mca::mnn::mnn_configured_component_path;
+using mca::mnn::require_mnn_component;
+using mca::mnn::mnn_json_exact_int64;
+using mca::mnn::parse_mnn_tie_embedding_descriptor;
+using mca::mnn::mnn_chat_bundle_preflight_message;
+using mca::mnn::collect_mnn_published_image_evidence;
+using mca::mnn::collect_mnn_visual_path_declarations;
+using mca::mnn::mnn_visual_path_declarations;
+using mca::mnn::select_mnn_visual_model_path;
+using mca::mnn::is_mnn_stop_marker_key;
+using mca::mnn::append_mnn_stop_markers_from_json;
+using mca::mnn::mnn_model_stop_markers;
 
 // The app links one coherent MNN 3.6 runtime.  Gemma 4's public MNN 3.5
 // visual graph crashes in MNN::Transformer::Omni::load before the Java layer
@@ -1231,90 +584,7 @@ std::vector<std::string> mnn_model_stop_markers(const std::string& configPath) {
 // Text-only isolation packages are unaffected because they do not enable or
 // contain a visual model.
 std::string incompatible_legacy_mnn_visual_graph_message(const std::string& requestedPath) {
-    constexpr const char* kLegacyGraphVersion = "3.5.0";
-    constexpr const char* kProductRuntimeVersion = "3.6";
-    const auto configPath = resolve_mnn_config_path(requestedPath);
-    const auto root = parent_dir(configPath);
-    const auto config = read_json_file_or_empty(configPath);
-    if (!config.is_object()) return "";
-    if (config.value("mca_import_mode", std::string()) == "text_only") return "";
-
-    std::string configuredVisual;
-    bool configuredVisualDeclared = false;
-    const auto visualIt = config.find("visual_model");
-    if (visualIt != config.end() && visualIt->is_string()) {
-        configuredVisualDeclared = true;
-        configuredVisual = mca::mnn::normalizeMnnVisualRelativePath(visualIt->get<std::string>());
-    }
-    const auto selectedVisual = select_mnn_visual_model_path(root, config, configuredVisual);
-    const bool visualEnabled = config.value("is_visual", false) ||
-            configuredVisualDeclared || !selectedVisual.empty();
-    if (!visualEnabled) return "";
-    const auto visualName = selectedVisual.empty()
-            ? (configuredVisual.empty() ? std::string("visual.mnn") : configuredVisual)
-            : selectedVisual;
-
-    // llm.mnn.json is MNN's exporter metadata sidecar. A model may use a
-    // differently named JSON embedding sidecar or a renamed llm_model, so
-    // inspect each safe relative metadata name before the standard file. This
-    // must mirror the repository gate: raw/debug native loads bypass Kotlin.
-    std::vector<std::string> metadataPaths;
-    const auto is_safe_relative = [](const std::string& name) {
-        if (name.empty() || name.front() == '/' || name.find('\\') != std::string::npos) return false;
-        size_t segmentStart = 0;
-        while (segmentStart <= name.size()) {
-            const size_t segmentEnd = name.find('/', segmentStart);
-            const auto segment = name.substr(
-                    segmentStart,
-                    segmentEnd == std::string::npos ? std::string::npos : segmentEnd - segmentStart);
-            if (segment.empty() || segment == "." || segment == "..") return false;
-            if (segmentEnd == std::string::npos) break;
-            segmentStart = segmentEnd + 1;
-        }
-        return true;
-    };
-    const auto add_metadata_path = [&metadataPaths, &root, &is_safe_relative](const std::string& name) {
-        const bool isJson = name.size() >= 5 && name.compare(name.size() - 5, 5, ".json") == 0;
-        if (isJson && is_safe_relative(name)) {
-            metadataPaths.push_back(join_path(root, name));
-        }
-    };
-    const auto embeddingIt = config.find("embedding_file");
-    if (embeddingIt != config.end() && embeddingIt->is_string()) {
-        add_metadata_path(embeddingIt->get<std::string>());
-    }
-    const auto llmModelIt = config.find("llm_model");
-    if (llmModelIt != config.end() && llmModelIt->is_string()) {
-        const auto modelName = llmModelIt->get<std::string>();
-        const bool isMnn = modelName.size() >= 4 &&
-                modelName.compare(modelName.size() - 4, 4, ".mnn") == 0;
-        if (isMnn && is_safe_relative(modelName)) {
-            add_metadata_path(modelName + ".json");
-        }
-    }
-    const bool visualNameIsMnn = visualName.size() >= 4 &&
-            visualName.compare(visualName.size() - 4, 4, ".mnn") == 0;
-    if (visualNameIsMnn && is_safe_relative(visualName)) {
-        add_metadata_path(visualName + ".json");
-    }
-    metadataPaths.push_back(join_path(root, "llm.mnn.json"));
-    std::sort(metadataPaths.begin(), metadataPaths.end());
-    metadataPaths.erase(std::unique(metadataPaths.begin(), metadataPaths.end()), metadataPaths.end());
-    for (const auto& metadataPath : metadataPaths) {
-        const auto metadata = read_json_file_or_empty(metadataPath);
-        if (!metadata.is_object()) continue;
-        const auto extraInfo = metadata.find("extraInfo");
-        if (extraInfo == metadata.end() || !extraInfo->is_object()) continue;
-        const auto version = extraInfo->value("version", std::string());
-        if (version == kLegacyGraphVersion) {
-            return std::string("MNN 多模态图版本 ") + kLegacyGraphVersion +
-                    " 与当前 MNN " + kProductRuntimeVersion +
-                    " runtime 不兼容，已安全阻止加载。请使用 MNN " +
-                    kProductRuntimeVersion +
-                    " 重新导出的多模态包，或移除视觉组件后仅作为文本模型使用。";
-        }
-    }
-    return "";
+    return mca::mnn::incompatible_legacy_mnn_visual_graph_message(requestedPath);
 }
 
 bool write_json_file(const std::string& path, const json& value) {
@@ -1356,78 +626,10 @@ bool inject_legacy_mnn_chat_template(json& runtimeConfig, const json& modelConfi
 }
 
 std::string prepare_mnn_runtime_config(const std::string& requestedPath) {
-    const auto configPath = resolve_mnn_config_path(requestedPath);
-    const auto root = parent_dir(configPath);
-    json config;
-    json modelConfig;
-    g_visual_model_path.clear();
-    g_vision_ready = false;
-    read_relocated_mnn_configs(configPath, config, modelConfig);
-    inject_legacy_mnn_chat_template(config, modelConfig);
-    json effective = config;
-    merge_mnn_config(effective, modelConfig);
-    const bool textOnlyImport = effective.value("mca_import_mode", std::string()) == "text_only";
-
-    std::string configuredVisual;
-    bool configuredVisualDeclared = false;
-    auto visualIt = effective.find("visual_model");
-    if (visualIt != effective.end() && visualIt->is_string()) {
-        configuredVisualDeclared = true;
-        configuredVisual = mca::mnn::normalizeMnnVisualRelativePath(visualIt->get<std::string>());
-    }
-    std::vector<std::string> declaredVisualPaths;
-    collect_mnn_visual_path_declarations(config, declaredVisualPaths);
-    collect_mnn_visual_path_declarations(modelConfig, declaredVisualPaths);
-    const auto selectedVisual = textOnlyImport ? std::string() : mca::mnn::selectMnnVisualModelPath(
-            configuredVisual, declaredVisualPaths, [&root](const std::string& relative) {
-                return nonempty_regular_file_exists(mca::mnn::confinedMnnBundlePath(root, relative).string());
-            });
-    const bool visualExists = !selectedVisual.empty();
-    const bool shouldEnableVision = !textOnlyImport && (visualExists || effective.value("is_visual", false) ||
-            configuredVisualDeclared);
-    if (shouldEnableVision) {
-        config["is_visual"] = true;
-        modelConfig["is_visual"] = true;
-        if (visualExists) {
-            // Always persist the resolved relative path.  This makes nested
-            // exporter layouts visible to MNN's Omni loader and keeps the
-            // g_vision_ready flag truthful for the Java/UI/API layers.
-            config["visual_model"] = selectedVisual;
-            modelConfig["visual_model"] = selectedVisual;
-            g_visual_model_path = join_path(root, selectedVisual);
-        } else if (configuredVisual.empty()) {
-            config["visual_model"] = "visual.mnn";
-            g_visual_model_path = join_path(root, "visual.mnn");
-        } else {
-            g_visual_model_path = configuredVisual;
-        }
-        g_vision_ready = visualExists;
-    }
-    if (textOnlyImport) {
-        for (auto* document : {&config, &modelConfig}) {
-            (*document)["mca_import_mode"] = "text_only";
-            (*document)["is_visual"] = false;
-            (*document)["is_audio"] = false;
-            (*document)["is_talker"] = false;
-        }
-    }
-
-    // LlmConfig reads and merges llm_config inside createLLM(), before any
-    // set_config call. Generate both documents so that second merge cannot
-    // reintroduce export-machine base_dir or unnormalised component paths.
-    const auto runtimeLlmName = "mca_runtime_llm_config.json";
-    const auto runtimeLlmPath = mca::mnn::confinedMnnBundlePath(root, runtimeLlmName).string();
-    modelConfig.erase("llm_config");
-    if (!write_json_file(runtimeLlmPath, modelConfig)) {
-        throw std::runtime_error("MNN relocated model config could not be written: " + runtimeLlmPath);
-    }
-    config["llm_config"] = runtimeLlmName;
-    const auto runtimeConfigPath = mca::mnn::confinedMnnBundlePath(root, "mca_runtime_config.json").string();
-    if (!write_json_file(runtimeConfigPath, config)) {
-        throw std::runtime_error(
-                "MNN compatibility runtime config could not be written: " + runtimeConfigPath);
-    }
-    return runtimeConfigPath;
+    return mca::mnn::prepare_mnn_runtime_config(
+            requestedPath,
+            &g_visual_model_path,
+            &g_vision_ready);
 }
 
 void set_error(const std::string& message) {
@@ -1672,90 +874,16 @@ void configure_mnn_debug_trace_locked(const json& params) {
 }
 
 std::string mnn_debug_raw_output_hex() {
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string encoded;
-    encoded.reserve(g_mnn_debug_raw_output.size() * 2U);
-    for (const unsigned char value : g_mnn_debug_raw_output) {
-        encoded.push_back(kHex[value >> 4U]);
-        encoded.push_back(kHex[value & 0x0fU]);
-    }
-    return encoded;
+    return mca::mnn::raw_bytes_to_hex(g_mnn_debug_raw_output);
 }
 
 std::string mnn_debug_generated_token_ids_json() {
-    std::ostringstream out;
-    out << '[';
-    for (size_t index = 0; index < g_mnn_debug_generated_token_ids.size(); ++index) {
-        if (index > 0) out << ',';
-        out << g_mnn_debug_generated_token_ids[index];
-    }
-    out << ']';
-    return out.str();
+    return mca::mnn::token_ids_to_json(g_mnn_debug_generated_token_ids);
 }
 
-struct MnnChatImageInput {
-    std::string key;
-    std::string path;
-};
-
-std::string image_url_from_content_part(const json& part) {
-    for (const auto* key : {"image_url", "image", "input_image", "url"}) {
-        const auto value = part.find(key);
-        if (value == part.end()) continue;
-        if (value->is_string()) {
-            const auto text = value->get<std::string>();
-            if (!text.empty()) return text;
-            continue;
-        }
-        if (!value->is_object()) continue;
-        const auto url = value->find("url");
-        if (url != value->end() && url->is_string()) {
-            const auto text = url->get<std::string>();
-            if (!text.empty()) return text;
-        }
-    }
-    return {};
-}
-
-std::string text_from_content(
-        const json& content,
-        std::vector<MnnChatImageInput>* imageInputs = nullptr) {
-    if (content.is_string()) return content.get<std::string>();
-    if (!content.is_array()) return content.dump();
-    std::vector<std::string> textParts;
-    std::vector<std::string> imageTags;
-    for (const auto& part : content) {
-        if (!part.is_object()) continue;
-        const auto type = part.value("type", "");
-        if (type == "text") {
-            textParts.push_back(part.value("text", ""));
-        } else if (type == "image_url" || type == "input_image" || type == "image") {
-            const auto url = image_url_from_content_part(part);
-            if (!url.empty()) {
-                if (imageInputs == nullptr) {
-                    imageTags.push_back("<img>" + url + "</img>");
-                    continue;
-                }
-                // Structured OpenAI parts and raw MNN tags can describe one
-                // attachment more than once (for example a file URI and an
-                // absolute path).  Do not allocate a second Omni image slot
-                // for the same lexical reference; duplicate slots were a
-                // common source of "one image becomes two" and unstable MNN
-                // visual prefill on older exporters.
-                const auto imageKey = mca::mnn::canonicalMnnImageReference(url);
-                const bool duplicate = !imageKey.empty() && std::any_of(
-                    imageInputs->begin(), imageInputs->end(), [&](const MnnChatImageInput& previous) {
-                        return mca::mnn::canonicalMnnImageReference(previous.path) == imageKey;
-                    });
-                if (duplicate) continue;
-                const auto key = "mca_image_" + std::to_string(imageInputs->size());
-                imageInputs->push_back({key, url});
-                imageTags.push_back("<img>" + key + "</img>");
-            }
-        }
-    }
-    return mca::mnn::composeMnnImageFirstPromptContent(imageTags, textParts);
-}
+using mca::mnn::MnnChatImageInput;
+using mca::mnn::image_url_from_content_part;
+using mca::mnn::text_from_content;
 
 void reset_generation_state_locked() {
     g_generation_active = false;
@@ -4112,85 +3240,9 @@ bool copy_vector_to_tensor(MNN::Tensor* tensor, const std::vector<T>& values, st
 float fp16_to_float(uint16_t value);
 float bf16_to_float(uint16_t value);
 
-json float_vector_stats_json(const std::vector<float>& values, size_t sampleLimit = 8) {
-    json samples = json::array();
-    long double sum = 0.0L;
-    long double absSum = 0.0L;
-    float minValue = 0.0f;
-    float maxValue = 0.0f;
-    size_t finite = 0;
-    for (float value : values) {
-        if (!std::isfinite(value)) continue;
-        if (finite == 0) {
-            minValue = value;
-            maxValue = value;
-        } else {
-            minValue = std::min(minValue, value);
-            maxValue = std::max(maxValue, value);
-        }
-        sum += static_cast<long double>(value);
-        absSum += std::fabs(static_cast<long double>(value));
-        ++finite;
-    }
-    for (size_t i = 0; i < values.size() && samples.size() < sampleLimit; ++i) {
-        const float value = values[i];
-        if (std::isfinite(value)) {
-            samples.push_back(static_cast<double>(value));
-        } else if (std::isnan(value)) {
-            samples.push_back("nan");
-        } else if (value > 0.0f) {
-            samples.push_back("inf");
-        } else {
-            samples.push_back("-inf");
-        }
-    }
-    json out = {
-            {"count", static_cast<long long>(values.size())},
-            {"finite", static_cast<long long>(finite)},
-            {"nonFinite", static_cast<long long>(values.size() - finite)},
-            {"samples", samples}
-    };
-    if (finite == 0) {
-        out["min"] = nullptr;
-        out["max"] = nullptr;
-        out["mean"] = nullptr;
-        out["absMean"] = nullptr;
-    } else {
-        out["min"] = static_cast<double>(minValue);
-        out["max"] = static_cast<double>(maxValue);
-        out["mean"] = static_cast<double>(sum / static_cast<long double>(finite));
-        out["absMean"] = static_cast<double>(absSum / static_cast<long double>(finite));
-    }
-    return out;
-}
-
-json float_vector_abs_diff_stats_json(const std::vector<float>& a, const std::vector<float>& b) {
-    const size_t count = std::min(a.size(), b.size());
-    std::vector<float> diff;
-    diff.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        diff.push_back(std::fabs(a[i] - b[i]));
-    }
-    auto stats = float_vector_stats_json(diff);
-    stats["compared"] = static_cast<long long>(count);
-    stats["leftCount"] = static_cast<long long>(a.size());
-    stats["rightCount"] = static_cast<long long>(b.size());
-    return stats;
-}
-
-template <typename Reader>
-json raw_tensor_stats_json(size_t availableCount, size_t expectedCount, Reader reader) {
-    const size_t count = std::min(availableCount, expectedCount);
-    std::vector<float> values;
-    values.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        values.push_back(reader(i));
-    }
-    auto stats = float_vector_stats_json(values);
-    stats["available"] = static_cast<long long>(availableCount);
-    stats["read"] = static_cast<long long>(count);
-    return stats;
-}
+using mca::mnn::float_vector_stats_json;
+using mca::mnn::float_vector_abs_diff_stats_json;
+using mca::mnn::raw_tensor_stats_json;
 
 bool assign_tensor_buffer_to_float_vector(
         MNN::Tensor* tensor,
@@ -7731,738 +6783,91 @@ json run_mnn_sd15_module_runner(
 #endif
 
 #if MCA_WITH_MNN_LLM
-struct ParsedMnnChatMessages {
-    std::vector<MNN::Transformer::ChatMessage> messages;
-    std::vector<MnnChatImageInput> images;
-    mca::mnn::MnnRawMediaTags rawMediaTags;
+using mca::mnn::ParsedMnnChatMessages;
+using mca::mnn::MnnPromptCacheRuntimeState;
+using mca::mnn::MnnPromptCacheContext;
+using mca::mnn::MnnPromptCacheManager;
+using mca::mnn::MnnHasLogBuffer;
+using mca::mnn::mnn_context_log_snapshot;
+using mca::mnn::mnn_role_protocol_stop_reason;
 
-    bool hasMediaInputs() const {
-        return !images.empty() || rawMediaTags.hasAny();
-    }
-};
-
-// Compose/UI persistence can change presentation-only bytes around a protocol
-// boundary.  Keep this equivalence deliberately narrow: the vendor token-LCP
-// remains the authority for the amount of KV that is actually reusable, while
-// this helper only decides whether two message transcripts are candidates for
-// the same transaction.  In particular, ordinary whitespace inside prose is
-// never folded or removed.
-std::string normalize_mnn_chat_message_for_prefix(
-        std::string text,
-        bool assistantProtocol) {
-    // Normalize CRLF/lone CR first so a transcript copied through a different
-    // transport cannot fail the prefix check merely because of line endings.
-    std::string lineNormalized;
-    lineNormalized.reserve(text.size());
-    for (size_t index = 0; index < text.size(); ++index) {
-        const char value = text[index];
-        if (value == '\r') {
-            if (index + 1 < text.size() && text[index + 1] == '\n') ++index;
-            lineNormalized.push_back('\n');
-        } else {
-            lineNormalized.push_back(value);
-        }
-    }
-    text = std::move(lineNormalized);
-
-    // Stream filtering and Compose persistence may disagree on invisible
-    // Unicode formatting characters emitted around protocol boundaries.
-    static const std::vector<std::string> invisible = {
-            "\xE2\x80\x8B", // U+200B ZERO WIDTH SPACE
-            "\xE2\x80\x8C", // U+200C ZERO WIDTH NON-JOINER
-            "\xE2\x80\x8D", // U+200D ZERO WIDTH JOINER
-            "\xEF\xBB\xBF"  // U+FEFF ZERO WIDTH NO-BREAK SPACE / BOM
-    };
-    for (const auto& marker : invisible) {
-        size_t position = 0;
-        while ((position = text.find(marker, position)) != std::string::npos) {
-            text.erase(position, marker.size());
-        }
-    }
-
-    // A few MNN exports emit an answer protocol tag followed by a newline,
-    // while the UI/API path persists the same visible answer without that
-    // presentation newline ("<answer>\\n7391" vs "<answer>7391").  Treat
-    // whitespace immediately after known protocol labels as equivalent, but
-    // do not generalize this to arbitrary text.
-    if (assistantProtocol) {
-        static const std::vector<std::string> protocolLabels = {
-                "<answer>",
-                "<final>",
-                "<response>",
-                "<|channel|>final",
-                "<|channel>final",
-                "<|channel|>response",
-                "<|channel>response"
-        };
-        // Protocol labels are only special at the beginning of the assistant
-        // payload. A literal label in the middle of prose must remain part of
-        // the user's answer and must not be rewritten.
-        size_t labelStart = 0;
-        while (labelStart < text.size() &&
-                std::isspace(static_cast<unsigned char>(text[labelStart]))) {
-            ++labelStart;
-        }
-        for (const auto& label : protocolLabels) {
-            if (text.compare(labelStart, label.size(), label) != 0) continue;
-            size_t content = labelStart + label.size();
-            while (content < text.size() &&
-                    (text[content] == ' ' || text[content] == '\t' ||
-                     text[content] == '\n')) {
-                ++content;
-            }
-            if (content > labelStart + label.size()) {
-                text.erase(labelStart + label.size(), content - (labelStart + label.size()));
-            }
-            break;
-        }
-    }
-
-    // Trailing line padding is presentation-only at any message boundary and
-    // was already ignored by the old comparator. For assistant payloads, also
-    // ignore leading padding introduced before a protocol label; user/system
-    // leading spaces remain exact.
-    size_t first = 0;
-    if (assistantProtocol) {
-        while (first < text.size() &&
-                std::isspace(static_cast<unsigned char>(text[first]))) {
-            ++first;
-        }
-    }
-    size_t last = text.size();
-    while (last > first &&
-            std::isspace(static_cast<unsigned char>(text[last - 1]))) {
-        --last;
-    }
-    if (first != 0 || last != text.size()) {
-        text = text.substr(first, last - first);
-    }
-    return text;
-}
-
-bool mnn_chat_messages_prefix(
-        const std::vector<MNN::Transformer::ChatMessage>& prefix,
-        const std::vector<MNN::Transformer::ChatMessage>& messages) {
-    if (prefix.size() > messages.size()) return false;
-    // normalize() includes the historical U+200B ZERO WIDTH SPACE cleanup;
-    // assistant protocol whitespace is handled by the shared helper below.
-    const auto normalize = [](const std::string& text) {
-        return normalize_mnn_chat_message_for_prefix(text, false);
-    };
-    for (size_t index = 0; index < prefix.size(); ++index) {
-        if (prefix[index].first != messages[index].first) return false;
-        const auto prefixText = prefix[index].first == "assistant"
-                ? normalize_mnn_chat_message_for_prefix(prefix[index].second, true)
-                : normalize(prefix[index].second);
-        const auto messageText = messages[index].first == "assistant"
-                ? normalize_mnn_chat_message_for_prefix(messages[index].second, true)
-                : normalize(messages[index].second);
-        if (prefixText != messageText) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void restore_mnn_committed_assistant_text_locked(
-        const std::vector<MNN::Transformer::ChatMessage>& committed,
-        std::vector<MNN::Transformer::ChatMessage>& messages) {
-    const size_t count = std::min(committed.size(), messages.size());
-    for (size_t index = 0; index < count; ++index) {
-        // Only assistant turns are rewritten. User/system text must remain
-        // exactly what the caller supplied; token-level LCP can safely trim a
-        // genuine mismatch without mutating user content.
-        if (committed[index].first != "assistant" ||
-                messages[index].first != committed[index].first) {
-            continue;
-        }
-        if (committed[index].second == messages[index].second) continue;
-        if (normalize_mnn_chat_message_for_prefix(committed[index].second, true) ==
-                normalize_mnn_chat_message_for_prefix(messages[index].second, true)) {
-            // The committed value came from live history_tokens. Reusing it,
-            // rather than the normalized display value, keeps the next
-            // ChatMessages render byte/token-identical to the live KV prefix.
-            messages[index].second = committed[index].second;
-        }
-    }
+inline mca::mnn::MnnPromptCacheContext mnn_prompt_cache_context_locked() {
+    mca::mnn::MnnPromptCacheContext ctx;
+    ctx.llm = g_llm;
+    ctx.cache = &g_mnn_prompt_cache;
+    ctx.lifecycle = &g_mnn_request_lifecycle;
+    ctx.active_stop_markers = &g_active_stop_markers;
+    ctx.generation_stop_reason = &g_generation_stop_reason;
+    ctx.prefill_total_tokens = &g_mnn_prefill_total_tokens;
+    ctx.prefill_completed_tokens = &g_mnn_prefill_completed_tokens;
+    ctx.hits = &g_mnn_prompt_cache_hits;
+    ctx.misses = &g_mnn_prompt_cache_misses;
+    ctx.stop_requested = &g_stop_requested;
+    return ctx;
 }
 
 void clear_mnn_prompt_cache_tracking_locked(const std::string& reason) {
-    g_mnn_prompt_cache = MnnPromptCacheRuntimeState();
-    g_mnn_prompt_cache.state = "cold";
-    g_mnn_prompt_cache.reason = reason;
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).clear_tracking(reason);
 }
 
 void reset_mnn_native_prompt_cache_locked() {
-    if (g_llm == nullptr) return;
-    // reset() clears both the vendor prompt text and the live KV sequence. It
-    // is used only for a text request after an invalidated session, or when a
-    // transaction cannot be rolled back to a known committed prefix. Never
-    // call it immediately before a multimodal response: Qwen visual exports
-    // have a separate executor lifetime contract.
-    g_llm->reset();
-    g_mnn_request_lifecycle.lastRequestReset = true;
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).reset_native_cache();
 }
 
 size_t mnn_effective_kv_history_locked() {
-    if (g_llm == nullptr || g_llm->getContext() == nullptr) return 0;
-    // `all_seq_len` is the logical sequence length and can temporarily lead or
-    // lag the backend while OpenCL commits a chunk or applies a lazy rollback.
-    // The vendor's committed KV counter is the only safe basis for cache-hit
-    // accounting and for deciding whether stale history must be cleared.
-    return g_llm->getCurrentHistory();
+    return mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).effective_kv_history();
 }
 
 std::string mnn_prompt_cache_assistant_text_locked() {
-    if (g_llm == nullptr || g_llm->getContext() == nullptr) return {};
-    const auto* context = g_llm->getContext();
-    const size_t start = std::min(
-            g_mnn_prompt_cache.generation_history_start,
-            context->history_tokens.size());
-    std::string response;
-    for (size_t index = start; index < context->history_tokens.size(); ++index) {
-        const int token = context->history_tokens[index];
-        if (g_llm->is_stop(token)) continue;
-        response += g_llm->tokenizer_decode(token);
-    }
-    // The stream path filters protocol framing before exposing text to Kotlin.
-    // Re-run that exact filter on the decoded token transcript before storing
-    // the assistant turn.  OpenCL/Qwen exports can emit a plain `user` line
-    // after a valid answer instead of a tokenizer EOS; committing the raw
-    // suffix makes the next ChatMessages prefix differ from what the caller
-    // sends back and turns every follow-up into a full prefill.  A temporary
-    // filter is intentional: the live stream filter is already stopped and
-    // must not be mutated while its terminal chunk is being drained.
-    mca::mnn::StreamProtocolFilterState cacheFilter;
-    cacheFilter.reset(g_active_stop_markers);
-    auto filtered = mca::mnn::filter_stream_protocol(
-            cacheFilter,
-            std::move(response),
-            true);
-    return std::move(filtered.visible);
-}
-
-bool mnn_role_protocol_stop_reason(const std::string& reason) {
-    return reason == "unexpected_role_token" ||
-            reason == "plain_role_header_after_visible_text" ||
-            reason == "role_header_after_visible_text" ||
-            reason == "xml_response_end" ||
-            reason == "xml_response_start_after_visible_text";
+    return mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).assistant_text();
 }
 
 void trim_mnn_protocol_suffix_from_live_history_locked() {
-    if (!mnn_role_protocol_stop_reason(g_generation_stop_reason) ||
-            g_llm == nullptr || g_llm->getContext() == nullptr) {
-        return;
-    }
-    const auto* context = g_llm->getContext();
-    const size_t generationStart = std::min(
-            g_mnn_prompt_cache.generation_history_start,
-            context->history_tokens.size());
-    if (generationStart >= context->history_tokens.size()) return;
-
-    // Locate the first byte of the role marker in the decoded completion and
-    // map it back to its owning token.  This handles a marker split over
-    // multiple stream writes/tokens while preserving all valid answer tokens.
-    std::string decodedCompletion;
-    std::vector<std::pair<size_t, size_t>> tokenRanges;
-    tokenRanges.reserve(context->history_tokens.size() - generationStart);
-    mca::mnn::StreamProtocolFilterState filter;
-    filter.reset(g_active_stop_markers);
-    for (size_t index = generationStart; index < context->history_tokens.size(); ++index) {
-        const auto piece = g_llm->tokenizer_decode(context->history_tokens[index]);
-        const size_t begin = decodedCompletion.size();
-        decodedCompletion.append(piece);
-        tokenRanges.emplace_back(begin, decodedCompletion.size());
-        const auto result = mca::mnn::filter_stream_protocol(filter, piece, false);
-        if (!result.stopped || filter.stop_reason != g_generation_stop_reason) continue;
-
-        size_t markerPosition = std::string::npos;
-        if (g_generation_stop_reason == "plain_role_header_after_visible_text") {
-            markerPosition = mca::mnn::detail::first_plain_role_line(decodedCompletion).position;
-        } else if (g_generation_stop_reason == "unexpected_role_token") {
-            markerPosition = mca::mnn::detail::first_terminal_marker(
-                    decodedCompletion,
-                    mca::mnn::unsafe_role_tokens()).position;
-        } else if (g_generation_stop_reason == "xml_response_end") {
-            markerPosition = filter.stop_marker_offset;
-        } else if (g_generation_stop_reason == "xml_response_start_after_visible_text") {
-            markerPosition = mca::mnn::detail::first_terminal_marker(
-                    decodedCompletion,
-                    mca::mnn::xml_protocol_start_markers()).position;
-        } else {
-            markerPosition = mca::mnn::detail::first_role_header(decodedCompletion).position;
-        }
-
-        size_t trimToken = index;
-        if (markerPosition != std::string::npos) {
-            for (size_t rangeIndex = 0; rangeIndex < tokenRanges.size(); ++rangeIndex) {
-                const auto [rangeBegin, rangeEnd] = tokenRanges[rangeIndex];
-                if (markerPosition >= rangeBegin && markerPosition < rangeEnd) {
-                    trimToken = generationStart + rangeIndex;
-                    break;
-                }
-            }
-        }
-        // History is token-granular.  If the protocol marker shares a token
-        // with visible answer text (a common tokenizer merge such as
-        // "answer</response>"), erasing that token would also erase the last
-        // visible fragment from the committed transcript.  Keep the token in
-        // live KV; the next prompt-cache LCP pass will trim the protocol
-        // suffix while preserving the complete caller-provided answer.
-        bool markerStartsAtTokenBoundary = markerPosition == std::string::npos;
-        if (markerPosition != std::string::npos && trimToken < tokenRanges.size() + generationStart) {
-            const auto rangeBegin = tokenRanges[trimToken - generationStart].first;
-            markerStartsAtTokenBoundary = markerPosition == rangeBegin;
-        }
-        if (markerStartsAtTokenBoundary &&
-                trimToken > generationStart && trimToken < g_llm->getCurrentHistory()) {
-            // eraseHistory() schedules the backend removal and also truncates
-            // history_tokens for a plain suffix removal. The next prefill then
-            // commits the exact visible-prefix state before token-LCP reuse.
-            g_llm->eraseHistory(trimToken, 0);
-            auto* mutableContext = const_cast<MNN::Transformer::LlmContext*>(context);
-            if (mutableContext->history_tokens.size() > trimToken) {
-                mutableContext->history_tokens.resize(trimToken);
-            }
-        }
-        return;
-    }
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).trim_protocol_suffix_from_live_history();
 }
 
 void mark_mnn_prompt_cache_disabled_locked(bool multimodal, const std::string& reason) {
-    g_mnn_prompt_cache = MnnPromptCacheRuntimeState();
-    g_mnn_prompt_cache.enabled = false;
-    g_mnn_prompt_cache.last_request_multimodal = multimodal;
-    g_mnn_prompt_cache.reset_before_next_text = multimodal;
-    g_mnn_prompt_cache.state = multimodal ? "disabled_multimodal" : "disabled";
-    g_mnn_prompt_cache.reason = reason;
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).mark_disabled(multimodal, reason);
 }
 
 void prepare_mnn_text_prompt_cache_locked(
         std::vector<MNN::Transformer::ChatMessage>& messages) {
-    if (g_mnn_prompt_cache.reset_before_next_text) {
-        reset_mnn_native_prompt_cache_locked();
-        g_mnn_prompt_cache.committed_messages.clear();
-        g_mnn_prompt_cache.reset_before_next_text = false;
-        g_mnn_prompt_cache.state = "cleared_after_invalidation";
-    }
-
-    bool hasCommittedTranscript = !g_mnn_prompt_cache.committed_messages.empty();
-    bool extendsCommittedTranscript = hasCommittedTranscript &&
-            mnn_chat_messages_prefix(g_mnn_prompt_cache.committed_messages, messages);
-    // A caller may legitimately start a new conversation on the same loaded
-    // MNN session.  Keeping the previous committed transcript in that case
-    // makes the vendor's live KV look reusable even though the new request is
-    // not its prefix; the next decode can then stop on a stale role marker.
-    // Clear only this mismatched session.  Matching prefixes retain the normal
-    // prompt-cache path and its longest-common-prefix reuse.
-    if (hasCommittedTranscript && !extendsCommittedTranscript) {
-        reset_mnn_native_prompt_cache_locked();
-        g_mnn_prompt_cache.committed_messages.clear();
-        hasCommittedTranscript = false;
-        extendsCommittedTranscript = false;
-    }
-    if (extendsCommittedTranscript) {
-        restore_mnn_committed_assistant_text_locked(
-                g_mnn_prompt_cache.committed_messages,
-                messages);
-    }
-    const size_t currentHistory = mnn_effective_kv_history_locked();
-    // A live KV sequence without a matching transcript is never eligible for
-    // reuse. This can occur after an interrupted multimodal request or an
-    // external clear-history action; clear it before accepting a text turn.
-    if (!hasCommittedTranscript && currentHistory > 0) {
-        reset_mnn_native_prompt_cache_locked();
-    }
-
-    g_mnn_prompt_cache.request_messages = messages;
-    g_mnn_prompt_cache.kv_history_before = mnn_effective_kv_history_locked();
-    g_mnn_prompt_cache.token_history_before =
-            g_llm != nullptr && g_llm->getContext() != nullptr
-            ? g_llm->getContext()->history_tokens.size()
-            : 0;
-    g_mnn_prompt_cache.token_history_after_prefill = 0;
-    g_mnn_prompt_cache.generation_history_start = 0;
-    g_mnn_prompt_cache.prefilled_tokens = 0;
-    g_mnn_prompt_cache.reused_tokens = 0;
-    g_mnn_prompt_cache.request_active = true;
-    g_mnn_prompt_cache.completion_tokens_before_rollback = -1;
-    g_mnn_prompt_cache.enabled = true;
-    g_mnn_prompt_cache.hit = false;
-    g_mnn_prompt_cache.committed = false;
-    g_mnn_prompt_cache.rolled_back = false;
-    g_mnn_prompt_cache.prefix_extended = extendsCommittedTranscript;
-    g_mnn_prompt_cache.last_request_multimodal = false;
-    g_mnn_prompt_cache.state = extendsCommittedTranscript ? "pending_hit" : "pending_miss";
-    g_mnn_prompt_cache.reason = extendsCommittedTranscript ? "prefix_candidate" : "cold_or_prefix_changed";
-    if (extendsCommittedTranscript && g_llm != nullptr) {
-        // Align the vendor's rendered-text eligibility guard with the persisted transcript.
-        // Its live token LCP still trims at the first real token mismatch, so this cannot reuse
-        // stale KV when normalization removed a presentation-only character.
-        // Keep the cached text anchored to the last committed turn.  `messages`
-        // already contains the new user turn and must remain the pending delta;
-        // syncing it here would make the vendor believe that delta was committed
-        // before prefill, defeating the next-turn LCP calculation.
-        g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages);
-    }
-}
-
-template <typename T, typename = void>
-struct MnnHasLogBuffer : std::false_type {};
-template <typename T>
-struct MnnHasLogBuffer<T, std::void_t<decltype(std::declval<const T&>().log_buffer)>> : std::true_type {};
-// MNN 3.6.x captures Llm errors into context->log_buffer; older runtimes lack it.
-template <typename ContextT>
-static std::string mnn_context_log_snapshot(const ContextT* context) {
-    if (context == nullptr) return "";
-    if constexpr (MnnHasLogBuffer<ContextT>::value) {
-        return context->log_buffer.substr(0, 1536);
-    }
-    return "";
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).prepare_text_cache(messages);
 }
 
 bool capture_mnn_text_prefill_locked(std::string& error) {
-    if (g_llm == nullptr || g_llm->getContext() == nullptr) {
-        error = "MNN text prefill produced no context.";
-        return false;
-    }
-    const auto* context = g_llm->getContext();
-    using MNN::Transformer::LlmStatus;
-    if (context->status == LlmStatus::INTERNAL_ERROR ||
-            context->status == LlmStatus::TIMEOUT ||
-            context->status == LlmStatus::NOT_LOADED) {
-        error = "MNN text prefill failed before decode.";
-        const std::string mnnLog = mnn_context_log_snapshot(context);
-        if (!mnnLog.empty()) {
-            error += " MNN log: " + mnnLog;
-        }
-        error += " 当前 MNN 模型与运行时可能不兼容或模型文件不完整，请重新导出模型或改用 GGUF 兼容引擎。";
-        return false;
-    }
-    g_mnn_prompt_cache.token_history_after_prefill = context->history_tokens.size();
-    g_mnn_prompt_cache.generation_history_start = context->history_tokens.size();
-    g_mnn_prompt_cache.prefilled_tokens = std::max(0, context->prompt_len);
-    const size_t effectiveHistory = mnn_effective_kv_history_locked();
-    const size_t retained = effectiveHistory >
-                    static_cast<size_t>(g_mnn_prompt_cache.prefilled_tokens)
-            ? effectiveHistory -
-                    static_cast<size_t>(g_mnn_prompt_cache.prefilled_tokens)
-            : 0;
-    g_mnn_prompt_cache.reused_tokens = static_cast<int>(std::min<size_t>(
-            retained, static_cast<size_t>(std::numeric_limits<int>::max())));
-    g_mnn_prompt_cache.hit = g_mnn_prompt_cache.reused_tokens > 0;
-    // Report the effective prompt total (reused + freshly prefilled) once it is
-    // known; completed jumps to total because MNN exposes no intermediate batches.
-    const int mnn_prompt_total = g_mnn_prompt_cache.prefilled_tokens + g_mnn_prompt_cache.reused_tokens;
-    if (mnn_prompt_total > 0) {
-        g_mnn_prefill_total_tokens.store(mnn_prompt_total, std::memory_order_release);
-        g_mnn_prefill_completed_tokens.store(mnn_prompt_total, std::memory_order_release);
-    }
-    g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "hit" : "miss";
-    g_mnn_prompt_cache.reason = g_mnn_prompt_cache.hit
-            ? "native_history_retained"
-            : (g_mnn_prompt_cache.prefix_extended ? "prefix_not_reused" : "cold_or_prefix_changed");
-    if (g_mnn_prompt_cache.hit) {
-        ++g_mnn_prompt_cache_hits;
-    } else {
-        ++g_mnn_prompt_cache_misses;
-    }
-    return true;
+    return mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).capture_text_prefill(error);
 }
 
 void commit_mnn_text_prompt_cache_locked(const std::string& reason) {
-    if (!g_mnn_prompt_cache.request_active || !g_mnn_prompt_cache.enabled || g_llm == nullptr) {
-        return;
-    }
-    trim_mnn_protocol_suffix_from_live_history_locked();
-    auto committed = g_mnn_prompt_cache.request_messages;
-    const auto response = mnn_prompt_cache_assistant_text_locked();
-    if (!response.empty()) {
-        committed.emplace_back("assistant", response);
-    }
-    g_llm->syncPromptCache(committed);
-    g_mnn_prompt_cache.committed_messages = std::move(committed);
-    g_mnn_prompt_cache.request_messages.clear();
-    g_mnn_prompt_cache.request_active = false;
-    g_mnn_prompt_cache.committed = true;
-    g_mnn_prompt_cache.rolled_back = false;
-    g_mnn_prompt_cache.state = g_mnn_prompt_cache.hit ? "committed_hit" : "committed_miss";
-    // Keep cache diagnostics about cache eligibility, while the native
-    // generation stop reason remains available separately in
-    // `generationStopReason`.  In particular, a successful hit that ended
-    // on a plain role line must not be reported as a cache failure merely
-    // because that role line was the model's protocol terminator.
-    g_mnn_prompt_cache.reason = g_mnn_prompt_cache.hit
-            ? "native_history_retained"
-            : (g_mnn_prompt_cache.prefix_extended ? "prefix_not_reused" : reason);
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).commit_text_cache(reason);
 }
 
 void rollback_mnn_text_prompt_cache_locked(
         const std::string& reason,
         bool forceClear) {
-    if (!g_mnn_prompt_cache.request_active) return;
-    bool restored = false;
-    const bool canRestoreCommittedPrefix = !forceClear &&
-            g_mnn_prompt_cache.prefix_extended &&
-            g_mnn_prompt_cache.kv_history_before > 0 &&
-            !g_mnn_prompt_cache.committed_messages.empty() &&
-            g_llm != nullptr;
-    if (canRestoreCommittedPrefix) {
-        const size_t currentHistory = mnn_effective_kv_history_locked();
-        if (currentHistory >= g_mnn_prompt_cache.kv_history_before) {
-            if (currentHistory > g_mnn_prompt_cache.kv_history_before) {
-                g_llm->eraseHistory(g_mnn_prompt_cache.kv_history_before, 0);
-            }
-            g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages);
-            restored = true;
-        }
-    }
-    if (!restored) {
-        // reset clears live history and gen_seq_len; retain completed request
-        // accounting so rejected output is not reported as zero generated tokens.
-        g_mnn_prompt_cache.completion_tokens_before_rollback = g_llm != nullptr && g_llm->getContext() != nullptr
-                ? g_llm->getContext()->gen_seq_len : 0;
-        reset_mnn_native_prompt_cache_locked();
-        g_mnn_prompt_cache.committed_messages.clear();
-        g_mnn_prompt_cache.reset_before_next_text = false;
-    }
-    g_mnn_prompt_cache.request_messages.clear();
-    g_mnn_prompt_cache.request_active = false;
-    g_mnn_prompt_cache.committed = false;
-    g_mnn_prompt_cache.rolled_back = true;
-    g_mnn_prompt_cache.state = restored ? "rolled_back" : "cleared_after_rollback";
-    g_mnn_prompt_cache.reason = reason;
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).rollback_text_cache(reason, forceClear);
 }
 
 void settle_mnn_text_prompt_cache_locked(const std::string& reason) {
-    if (!g_mnn_prompt_cache.request_active) return;
-    if (g_stop_requested || g_llm == nullptr || g_llm->getContext() == nullptr) {
-        rollback_mnn_text_prompt_cache_locked(reason, true);
-        return;
-    }
-    using MNN::Transformer::LlmStatus;
-    const auto status = g_llm->getContext()->status;
-    if (status == LlmStatus::USER_CANCEL || status == LlmStatus::INTERNAL_ERROR ||
-            status == LlmStatus::TIMEOUT || status == LlmStatus::NOT_LOADED) {
-        rollback_mnn_text_prompt_cache_locked(reason, true);
-        return;
-    }
-    if (!mca::mnn::detail::has_non_whitespace(mnn_prompt_cache_assistant_text_locked())) {
-        rollback_mnn_text_prompt_cache_locked("empty_visible_response", true);
-        return;
-    }
-    commit_mnn_text_prompt_cache_locked(reason);
+    mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).settle_text_cache(reason);
 }
 
-void collect_mnn_raw_media_tags_from_content(
-        const json& content,
-        mca::mnn::MnnRawMediaTags& tags) {
-    if (content.is_string()) {
-        mca::mnn::collectMnnRawMediaTags(content.get<std::string>(), tags);
-        return;
-    }
-    if (!content.is_array()) return;
-    for (const auto& part : content) {
-        if (!part.is_object() || part.value("type", "") != "text") continue;
-        const auto textIt = part.find("text");
-        if (textIt != part.end() && textIt->is_string()) {
-            mca::mnn::collectMnnRawMediaTags(textIt->get<std::string>(), tags);
-        }
-    }
-}
-
-ParsedMnnChatMessages parse_chat_messages(const std::string& messages_json) {
-    const auto root = json::parse(messages_json);
-    if (!root.is_array()) {
-        throw std::runtime_error("messagesJson must be an array.");
-    }
-    ParsedMnnChatMessages parsed;
-    for (const auto& item : root) {
-        if (!item.is_object()) continue;
-        const auto role = item.value("role", "user");
-        const auto content_it = item.find("content");
-        if (content_it != item.end()) {
-            collect_mnn_raw_media_tags_from_content(*content_it, parsed.rawMediaTags);
-        }
-        const auto content = content_it == item.end()
-                ? std::string()
-                : text_from_content(*content_it, &parsed.images);
-        if (!content.empty() || role == "assistant" || role == "system") {
-            parsed.messages.emplace_back(role, content);
-        }
-    }
-    if (!parsed.images.empty() && !parsed.rawMediaTags.images.empty()) {
-        // Structured image parts are the canonical transport. If the same
-        // request also contains an equivalent raw <img> tag, drop that raw
-        // duplicate before Omni prompt normalization so one user image maps
-        // to exactly one visual slot.
-        parsed.rawMediaTags.images.erase(
-                std::remove_if(
-                        parsed.rawMediaTags.images.begin(),
-                        parsed.rawMediaTags.images.end(),
-                        [&](const std::string& rawPath) {
-                            const auto key = mca::mnn::canonicalMnnImageReference(rawPath);
-                            return !key.empty() && std::any_of(
-                                    parsed.images.begin(),
-                                    parsed.images.end(),
-                                    [&](const MnnChatImageInput& input) {
-                                        return mca::mnn::canonicalMnnImageReference(input.path) == key;
-                                    });
-                        }),
-                parsed.rawMediaTags.images.end());
-
-        // A few clients serialize one attachment twice in the same content
-        // array: once as a structured image part and once as a literal
-        // `<img>...</img>` marker inside the text part.  The structured part
-        // already owns the Omni image slot; leaving the literal marker in the
-        // message would make the native prompt contain two visual slots even
-        // though the user selected one image.  Remove only markers whose
-        // lexical identity matches a structured image and preserve all other
-        // prompt text/markers verbatim.
-        for (auto& message : parsed.messages) {
-            std::string cleaned;
-            cleaned.reserve(message.second.size());
-            size_t cursor = 0;
-            while (cursor < message.second.size()) {
-                const size_t start = message.second.find("<img>", cursor);
-                if (start == std::string::npos) {
-                    cleaned.append(message.second, cursor, std::string::npos);
-                    break;
-                }
-                cleaned.append(message.second, cursor, start - cursor);
-                const size_t valueStart = start + 5;
-                const size_t end = message.second.find("</img>", valueStart);
-                if (end == std::string::npos) {
-                    cleaned.append(message.second, start, std::string::npos);
-                    break;
-                }
-                const auto rawPath = message.second.substr(valueStart, end - valueStart);
-                const auto rawKey = mca::mnn::canonicalMnnImageReference(rawPath);
-                const bool matchesStructured = !rawKey.empty() && std::any_of(
-                    parsed.images.begin(),
-                    parsed.images.end(),
-                    [&](const MnnChatImageInput& input) {
-                        return mca::mnn::canonicalMnnImageReference(input.path) == rawKey;
-                    });
-                if (!matchesStructured) {
-                    cleaned.append(message.second, start, end + 6 - start);
-                }
-                cursor = end + 6;
-            }
-            message.second = std::move(cleaned);
-        }
-    }
-    if (parsed.messages.empty()) {
-        throw std::runtime_error("No valid chat messages for MNN generation.");
-    }
-    return parsed;
-}
-
-std::string local_mnn_image_path(const std::string& rawPath) {
-    if (rawPath.rfind("file://", 0) == 0) return rawPath.substr(7);
-    if (rawPath.rfind("file:", 0) == 0) return rawPath.substr(5);
-    return rawPath;
-}
+using mca::mnn::collect_mnn_raw_media_tags_from_content;
+using mca::mnn::parse_chat_messages;
+using mca::mnn::local_mnn_image_path;
+using mca::mnn::prepareMnnVisualResponse;
 
 MNN::Transformer::ChatMessages prepare_mnn_visual_response(const ParsedMnnChatMessages& parsed) {
-    if (parsed.rawMediaTags.malformed) {
-        throw std::runtime_error(
-                "MNN local multimodal input contains an unterminated raw media tag.");
-    }
-    if (!parsed.rawMediaTags.audio.empty() || !parsed.rawMediaTags.video.empty()) {
-        throw std::runtime_error(
-                "MNN local chat currently supports image attachments only; raw audio/video tags are unavailable.");
-    }
-    if (!g_vision_ready || g_visual_model_path.empty()) {
-        throw std::runtime_error(
-                "This MNN package does not include a readable visual.mnn component. "
-                "Load a complete local multimodal package before sending an image.");
-    }
-#if !defined(MNN_IMGCODECS)
-    throw std::runtime_error(
-            "This MCA build does not include MNN image codecs, so local image input is unavailable.");
-#else
-    // Let Omni decode each attachment inside its own ExecutorScope. Creating image VARPs here
-    // binds them to the default runtime, which can make the later vision/text concat cross runtimes.
-    // Keep media decoding inside Omni's official response path after validating
-    // and normalizing paths. Reimplementing template -> tokenize -> embedding
-    // here diverges from MNNChat and can lose the visual effect before decode.
-    auto promptMessages = parsed.messages;
-    // Preserve caller roles. The continuous ChatMessages response owns visual
-    // prefill and decode for historical requests, just as the single-turn path does.
-    g_multimodal_system_prompt_suppressed = false;
-    if (promptMessages.empty()) {
-        throw std::runtime_error(
-                "MNN local multimodal input has no messages.");
-    }
-    const auto checkedImagePath = [](const std::string& rawPath) {
-        const auto imagePath = local_mnn_image_path(rawPath);
-        if (imagePath.rfind("content://", 0) == 0 ||
-                imagePath.rfind("http://", 0) == 0 ||
-                imagePath.rfind("https://", 0) == 0 ||
-                imagePath.rfind("data:", 0) == 0) {
-            throw std::runtime_error(
-                    "MNN local vision received an unresolved image URI. "
-                    "Prepare the attachment as a local readable image file first.");
-        }
-        if (!file_exists(imagePath)) {
-            throw std::runtime_error(
-                    "MNN local vision image file is missing or unreadable: " + imagePath);
-        }
-        return imagePath;
-    };
-    const auto replaceTagInMessages = [&promptMessages](
-            const std::string& originalTag,
-            const std::string& replacementTag) {
-        for (auto& message : promptMessages) {
-            const auto offset = message.second.find(originalTag);
-            if (offset == std::string::npos) continue;
-            message.second.replace(offset, originalTag.size(), replacementTag);
-            return true;
-        }
-        return false;
-    };
-
-    for (const auto& input : parsed.images) {
-        const auto imagePath = checkedImagePath(input.path);
-        const auto placeholder = "<img>" + input.key + "</img>";
-        if (!replaceTagInMessages(
-                    placeholder,
-                    "<img>" + imagePath + "</img>")) {
-            throw std::runtime_error(
-                    "MNN local vision could not match an image placeholder in the message content.");
-        }
-    }
-    for (const auto& rawImagePath : parsed.rawMediaTags.images) {
-        const auto imagePath = checkedImagePath(rawImagePath);
-        if (imagePath == rawImagePath) continue;
-        if (!replaceTagInMessages(
-                    "<img>" + rawImagePath + "</img>",
-                    "<img>" + imagePath + "</img>")) {
-            throw std::runtime_error(
-                    "MNN local vision could not preserve a normalized raw image tag in the message content.");
-        }
-    }
-    const auto latestUserMessage = std::find_if(
-            promptMessages.rbegin(),
-            promptMessages.rend(),
-            [](const MNN::Transformer::ChatMessage& message) {
-                return message.first == "user";
-            });
-    if (latestUserMessage == promptMessages.rend()) {
-        throw std::runtime_error(
-                "MNN local multimodal input has no user message after normalization.");
-    }
-    g_multimodal_history_suppressed = false;
-    const bool singleUserTurn = mca::mnn::useMnnSingleUserVisualResponse(promptMessages);
-    const auto formatted_prompt = singleUserTurn
-            ? g_llm->apply_chat_template(promptMessages.front().second)
-            : g_llm->apply_chat_template(promptMessages);
-    capture_mnn_debug_prompt(formatted_prompt);
-    g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted_prompt);
-    return promptMessages;
-#endif
+    return prepareMnnVisualResponse(
+            parsed,
+            g_vision_ready,
+            g_visual_model_path,
+            g_llm,
+            g_multimodal_system_prompt_suppressed,
+            g_multimodal_history_suppressed,
+            g_prompt_ends_inside_reasoning,
+            capture_mnn_debug_prompt);
 }
 
 bool begin_mnn_response(
@@ -8652,32 +7057,7 @@ void destroy_llm_locked() {
     g_mnn_request_lifecycle.onModelUnloaded();
 }
 
-std::vector<std::string> mnn_load_signature_differences(
-        const json& loaded,
-        const json& requested) {
-    static const std::array<const char*, 11> kLoadBoundFields = {
-            "backend_type",
-            "precision",
-            "memory",
-            "power",
-            "use_mmap",
-            "use_cached_mmap",
-            "tmp_path",
-            "kvcache_mmap",
-            "max_all_tokens",
-            "n_ctx",
-            "visual_model"};
-    std::vector<std::string> changed;
-    for (const char* field : kLoadBoundFields) {
-        const auto loaded_it = loaded.find(field);
-        const auto requested_it = requested.find(field);
-        if (loaded_it == loaded.end() && requested_it == requested.end()) continue;
-        if (loaded_it == loaded.end() || requested_it == requested.end() || *loaded_it != *requested_it) {
-            changed.emplace_back(field);
-        }
-    }
-    return changed;
-}
+using mca::mnn::mnn_load_signature_differences;
 
 bool context_finished_locked() {
     if (g_llm == nullptr || g_llm->getContext() == nullptr) return true;
@@ -8776,193 +7156,60 @@ void filter_mnn_stop_markers_locked(bool flush) {
 #endif
 
 std::string stats_json_locked() {
-    int prompt_tokens = 0;
-    int prefill_tokens = 0;
-    int completion_tokens = 0;
-    int64_t prefill_ms = 0;
-    int64_t decode_ms = 0;
-    int64_t ttft_ms = 0;
-    double prefill_tps = 0.0;
-    double effective_prompt_tps = 0.0;
-    double decode_tps = 0.0;
-    size_t logits_count = 0;
-    size_t logits_finite_count = 0;
-    size_t logits_non_finite_count = 0;
-    float logits_min = 0.0f;
-    float logits_max = 0.0f;
-    bool logits_all_finite = false;
-    std::string logits_diagnostics = "null";
-    std::string first_logits_diagnostics = "null";
-    std::string prompt_cache_reuse = "null";
-    std::string sampler_config = "null";
-    std::string effective_config;
+    mca::mnn::MnnEngineStatsSnapshot snapshot;
+    snapshot.backend_type = g_mnn_backend_type;
+    snapshot.loaded = g_loaded;
+    snapshot.runner_ready = g_runner_ready;
+    snapshot.load_generation = g_load_generation;
+    snapshot.loaded_at_ms = g_loaded_at_ms;
+    snapshot.request_count_since_load = g_mnn_request_lifecycle.requestCountSinceLoad;
+    snapshot.last_request_reset = g_mnn_request_lifecycle.lastRequestReset;
+    snapshot.mnn_model_type = g_mnn_model_type;
+    snapshot.multimodal_system_prompt_suppressed = g_multimodal_system_prompt_suppressed;
+    snapshot.multimodal_history_suppressed = g_multimodal_history_suppressed;
+    snapshot.prompt_ends_inside_reasoning = g_prompt_ends_inside_reasoning;
+    snapshot.model_path = g_model_path;
+    snapshot.original_model_path = g_original_model_path;
+    snapshot.native_lib_dir = g_native_lib_dir;
+    snapshot.vision_ready = g_vision_ready;
+    snapshot.visual_model_path = g_visual_model_path;
+
 #if MCA_WITH_MNN_LLM
-    if (g_llm != nullptr && g_llm->getContext() != nullptr) {
-        const auto* context = g_llm->getContext();
-        prompt_tokens = g_mnn_prompt_cache.enabled
-                ? g_mnn_prompt_cache.reused_tokens + g_mnn_prompt_cache.prefilled_tokens
-                : context->prompt_len;
-        const int computed_prefill_tokens = g_mnn_prompt_cache.enabled
-                ? g_mnn_prompt_cache.prefilled_tokens
-                : context->prompt_len;
-        prefill_tokens = computed_prefill_tokens;
-        completion_tokens = g_mnn_prompt_cache.completion_tokens_before_rollback >= 0
-                ? g_mnn_prompt_cache.completion_tokens_before_rollback : context->gen_seq_len;
-        prefill_ms = context->prefill_us / 1000;
-        decode_ms = context->decode_us / 1000;
-        if (prefill_ms > 0 && computed_prefill_tokens > 0) {
-            prefill_tps = computed_prefill_tokens * 1000.0 / prefill_ms;
-        }
-        if (prefill_ms > 0 && prompt_tokens > 0) {
-            effective_prompt_tps = prompt_tokens * 1000.0 / prefill_ms;
-        }
-        if (decode_ms > 0 && completion_tokens > 0) {
-            decode_tps = completion_tokens * 1000.0 / decode_ms;
-        }
-        if (g_generation_started_at_ms > 0 && g_first_chunk_at_ms > 0) {
-            ttft_ms = g_first_chunk_at_ms - g_generation_started_at_ms;
-        }
-        logits_count = context->logits_count;
-        logits_finite_count = context->logits_finite_count;
-        logits_non_finite_count = context->logits_non_finite_count;
-        logits_min = context->logits_min;
-        logits_max = context->logits_max;
-        logits_all_finite = context->logits_all_finite;
-        if (!context->logits_diagnostics_json.empty()) logits_diagnostics = context->logits_diagnostics_json;
-        if (!context->first_logits_diagnostics_json.empty()) first_logits_diagnostics = context->first_logits_diagnostics_json;
-        if (!context->prompt_cache_diagnostics_json.empty()) prompt_cache_reuse = context->prompt_cache_diagnostics_json;
-        if (!context->sampler_config_json.empty()) sampler_config = context->sampler_config_json;
-        effective_config = g_llm->dump_config();
-    }
-#endif
-    const std::string backend_type = g_mnn_backend_type.empty() ? "cpu" : g_mnn_backend_type;
-    const bool opencl_backend = backend_type == "opencl";
-    const std::string backend_id = std::string("mnn_") + backend_type;
-    std::ostringstream out;
-    out << "{"
-        << "\"backend\":\"" << escape_json(backend_id) << "\","
-        << "\"loaded\":" << (g_loaded ? "true" : "false") << ","
-        << "\"runnerReady\":" << (g_runner_ready ? "true" : "false") << ","
-        << "\"loadGeneration\":" << g_load_generation << ","
-        << "\"loadedAtMs\":" << g_loaded_at_ms << ","
-        << "\"requestCountSinceLoad\":" << g_mnn_request_lifecycle.requestCountSinceLoad << ","
-        << "\"lastRequestReset\":" << (g_mnn_request_lifecycle.lastRequestReset ? "true" : "false") << ","
-        << "\"mnnModelType\":\"" << escape_json(g_mnn_model_type) << "\","
-        << "\"multimodalSystemPromptSuppressed\":"
-        << (g_multimodal_system_prompt_suppressed ? "true" : "false") << ","
-        << "\"multimodalHistorySuppressed\":"
-        << (g_multimodal_history_suppressed ? "true" : "false") << ","
-        << "\"promptEndsInsideReasoning\":"
-        << (g_prompt_ends_inside_reasoning ? "true" : "false") << ","
-        << "\"modelPath\":\"" << escape_json(g_model_path) << "\","
-        << "\"originalModelPath\":\"" << escape_json(g_original_model_path) << "\","
-        << "\"nativeLibDir\":\"" << escape_json(g_native_lib_dir) << "\","
-        << "\"visionReady\":" << (g_vision_ready ? "true" : "false") << ","
-        << "\"visualModelPath\":\"" << escape_json(g_visual_model_path) << "\","
-        << "\"promptTokens\":" << prompt_tokens << ","
-        << "\"prefillTokens\":" << prefill_tokens << ","
-        << "\"completionTokens\":" << completion_tokens << ","
-#if MCA_WITH_MNN_LLM
-        << "\"promptCache\":{"
-        << "\"enabled\":" << (g_mnn_prompt_cache.enabled ? "true" : "false") << ","
-        << "\"hit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
-        << "\"reusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
-        << "\"prefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
-        << "\"kvHistoryBefore\":" << g_mnn_prompt_cache.kv_history_before << ","
-        << "\"tokenHistoryBefore\":" << g_mnn_prompt_cache.token_history_before << ","
-        << "\"tokenHistoryAfterPrefill\":"
-        << g_mnn_prompt_cache.token_history_after_prefill << ","
-        << "\"prefixExtended\":" << (g_mnn_prompt_cache.prefix_extended ? "true" : "false") << ","
-        << "\"committed\":" << (g_mnn_prompt_cache.committed ? "true" : "false") << ","
-        << "\"multimodalDisabled\":"
-        << (g_mnn_prompt_cache.last_request_multimodal ? "true" : "false") << ","
-        << "\"state\":\"" << escape_json(g_mnn_prompt_cache.state) << "\","
-        << "\"reason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\"},"
-        // Flat aliases keep the status consumable by older diagnostics clients
-        // that do not yet parse the structured promptCache object.
-        << "\"promptCacheEnabled\":" << (g_mnn_prompt_cache.enabled ? "true" : "false") << ","
-        << "\"promptCacheHit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
-        << "\"promptCacheReusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
-        << "\"promptCachePrefillTokens\":" << g_mnn_prompt_cache.prefilled_tokens << ","
-        << "\"promptCacheKvHistoryBefore\":" << g_mnn_prompt_cache.kv_history_before << ","
-        << "\"promptCacheTokenHistoryBefore\":" << g_mnn_prompt_cache.token_history_before << ","
-        << "\"promptCacheTokenHistoryAfterPrefill\":"
-        << g_mnn_prompt_cache.token_history_after_prefill << ","
-        << "\"promptCacheState\":\"" << escape_json(g_mnn_prompt_cache.state) << "\","
-        << "\"promptCacheReason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\","
-        << "\"cacheReuse\":{"
-        << "\"hit\":" << (g_mnn_prompt_cache.hit ? "true" : "false") << ","
-        << "\"reusedTokens\":" << g_mnn_prompt_cache.reused_tokens << ","
-        << "\"hits\":" << g_mnn_prompt_cache_hits << ","
-        << "\"misses\":" << g_mnn_prompt_cache_misses << ","
-        << "\"reason\":\"" << escape_json(g_mnn_prompt_cache.reason) << "\"},"
+    snapshot.llm_context = mca::mnn::extract_llm_context_stats(
+            g_llm,
+            g_mnn_prompt_cache,
+            g_generation_started_at_ms,
+            g_first_chunk_at_ms);
+    snapshot.prompt_cache = mca::mnn::make_prompt_cache_snapshot(
+            g_mnn_prompt_cache,
+            g_mnn_prompt_cache_hits,
+            g_mnn_prompt_cache_misses);
 #else
-        << "\"promptCache\":{\"enabled\":false,\"hit\":false,\"reusedTokens\":0,"
-        << "\"prefillTokens\":0,\"kvHistoryBefore\":0,\"tokenHistoryBefore\":0,"
-        << "\"tokenHistoryAfterPrefill\":0,\"state\":\"unavailable\","
-        << "\"reason\":\"mnn_llm_not_linked\"},"
-        << "\"promptCacheEnabled\":false,"
-        << "\"promptCacheHit\":false,"
-        << "\"promptCacheReusedTokens\":0,"
-        << "\"promptCachePrefillTokens\":0,"
-        << "\"promptCacheKvHistoryBefore\":0,"
-        << "\"promptCacheTokenHistoryBefore\":0,"
-        << "\"promptCacheTokenHistoryAfterPrefill\":0,"
-        << "\"promptCacheState\":\"unavailable\","
-        << "\"promptCacheReason\":\"mnn_llm_not_linked\","
-        << "\"cacheReuse\":{\"hit\":false,\"reusedTokens\":0,\"hits\":0,\"misses\":0,"
-        << "\"reason\":\"mnn_llm_not_linked\"},"
+    snapshot.prompt_cache.has_prompt_cache = false;
 #endif
-        << "\"generationSequence\":" << g_generation_sequence << ","
-        << "\"ttftMs\":" << ttft_ms << ","
-        << "\"prefillMs\":" << prefill_ms << ","
-        << "\"prefillTps\":" << prefill_tps << ","
-        << "\"effectivePromptTps\":" << effective_prompt_tps << ","
-        << "\"decodeMs\":" << decode_ms << ","
-        << "\"decodeTps\":" << decode_tps << ","
-        << "\"logitsCount\":" << logits_count << ","
-        << "\"logitsFiniteCount\":" << logits_finite_count << ","
-        << "\"logitsNonFiniteCount\":" << logits_non_finite_count << ","
-        << "\"logitsAllFinite\":" << (logits_all_finite ? "true" : "false") << ","
-        << "\"logitsDiagnostics\":" << logits_diagnostics << ","
-        << "\"firstLogits\":" << first_logits_diagnostics << ","
-        << "\"samplerConfig\":" << sampler_config << ","
-        << "\"effectiveConfigJson\":\"" << escape_json(effective_config) << "\","
-        << "\"logitsMin\":";
-    if (logits_finite_count == 0) out << "null";
-    else out << logits_min;
-    out << ",\"logitsMax\":";
-    if (logits_finite_count == 0) out << "null";
-    else out << logits_max;
-    out << ","
-        << "\"generationActive\":" << (g_generation_active ? "true" : "false") << ","
-        << "\"generatedSteps\":" << g_generated_steps << ","
-        << "\"streamedBytes\":" << g_streamed_bytes << ","
-        << "\"generationStopReason\":\"" << escape_json(g_generation_stop_reason) << "\","
-        << "\"mnnDebugTraceEnabled\":" << (g_mnn_debug_trace_enabled ? "true" : "false") << ","
-        << "\"mnnDebugTraceTruncated\":" << (g_mnn_debug_trace_truncated ? "true" : "false") << ","
-        << "\"mnnDebugRawOutput\":\""
-        << escape_json(sanitize_utf8_for_diagnostics(g_mnn_debug_raw_output)) << "\","
-        << "\"mnnDebugRawOutputHex\":\"" << mnn_debug_raw_output_hex() << "\","
-        << "\"mnnDebugGeneratedTokenIds\":" << mnn_debug_generated_token_ids_json() << ","
-        << "\"promptCacheReuse\":" << prompt_cache_reuse << ","
-        << "\"mnnDebugTokenIdsTruncated\":"
-        << (g_mnn_debug_token_ids_truncated ? "true" : "false") << ","
-        << "\"mnnDebugPromptTruncated\":" << (g_mnn_debug_prompt_truncated ? "true" : "false") << ","
-        << "\"mnnDebugPrompt\":\""
-        << escape_json(sanitize_utf8_for_diagnostics(g_mnn_debug_prompt)) << "\","
-        << "\"syncStepping\":" << (g_sync_stepping ? "true" : "false") << ","
-        << "\"nThreads\":" << g_n_threads << ","
-        << "\"nCtx\":" << g_max_all_tokens << ","
-        << "\"maxAllTokens\":" << g_max_all_tokens << ","
-        << "\"maxNewTokens\":" << g_max_new_tokens << ","
-        << "\"loadedConfigJson\":\"" << escape_json(g_loaded_config_json) << "\","
-        << "\"lastConfigJson\":\"" << escape_json(g_last_config_json) << "\","
-        << "\"backendType\":\"" << escape_json(backend_type) << "\","
-        << "\"backendDevices\":[\"" << (opencl_backend ? "opencl" : "cpu") << "\"],"
-        << "\"lastError\":\"" << escape_json(g_last_error) << "\""
-        << "}";
-    return out.str();
+
+    snapshot.generation_sequence = g_generation_sequence;
+    snapshot.generation_active = g_generation_active;
+    snapshot.generated_steps = g_generated_steps;
+    snapshot.streamed_bytes = g_streamed_bytes;
+    snapshot.generation_stop_reason = g_generation_stop_reason;
+    snapshot.mnn_debug_trace_enabled = g_mnn_debug_trace_enabled;
+    snapshot.mnn_debug_trace_truncated = g_mnn_debug_trace_truncated;
+    snapshot.mnn_debug_raw_output = g_mnn_debug_raw_output;
+    snapshot.mnn_debug_generated_token_ids = g_mnn_debug_generated_token_ids;
+    snapshot.mnn_debug_token_ids_truncated = g_mnn_debug_token_ids_truncated;
+    snapshot.mnn_debug_prompt_truncated = g_mnn_debug_prompt_truncated;
+    snapshot.mnn_debug_prompt = g_mnn_debug_prompt;
+    snapshot.sync_stepping = g_sync_stepping;
+    snapshot.n_threads = g_n_threads;
+    snapshot.n_ctx = g_max_all_tokens;
+    snapshot.max_all_tokens = g_max_all_tokens;
+    snapshot.max_new_tokens = g_max_new_tokens;
+    snapshot.loaded_config_json = g_loaded_config_json;
+    snapshot.last_config_json = g_last_config_json;
+    snapshot.last_error = g_last_error;
+
+    return mca::mnn::format_mnn_stats_json(snapshot);
 }
 
 #if MCA_WITH_MNN_LLM
@@ -9294,15 +7541,10 @@ Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion(
             set_error("");
             g_sync_stepping = false;
             {
-                auto snapshot = json::parse(stats_json_locked());
-                for (const auto* key : {"promptTokens", "prefillTokens", "completionTokens",
-                        "prefillMs", "decodeMs", "ttftMs", "prefillTps", "effectivePromptTps", "decodeTps"}) {
-                    snapshot.erase(key);
-                }
-                snapshot["generationSequence"] = g_generation_sequence + 1;
-                snapshot["runtimeStatsDeferred"] = true;
                 std::lock_guard<std::mutex> stats_lock(g_visual_stats_mutex);
-                g_visual_stats_json = snapshot.dump();
+                g_visual_stats_json = mca::mnn::make_deferred_visual_stats_json(
+                        stats_json_locked(),
+                        g_generation_sequence + 1);
             }
             visualStream->filter.reset(g_active_stop_markers);
             std::atomic_store(&g_visual_stream, visualStream);

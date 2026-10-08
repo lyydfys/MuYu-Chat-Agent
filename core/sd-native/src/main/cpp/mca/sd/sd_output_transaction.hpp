@@ -34,7 +34,7 @@ class SdOutputTransaction {
 public:
     explicit SdOutputTransaction(
         std::string target_path,
-        mca::contract::RequestIdentity identity
+        mca::contract::RequestIdentity identity = {}
     );
     ~SdOutputTransaction();
 
@@ -71,6 +71,19 @@ public:
     [[nodiscard]] bool is_committed() const noexcept { return is_committed_; }
     [[nodiscard]] const std::string& get_target_path() const noexcept { return target_path_; }
     [[nodiscard]] const std::string& get_partial_path() const noexcept { return partial_path_; }
+
+    /**
+     * Executes a complete atomic PNG publication transaction in a single step.
+     */
+    [[nodiscard]] static OutputTransactionResult write_png_atomic(
+        const std::string& target,
+        int32_t width,
+        int32_t height,
+        int32_t channels,
+        const uint8_t* pixels,
+        const mca::contract::RequestIdentity& identity = {},
+        const std::function<bool()>& cancel_checker = nullptr
+    );
 
 private:
     std::string target_path_;

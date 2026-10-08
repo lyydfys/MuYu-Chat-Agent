@@ -2,9 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <limits>
 #include <vector>
 
 #if defined(_WIN32)
@@ -16,16 +21,30 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
 #include "mca/common/logging.hpp"
 #include "sd_input_contract.hpp"
 
+#if defined(__GNUC__) || defined(__clang__)
+extern "C" __attribute__((weak)) int stbi_write_png(
+    char const *filename, int w, int h, int comp, const void *data, int stride_in_bytes);
+#endif
+
 namespace mca {
 namespace sd {
 
 namespace {
+
+static constexpr std::array<uint8_t, 8> kPngMagic = {{
+    0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au,
+}};
+
+static constexpr uint64_t kMaxOutputSizeBytes = 256u * 1024u * 1024u;
 
 bool platform_atomic_rename(const std::string& from, const std::string& to) {
 #if defined(_WIN32)
@@ -36,7 +55,64 @@ bool platform_atomic_rename(const std::string& from, const std::string& to) {
 #endif
 }
 
-// CRC32 calculation for PNG chunk framing
+bool output_parent_is_still_canonical(const std::string& target) {
+    const size_t slash = target.find_last_of("/\\");
+    if (slash == std::string::npos) return false;
+    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
+#if !defined(_WIN32)
+    char canonical_parent[PATH_MAX] = {};
+    if (realpath(parent.c_str(), canonical_parent) == nullptr) {
+        return false;
+    }
+    struct stat st {};
+    if (stat(canonical_parent, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        return false;
+    }
+    return parent == canonical_parent;
+#else
+    char full_parent[MAX_PATH] = {};
+    if (GetFullPathNameA(parent.c_str(), MAX_PATH, full_parent, nullptr) == 0) {
+        return false;
+    }
+    DWORD attrs = GetFileAttributesA(full_parent);
+    return (attrs != INVALID_FILE_ATTRIBUTES) && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+#endif
+}
+
+bool fsync_output_parent(const std::string& target, std::string& error) {
+    const size_t slash = target.find_last_of("/\\");
+    if (slash == std::string::npos) {
+        error = "output path has no parent directory";
+        return false;
+    }
+    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
+#if !defined(_WIN32)
+    const int descriptor = open(
+        parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) {
+        error = "output directory could not be opened for commit";
+        return false;
+    }
+    const bool synced = fsync(descriptor) == 0;
+    const int close_result = close(descriptor);
+    if (!synced || close_result != 0) {
+        error = "output directory commit could not be synchronized";
+        return false;
+    }
+#else
+    (void)parent;
+    (void)error;
+#endif
+    return true;
+}
+
+bool is_hex_sha256(const std::string& value) {
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+        return std::isxdigit(c) != 0;
+    });
+}
+
+// CRC32 calculation for fallback PNG chunk framing
 uint32_t update_crc32(uint32_t crc, const uint8_t* buf, size_t len) noexcept {
     static uint32_t table[256];
     static bool have_table = false;
@@ -96,8 +172,7 @@ std::vector<uint8_t> encode_basic_png(
 ) {
     std::vector<uint8_t> png;
     // 1. PNG Signature
-    static const uint8_t signature[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
-    png.insert(png.end(), signature, signature + 8);
+    png.insert(png.end(), kPngMagic.begin(), kPngMagic.end());
 
     // 2. IHDR Chunk
     std::vector<uint8_t> ihdr;
@@ -203,8 +278,31 @@ bool SdOutputTransaction::begin() {
         return false;
     }
 
-    // Unlink any stale partial output from previous crashed runs
+    if (!output_parent_is_still_canonical(target_path_)) {
+        MCA_LOGE("SdOutputTransaction",
+                 "Output parent is not canonical or directory does not exist: %s",
+                 target_path_.c_str());
+        return false;
+    }
+
+#if !defined(_WIN32)
+    struct stat stale_stat {};
+    if (lstat(partial_path_.c_str(), &stale_stat) == 0) {
+        if (!S_ISREG(stale_stat.st_mode) || unlink(partial_path_.c_str()) != 0) {
+            MCA_LOGE("SdOutputTransaction",
+                     "Stale partial output is not a removable regular file: %s",
+                     partial_path_.c_str());
+            return false;
+        }
+    } else if (errno != ENOENT) {
+        MCA_LOGE("SdOutputTransaction",
+                 "Partial output path could not be inspected: %s",
+                 partial_path_.c_str());
+        return false;
+    }
+#else
     std::remove(partial_path_.c_str());
+#endif
 
     is_active_ = true;
     is_committed_ = false;
@@ -250,13 +348,47 @@ bool SdOutputTransaction::write_pixels_as_png(
         MCA_LOGE("SdOutputTransaction", "Cannot write pixels: transaction not active");
         return false;
     }
-    if (width <= 0 || height <= 0 || channels <= 0) {
-        MCA_LOGE("SdOutputTransaction", "Invalid image dimensions: %dx%dx%d", width, height, channels);
+    if (pixels == nullptr || width <= 0 || height <= 0 || channels <= 0 ||
+        channels > 4 || width > std::numeric_limits<int>::max() / channels) {
+        MCA_LOGE("SdOutputTransaction",
+                 "Invalid image dimensions or parameters: %dx%dx%d",
+                 width, height, channels);
         return false;
     }
 
+    bool wrote = false;
+#if defined(__GNUC__) || defined(__clang__)
+    if (&stbi_write_png != nullptr) {
+        wrote = stbi_write_png(
+            partial_path_.c_str(),
+            width,
+            height,
+            channels,
+            pixels,
+            width * channels) != 0;
+        if (wrote) {
+            std::ifstream in(partial_path_, std::ios::binary | std::ios::ate);
+            if (in.is_open()) {
+                bytes_written_ = static_cast<uint64_t>(in.tellg());
+            }
+        }
+    } else {
+        const auto png_bytes = encode_basic_png(width, height, channels, pixels);
+        wrote = write_data(png_bytes.data(), png_bytes.size());
+    }
+#else
     const auto png_bytes = encode_basic_png(width, height, channels, pixels);
-    return write_data(png_bytes.data(), png_bytes.size());
+    wrote = write_data(png_bytes.data(), png_bytes.size());
+#endif
+
+    if (!wrote) {
+        std::remove(partial_path_.c_str());
+        MCA_LOGE("SdOutputTransaction",
+                 "Failed to encode PNG for partial path: %s",
+                 partial_path_.c_str());
+        return false;
+    }
+    return true;
 }
 
 OutputTransactionResult SdOutputTransaction::commit(
@@ -286,13 +418,49 @@ OutputTransactionResult SdOutputTransaction::commit(
         err.code = mca::contract::StableErrorCode::CNC_USER_CANCELLED;
         err.category = mca::contract::ErrorCategory::Cancel;
         err.phase = mca::contract::ErrorPhase::Persist;
-        err.public_message = "Generation cancelled before output publication";
+        err.public_message = "cancelled before atomic PNG publication";
         err.identity = identity_;
         result.error = err;
         return result;
     }
 
-    // Verify partial file exists and has content
+#if !defined(_WIN32)
+    const int descriptor = open(
+        partial_path_.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "partial PNG could not be opened without following links";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+
+    struct stat partial_stat {};
+    std::array<uint8_t, 8> observed_magic = {};
+    const bool valid_partial =
+        fstat(descriptor, &partial_stat) == 0 &&
+        S_ISREG(partial_stat.st_mode) && partial_stat.st_size > 0 &&
+        static_cast<uint64_t>(partial_stat.st_size) <= kMaxOutputSizeBytes &&
+        pread(descriptor, observed_magic.data(), observed_magic.size(), 0) ==
+            static_cast<ssize_t>(observed_magic.size()) &&
+        observed_magic == kPngMagic && fsync(descriptor) == 0;
+    const int close_result = close(descriptor);
+    if (!valid_partial || close_result != 0) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "partial PNG failed bounded format or durability validation";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+#else
     std::ifstream partial_check(partial_path_, std::ios::binary | std::ios::ate);
     if (!partial_check.is_open()) {
         rollback();
@@ -300,31 +468,176 @@ OutputTransactionResult SdOutputTransaction::commit(
         err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
         err.category = mca::contract::ErrorCategory::Storage;
         err.phase = mca::contract::ErrorPhase::Persist;
-        err.public_message = "Partial output file missing before commit";
+        err.public_message = "partial PNG could not be opened";
         err.identity = identity_;
         result.error = err;
         return result;
     }
 
     const auto sz = partial_check.tellg();
-    partial_check.close();
-
-    if (sz <= 0) {
+    if (sz <= 0 || static_cast<uint64_t>(sz) > kMaxOutputSizeBytes) {
+        partial_check.close();
         rollback();
         mca::contract::ErrorEnvelope err;
         err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
         err.category = mca::contract::ErrorCategory::Storage;
         err.phase = mca::contract::ErrorPhase::Persist;
-        err.public_message = "Partial output file is empty";
+        err.public_message = "partial PNG failed bounded format or durability validation";
         err.identity = identity_;
         result.error = err;
         return result;
     }
 
-    // Compute final checksum from the written file
-    const std::string sha256 = SdInputValidator::compute_file_sha256(partial_path_);
-    if (sha256.empty()) {
+    partial_check.seekg(0);
+    std::array<uint8_t, 8> observed_magic = {};
+    partial_check.read(reinterpret_cast<char*>(observed_magic.data()), observed_magic.size());
+    partial_check.close();
+    if (sz >= 8 && observed_magic != kPngMagic) {
         rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "partial PNG failed bounded format or durability validation";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+#endif
+
+    // Re-check cancellation immediately before rename
+    if (cancel_checker && cancel_checker()) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::CNC_USER_CANCELLED;
+        err.category = mca::contract::ErrorCategory::Cancel;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "cancelled before atomic PNG publication";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+
+#if !defined(_WIN32)
+    struct stat target_stat {};
+    errno = 0;
+    if (!output_parent_is_still_canonical(target_path_) ||
+        lstat(target_path_.c_str(), &target_stat) == 0 || errno != ENOENT) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "atomic PNG target changed before publication";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+#else
+    if (!output_parent_is_still_canonical(target_path_)) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "atomic PNG target changed before publication";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+#endif
+
+    // Atomic rename
+    if (!platform_atomic_rename(partial_path_, target_path_)) {
+        rollback();
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "atomic PNG rename failed";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+
+    // Parent directory commit synchronization
+    std::string fsync_error;
+    if (!fsync_output_parent(target_path_, fsync_error)) {
+        std::remove(target_path_.c_str());
+        std::string ignored;
+        fsync_output_parent(target_path_, ignored);
+        is_active_ = false;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = fsync_error.empty()
+            ? "output directory commit could not be synchronized"
+            : fsync_error;
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+
+    // Post-rename committed target validation
+    uint64_t committed_bytes = 0;
+#if !defined(_WIN32)
+    struct stat committed_stat {};
+    if (lstat(target_path_.c_str(), &committed_stat) != 0 ||
+        !S_ISREG(committed_stat.st_mode) || committed_stat.st_size <= 0 ||
+        static_cast<uint64_t>(committed_stat.st_size) > kMaxOutputSizeBytes) {
+        std::remove(target_path_.c_str());
+        std::string ignored;
+        fsync_output_parent(target_path_, ignored);
+        is_active_ = false;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "committed PNG failed bounded regular-file validation";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+    committed_bytes = static_cast<uint64_t>(committed_stat.st_size);
+#else
+    std::ifstream committed_check(target_path_, std::ios::binary | std::ios::ate);
+    if (!committed_check.is_open()) {
+        std::remove(target_path_.c_str());
+        is_active_ = false;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "committed PNG failed bounded regular-file validation";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+    const auto committed_sz = committed_check.tellg();
+    committed_check.close();
+    if (committed_sz <= 0 || static_cast<uint64_t>(committed_sz) > kMaxOutputSizeBytes) {
+        std::remove(target_path_.c_str());
+        is_active_ = false;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "committed PNG failed bounded regular-file validation";
+        err.identity = identity_;
+        result.error = err;
+        return result;
+    }
+    committed_bytes = static_cast<uint64_t>(committed_sz);
+#endif
+
+    // Checksum verification of committed file
+    const std::string sha256 = SdInputValidator::compute_file_sha256(target_path_);
+    if (sha256.empty() || !is_hex_sha256(sha256)) {
+        std::remove(target_path_.c_str());
+        std::string ignored;
+        fsync_output_parent(target_path_, ignored);
+        is_active_ = false;
         mca::contract::ErrorEnvelope err;
         err.code = mca::contract::StableErrorCode::STR_READ_ERROR;
         err.category = mca::contract::ErrorCategory::Storage;
@@ -335,25 +648,13 @@ OutputTransactionResult SdOutputTransaction::commit(
         return result;
     }
 
-    // Atomic rename
-    if (!platform_atomic_rename(partial_path_, target_path_)) {
-        rollback();
-        mca::contract::ErrorEnvelope err;
-        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
-        err.category = mca::contract::ErrorCategory::Storage;
-        err.phase = mca::contract::ErrorPhase::Persist;
-        err.public_message = "Atomic rename of partial output failed";
-        err.identity = identity_;
-        result.error = err;
-        return result;
-    }
-
     is_committed_ = true;
     is_active_ = false;
 
     result.success = true;
     result.sha256_hex = sha256;
-    result.bytes_written = static_cast<uint64_t>(sz);
+    result.bytes_written = committed_bytes;
+    result.target_path = target_path_;
 
     MCA_LOGI("SdOutputTransaction",
              "Committed output '%s' (%llu bytes, sha256: %s)",
@@ -371,6 +672,46 @@ void SdOutputTransaction::rollback() noexcept {
         is_active_ = false;
         bytes_written_ = 0;
     }
+}
+
+OutputTransactionResult SdOutputTransaction::write_png_atomic(
+    const std::string& target,
+    int32_t width,
+    int32_t height,
+    int32_t channels,
+    const uint8_t* pixels,
+    const mca::contract::RequestIdentity& identity,
+    const std::function<bool()>& cancel_checker
+) {
+    SdOutputTransaction tx(target, identity);
+    if (!tx.begin()) {
+        OutputTransactionResult res;
+        res.target_path = target;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "atomic PNG request or output parent is invalid";
+        err.identity = identity;
+        res.error = err;
+        return res;
+    }
+
+    if (!tx.write_pixels_as_png(width, height, channels, pixels)) {
+        tx.rollback();
+        OutputTransactionResult res;
+        res.target_path = target;
+        mca::contract::ErrorEnvelope err;
+        err.code = mca::contract::StableErrorCode::STR_WRITE_ERROR;
+        err.category = mca::contract::ErrorCategory::Storage;
+        err.phase = mca::contract::ErrorPhase::Persist;
+        err.public_message = "native PNG encoder failed before atomic publication";
+        err.identity = identity;
+        res.error = err;
+        return res;
+    }
+
+    return tx.commit(cancel_checker);
 }
 
 } // namespace sd

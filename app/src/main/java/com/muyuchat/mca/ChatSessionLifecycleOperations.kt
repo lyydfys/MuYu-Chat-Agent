@@ -75,64 +75,14 @@ internal fun deleteLastConversationTurnFor(
     pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
     persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState, Boolean) -> Job?
 ) {
-    val state = store.state.value
-    if (rejectWhileConversationMutationInProgress()) return
-    if (!state.canWriteToActiveAssistantSession()) return
-    if (state.isGenerating) {
-        showStatus("请先停止当前生成，再删除本轮对话")
-        return
-    }
-    val prune = state.messages.pruneLastConversationTurn()
-    if (prune == null) {
-        showStatus("没有可删除的本轮对话")
-        return
-    }
-    val lastUserIndex = state.messages.indexOfLast { it.role == Role.USER }
-    val lastAssistantIndex = state.messages.indexOfLast { it.role == Role.ASSISTANT }
-    val removedEndIndex = if (lastAssistantIndex > lastUserIndex) lastAssistantIndex else lastUserIndex
-    val removedRequests = if (lastUserIndex >= 0 && removedEndIndex >= lastUserIndex) {
-        state.messages.subList(lastUserIndex, removedEndIndex + 1)
-            .mapNotNull { it.generatedImageRequest }
-    } else emptyList()
-    if (removedRequests.any(isChatImageRequestActive)) {
-        showStatus("本轮仍关联运行中的图片任务，请等任务结束后再删除。")
-        return
-    }
-    val rollback = state.conversationMutationRollbackState()
-    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-    var updatedSessions: List<ChatSessionRecord> = state.chatSessions
-    store.update {
-        updatedSessions = if (prune.messages.isEmpty()) {
-            it.chatSessions.map { session ->
-                if (session.id == sessionId) session.copy(
-                    messages = emptyList(), contextSummaries = emptyList(),
-                    updatedAt = System.currentTimeMillis()
-                ) else session
-            }
-        } else {
-            it.chatSessions.upsertSessionFor(
-                state = it,
-                sessionId = sessionId,
-                messages = prune.messages,
-                assistantId = it.selectedAssistantId,
-                modelMode = it.selectedChatBackend.bindingValue(),
-                modelId = it.currentChatModelId()
-            )
-        }
-        it.copy(
-            messages = prune.messages,
-            activeChatSessionId = sessionId,
-            chatSessions = updatedSessions,
-            promptContextUsage = null,
-            statusMessage = "已删除最后一轮对话"
-        )
-    }
-    removedRequests.forEach { pendingAssistantImageToolTurns.remove(it.id) }
-    persistConversationMutation(
-        updatedSessions,
-        rollback,
-        true
-    )
+    ChatWorkflowCoordinator(
+        store = store,
+        rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
+        showStatus = showStatus,
+        isChatImageRequestActive = isChatImageRequestActive,
+        pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+        persistConversationMutation = persistConversationMutation
+    ).deleteLastConversationTurn()
 }
 
 internal fun newChatForAssistantFor(

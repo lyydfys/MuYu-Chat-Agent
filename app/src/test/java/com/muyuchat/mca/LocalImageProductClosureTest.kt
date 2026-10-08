@@ -341,7 +341,10 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         // about its field reads from there. The other four read function bodies that stayed in
         // the ViewModel. No assertion changed -- only the file each one reads.
         val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
-        val retry = functionBody(viewModel, "fun retryImageGeneration(")
+        val retry = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatImageWorkflowCoordinator.kt"),
+            "fun retryImageGeneration("
+        )
         // Re-creation moved to ImageAssetCreationOperations.kt; the ViewModel keeps a forwarder.
         val recreate = functionBody(
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageAssetCreationOperations.kt"),

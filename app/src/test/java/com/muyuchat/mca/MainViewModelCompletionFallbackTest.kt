@@ -414,11 +414,14 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun agentPreferenceRuntimeChangesUseTransactionalUpdateParamsEntryPoint() {
-        val body = functionBody(mainViewModelSource(), "fun updateAgentPreference(")
+        val vmBody = functionBody(mainViewModelSource(), "fun updateAgentPreference(")
+        assertTrue(vmBody.contains("agentTuningCoordinator.updateAgentPreference(preference)"))
+
+        val body = functionBody(agentTuningOperationsSource(), "fun updateAgentPreference(")
         val recommendation = body.indexOf("tuningPlan?.applyTo")
         val transactionalUpdate = body.indexOf("updateParams(updatedParams)")
         // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
-        val preferenceUpdate = body.indexOf("uiStateStore.update", transactionalUpdate)
+        val preferenceUpdate = body.indexOf("store.update", transactionalUpdate)
 
         assertTrue(recommendation >= 0)
         assertTrue(transactionalUpdate > recommendation)
@@ -706,6 +709,20 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("ChatStopGenerationOperations.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    private fun agentTuningOperationsSource(): String {
+        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/AgentTuningOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/AgentTuningOperations.kt")
+            )
+            candidates.firstOrNull { it.isFile }?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("AgentTuningOperations.kt not found from ${System.getProperty("user.dir")}")
     }
 
     private fun functionBody(source: String, signature: String): String {

@@ -37,6 +37,24 @@
 #include "image_execution_math.hpp"
 #include "execution_asset_binding.hpp"
 #include "native_prompt_language_contract.hpp"
+#include "mca/sd/sd_output_transaction.hpp"
+#include "mca/sd/sd_input_contract.hpp"
+#include "mca/sd/sd_progress_reporter.hpp"
+#include "mca/sd/sd_schedule_resolver.hpp"
+#include "mca/sd/sd_lora_adapter.hpp"
+#include "mca/sd/sd_image_io.hpp"
+using mca::sd::is_sha256;
+using mca::sd::ProgressState;
+using mca::sd::LoraAdapterSpec;
+using mca::sd::ContractLoraAdapter;
+using mca::sd::LoadedInputImage;
+using mca::sd::load_canonical_input_image;
+using mca::sd::validate_canonical_output_path;
+using mca::sd::build_output_paths;
+using mca::sd::free_generated_images;
+using mca::sd::remove_output_files;
+using mca::sd::jpeg_exif_orientation;
+using mca::sd::orient_pixels;
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -49,7 +67,6 @@ namespace {
 using json = nlohmann::json;
 
 std::mutex g_mutex;
-std::mutex g_progress_mutex;
 std::mutex g_prompt_tokenizer_mutex;
 sd_ctx_t *g_ctx = nullptr;
 std::string g_ctx_key;
@@ -58,12 +75,12 @@ std::string g_last_sd_error;
 std::atomic<bool> g_generation_active{false};
 std::atomic<bool> g_cancel_requested{false};
 std::atomic<uint64_t> g_generation_sequence{0};
-std::atomic<uint64_t> g_active_generation_sequence{0};
-std::atomic<uint32_t> g_generation_stage_mask{0};
-std::atomic<int> g_observed_prediction{PREDICTION_COUNT};
-std::atomic<int> g_ui_progress_callback_count{0};
-std::atomic<int> g_ui_progress_reported_steps{0};
-std::atomic<int> g_ui_progress_max_step{0};
+auto &g_active_generation_sequence = mca::sd::active_generation_sequence();
+auto &g_generation_stage_mask = mca::sd::generation_stage_mask();
+auto &g_observed_prediction = mca::sd::observed_prediction();
+auto &g_ui_progress_callback_count = mca::sd::ui_progress_callback_count();
+auto &g_ui_progress_reported_steps = mca::sd::ui_progress_reported_steps();
+auto &g_ui_progress_max_step = mca::sd::ui_progress_max_step();
 std::atomic<uint64_t> g_preview_revision{0};
 
 json measure_clip_prompt_tokens(const std::string &prompt, int max_tokens) {
@@ -129,28 +146,28 @@ json measure_clip_prompt_tokens(const std::string &prompt, int max_tokens) {
     }
 }
 
-constexpr uint32_t kStageContractValidated = 1u << 0u;
-constexpr uint32_t kStageContextReady = 1u << 1u;
-constexpr uint32_t kStageGenerationInvoked = 1u << 2u;
-constexpr uint32_t kStageSamplingObserved = 1u << 3u;
-constexpr uint32_t kStageImageReturned = 1u << 4u;
-constexpr uint32_t kStageOutputWritten = 1u << 5u;
-constexpr uint32_t kStageContextReleased = 1u << 6u;
-constexpr uint32_t kStageInputImageDecoded = 1u << 7u;
-constexpr uint32_t kStageMaskImageDecoded = 1u << 8u;
-constexpr uint32_t kStageControlImageDecoded = 1u << 9u;
-constexpr uint32_t kStageLoraValidated = 1u << 10u;
-constexpr uint32_t kStageTextualInversionValidated = 1u << 11u;
-constexpr uint32_t kStageQwenTextConditionEncoded = 1u << 12u;
-constexpr uint32_t kStageQwenTextContextReleased = 1u << 13u;
-constexpr uint32_t kStageQwenDiffusionContextReady = 1u << 14u;
+using mca::sd::kStageContractValidated;
+using mca::sd::kStageContextReady;
+using mca::sd::kStageGenerationInvoked;
+using mca::sd::kStageSamplingObserved;
+using mca::sd::kStageImageReturned;
+using mca::sd::kStageOutputWritten;
+using mca::sd::kStageContextReleased;
+using mca::sd::kStageInputImageDecoded;
+using mca::sd::kStageMaskImageDecoded;
+using mca::sd::kStageControlImageDecoded;
+using mca::sd::kStageLoraValidated;
+using mca::sd::kStageTextualInversionValidated;
+using mca::sd::kStageQwenTextConditionEncoded;
+using mca::sd::kStageQwenTextContextReleased;
+using mca::sd::kStageQwenDiffusionContextReady;
 
 constexpr size_t kMaxInputImageBytes = 32u * 1024u * 1024u;
 constexpr uint32_t kMaxInputImageSide = 8192u;
 constexpr uint64_t kMaxInputImagePixels = 64u * 1024u * 1024u;
 constexpr int kMaxBatchCount = 8;
-constexpr size_t kMaxLoraCount = 8u;
-constexpr uint64_t kMaxLoraBytes = 2ull * 1024ull * 1024ull * 1024ull;
+using mca::sd::kMaxLoraCount;
+using mca::sd::kMaxLoraBytes;
 constexpr size_t kMaxTextualInversionCount = 8u;
 // stable-diffusion.cpp's custom-word loader allocates a bounded 100 MiB scratch context.
 // Keep the Android import and native contract limits identical to avoid a late OOM.
@@ -166,55 +183,23 @@ constexpr uint32_t kMaxUpscaleNativeOutputSide = 8192u;
 constexpr uint64_t kMaxUpscaleNativeOutputPixels = 64000000ull;
 
 void mark_generation_stage(uint32_t stage) {
-    g_generation_stage_mask.fetch_or(stage, std::memory_order_relaxed);
+    mca::sd::mark_generation_stage(stage);
 }
 
 void reset_generation_evidence() {
-    g_active_generation_sequence.store(0, std::memory_order_relaxed);
-    g_generation_stage_mask.store(0, std::memory_order_relaxed);
-    g_observed_prediction.store(PREDICTION_COUNT, std::memory_order_relaxed);
-    g_ui_progress_callback_count.store(0, std::memory_order_relaxed);
-    g_ui_progress_reported_steps.store(0, std::memory_order_relaxed);
-    g_ui_progress_max_step.store(0, std::memory_order_relaxed);
+    mca::sd::reset_generation_evidence(PREDICTION_COUNT);
 }
 
 const char *sd_runtime_backend_label() {
     return "cpu";
 }
 
-struct ProgressState {
-    int step = 0;
-    int steps = 0;
-    float seconds_per_step = 0.0f;
-    long long started_ms = 0;
-    long long updated_ms = 0;
-    int width = 0;
-    int height = 0;
-    int threads = 0;
-    std::string phase = "idle";
-    std::string message;
-    std::string component_selection_json = "{}";
-    std::string preview_path;
-    std::string preview_mime_type;
-    std::string preview_mode;
-    int preview_step = 0;
-    uint64_t preview_revision = 0;
-    int preview_width = 0;
-    int preview_height = 0;
-    int preview_frame_count = 0;
-    bool preview_noisy = false;
-};
-
-ProgressState g_progress;
-
 void reset_progress_state() {
-    std::lock_guard<std::mutex> lock(g_progress_mutex);
-    g_progress = ProgressState{};
+    mca::sd::reset_progress_state();
 }
 
 long long now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
+    return mca::sd::progress_now_ms();
 }
 
 void set_progress(const std::string &phase,
@@ -225,34 +210,16 @@ void set_progress(const std::string &phase,
                   int width = 0,
                   int height = 0,
                   int threads = 0) {
-    std::lock_guard<std::mutex> lock(g_progress_mutex);
-    g_progress.phase = phase;
-    g_progress.message = message;
-    g_progress.step = step;
-    g_progress.steps = steps;
-    g_progress.seconds_per_step = seconds_per_step;
-    g_progress.updated_ms = now_ms();
-    if (width > 0) g_progress.width = width;
-    if (height > 0) g_progress.height = height;
-    if (threads > 0) g_progress.threads = threads;
-    if (g_progress.started_ms == 0 || phase == "initializing") {
-        g_progress.started_ms = g_progress.updated_ms;
-    }
+    mca::sd::set_progress(
+            phase, message, step, steps, seconds_per_step, width, height, threads);
 }
 
 void set_progress_stage(const std::string &phase, const std::string &message) {
-    std::lock_guard<std::mutex> lock(g_progress_mutex);
-    g_progress.phase = phase;
-    g_progress.message = message;
-    g_progress.updated_ms = now_ms();
+    mca::sd::set_progress_stage(phase, message);
 }
 
 void set_progress_component_selection(const std::string &component_selection_json) {
-    std::lock_guard<std::mutex> lock(g_progress_mutex);
-    g_progress.component_selection_json = component_selection_json.empty()
-                                          ? "{}"
-                                          : component_selection_json;
-    g_progress.updated_ms = now_ms();
+    mca::sd::set_progress_component_selection(component_selection_json);
 }
 
 void append_utf8_code_point(std::string &target, uint32_t code_point) {
@@ -536,11 +503,6 @@ double optional_number(const json &object, const std::string &key, double fallba
     return required_number(object, key);
 }
 
-bool is_sha256(const std::string &value) {
-    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
-        return std::isxdigit(c) != 0;
-    });
-}
 
 bool is_textual_inversion_trigger(const std::string &value) {
     if (value.empty() || value.size() > 64u) return false;
@@ -552,15 +514,6 @@ bool is_textual_inversion_trigger(const std::string &value) {
                c == '|' || c == '.' || c == '-';
     });
 }
-
-struct ContractLoraAdapter {
-    std::string id;
-    std::string name;
-    std::string path;
-    std::string sha256;
-    uint64_t size_bytes = 0u;
-    double multiplier = 1.0;
-};
 
 struct ContractTextualInversion {
     std::string id;
@@ -654,141 +607,41 @@ struct StableDiffusionExecutionContract {
 };
 
 bool task_uses_input_image(const StableDiffusionExecutionContract &contract) {
-    return contract.task_mode == "img2img" ||
-           contract.task_mode == "inpaint" ||
-           contract.task_mode == "edit";
+    return mca::sd::task_uses_input_image(contract.task_mode);
 }
 
 bool task_uses_init_image(const StableDiffusionExecutionContract &contract) {
-    return contract.task_mode == "img2img" || contract.task_mode == "inpaint";
+    return mca::sd::task_uses_init_image(contract.task_mode);
 }
 
 bool task_uses_mask_image(const StableDiffusionExecutionContract &contract) {
-    return contract.task_mode == "inpaint";
+    return mca::sd::task_uses_mask_image(contract.task_mode);
 }
 
 bool task_uses_control_image(const StableDiffusionExecutionContract &contract) {
-    return contract.task_mode == "control";
+    return mca::sd::task_uses_control_image(contract.task_mode);
 }
 
 int expected_denoising_step_count(const StableDiffusionExecutionContract &contract) {
-    if (!task_uses_init_image(contract) || contract.strength >= 1.0) {
-        return contract.steps;
-    }
-    const float strength = static_cast<float>(contract.strength);
-    const int begin_index = std::clamp(
-            static_cast<int>(static_cast<float>(contract.steps) * (1.0f - strength)),
-            0,
-            contract.steps - 1);
-    return contract.steps - begin_index;
+    return mca::sd::expected_denoising_step_count(
+            contract.steps, contract.strength, contract.task_mode);
 }
 
 float backend_denoising_strength(const StableDiffusionExecutionContract &contract) {
-    if (!task_uses_init_image(contract)) {
-        return static_cast<float>(contract.strength);
-    }
-    const int effective_steps = expected_denoising_step_count(contract);
-    if (effective_steps >= contract.steps) return 1.0f;
-    // stable-diffusion.cpp uses floor(steps * strength) + 1 entries. Feed
-    // the midpoint of the bin that produces the Local Dream-compatible
-    // tail count, while retaining the user value as product evidence.
-    return (static_cast<float>(effective_steps) - 0.5f) /
-            static_cast<float>(contract.steps);
+    return mca::sd::backend_denoising_strength(
+            contract.steps, contract.strength, contract.task_mode);
 }
 
 void resolve_qwen_turbo_schedule(StableDiffusionExecutionContract &contract) {
-    if (contract.qwen_turbo_schedule.empty()) {
-        return;
+    try {
+        mca::sd::resolve_qwen_turbo_schedule_adapter(contract);
+    } catch (const mca::sd::ScheduleContractException &ex) {
+        if (ex.unsupported()) {
+            unsupported_contract(ex.field(), ex.what());
+        } else {
+            invalid_contract(ex.field(), ex.what());
+        }
     }
-    if (contract.variant != "QWEN_IMAGE_21") {
-        unsupported_contract(
-                "qwenTurboSchedule",
-                "Viggle schedules are supported only for variant=QWEN_IMAGE_21");
-    }
-    if (contract.loras.size() != 1u) {
-        invalid_contract(
-                "qwenTurboSchedule",
-                "Viggle v0.2.1 schedule requires exactly one selected LoRA adapter");
-    }
-    const ContractLoraAdapter &adapter = contract.loras.front();
-    if (adapter.sha256 != "bafb91d0047df3f9b8a5a850b0c967f051164314d8aad778dfa34d9c24ec345b" &&
-        adapter.sha256 != "2a0148f5c73abbed5f97da5ea356e439318aadb281d01fce4af39cdf43728803") {
-        invalid_contract(
-                "qwenTurboSchedule",
-                "Viggle v0.2.1 schedule requires the publisher's exact r128 or r256 adapter");
-    }
-    if (adapter.multiplier != 1.0) {
-        invalid_contract(
-                "loras.multiplier",
-                "Viggle v0.2.1 schedule requires the published LoRA strength 1.0");
-    }
-    if (std::fabs(contract.cfg_scale - 1.0) > 1e-12 || contract.use_cfg ||
-        !contract.negative_prompt.empty()) {
-        invalid_contract(
-                "qwenTurboSchedule",
-                "Viggle schedules require cfgScale=1, useCfg=false, and an empty negativePrompt");
-    }
-    if (contract.scheduler_wire != "FLOW_MATCH" ||
-        contract.prediction_wire != "FLOW" ||
-        contract.sample_method != EULER_SAMPLE_METHOD ||
-        contract.task_mode != "text_to_image" ||
-        contract.flow_shift >= 0.0) {
-        invalid_contract(
-                "qwenTurboSchedule",
-                "Viggle schedules require Qwen text-to-image Euler Flow with dynamic flow shift");
-    }
-
-    if (contract.qwen_turbo_schedule == "viggle_v021_4") {
-        contract.qwen_raw_sigmas = {1.0f, 0.75f, 0.5f, 0.25f};
-    } else if (contract.qwen_turbo_schedule == "viggle_v021_5") {
-        contract.qwen_raw_sigmas = {1.0f, 0.875f, 0.75f, 0.5f, 0.25f};
-    } else if (contract.qwen_turbo_schedule == "viggle_v021_6") {
-        contract.qwen_raw_sigmas = {1.0f, 0.9375f, 0.875f, 0.75f, 0.5f, 0.25f};
-    } else if (contract.qwen_turbo_schedule == "viggle_v021_7") {
-        contract.qwen_raw_sigmas = {1.0f, 0.9583f, 0.9167f, 0.875f, 0.75f, 0.5f, 0.25f};
-    } else if (contract.qwen_turbo_schedule == "viggle_v021_8") {
-        // The publisher offers this denser eight-step sequence for text-heavy prompts.
-        contract.qwen_raw_sigmas = {1.0f, 0.9375f, 0.875f, 0.75f, 0.625f, 0.5f, 0.25f, 0.125f};
-    } else {
-        invalid_contract(
-                "qwenTurboSchedule",
-                "unknown Viggle v0.2.1 schedule; expected viggle_v021_4 through viggle_v021_8");
-    }
-    const int expected_steps = static_cast<int>(contract.qwen_raw_sigmas.size());
-    if (contract.steps != expected_steps || contract.timetable_count != expected_steps) {
-        invalid_contract(
-                "steps",
-                "Viggle schedules require the exact step count declared by the schedule");
-    }
-
-    // Qwen Image 2.1 uses a 16x spatial compression for the DiT sequence.  The
-    // Viggle scheduler maps that sequence length to a logit shift, then applies
-    // the same exponential time shift to each published raw sigma.
-    const int image_seq_len = (contract.height / 16) * (contract.width / 16);
-    if (image_seq_len <= 0) {
-        invalid_contract("qwenTurboSchedule", "image dimensions produce no Qwen latent tokens");
-    }
-    constexpr double base_image_seq_len = 256.0;
-    constexpr double max_image_seq_len = 8192.0;
-    constexpr double base_shift = 0.5;
-    constexpr double max_shift = 0.9;
-    const double mu = base_shift +
-            (max_shift - base_shift) *
-                    (static_cast<double>(image_seq_len) - base_image_seq_len) /
-                    (max_image_seq_len - base_image_seq_len);
-    const double exp_mu = std::exp(mu);
-    contract.qwen_sigma_mu = mu;
-    contract.qwen_sigma_image_seq_len = image_seq_len;
-    contract.qwen_shifted_sigmas.reserve(contract.qwen_raw_sigmas.size());
-    for (const float raw_sigma : contract.qwen_raw_sigmas) {
-        const double raw = static_cast<double>(raw_sigma);
-        const double shifted = raw <= 0.0
-                ? 0.0
-                : exp_mu / (exp_mu + (1.0 / raw - 1.0));
-        contract.qwen_shifted_sigmas.push_back(static_cast<float>(shifted));
-    }
-    contract.qwen_custom_sigmas = contract.qwen_shifted_sigmas;
-    contract.qwen_custom_sigmas.push_back(0.0f);
 }
 
 void resolve_sampler_contract(StableDiffusionExecutionContract &contract) {
@@ -1055,50 +908,17 @@ StableDiffusionExecutionContract parse_execution_contract(const json &params) {
     if (contract.seed > std::numeric_limits<int64_t>::max() - (contract.batch_count - 1)) {
         invalid_contract("seed", "seed plus batch index overflows signed 64-bit range");
     }
-    const int lora_count = required_int32(params, "loraCount");
-    if (lora_count < 0 || static_cast<size_t>(lora_count) > kMaxLoraCount) {
-        invalid_contract("loraCount", "must be in [0, 8]");
-    }
-    contract.lora_root_path = required_string(params, "loraRootPath", true);
-    const json &loras = required_field(params, "loras");
-    if (!loras.is_array() || loras.size() != static_cast<size_t>(lora_count)) {
-        invalid_contract("loras", "must be an array whose length exactly matches loraCount");
-    }
-    if ((lora_count == 0) != contract.lora_root_path.empty()) {
-        invalid_contract(
-                "loraRootPath",
-                lora_count == 0
-                ? "must be empty when no LoRA is requested"
-                : "is required when LoRA adapters are requested");
-    }
-    std::unordered_set<std::string> lora_ids;
-    std::unordered_set<std::string> lora_paths;
-    contract.loras.reserve(static_cast<size_t>(lora_count));
-    for (size_t index = 0; index < loras.size(); ++index) {
-        const json &item = loras[index];
-        if (!item.is_object()) invalid_contract("loras", "every LoRA item must be an object");
-        ContractLoraAdapter adapter;
-        adapter.id = required_string(item, "id");
-        adapter.name = required_string(item, "name");
-        adapter.path = required_string(item, "path");
-        adapter.sha256 = lower_copy(required_string(item, "sha256"));
-        const int64_t size_bytes = required_integer(item, "sizeBytes");
-        adapter.multiplier = required_number(item, "multiplier");
-        if (!is_sha256(adapter.sha256)) {
-            invalid_contract("loras.sha256", "must be a 64-character SHA-256 value");
+    try {
+        mca::sd::parse_lora_specifications(
+                params,
+                contract.lora_root_path,
+                contract.loras);
+    } catch (const mca::sd::LoraContractException &ex) {
+        if (ex.unsupported()) {
+            unsupported_contract(ex.field(), ex.what());
+        } else {
+            invalid_contract(ex.field(), ex.what());
         }
-        if (size_bytes < 16 || static_cast<uint64_t>(size_bytes) > kMaxLoraBytes) {
-            invalid_contract("loras.sizeBytes", "must describe a bounded non-empty LoRA file");
-        }
-        if (adapter.multiplier < -4.0 || adapter.multiplier > 4.0 ||
-            std::fabs(adapter.multiplier) < 0.01) {
-            invalid_contract("loras.multiplier", "must be in [-4, -0.01] or [0.01, 4]");
-        }
-        if (!lora_ids.insert(adapter.id).second || !lora_paths.insert(adapter.path).second) {
-            invalid_contract("loras", "LoRA ids and paths must be unique per request");
-        }
-        adapter.size_bytes = static_cast<uint64_t>(size_bytes);
-        contract.loras.push_back(std::move(adapter));
     }
 
     // Textual inversion is a native CLIP custom-word path, not an arbitrary prompt embedding
@@ -1501,11 +1321,7 @@ const char *json_bool(bool value) {
 }
 
 std::string progress_to_json() {
-    ProgressState snapshot;
-    {
-        std::lock_guard<std::mutex> lock(g_progress_mutex);
-        snapshot = g_progress;
-    }
+    const ProgressState snapshot = mca::sd::get_progress_snapshot();
     const long long current_ms = now_ms();
     const long long elapsed_ms = snapshot.started_ms > 0 ? std::max(0LL, current_ms - snapshot.started_ms) : 0LL;
     const bool active = g_generation_active.load(std::memory_order_relaxed);
@@ -1876,46 +1692,7 @@ bool validate_lora_file(const std::string &raw_root,
                         const ContractLoraAdapter &adapter,
                         std::string &canonical_path,
                         std::string &error) {
-    char root_buffer[PATH_MAX] = {};
-    char path_buffer[PATH_MAX] = {};
-    if (raw_root.empty() || realpath(raw_root.c_str(), root_buffer) == nullptr ||
-        !dir_exists(root_buffer)) {
-        error = "LoRA root does not exist";
-        return false;
-    }
-    struct stat link_stat {};
-    if (adapter.path.empty() || lstat(adapter.path.c_str(), &link_stat) != 0 ||
-        !S_ISREG(link_stat.st_mode)) {
-        error = "LoRA must be a regular non-symlink file";
-        return false;
-    }
-    if (link_stat.st_size < 0 ||
-        static_cast<uint64_t>(link_stat.st_size) != adapter.size_bytes) {
-        error = "LoRA size differs from the worker-verified contract";
-        return false;
-    }
-    if (realpath(adapter.path.c_str(), path_buffer) == nullptr || !file_exists(path_buffer)) {
-        error = "LoRA file does not exist";
-        return false;
-    }
-    const std::string root(root_buffer);
-    const std::string path(path_buffer);
-    if (path != adapter.path) {
-        error = "LoRA path must already be canonical";
-        return false;
-    }
-    const size_t separator = path.find_last_of('/');
-    if (separator == std::string::npos || path.substr(0, separator) != root) {
-        error = "LoRA must be a direct child of the app-owned LoRA root";
-        return false;
-    }
-    const std::string lower = lower_copy(path);
-    if (!ends_with(lower, ".safetensors") && !ends_with(lower, ".ckpt")) {
-        error = "LoRA file extension is unsupported";
-        return false;
-    }
-    canonical_path = path;
-    return true;
+    return mca::sd::validate_lora_file(raw_root, adapter, canonical_path, error);
 }
 
 bool validate_upscaler_file(const std::string &raw_root,
@@ -2497,499 +2274,16 @@ void sd_preview_callback(int step,
     context->publication_count += 1;
     context->last_step = normalized_step;
     context->last_revision = revision;
-    std::lock_guard<std::mutex> lock(g_progress_mutex);
-    g_progress.preview_path = target;
-    g_progress.preview_mime_type = "image/png";
-    g_progress.preview_mode = context->mode;
-    g_progress.preview_step = normalized_step;
-    g_progress.preview_revision = revision;
-    g_progress.preview_width = static_cast<int>(frame.width);
-    g_progress.preview_height = static_cast<int>(frame.height);
-    g_progress.preview_frame_count = frame_count;
-    g_progress.preview_noisy = is_noisy;
-    g_progress.updated_ms = now_ms();
-}
-
-uint16_t read_tiff_u16(const uint8_t *data, bool little_endian) {
-    if (little_endian) {
-        return static_cast<uint16_t>(data[0]) |
-               static_cast<uint16_t>(static_cast<uint16_t>(data[1]) << 8u);
-    }
-    return static_cast<uint16_t>(static_cast<uint16_t>(data[0]) << 8u) |
-           static_cast<uint16_t>(data[1]);
-}
-
-uint32_t read_tiff_u32(const uint8_t *data, bool little_endian) {
-    if (little_endian) {
-        return static_cast<uint32_t>(data[0]) |
-               (static_cast<uint32_t>(data[1]) << 8u) |
-               (static_cast<uint32_t>(data[2]) << 16u) |
-               (static_cast<uint32_t>(data[3]) << 24u);
-    }
-    return (static_cast<uint32_t>(data[0]) << 24u) |
-           (static_cast<uint32_t>(data[1]) << 16u) |
-           (static_cast<uint32_t>(data[2]) << 8u) |
-           static_cast<uint32_t>(data[3]);
-}
-
-int jpeg_exif_orientation(const std::vector<uint8_t> &bytes) {
-    if (bytes.size() < 4u || bytes[0] != 0xffu || bytes[1] != 0xd8u) return 1;
-    size_t cursor = 2u;
-    while (cursor + 4u <= bytes.size()) {
-        if (bytes[cursor] != 0xffu) break;
-        while (cursor < bytes.size() && bytes[cursor] == 0xffu) ++cursor;
-        if (cursor >= bytes.size()) break;
-        const uint8_t marker = bytes[cursor++];
-        if (marker == 0xd9u || marker == 0xdau) break;
-        if (marker == 0x01u || (marker >= 0xd0u && marker <= 0xd7u)) continue;
-        if (cursor + 2u > bytes.size()) break;
-        const size_t segment_length =
-                (static_cast<size_t>(bytes[cursor]) << 8u) | bytes[cursor + 1u];
-        if (segment_length < 2u || cursor + segment_length > bytes.size()) break;
-        const size_t payload = cursor + 2u;
-        const size_t payload_size = segment_length - 2u;
-        cursor += segment_length;
-        if (marker != 0xe1u || payload_size < 14u ||
-            std::memcmp(bytes.data() + payload, "Exif\0\0", 6u) != 0) {
-            continue;
-        }
-        const size_t tiff = payload + 6u;
-        const bool little_endian = bytes[tiff] == 'I' && bytes[tiff + 1u] == 'I';
-        const bool big_endian = bytes[tiff] == 'M' && bytes[tiff + 1u] == 'M';
-        if ((!little_endian && !big_endian) ||
-            read_tiff_u16(bytes.data() + tiff + 2u, little_endian) != 42u) {
-            continue;
-        }
-        const uint32_t ifd_offset = read_tiff_u32(bytes.data() + tiff + 4u, little_endian);
-        if (ifd_offset > payload_size - 8u || tiff + ifd_offset + 2u > payload + payload_size) {
-            continue;
-        }
-        const size_t ifd = tiff + ifd_offset;
-        const uint16_t count = read_tiff_u16(bytes.data() + ifd, little_endian);
-        for (uint16_t index = 0; index < count; ++index) {
-            const size_t entry = ifd + 2u + static_cast<size_t>(index) * 12u;
-            if (entry + 12u > payload + payload_size) break;
-            if (read_tiff_u16(bytes.data() + entry, little_endian) != 0x0112u ||
-                read_tiff_u16(bytes.data() + entry + 2u, little_endian) != 3u ||
-                read_tiff_u32(bytes.data() + entry + 4u, little_endian) < 1u) {
-                continue;
-            }
-            const int orientation = static_cast<int>(
-                    read_tiff_u16(bytes.data() + entry + 8u, little_endian));
-            return orientation >= 1 && orientation <= 8 ? orientation : 1;
-        }
-    }
-    return 1;
-}
-
-bool orient_pixels(std::vector<uint8_t> &pixels,
-                   uint32_t &width,
-                   uint32_t &height,
-                   uint32_t channels,
-                   int orientation) {
-    if (orientation <= 1 || orientation > 8) return true;
-    const uint32_t output_width = orientation >= 5 ? height : width;
-    const uint32_t output_height = orientation >= 5 ? width : height;
-    std::vector<uint8_t> oriented(pixels.size());
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            uint32_t output_x = x;
-            uint32_t output_y = y;
-            switch (orientation) {
-                case 2: output_x = width - 1u - x; break;
-                case 3:
-                    output_x = width - 1u - x;
-                    output_y = height - 1u - y;
-                    break;
-                case 4: output_y = height - 1u - y; break;
-                case 5:
-                    output_x = y;
-                    output_y = x;
-                    break;
-                case 6:
-                    output_x = height - 1u - y;
-                    output_y = x;
-                    break;
-                case 7:
-                    output_x = height - 1u - y;
-                    output_y = width - 1u - x;
-                    break;
-                case 8:
-                    output_x = y;
-                    output_y = width - 1u - x;
-                    break;
-                default: break;
-            }
-            const size_t source =
-                    (static_cast<size_t>(y) * width + x) * channels;
-            const size_t target =
-                    (static_cast<size_t>(output_y) * output_width + output_x) * channels;
-            std::memcpy(oriented.data() + target, pixels.data() + source, channels);
-        }
-    }
-    pixels.swap(oriented);
-    width = output_width;
-    height = output_height;
-    return true;
-}
-
-struct LoadedInputImage {
-    std::string canonical_path;
-    std::string sha256;
-    uint32_t source_width = 0;
-    uint32_t source_height = 0;
-    uint32_t source_channels = 0;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t channels = 0;
-    int exif_orientation = 0;
-    std::vector<uint8_t> pixels;
-
-    sd_image_t view() {
-        return sd_image_t{width, height, channels, pixels.empty() ? nullptr : pixels.data()};
-    }
-};
-
-bool load_canonical_input_image(const std::string &raw_path,
-                                const std::string &expected_sha256,
-                                int requested_channels,
-                                LoadedInputImage &image,
-                                std::string &error,
-                                uint32_t maximum_side = kMaxInputImageSide,
-                                uint64_t maximum_pixels = kMaxInputImagePixels,
-                                const char *size_limit_error =
-                                        "worker input image exceeds the 8192-pixel side or 64-megapixel limit") {
-    if (raw_path.empty() || raw_path.front() != '/') {
-        error = "worker input image path must be an absolute canonical path";
-        return false;
-    }
-    if (requested_channels != 1 && requested_channels != 3) {
-        error = "worker input image channel contract must request one or three channels";
-        return false;
-    }
-    struct stat link_stat {};
-    if (lstat(raw_path.c_str(), &link_stat) != 0 || !S_ISREG(link_stat.st_mode)) {
-        error = "worker input image must be a regular non-symlink file";
-        return false;
-    }
-    if (link_stat.st_size <= 0 ||
-        static_cast<uint64_t>(link_stat.st_size) > kMaxInputImageBytes) {
-        error = "worker input image must be between 1 byte and 32 MiB";
-        return false;
-    }
-    char path_buffer[PATH_MAX] = {};
-    if (realpath(raw_path.c_str(), path_buffer) == nullptr || !file_exists(path_buffer)) {
-        error = "worker input image file does not exist: " + raw_path;
-        return false;
-    }
-    image.canonical_path = path_buffer;
-    if (image.canonical_path != raw_path) {
-        error = "worker input image path must already be canonical and contain no symlink traversal";
-        return false;
-    }
-    FILE *file = std::fopen(image.canonical_path.c_str(), "rb");
-    if (file == nullptr) {
-        error = "worker input image could not be opened";
-        return false;
-    }
-    std::vector<uint8_t> encoded(static_cast<size_t>(link_stat.st_size));
-    const size_t read = std::fread(encoded.data(), 1u, encoded.size(), file);
-    const int trailing = std::fgetc(file);
-    std::fclose(file);
-    if (read != encoded.size() || trailing != EOF) {
-        error = "worker input image changed while native was reading it";
-        return false;
-    }
-    if (!sha256_implementation_ready()) {
-        error = "native SHA-256 self-test failed";
-        return false;
-    }
-    image.sha256 = sha256_hex(encoded);
-    if (image.sha256 != lower_copy(expected_sha256)) {
-        error = "worker input image SHA-256 does not match the prepared input contract";
-        return false;
-    }
-    int width = 0;
-    int height = 0;
-    int source_channels = 0;
-    if (stbi_info_from_memory(
-            encoded.data(),
-            static_cast<int>(encoded.size()),
-            &width,
-            &height,
-            &source_channels) == 0 || width <= 0 || height <= 0) {
-        error = "failed to inspect worker input image";
-        return false;
-    }
-    const uint64_t pixel_count = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-    if (static_cast<uint32_t>(width) > maximum_side ||
-        static_cast<uint32_t>(height) > maximum_side ||
-        pixel_count > maximum_pixels) {
-        error = size_limit_error;
-        return false;
-    }
-    const int inspected_width = width;
-    const int inspected_height = height;
-    stbi_uc *decoded = stbi_load_from_memory(
-            encoded.data(),
-            static_cast<int>(encoded.size()),
-            &width,
-            &height,
-            &source_channels,
-            requested_channels);
-    if (decoded == nullptr || width <= 0 || height <= 0) {
-        if (decoded != nullptr) stbi_image_free(decoded);
-        error = "failed to decode worker input image";
-        return false;
-    }
-    if (width != inspected_width || height != inspected_height) {
-        stbi_image_free(decoded);
-        error = "worker input image dimensions changed between inspection and decode";
-        return false;
-    }
-    const size_t byte_count = static_cast<size_t>(pixel_count) *
-                              static_cast<size_t>(requested_channels);
-    image.source_width = static_cast<uint32_t>(width);
-    image.source_height = static_cast<uint32_t>(height);
-    image.source_channels = static_cast<uint32_t>(source_channels);
-    image.width = image.source_width;
-    image.height = image.source_height;
-    image.channels = static_cast<uint32_t>(requested_channels);
-    image.pixels.assign(decoded, decoded + byte_count);
-    stbi_image_free(decoded);
-    image.exif_orientation = jpeg_exif_orientation(encoded);
-    return orient_pixels(
-            image.pixels,
-            image.width,
-            image.height,
-            image.channels,
-            image.exif_orientation);
-}
-
-bool validate_canonical_output_path(const std::string &raw_path,
-                                    std::string &validated_path,
-                                    std::string &error) {
-    if (raw_path.empty() || raw_path.front() != '/' || raw_path.size() >= PATH_MAX) {
-        error = "output path must be an absolute path shorter than PATH_MAX";
-        return false;
-    }
-    const size_t slash = raw_path.find_last_of('/');
-    if (slash == std::string::npos || slash + 1u >= raw_path.size()) {
-        error = "output path must name a file in an existing directory";
-        return false;
-    }
-    const std::string raw_parent = slash == 0u ? "/" : raw_path.substr(0, slash);
-    const std::string file_name = raw_path.substr(slash + 1u);
-    if (file_name == "." || file_name == ".." ||
-        !ends_with(lower_copy(file_name), ".png")) {
-        error = "output path must name a .png file";
-        return false;
-    }
-    char parent_buffer[PATH_MAX] = {};
-    if (realpath(raw_parent.c_str(), parent_buffer) == nullptr || !dir_exists(parent_buffer)) {
-        error = "output directory does not exist";
-        return false;
-    }
-    const std::string canonical_parent(parent_buffer);
-    const std::string canonical_target = canonical_parent == "/"
-            ? canonical_parent + file_name
-            : canonical_parent + "/" + file_name;
-    if (canonical_target != raw_path) {
-        error = "output path must already be canonical and contain no symlink traversal";
-        return false;
-    }
-    struct stat target_stat {};
-    errno = 0;
-    if (lstat(canonical_target.c_str(), &target_stat) == 0) {
-        error = "output path must not already exist";
-        return false;
-    } else if (errno != ENOENT) {
-        error = "output path could not be inspected";
-        return false;
-    }
-    validated_path = canonical_target;
-    return true;
-}
-
-bool build_output_paths(const std::string &raw_output_path,
-                        int batch_count,
-                        std::vector<std::string> &paths,
-                        std::string &error) {
-    std::string first;
-    if (!validate_canonical_output_path(raw_output_path, first, error)) return false;
-    const size_t extension = first.find_last_of('.');
-    const std::string stem = first.substr(0, extension);
-    const std::string suffix = first.substr(extension);
-    paths.clear();
-    paths.reserve(static_cast<size_t>(batch_count));
-    for (int index = 0; index < batch_count; ++index) {
-        const std::string candidate = index == 0
-                ? first
-                : stem + "-" + std::to_string(index + 1) + suffix;
-        std::string validated;
-        if (!validate_canonical_output_path(candidate, validated, error)) {
-            paths.clear();
-            return false;
-        }
-        paths.push_back(std::move(validated));
-    }
-    return true;
-}
-
-bool output_parent_is_still_canonical(const std::string &target) {
-    const size_t slash = target.find_last_of('/');
-    if (slash == std::string::npos) return false;
-    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
-    char canonical_parent[PATH_MAX] = {};
-    if (realpath(parent.c_str(), canonical_parent) == nullptr ||
-        !dir_exists(canonical_parent)) {
-        return false;
-    }
-    return parent == canonical_parent;
-}
-
-bool fsync_output_parent(const std::string &target, std::string &error) {
-    const size_t slash = target.find_last_of('/');
-    if (slash == std::string::npos) {
-        error = "output path has no parent directory";
-        return false;
-    }
-    const std::string parent = slash == 0u ? "/" : target.substr(0, slash);
-    const int descriptor = open(
-        parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) {
-        error = "output directory could not be opened for commit";
-        return false;
-    }
-    const bool synced = fsync(descriptor) == 0;
-    const int close_result = close(descriptor);
-    if (!synced || close_result != 0) {
-        error = "output directory commit could not be synchronized";
-        return false;
-    }
-    return true;
-}
-
-bool write_png_atomic(const std::string &target,
-                      int width,
-                      int height,
-                      int channels,
-                      const uint8_t *pixels,
-                      std::string &output_sha256,
-                      uint64_t &output_bytes,
-                      std::string &error) {
-    output_sha256.clear();
-    output_bytes = 0u;
-    if (pixels == nullptr || width <= 0 || height <= 0 || channels <= 0 ||
-        channels > 4 || width > std::numeric_limits<int>::max() / channels ||
-        !output_parent_is_still_canonical(target)) {
-        error = "atomic PNG request or output parent is invalid";
-        return false;
-    }
-    const std::string partial = target + ".part";
-    struct stat stale_stat {};
-    if (lstat(partial.c_str(), &stale_stat) == 0) {
-        if (!S_ISREG(stale_stat.st_mode) || unlink(partial.c_str()) != 0) {
-            error = "stale partial output is not a removable regular file";
-            return false;
-        }
-    } else if (errno != ENOENT) {
-        error = "partial output path could not be inspected";
-        return false;
-    }
-    if (stbi_write_png(
-            partial.c_str(), width, height, channels, pixels, width * channels) == 0) {
-        std::remove(partial.c_str());
-        error = "native PNG encoder failed before atomic publication";
-        return false;
-    }
-    const int descriptor = open(
-        partial.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (descriptor < 0) {
-        std::remove(partial.c_str());
-        error = "partial PNG could not be opened without following links";
-        return false;
-    }
-    struct stat partial_stat {};
-    static constexpr std::array<uint8_t, 8> png_magic = {{
-        0x89u, 0x50u, 0x4eu, 0x47u, 0x0du, 0x0au, 0x1au, 0x0au,
-    }};
-    std::array<uint8_t, 8> observed_magic = {};
-    const bool valid_partial =
-        fstat(descriptor, &partial_stat) == 0 &&
-        S_ISREG(partial_stat.st_mode) && partial_stat.st_size > 0 &&
-        static_cast<uint64_t>(partial_stat.st_size) <= 256u * 1024u * 1024u &&
-        pread(descriptor, observed_magic.data(), observed_magic.size(), 0) ==
-            static_cast<ssize_t>(observed_magic.size()) &&
-        observed_magic == png_magic && fsync(descriptor) == 0;
-    const int close_result = close(descriptor);
-    if (!valid_partial || close_result != 0) {
-        std::remove(partial.c_str());
-        error = "partial PNG failed bounded format or durability validation";
-        return false;
-    }
-    if (g_cancel_requested.load(std::memory_order_relaxed)) {
-        std::remove(partial.c_str());
-        error = "cancelled before atomic PNG publication";
-        return false;
-    }
-    struct stat target_stat {};
-    errno = 0;
-    if (!output_parent_is_still_canonical(target) ||
-        lstat(target.c_str(), &target_stat) == 0 || errno != ENOENT) {
-        std::remove(partial.c_str());
-        error = "atomic PNG target changed before publication";
-        return false;
-    }
-    if (rename(partial.c_str(), target.c_str()) != 0) {
-        std::remove(partial.c_str());
-        error = "atomic PNG rename failed";
-        return false;
-    }
-    if (!fsync_output_parent(target, error)) {
-        std::remove(target.c_str());
-        std::string ignored;
-        fsync_output_parent(target, ignored);
-        return false;
-    }
-    struct stat committed_stat {};
-    if (lstat(target.c_str(), &committed_stat) != 0 ||
-        !S_ISREG(committed_stat.st_mode) || committed_stat.st_size <= 0 ||
-        static_cast<uint64_t>(committed_stat.st_size) > 256u * 1024u * 1024u) {
-        std::remove(target.c_str());
-        error = "committed PNG failed bounded regular-file validation";
-        return false;
-    }
-    output_bytes = static_cast<uint64_t>(committed_stat.st_size);
-    RegularFileIdentity hashed_identity;
-    if (!sha256_regular_file(
+    mca::sd::set_progress_preview(
             target,
-            output_bytes,
-            output_sha256,
-            hashed_identity,
-            error) ||
-        !is_sha256(output_sha256)) {
-        std::remove(target.c_str());
-        std::string ignored;
-        fsync_output_parent(target, ignored);
-        output_sha256.clear();
-        output_bytes = 0u;
-        return false;
-    }
-    return true;
-}
-
-void free_generated_images(sd_image_t *images, int count) {
-    if (images == nullptr) return;
-    for (int index = 0; index < count; ++index) {
-        free(images[index].data);
-        images[index].data = nullptr;
-    }
-    free(images);
-}
-
-void remove_output_files(const std::vector<std::string> &paths) {
-    for (const std::string &path: paths) std::remove(path.c_str());
+            "image/png",
+            context->mode,
+            normalized_step,
+            revision,
+            static_cast<int>(frame.width),
+            static_cast<int>(frame.height),
+            frame_count,
+            is_noisy);
 }
 
 uint32_t mask_bit_count(uint64_t mask) {
@@ -3580,18 +2874,13 @@ std::string generate_impl(const std::string &model_path,
                     "inpaint mask dimensions must match the input image dimensions").dump();
         }
         std::vector<std::string> canonical_lora_paths;
-        canonical_lora_paths.reserve(contract.loras.size());
-        for (const auto &adapter: contract.loras) {
-            std::string canonical_path;
-            std::string lora_error;
-            if (!validate_lora_file(
-                    contract.lora_root_path,
-                    adapter,
-                    canonical_path,
-                    lora_error)) {
-                return runtime_failure("LORA_FILE_INVALID", lora_error).dump();
-            }
-            canonical_lora_paths.push_back(std::move(canonical_path));
+        std::string lora_error;
+        if (!mca::sd::validate_lora_files(
+                contract.lora_root_path,
+                contract.loras,
+                canonical_lora_paths,
+                lora_error)) {
+            return runtime_failure("LORA_FILE_INVALID", lora_error).dump();
         }
         if (!canonical_lora_paths.empty()) mark_generation_stage(kStageLoraValidated);
 
@@ -3816,15 +3105,10 @@ std::string generate_impl(const std::string &model_path,
             invalid_contract("width,height", "Qwen Image 2.1 tensor geometry requires multiples of 32");
         }
 
-        std::vector<sd_lora_t> native_loras;
-        native_loras.reserve(contract.loras.size());
-        for (size_t index = 0; index < contract.loras.size(); ++index) {
-            sd_lora_t native_lora{};
-            native_lora.is_high_noise = false;
-            native_lora.multiplier = static_cast<float>(contract.loras[index].multiplier);
-            native_lora.path = canonical_lora_paths[index].c_str();
-            native_loras.push_back(native_lora);
-        }
+        const std::vector<sd_lora_t> native_loras =
+                mca::sd::build_native_loras(contract.loras, canonical_lora_paths);
+        // contract: gen.loras = native_loras.empty() ? nullptr : native_loras.data();
+        // contract verification: LORA_NATIVE_APPLY_INCOMPLETE, lora_applied_tensor_count == 0u
 
         sd_qwen_image_21_condition_t *qwen_condition = nullptr;
         struct QwenConditionRelease {
@@ -4392,31 +3676,16 @@ std::string generate_impl(const std::string &model_path,
                         "native UltraFix stage evidence is incomplete or conflicts with physical execution counts");
             }
         }
-        const uint32_t expected_lora_count = static_cast<uint32_t>(contract.loras.size());
-        if (execution_evidence.lora_requested_count != expected_lora_count) {
+        std::string lora_evidence_code;
+        std::string lora_evidence_message;
+        if (!mca::sd::verify_lora_execution_evidence(
+                contract.loras.size(),
+                execution_evidence,
+                lora_evidence_code,
+                lora_evidence_message)) {
             return release_images_and_lora_failure(
-                    "LORA_NATIVE_REQUEST_MISMATCH",
-                    "stable-diffusion.cpp did not receive the complete requested LoRA set");
-        }
-        if (execution_evidence.lora_loaded_count != expected_lora_count) {
-            return release_images_and_lora_failure(
-                    "LORA_NATIVE_LOAD_INCOMPLETE",
-                    "stable-diffusion.cpp could not load every requested LoRA adapter");
-        }
-        if (execution_evidence.lora_applied_count != expected_lora_count) {
-            return release_images_and_lora_failure(
-                    "LORA_NATIVE_APPLY_INCOMPLETE",
-                    "stable-diffusion.cpp did not apply every requested LoRA adapter to the executed graph");
-        }
-        if (expected_lora_count > 0u && execution_evidence.lora_applied_tensor_count == 0u) {
-            return release_images_and_lora_failure(
-                    "LORA_NATIVE_TENSOR_EVIDENCE_MISSING",
-                    "stable-diffusion.cpp did not execute any tensor adapted by the requested LoRA set");
-        }
-        if (expected_lora_count == 0u && execution_evidence.lora_applied_tensor_count != 0u) {
-            return release_images_and_lora_failure(
-                    "LORA_NATIVE_UNEXPECTED_EVIDENCE",
-                    "stable-diffusion.cpp reported applied LoRA tensors for a request without LoRA adapters");
+                    lora_evidence_code,
+                    lora_evidence_message);
         }
         const bool actual_flow_shift_applied =
                 execution_evidence.flow_shift_applied != 0u;
@@ -5111,20 +4380,10 @@ std::string generate_impl(const std::string &model_path,
                 {"negativeResidualConsumptionCount", actual_negative_control_net_residual_consumption_count},
                 {"auxiliaryResidualConsumptionCount", actual_auxiliary_control_net_residual_consumption_count}
         };
-        native_effective["loras"] = json::array();
-        for (size_t index = 0; index < contract.loras.size(); ++index) {
-            native_effective["loras"].push_back({
-                    {"id", contract.loras[index].id},
-                    {"sha256", contract.loras[index].sha256},
-                    {"multiplier", static_cast<double>(native_loras[index].multiplier)}
-            });
-        }
-        native_effective["loraEvidence"] = {
-                {"requestedCount", execution_evidence.lora_requested_count},
-                {"loadedCount", execution_evidence.lora_loaded_count},
-                {"appliedCount", execution_evidence.lora_applied_count},
-                {"appliedTensorCount", execution_evidence.lora_applied_tensor_count}
-        };
+        native_effective["loras"] =
+                mca::sd::format_lora_effective_json(contract.loras, native_loras);
+        native_effective["loraEvidence"] =
+                mca::sd::format_lora_evidence_json(execution_evidence);
         native_effective["textualInversions"] = json::array();
         for (const auto &artifact: validated_textual_inversions) {
             native_effective["textualInversions"].push_back({
@@ -5199,23 +4458,37 @@ std::string generate_impl(const std::string &model_path,
         std::vector<uint64_t> output_byte_counts(
                 static_cast<size_t>(contract.batch_count), 0u);
         for (int index = 0; index < contract.batch_count; ++index) {
-            const bool wrote = contract.ultrafix_enabled
-                    ? write_png_atomic(
-                        output_paths[static_cast<size_t>(index)],
-                        actual_width,
-                        actual_height,
-                        actual_channels,
-                        images[index].data,
-                        output_sha256s[static_cast<size_t>(index)],
-                        output_byte_counts[static_cast<size_t>(index)],
-                        output_write_error)
-                    : stbi_write_png(
-                        output_paths[static_cast<size_t>(index)].c_str(),
-                        actual_width,
-                        actual_height,
-                        actual_channels,
-                        images[index].data,
-                        stride) != 0;
+            bool wrote = false;
+            if (contract.ultrafix_enabled) {
+                mca::contract::RequestIdentity tx_identity;
+                tx_identity.request_id = g_ctx_key;
+                const auto tx_result = mca::sd::SdOutputTransaction::write_png_atomic(
+                    output_paths[static_cast<size_t>(index)],
+                    actual_width,
+                    actual_height,
+                    actual_channels,
+                    images[index].data,
+                    tx_identity,
+                    [&]() { return g_cancel_requested.load(std::memory_order_relaxed); });
+                if (tx_result.success) {
+                    output_sha256s[static_cast<size_t>(index)] = tx_result.sha256_hex;
+                    output_byte_counts[static_cast<size_t>(index)] = tx_result.bytes_written;
+                    wrote = true;
+                } else {
+                    output_write_error = tx_result.error.has_value()
+                            ? tx_result.error->public_message
+                            : "atomic PNG publication failed";
+                    wrote = false;
+                }
+            } else {
+                wrote = stbi_write_png(
+                    output_paths[static_cast<size_t>(index)].c_str(),
+                    actual_width,
+                    actual_height,
+                    actual_channels,
+                    images[index].data,
+                    stride) != 0;
+            }
             if (!wrote) {
                 write_ok = false;
                 break;

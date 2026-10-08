@@ -63,8 +63,21 @@ set_source_files_properties(
         PROPERTIES COMPILE_OPTIONS "-O0")
 
 add_library(mca_sd_native SHARED
-        stable_diffusion_bridge.cpp)
+        stable_diffusion_bridge.cpp
+        mca/sd/sd_progress_reporter.cpp
+        mca/sd/sd_schedule_resolver.cpp
+        mca/sd/sd_lora_adapter.cpp
+        mca/sd/sd_image_io.cpp
+        mca/sd/sd_output_transaction.cpp
+        mca/sd/sd_input_contract.cpp
+        mca/sd/sd_phase_machine.cpp
+        mca/sd/sd_request.cpp
+        mca/sd/sd_runtime_owner.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/common/logging.cpp)
 target_include_directories(mca_sd_native PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
         ${SDCPP_SRC}/include
         ${SDCPP_SRC}/src
         ${SDCPP_SRC}/thirdparty

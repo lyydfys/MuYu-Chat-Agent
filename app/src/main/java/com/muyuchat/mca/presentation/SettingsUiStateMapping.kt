@@ -5,15 +5,18 @@ package com.muyuchat.mca.presentation
 // No field, default, count or ordering was edited.
 
 
+import android.content.Context
+import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.feature.settings.AppUpdateSettingsUiState
 import com.muyuchat.feature.settings.SettingsUiState
 import com.muyuchat.feature.settings.WebSearchBackupProviderUiState
 import com.muyuchat.feature.settings.WebSearchDiagnosticSourceUiItem
 import com.muyuchat.feature.settings.WebSearchDiagnosticUiItem
 import com.muyuchat.feature.settings.WebSearchSettingsUiState
-import com.muyuchat.mca.MainUiState
-import com.muyuchat.mca.webSearchHostLabel
-import com.muyuchat.mca.webSearchSourceTrustClass
+import com.muyuchat.mca.*
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.Job
 
 internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     params = params,
@@ -134,3 +137,54 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
         }
     )
 )
+
+internal fun performUpdateParams(
+    params: GenerationParams,
+    context: Context,
+    uiStateStore: UiStateStore,
+    engine: McaInferenceService,
+    assistantProfileCoordinator: AssistantProfileCoordinator,
+    runtimeUserOverrideFields: MutableSet<String>,
+    directParameterStageGeneration: AtomicLong,
+    getDirectParameterStageJob: () -> Job?,
+    getPendingProfileTransactionId: () -> String?,
+    discardPendingAgentProfile: () -> Unit,
+    persistModelGenerationParams: (MainUiState, GenerationParams) -> Unit,
+    stageDirectParameterProfile: (GenerationParams) -> Unit,
+) {
+    val state = uiStateStore.current
+    val previous = state.params
+    val scopedParams = params.copy(systemPrompt = state.selectedAssistant()?.systemPrompt ?: previous.systemPrompt)
+    val changedRuntimeFields = runtimeParameterChanges(previous, scopedParams)
+    if (changedRuntimeFields.isNotEmpty()) {
+        runtimeUserOverrideFields += changedRuntimeFields
+        GenerationPreferences.persistRuntimeUserOverrideFields(context, runtimeUserOverrideFields)
+    }
+    GenerationPreferences.persistGenerationParams(context, scopedParams)
+    persistModelGenerationParams(state, scopedParams)
+    val updatedAssistants = updatedAssistantsWithParams(state.assistants, state.selectedAssistantId, scopedParams)
+    val hasLoadedModel = uiStateStore.current.loadedModelId != null
+    val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
+    uiStateStore.update { current ->
+        current.copy(
+            params = scopedParams,
+            assistants = updatedAssistants,
+            reloadRequired = reloadRequired,
+            statusMessage = if (reloadRequired) {
+                "运行时参数已修改，将在下次生成或重载后生效；当前模型继续使用原参数。"
+            } else if (changedRuntimeFields.isNotEmpty() && current.loadedModelId == null) {
+                "运行时参数已保存，下次加载模型时将自动应用该配置。"
+            } else {
+                current.statusMessage
+            }
+        )
+    }
+    assistantProfileCoordinator.persistAssistantsAsync()
+    if (reloadRequired && changedRuntimeFields.isNotEmpty()) {
+        stageDirectParameterProfile(scopedParams)
+    } else if (!reloadRequired && changedRuntimeFields.isNotEmpty()) {
+        directParameterStageGeneration.incrementAndGet()
+        getDirectParameterStageJob()?.cancel()
+        if (getPendingProfileTransactionId() != null) discardPendingAgentProfile()
+    }
+}

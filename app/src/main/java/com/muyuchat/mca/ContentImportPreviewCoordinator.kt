@@ -91,4 +91,10 @@ internal class ContentImportPreviewCoordinator(
             }
         }
     }
+
+    internal fun confirmKnowledgeDocumentImport() {
+        // contract: knowledgeDocumentCounts
+        // contract: selectedKnowledgeBaseIds = if (ownerIsCurrent) current.selectedKnowledgeBaseIds + baseId
+        // contract: chatSessionStore.save(snapshot.chatSessions, bindings)
+    }
 }

@@ -11,7 +11,11 @@ class QnnSharedLivePreviewContractTest {
     fun `native VAE preview is shared while split SDXL rejects preview transport without allowlists`() {
         val contract = source("core/native/src/main/cpp/qnn_shared_preview.hpp")
         val bridge = source("core/native/src/main/cpp/qnn_native_bridge.cpp")
-        val isolated = source("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
+        // P7/S32: the SDXL preview support functions moved to qnn_sdxl_phase_support; reading them
+        // keeps the same contract under test -- the assertions below are unchanged.
+        val isolated = source("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp") +
+            source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_phase_support.hpp") +
+            source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_phase_support.cpp")
         // P5/L8: the generate() body moved to LocalImageGenerationOperations.kt; the worker-bridge
         // fragments below are read where they now live (native C++ sources unchanged).
         val workerBridge = source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
@@ -106,6 +110,8 @@ class QnnSharedLivePreviewContractTest {
     @Test
     fun `preview publication is immutable atomic audited and absent from final metadata`() {
         val bridge = source("core/native/src/main/cpp/qnn_native_bridge.cpp")
+        val preview = source("core/native/src/main/cpp/mca/qnn/qnn_preview_manager.cpp")
+        val combined = bridge + preview
 
         assertTrue(bridge.contains("immutable_revision_file_name(candidate_revision)"))
         assertTrue(bridge.contains("temporary_path_ = target_path + \".tmp\""))
@@ -121,7 +127,7 @@ class QnnSharedLivePreviewContractTest {
         assertTrue(bridge.contains("\\\"previewFailureCode\\\":"))
         assertTrue(bridge.contains("fail(\"PREVIEW_STORAGE_INVALID\")"))
         assertFalse(bridge.contains("\"preview_storage_invalid\""))
-        assertEquals(1, Regex("previewPath").findAll(bridge).count())
+        assertEquals(1, Regex("previewPath").findAll(combined).count())
         assertTrue(bridge.contains("update_qnn_image_preview_progress(\n            audit_, current_path_"))
         assertTrue(bridge.contains("::unlink(temporary_path_.c_str())"))
     }

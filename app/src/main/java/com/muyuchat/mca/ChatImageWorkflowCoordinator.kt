@@ -67,6 +67,39 @@ internal class ChatImageWorkflowCoordinator(
         jobSnapshot = null
     )
 
+    private val _uiState get() = store.state
+
+    fun retryImageGeneration(jobId: String) {
+        val sourceJob = store.current.imageJobs.firstOrNull { it.id == jobId }
+        val originalSnapshot = sourceJob?.spec
+        if (sourceJob == null || originalSnapshot == null) {
+            showStatus("原图片任务参数已不可用，无法按原任务重试。")
+            return
+        }
+        if (!sourceJob.status.terminal) {
+            showStatus("当前图片任务仍在运行，无需重复提交。")
+            return
+        }
+        // A retry is a new admission. Re-resolve the current model record and discard prompt
+        // execution evidence captured by the failed/previous worker; the profile, tokenizer and
+        // language gate must be evaluated again before a new worker is bound.
+        val currentModel = originalSnapshot.localModelSnapshot?.let { previous ->
+            _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(previous.id) } ?: previous
+        }
+        val retrySnapshot = originalSnapshot.copy(
+            localModelSnapshot = currentModel,
+            promptExecution = null
+        )
+        val jobSnapshot = retrySnapshot
+        val snapshot = jobSnapshot
+        imageGenerationOwner.submit(
+            prompt = snapshot.prompt,
+            inputDraft = snapshot.inputDraft,
+            options = snapshot.options,
+            jobSnapshot = snapshot
+        )
+    }
+
     fun upscaleImageAsset(imageId: String, targetScale: Int) {
         imageUpscaleOwner.upscaleImageAsset(imageId, targetScale, scope)
     }

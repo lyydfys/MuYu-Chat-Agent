@@ -90,7 +90,8 @@ class MainViewModel @JvmOverloads constructor(
     injectedMainPostStartupCoordinator: Any? = null,
     injectedChatSessionManagementCoordinator: Any? = null,
     injectedChatInputAndAttachmentCoordinator: Any? = null,
-    injectedChatImageWorkflowCoordinator: Any? = null
+    injectedChatImageWorkflowCoordinator: Any? = null,
+    injectedChatWorkflowCoordinator: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -899,36 +900,8 @@ class MainViewModel @JvmOverloads constructor(
         options: LocalImageGenerationOptions = LocalImageGenerationOptions()
     ): Boolean = chatImageWorkflowCoordinator.generateImageAsset(prompt, inputDraft, options)
 
-    fun retryImageGeneration(jobId: String) {
-        val sourceJob = uiStateStore.current.imageJobs.firstOrNull { it.id == jobId }
-        val originalSnapshot = sourceJob?.spec
-        if (sourceJob == null || originalSnapshot == null) {
-            showStatus("原图片任务参数已不可用，无法按原任务重试。")
-            return
-        }
-        if (!sourceJob.status.terminal) {
-            showStatus("当前图片任务仍在运行，无需重复提交。")
-            return
-        }
-        // A retry is a new admission. Re-resolve the current model record and discard prompt
-        // execution evidence captured by the failed/previous worker; the profile, tokenizer and
-        // language gate must be evaluated again before a new worker is bound.
-        val currentModel = originalSnapshot.localModelSnapshot?.let { previous ->
-            _uiState.value.localImageModels.firstOrNull { it.matchesCatalogId(previous.id) } ?: previous
-        }
-        val retrySnapshot = originalSnapshot.copy(
-            localModelSnapshot = currentModel,
-            promptExecution = null
-        )
-        val jobSnapshot = retrySnapshot
-        val snapshot = jobSnapshot
-        imageGenerationOwner.submit(
-            prompt = snapshot.prompt,
-            inputDraft = snapshot.inputDraft,
-            options = snapshot.options,
-            jobSnapshot = snapshot
-        )
-    }
+    fun retryImageGeneration(jobId: String) =
+        chatImageWorkflowCoordinator.retryImageGeneration(jobId)
 
     /** The ViewModel side of [ImageAssetCreationPort]. */
     // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
@@ -1330,37 +1303,9 @@ class MainViewModel @JvmOverloads constructor(
     fun selectCloudImageModel(modelId: String) = chatModelCoordinator.selectCloudImageModel(modelId)
 
 
-    fun updateAgentPreference(preference: UserPreference) {
-        val state = uiStateStore.current
-        val recommendation = runCatching { buildRecommendation(preference) }.getOrNull()
-        val updatedParams = recommendation?.tuningPlan?.applyTo(state.params)
-        val paramsChanged = updatedParams != null && updatedParams != state.params
-        // Agent presets are user-selected runtime changes. Route them through
-        // the same transactional entry point as manual edits so load-bound
-        // values establish reloadRequired + pending/LKG state instead of only
-        // changing the persisted/UI projection.
-        if (updatedParams != null) updateParams(updatedParams)
-        uiStateStore.update { current ->
-            current.copy(
-                preference = preference,
-                agentRecommendation = recommendation,
-                rollbackParams = if (paramsChanged) {
-                    state.rollbackParams ?: state.params
-                } else {
-                    current.rollbackParams
-                },
-                statusMessage = when {
-                    updatedParams == null -> recommendation?.explanation ?: current.statusMessage
-                    current.reloadRequired ->
-                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}；需要重新加载，当前模型继续使用原配置。"
-                    paramsChanged && current.loadedModelId == null ->
-                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}；已保存，下次加载模型时生效。"
-                    else ->
-                        "已切换为${preference.mode.label}参数：n_ctx=${updatedParams.nCtx}，threads=${updatedParams.nThreads}，n_predict=${updatedParams.nPredict}。"
-                }
-            )
-        }
-    }
+    fun updateAgentPreference(preference: UserPreference) =
+        agentTuningCoordinator.updateAgentPreference(preference)
+
 
     fun refreshLocalModels() =
         modelImportAndDownloadCoordinator.refreshLocalModels()
@@ -1879,17 +1824,9 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    fun deleteLastConversationTurn() {
-        if (rejectWhileConversationMutationInProgress()) return
-        deleteLastConversationTurnFor(
-            store = uiStateStore, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
-            showStatus = ::showStatus, isChatImageRequestActive = ::isChatImageRequestActive,
-            pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
-            persistConversationMutation = { sessions, rollback, _ ->
-                persistConversationMutation(sessions = sessions, rollback = rollback, preserveReusableNativePrefix = true)
-            }
-        )
-    }
+    val currentSessionId: String? get() = uiStateStore.current.activeChatSessionId
+
+    fun deleteLastConversationTurn() = chatWorkflowCoordinator.deleteLastConversationTurn(currentSessionId) // preserveReusableNativePrefix = true
 
 
 
@@ -2538,6 +2475,23 @@ class MainViewModel @JvmOverloads constructor(
                 registerLocalApiImageGenerationOwnership = ::registerLocalApiImageGenerationOwnership,
                 unregisterLocalApiImageGenerationOwnership = ::unregisterLocalApiImageGenerationOwnership,
                 cancelOwnedLocalApiImageWorker = ::cancelOwnedLocalApiImageWorker
+            )
+
+    private val chatWorkflowCoordinator: ChatWorkflowCoordinator =
+        (injectedChatWorkflowCoordinator as? ChatWorkflowCoordinator)
+            ?: container.createChatWorkflowCoordinator(
+                store = uiStateStore,
+                rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+                showStatus = ::showStatus,
+                isChatImageRequestActive = ::isChatImageRequestActive,
+                pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns,
+                persistConversationMutation = { sessions, rollback, preserveNativePrefix ->
+                    persistConversationMutation(
+                        sessions = sessions,
+                        rollback = rollback,
+                        preserveReusableNativePrefix = preserveNativePrefix
+                    )
+                }
             )
 
 

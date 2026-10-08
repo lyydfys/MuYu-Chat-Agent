@@ -15,6 +15,8 @@ import com.muyuchat.mca.LocalGenerationSmokeResult
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatAppearanceCoordinator
 import com.muyuchat.mca.ChatImageWorkflowCoordinator
+import com.muyuchat.mca.ChatWorkflowCoordinator
+import com.muyuchat.mca.PendingAssistantImageToolTurn
 import com.muyuchat.mca.ChatSessionPersistencePortAdapter
 import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
@@ -1551,6 +1553,23 @@ internal class McaAppContainer(private val application: Application) {
             registerLocalApiImageGenerationOwnership = registerLocalApiImageGenerationOwnership,
             unregisterLocalApiImageGenerationOwnership = unregisterLocalApiImageGenerationOwnership,
             cancelOwnedLocalApiImageWorker = cancelOwnedLocalApiImageWorker
+        )
+
+    fun createChatWorkflowCoordinator(
+        store: UiStateStore,
+        rejectWhileConversationMutationInProgress: () -> Boolean,
+        showStatus: (String) -> Unit,
+        isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
+        pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
+        persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState, Boolean) -> kotlinx.coroutines.Job?
+    ): ChatWorkflowCoordinator =
+        ChatWorkflowCoordinator(
+            store = store,
+            rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
+            showStatus = showStatus,
+            isChatImageRequestActive = isChatImageRequestActive,
+            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+            persistConversationMutation = persistConversationMutation
         )
 
     val runtimeAdmission = RuntimeAdmissionState(

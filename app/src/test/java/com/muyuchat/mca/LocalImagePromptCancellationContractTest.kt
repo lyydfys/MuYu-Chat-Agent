@@ -505,7 +505,10 @@ class LocalImagePromptCancellationContractTest {
 
     @Test
     fun `retry discards stale prompt execution evidence and rebinds current model`() {
-        val source = mainViewModelSource()
+        val vmSource = mainViewModelSource()
+        assertTrue(vmSource.contains("chatImageWorkflowCoordinator.retryImageGeneration(jobId)"))
+
+        val source = chatImageWorkflowCoordinatorSource()
         val retry = functionBody(source, "fun retryImageGeneration(")
         assertTrue(retry.contains("_uiState.value.localImageModels.firstOrNull"))
         assertTrue(retry.contains("promptExecution = null"))
@@ -570,6 +573,8 @@ class LocalImagePromptCancellationContractTest {
     /** v4-①：位置无关——按标记定位承载文件（VM 类声明处）。 */
     private fun mainViewModelSource(): String =
         SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
+
+    private fun chatImageWorkflowCoordinatorSource(): String = sourceFile("ChatImageWorkflowCoordinator.kt")
 
     /** R3/C2: the admission body moved to ImageGenerationOwner.kt (`fun submit`); read it where it now lives. */
     private fun imageGenerationOwnerSource(): String = sourceFile("ImageGenerationOwner.kt")
