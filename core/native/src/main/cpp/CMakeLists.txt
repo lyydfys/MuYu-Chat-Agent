@@ -97,7 +97,8 @@ add_library(mca_native SHARED
         native_engine.cpp
         mca/llm/llm_prefill_tracker.cpp
         mca/llm/llm_prefix_cache_manager.cpp
-        mca/llm/llm_stats_collector.cpp)
+        mca/llm/llm_stats_collector.cpp
+        mca/llm/llm_runtime_config.cpp)
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
 add_library(mca_prompt_handoff SHARED
         mnn_qnn_prompt_handoff.cpp
