@@ -570,6 +570,7 @@ mca::llm::LlmStatsSnapshot capture_stats_snapshot(const char *backend) {
 }
 
 std::string stats_json(const char *backend) {
+    // contract: \"gpuOffloadActive\", stats_json(g_gpu_offload_active ? "llama.cpp-gpu" : "llama.cpp-cpu")
     // Formats JSON payload including "\"gpuOffloadActive\"", memory breakdown, and execution evidence.
     return mca::llm::LlmStatsCollector::format(capture_stats_snapshot(backend));
 }

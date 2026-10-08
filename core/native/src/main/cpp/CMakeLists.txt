@@ -120,7 +120,8 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_sdxl_phase_support.cpp
         mca/qnn/qnn_tensor_codec.cpp
         mca/qnn/qnn_device_support.cpp
-        mca/qnn/qnn_tensor_inspect.cpp)
+        mca/qnn/qnn_tensor_inspect.cpp
+        mca/qnn/qnn_ultrafix_handler.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
@@ -154,7 +155,8 @@ target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
         diffusion_scheduler.cpp
-        mca/mnn/mnn_tensor_ops.cpp)
+        mca/mnn/mnn_tensor_ops.cpp
+        mca/mnn/mnn_vae_image_writer.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
