@@ -9,13 +9,19 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 internal val urlRegex = Regex("""https?://[^\s，。！？、）)\]}>"'`]+""", RegexOption.IGNORE_CASE)
 internal class BlockedWebSearchUrlException(message: String) : IllegalArgumentException(message)
 
-internal fun validateReadableWebSearchUrl(url: String) {
-    blockedReadableWebSearchUrlReason(url)?.let { reason ->
+internal fun validateReadableWebSearchUrl(
+    url: String,
+    dnsResolver: ((String) -> List<InetAddress>)? = null
+) {
+    blockedReadableWebSearchUrlReason(url, dnsResolver)?.let { reason ->
         throw BlockedWebSearchUrlException(reason)
     }
 }
 
-internal fun blockedReadableWebSearchUrlReason(url: String): String? {
+internal fun blockedReadableWebSearchUrlReason(
+    url: String,
+    dnsResolver: ((String) -> List<InetAddress>)? = null
+): String? {
     val httpUrl = url.toHttpUrlOrNull()
         ?: return "MCA 已阻止联网检索读取无效网页地址。"
     if (httpUrl.scheme != "http" && httpUrl.scheme != "https") {
@@ -30,14 +36,20 @@ internal fun blockedReadableWebSearchUrlReason(url: String): String? {
     if (asciiHost == "localhost" || asciiHost.endsWith(".localhost") || asciiHost.endsWith(".local")) {
         return "MCA 已阻止联网检索读取本机或局域网主机。"
     }
-    val addresses = runCatching { InetAddress.getAllByName(asciiHost).toList() }
-        .getOrElse { error ->
-            if (error is UnknownHostException) {
-                return null
-            }
-            return "MCA 无法确认该地址是否安全，已阻止读取。"
+    val isLiteral = isIpLiteral(asciiHost)
+    val addresses = runCatching {
+        if (isLiteral) {
+            InetAddress.getAllByName(asciiHost).toList()
+        } else {
+            dnsResolver?.invoke(asciiHost) ?: InetAddress.getAllByName(asciiHost).toList()
         }
-    val blocked = addresses.firstOrNull { it.isRestrictedWebSearchAddress() }
+    }.getOrElse { error ->
+        if (error is UnknownHostException) {
+            return null
+        }
+        return "MCA 无法确认该地址是否安全，已阻止读取。"
+    }
+    val blocked = addresses.firstOrNull { it.isRestrictedWebSearchAddress(isIpLiteral = isLiteral) }
     return if (blocked != null) {
         "MCA 已阻止联网检索读取本机、内网、链路本地或保留地址：${blocked.hostAddress}"
     } else {
@@ -45,13 +57,23 @@ internal fun blockedReadableWebSearchUrlReason(url: String): String? {
     }
 }
 
-internal fun InetAddress.isRestrictedWebSearchAddress(): Boolean {
+internal fun isIpLiteral(host: String): Boolean {
+    val clean = host.removePrefix("[").removeSuffix("]")
+    if (clean.contains(':')) return true
+    val parts = clean.split('.')
+    if (parts.size == 4 && parts.all { part -> part.toIntOrNull() in 0..255 }) {
+        return true
+    }
+    return false
+}
+
+internal fun InetAddress.isRestrictedWebSearchAddress(isIpLiteral: Boolean = true): Boolean {
     if (isAnyLocalAddress || isLoopbackAddress || isLinkLocalAddress || isSiteLocalAddress || isMulticastAddress) {
         return true
     }
     val bytes = address
     if (bytes.size == 4) {
-        return bytes.isRestrictedIpv4Address(0)
+        return bytes.isRestrictedIpv4Address(0, isIpLiteral = isIpLiteral)
     }
     if (bytes.size == 16) {
         val first = bytes[0].toInt() and 0xff
@@ -62,7 +84,7 @@ internal fun InetAddress.isRestrictedWebSearchAddress(): Boolean {
             .takeIf { candidate -> (0 until 10).all { candidate[it].toInt() == 0 } }
             ?.takeIf { candidate -> (candidate[10].toInt() and 0xff) == 0xff && (candidate[11].toInt() and 0xff) == 0xff }
         if (mappedIpv4 != null) {
-            return mappedIpv4.isRestrictedIpv4Address(12)
+            return mappedIpv4.isRestrictedIpv4Address(12, isIpLiteral = isIpLiteral)
         }
         return first == 0 ||
             first == 0xfc ||
@@ -73,7 +95,7 @@ internal fun InetAddress.isRestrictedWebSearchAddress(): Boolean {
     return false
 }
 
-internal fun ByteArray.isRestrictedIpv4Address(offset: Int): Boolean {
+internal fun ByteArray.isRestrictedIpv4Address(offset: Int, isIpLiteral: Boolean = true): Boolean {
     val first = this[offset].toInt() and 0xff
     val second = this[offset + 1].toInt() and 0xff
     val third = this[offset + 2].toInt() and 0xff
@@ -85,7 +107,7 @@ internal fun ByteArray.isRestrictedIpv4Address(offset: Int): Boolean {
         (first == 172 && second in 16..31) ||
         (first == 192 && second == 0) ||
         (first == 192 && second == 168) ||
-        (first == 198 && second in 18..19) ||
+        (isIpLiteral && first == 198 && second in 18..19) ||
         (first == 198 && second == 51 && third == 100) ||
         (first == 203 && second == 0 && third == 113) ||
         (first >= 224)

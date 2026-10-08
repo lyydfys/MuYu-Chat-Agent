@@ -81,7 +81,8 @@ class AppForegroundRecoveryContractTest {
         assertTrue(application.contains("fun current(): ProcessUiLifecycleEvent?"))
         assertTrue(viewModel.contains("if (initialApiPreferences.apiEnabled)"))
         assertFalse(viewModel.contains("initialApiPreferences.apiEnabled &&\n            ProcessUiLifecycleEvents.current() != ProcessUiLifecycleEvent.FOREGROUNDED"))
-        val foreground = functionBody(viewModel, "fun onAppForegrounded()")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/AppLifecycleCoordinator.kt")
+        val foreground = functionBody(coordinator, "fun onAppForegrounded()")
         assertTrue(foreground.contains("apiLifecycleRequestJob?.let"))
         assertTrue(foreground.contains("pending.join()"))
         assertFalse(foreground.contains("apiLifecycleRequestJob?.cancel()"))
@@ -89,8 +90,8 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun foregroundRecoverySerializesApiAndProbesOnlyAnIdleEngine() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "fun onAppForegrounded()")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/AppLifecycleCoordinator.kt")
+        val body = functionBody(coordinator, "fun onAppForegrounded()")
 
         assertTrue(body.contains("foregroundRecoverySequence.incrementAndGet()"))
         assertTrue(body.contains("foregroundRecoveryJob?.cancel()"))

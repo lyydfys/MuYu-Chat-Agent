@@ -47,11 +47,14 @@
 #include "mca/sd/sd_component_resolver.hpp"
 #include "mca/sd/sd_runtime_diagnostics.hpp"
 #include "mca/sd/sd_upscaler.hpp"
+#include "mca/sd/sd_context_key.hpp"
 using mca::sd::progress_to_json;
 using mca::sd::runtime_config_json;
 using mca::sd::set_progress_from_sd_log;
 using mca::sd::safe_sd_runtime_message;
 using mca::sd::sd_log_callback;
+using mca::sd::make_context_key;
+using mca::sd::observed_prediction_mode;
 using mca::sd::ComponentPaths;
 using mca::sd::textual_inversion_consumer_paths;
 using mca::sd::execution_assets_match_consumers;
@@ -581,40 +584,6 @@ void sd_preview_callback(int step,
             is_noisy);
 }
 
-std::string make_context_key(
-        const ComponentPaths &paths,
-        const std::vector<ContractTextualInversion> &textual_inversions,
-        int threads,
-        const std::string& execution_asset_composite,
-        sd_qwen_image_21_phase_t qwen_phase = SD_QWEN_IMAGE_21_PHASE_FULL) {
-    std::ostringstream key;
-    key << paths.model << "|"
-        << paths.diffusion << "|"
-        << paths.high_noise_diffusion << "|"
-        << paths.vae << "|"
-        << paths.clip_l << "|"
-        << paths.clip_g << "|"
-        << paths.clip_vision << "|"
-        << paths.t5xxl << "|"
-        << paths.llm << "|"
-        << paths.llm_vision << "|"
-        << paths.embeddings_connectors << "|"
-        << paths.control_net << "|"
-        << paths.selection_mode << "|"
-        << paths.tokenizer_path << "|"
-        << "qwenPhase:" << static_cast<int>(qwen_phase) << "|"
-        << threads << "|"
-        << sd_runtime_backend_label() << "|assets:"
-        << execution_asset_composite;
-    for (const auto &artifact: textual_inversions) {
-        key << "|ti:" << lower_copy(artifact.trigger)
-            << ":" << artifact.path
-            << ":" << artifact.sha256
-            << ":" << artifact.tokenizer_fingerprint;
-    }
-    return key.str();
-}
-
 sd_ctx_t *ensure_context(const ComponentPaths &paths,
                          const std::vector<ContractTextualInversion> &textual_inversions,
                          const std::string &ctx_key,
@@ -710,11 +679,6 @@ std::string observed_prediction_wire(int prediction) {
                     "predictionType",
                     "stable-diffusion.cpp did not expose an observed prediction mode");
     }
-}
-
-std::string observed_prediction_mode(int prediction) {
-    if (prediction < 0 || prediction >= PREDICTION_COUNT) return "unknown";
-    return sd_prediction_name(static_cast<prediction_t>(prediction));
 }
 
 json runtime_failure(const std::string &code, const std::string &message) {

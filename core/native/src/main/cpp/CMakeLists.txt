@@ -156,13 +156,15 @@ target_sources(mca_mnn_native PRIVATE
         textual_inversion_conditioning.cpp
         diffusion_scheduler.cpp
         mca/mnn/mnn_tensor_ops.cpp
-        mca/mnn/mnn_vae_image_writer.cpp)
+        mca/mnn/mnn_vae_image_writer.cpp
+        mca/mnn/mnn_clip_weighting.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
         image_execution_math.cpp
         qnn_controlnet_execution.cpp
-        diffusion_scheduler.cpp)
+        diffusion_scheduler.cpp
+        mca/qnn/qnn_image_writer.cpp)
 target_compile_definitions(mca_qnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=0)
 
 # tokenizers-cpp executes the complete Hugging Face tokenizer.json contract.

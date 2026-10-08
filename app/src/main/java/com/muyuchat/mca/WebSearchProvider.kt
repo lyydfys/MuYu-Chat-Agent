@@ -810,7 +810,8 @@ class WebSearchProvider(
     private val allowPrivateNetworkFetch: Boolean = false,
     private val cacheTtlMillis: Long = DEFAULT_WEB_SEARCH_CACHE_TTL_MS,
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
-    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
+    private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock,
+    private val dnsResolver: ((String) -> List<InetAddress>)? = null
 ) {
     private val cacheLock = Any()
     private val searchCache = linkedMapOf<String, WebSearchCacheEntry>()
@@ -1026,6 +1027,13 @@ class WebSearchProvider(
     private val readableFetchPort = object : WebSearchReadableFetchPort {
         override val client: OkHttpClient get() = this@WebSearchProvider.client
         override val allowPrivateNetworkFetch: Boolean get() = this@WebSearchProvider.allowPrivateNetworkFetch
+        override val dnsResolver: ((String) -> List<InetAddress>)? get() = this@WebSearchProvider.dnsResolver ?: { hostname ->
+            if (this@WebSearchProvider.client.dns != okhttp3.Dns.SYSTEM) {
+                this@WebSearchProvider.client.dns.lookup(hostname)
+            } else {
+                InetAddress.getAllByName(hostname).toList()
+            }
+        }
     }
 
     private fun fetchReadableDocument(url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument =

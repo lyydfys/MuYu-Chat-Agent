@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import java.net.InetAddress
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -18,6 +19,7 @@ import okhttp3.OkHttpClient
 internal interface WebSearchReadableFetchPort {
     val client: OkHttpClient
     val allowPrivateNetworkFetch: Boolean
+    val dnsResolver: ((String) -> List<InetAddress>)? get() = null
 }
 
 internal fun fetchReadableDocumentVia(port: WebSearchReadableFetchPort, url: String, provider: String, config: WebSearchConfig? = null): WebSearchDocument {
@@ -26,7 +28,7 @@ internal fun fetchReadableDocumentVia(port: WebSearchReadableFetchPort, url: Str
         return WebSearchDocument(title = url, url = url, provider = provider)
     }
     if (!port.allowPrivateNetworkFetch) {
-        validateReadableWebSearchUrl(url)
+        validateReadableWebSearchUrl(url, port.dnsResolver)
     }
     val direct = runCatching { fetchReadableDocumentDirect(port, url, provider) }.getOrNull()
     if (direct != null && direct.content.length >= 280) {

@@ -824,6 +824,14 @@ class WebSearchProviderTest {
         assertTrue(blockedReadableWebSearchUrlReason("http://[fe80::1]/status") != null)
         assertTrue(blockedReadableWebSearchUrlReason("http://[2001:db8::1]/status") != null)
         assertEquals(null, blockedReadableWebSearchUrlReason("https://example.com/docs"))
+        val fakeIpResolver: (String) -> List<InetAddress> = {
+            listOf(InetAddress.getByAddress("example.com", byteArrayOf(198.toByte(), 18.toByte(), 0, 41)))
+        }
+        assertEquals(null, blockedReadableWebSearchUrlReason("https://example.com/docs", dnsResolver = fakeIpResolver))
+        val rebindResolver: (String) -> List<InetAddress> = {
+            listOf(InetAddress.getByAddress("rebind.example.com", byteArrayOf(127, 0, 0, 1)))
+        }
+        assertTrue(blockedReadableWebSearchUrlReason("https://rebind.example.com/docs", dnsResolver = rebindResolver) != null)
     }
 
     @Test
@@ -1639,6 +1647,12 @@ class WebSearchProviderTest {
 
     @Test
     fun providerFailureMessagesExplainDeviceDnsFailures() = runBlocking {
+        val dnsFailingClient = OkHttpClient.Builder()
+            .dns(object : okhttp3.Dns {
+                override fun lookup(hostname: String): List<InetAddress> =
+                    throw UnknownHostException("Unable to resolve host: $hostname")
+            })
+            .build()
         val outcome = executeWebSearchForChatTurn(
             messages = listOf(ChatMessage(role = Role.USER, content = "搜索 MCA")),
             config = WebSearchConfig(
@@ -1651,7 +1665,7 @@ class WebSearchProviderTest {
             ),
             oneShotEnabled = true,
             assistantWebSearchEnabled = false,
-            search = { turnPlan, turnConfig -> WebSearchProvider().search(turnPlan, turnConfig) }
+            search = { turnPlan, turnConfig -> WebSearchProvider(client = dnsFailingClient).search(turnPlan, turnConfig) }
         )
 
         assertFalse(outcome.success)

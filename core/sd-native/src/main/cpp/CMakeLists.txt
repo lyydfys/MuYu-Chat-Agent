@@ -78,6 +78,7 @@ add_library(mca_sd_native SHARED
         mca/sd/sd_runtime_owner.cpp
         mca/sd/sd_runtime_diagnostics.cpp
         mca/sd/sd_upscaler.cpp
+        mca/sd/sd_context_key.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/common/logging.cpp)

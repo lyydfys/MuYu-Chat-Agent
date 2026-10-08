@@ -91,7 +91,9 @@ class MainViewModel @JvmOverloads constructor(
     injectedChatSessionManagementCoordinator: Any? = null,
     injectedChatInputAndAttachmentCoordinator: Any? = null,
     injectedChatImageWorkflowCoordinator: Any? = null,
-    injectedChatWorkflowCoordinator: Any? = null
+    injectedChatWorkflowCoordinator: Any? = null,
+    injectedDocumentImportCoordinator: Any? = null,
+    injectedAppLifecycleCoordinator: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -738,6 +740,38 @@ class MainViewModel @JvmOverloads constructor(
     private val chatSessionManagementCoordinator get() = coordinatorAssembly.chatSessionManagementCoordinator
     private val chatInputAndAttachmentCoordinator get() = coordinatorAssembly.chatInputAndAttachmentCoordinator
 
+    private val documentImportCoordinator: DocumentImportCoordinator =
+        (injectedDocumentImportCoordinator as? DocumentImportCoordinator)
+            ?: DocumentImportCoordinator(
+                application = application,
+                uiStateStore = uiStateStore,
+                scope = viewModelScope,
+                knowledgeBaseStore = knowledgeBaseStore,
+                chatSessionStore = chatSessionStore,
+                chatSessionPersistenceState = container.chatSessionPersistenceState,
+                contentImportSelectionRevision = contentImportSelectionRevision,
+                stageContentImportPreview = { stageContentImportPreview(it) },
+                markLocalConversationContextInvalid = { markLocalConversationContextInvalid() },
+                showStatus = { showStatus(it) }
+            )
+
+    private val appLifecycleCoordinator: AppLifecycleCoordinator =
+        (injectedAppLifecycleCoordinator as? AppLifecycleCoordinator)
+            ?: AppLifecycleCoordinator(
+                application = application,
+                uiStateStore = uiStateStore,
+                scope = viewModelScope,
+                engine = engine,
+                chatRuns = chatRuns,
+                localApiServerCoordinator = localApiServerCoordinator,
+                offlinePromptTranslationAndChatImageCoordinator = offlinePromptTranslationAndChatImageCoordinator,
+                assistantImageContinuationCoordinator = assistantImageContinuationCoordinator,
+                maybeCheckForAppUpdate = { maybeCheckForAppUpdate() },
+                foregroundRecoverySequence = foregroundRecoverySequence,
+                getForegroundRecoveryJob = { foregroundRecoveryJob },
+                setForegroundRecoveryJob = { foregroundRecoveryJob = it }
+            )
+
     private val _uiEffects = kotlinx.coroutines.flow.MutableSharedFlow<com.muyuchat.mca.presentation.MainUiEffect>(extraBufferCapacity = 64)
     val uiEffects: kotlinx.coroutines.flow.SharedFlow<com.muyuchat.mca.presentation.MainUiEffect> = _uiEffects
 
@@ -1146,7 +1180,7 @@ class MainViewModel @JvmOverloads constructor(
     fun removeLocalImageModelRecord(modelId: String) = localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
     private suspend fun stageContentImportPreview(preview: ContentImportPreview) = contentImportPreviewCoordinator.stageContentImportPreview(preview)
     fun cancelContentImportPreview(id: String) = contentImportPreviewCoordinator.cancelContentImportPreview(id)
-    fun confirmContentImportPreview(id: String) = contentImportPreviewCoordinator.confirmContentImportPreview(id) { confirmKnowledgeDocumentImport(it) }
+    fun confirmContentImportPreview(id: String) = contentImportPreviewCoordinator.confirmContentImportPreview(id) { documentImportCoordinator.confirmKnowledgeDocumentImport(it) }
 
     fun importAssistantCardFile(uriString: String, importOwner: ContentImportOwner? = null) =
         assistantProfileCoordinator.importAssistantCardFile(uriString, importOwner)
@@ -1175,105 +1209,10 @@ class MainViewModel @JvmOverloads constructor(
         knowledgeBaseId: String,
         uriString: String,
         importOwner: ContentImportOwner? = null
-    ) {
-        if (uiStateStore.current.isGenerating) {
-            showStatus("请先停止当前生成，再导入知识库文件")
-            return
-        }
-        if (knowledgeBaseId in uiStateStore.current.knowledgeBaseImportingIds) {
-            showStatus("该知识库正在导入文件，请稍候")
-            return
-        }
-        val known = uiStateStore.current.knowledgeBases.any { it.id == knowledgeBaseId }
-        if (!known) {
-            showStatus("未找到要导入的知识库")
-            return
-        }
-        val owner = importOwner ?: captureContentImportOwner()
-        uiStateStore.update { state ->
-            state.copy(
-                knowledgeBaseImportingIds = state.knowledgeBaseImportingIds + knowledgeBaseId,
-                statusMessage = "正在准备知识库文档预览…"
-            )
-        }
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val preview = runCatching {
-                    val uri = Uri.parse(uriString)
-                    val name = displayNameForUri(getApplication<Application>().contentResolver, uri)
-                    require(isSupportedTextAttachment(getApplication<Application>().contentResolver, uri, name)) { "知识库目前支持文本、Markdown、JSON、XML、CSV 与代码文件。" }
-                    val text = getApplication<Application>().contentResolver.openInputStream(uri)
-                        ?.use { KnowledgeDocumentImportCodec.readTextCancellable(it) }
-                        ?: error("无法读取所选文档")
-                    knowledgeDocumentPreview(text, name, knowledgeBaseId, uriString, owner)
-                }.getOrElse { error ->
-                    if (error is CancellationException) throw error
-                    showStatus("知识库导入失败：${error.message ?: "无法读取文件"}")
-                    return@launch
-                }
-                stageContentImportPreview(preview)
-            } finally {
-                uiStateStore.update { it.copy(knowledgeBaseImportingIds = it.knowledgeBaseImportingIds - knowledgeBaseId) }
-            }
-        }
-    }
+    ) = documentImportCoordinator.importKnowledgeDocument(knowledgeBaseId, uriString, importOwner)
 
-    private suspend fun confirmKnowledgeDocumentImport(preview: ContentImportPreview): Boolean {
-        val baseId = requireNotNull(preview.knowledgeBaseId)
-        require(contentImportSha256(preview.rawSource) == preview.sourceHash) {
-            "导入预览内容已改变，请重新选择文档。"
-        }
-        require(uiStateStore.current.knowledgeBases.any { it.id == baseId }) {
-            "原知识库已删除，请重新选择知识库。"
-        }
-        val document = withContext(Dispatchers.IO) {
-            knowledgeBaseStore.importDocument(baseId, preview.title, preview.rawSource, preview.source ?: "local")
-        }
-        val owner = preview.owner
-        chatSessionPersistenceSequence.incrementAndGet()
-        withContext(Dispatchers.IO) {
-            chatSessionPersistenceMutex.withLock {
-                val snapshot = uiStateStore.current
-                val ownerSessionId = owner.sessionId?.takeIf { id -> snapshot.chatSessions.any { it.id == id } }
-                val binding = ownerSessionId?.let { sessionId ->
-                    val selected = synchronized(chatSessionPersistenceStateLock) {
-                        pendingKnowledgeBindings[sessionId]?.toSet()
-                    } ?: if (owner.isCurrent(snapshot)) snapshot.selectedKnowledgeBaseIds
-                        else knowledgeBaseStore.selectedKnowledgeBaseIds(sessionId)
-                    sessionId to (selected + baseId)
-                }
-                if (binding != null) {
-                    val bindings = synchronized(chatSessionPersistenceStateLock) {
-                        pendingKnowledgeBindings[binding.first] = binding.second
-                        pendingKnowledgeBindings.filterKeys { id -> snapshot.chatSessions.any { it.id == id } }
-                            .mapValues { (_, ids) -> ids.toSet() }
-                    }
-                    chatSessionStore.save(snapshot.chatSessions, bindings)
-                    durableChatSessions = snapshot.chatSessions
-                    synchronized(chatSessionPersistenceStateLock) {
-                        bindings.forEach { (sessionId, ids) ->
-                            if (pendingKnowledgeBindings[sessionId] == ids) pendingKnowledgeBindings.remove(sessionId)
-                        }
-                    }
-                }
-                val bases = knowledgeBaseStore.loadBases()
-                val count = knowledgeBaseStore.documents(baseId).size
-                uiStateStore.update { current ->
-                    val ownerIsCurrent = owner.isCurrent(current)
-                    current.copy(
-                        knowledgeBases = bases,
-                        knowledgeDocumentCounts = current.knowledgeDocumentCounts + (baseId to count),
-                        selectedKnowledgeBaseIds = if (ownerIsCurrent) current.selectedKnowledgeBaseIds + baseId
-                            else current.selectedKnowledgeBaseIds,
-                        statusMessage = "已导入知识库文档：${document.title}（${document.chunkCount} 段）" +
-                            if (ownerIsCurrent) "，已启用" else if (binding != null) "；已绑定原对话" else "；已保存，原对话已不存在"
-                    )
-                }
-            }
-        }
-        if (owner.isCurrent(uiStateStore.current)) markLocalConversationContextInvalid()
-        return true
-    }
+    fun importKnowledgeDocument(uriString: String) =
+        documentImportCoordinator.importKnowledgeDocument(uriString)
 
     fun setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) =
         setKnowledgeBaseSelectedFor(uiStateStore, { uiStateStore.current }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
@@ -1794,100 +1733,7 @@ class MainViewModel @JvmOverloads constructor(
      * Worker loss is detected here, while the existing request path owns any expensive model
      * reload so returning to the UI cannot create a surprise memory spike.
      */
-    fun onAppForegrounded() {
-        // A file removed or replaced while backgrounded must restore the download action.
-        viewModelScope.launch { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() }
-        chatRuns.foreground()
-        // R3/S22: 前后台写入经 UiStateStore。
-        uiStateStore.update { state ->
-            if (state.statusMessage != BACKGROUND_TASK_STATUS) {
-                state
-            } else {
-                val imageActive = state.imageJobs.any { job -> !job.status.terminal }
-                state.copy(
-                    statusMessage = if (state.isGenerating || imageActive) {
-                        "已回到前台，任务仍在运行。"
-                    } else {
-                        null
-                    }
-                )
-            }
-        }
-        maybeCheckForAppUpdate()
-        assistantImageContinuationCoordinator.resumePendingAssistantImageToolTurnIfReady()
-        val recovery = foregroundRecoverySequence.incrementAndGet()
-        foregroundRecoveryJob?.cancel()
-        foregroundRecoveryJob = viewModelScope.launch(Dispatchers.IO) {
-            // Construction-time recovery and process-foreground recovery share
-            // the same serialized operation. Waiting for an already queued
-            // request avoids the old start -> cancel -> stop -> start sequence
-            // that could stop LocalApiForegroundService before Android delivered
-            // its first onStartCommand callback.
-            apiLifecycleRequestJob?.let { pending ->
-                if (pending !== coroutineContext[Job]) pending.join()
-            }
-            if (recovery != foregroundRecoverySequence.get()) return@launch
-            val preferences = loadApiPreferences(getApplication<Application>())
-            val apiOperation = apiLifecycleSequence.incrementAndGet()
-            val apiResult = applyLocalApiState(
-                operation = apiOperation,
-                enabled = preferences.apiEnabled,
-                restEnabled = preferences.restEnabled,
-                failurePrefix = "本机 API 恢复失败"
-            ) ?: return@launch
-            if (recovery != foregroundRecoverySequence.get()) return@launch
-
-            val stateBeforeProbe = uiStateStore.current
-            val canProbeWorker = stateBeforeProbe.loadedModelId != null &&
-                !stateBeforeProbe.busy &&
-                !stateBeforeProbe.isGenerating &&
-                stateBeforeProbe.engineLifecycle !in setOf(
-                    AgentEngineLifecycle.LOADING,
-                    AgentEngineLifecycle.RELOADING,
-                    AgentEngineLifecycle.ROLLING_BACK,
-                    AgentEngineLifecycle.STOPPING
-                )
-            val health = if (canProbeWorker) {
-                engine.tryRuntimeHealthSnapshot()
-            } else {
-                null
-            }
-            if (recovery != foregroundRecoverySequence.get()) return@launch
-
-            uiStateStore.update { state ->
-                if (recovery != foregroundRecoverySequence.get()) {
-                    state
-                } else {
-                    val healthStillCurrent = health != null &&
-                        state.loadedModelId == stateBeforeProbe.loadedModelId &&
-                        !state.busy &&
-                        !state.isGenerating &&
-                        engine.stats.value == health.runtimeStats
-                    val workerSessionLost = healthStillCurrent &&
-                        health.workerSessionLost
-                    val status = when {
-                        apiResult.failure != null -> state.statusMessage
-                        workerSessionLost && state.loadedModelId != null ->
-                            "本地推理进程已被系统回收，将在下一次发送时自动恢复模型。"
-                        else -> state.statusMessage
-                    }
-                    state.copy(
-                        apiEnabled = apiResult.running,
-                        restEnabled = apiResult.restEnabled,
-                        engineLifecycle = if (workerSessionLost && state.loadedModelId != null) {
-                            AgentEngineLifecycle.UNLOADED
-                        } else {
-                            state.engineLifecycle
-                        },
-                        statusMessage = status
-                    )
-                }
-            }
-            if (recovery == foregroundRecoverySequence.get()) {
-                assistantImageContinuationCoordinator.resumePendingAssistantImageToolTurnIfReady()
-            }
-        }
-    }
+    fun onAppForegrounded() = appLifecycleCoordinator.onAppForegrounded()
 
     fun refreshLogs() = diagnosticsOperations.refreshLogs()
     fun refreshDiagnostics() = diagnosticsOperations.refreshDiagnostics()
