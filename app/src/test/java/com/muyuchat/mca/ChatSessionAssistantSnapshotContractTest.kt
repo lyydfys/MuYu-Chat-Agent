@@ -27,16 +27,16 @@ class ChatSessionAssistantSnapshotContractTest {
 
     @Test
     fun activeConversationUsesItsSnapshotForTheRequestAndPrefixCache() {
-        // P3 step 1 moved the startGeneration execution body to ChatExecutionOperations; the
-        // snapshot/prefix-cache assertions are unchanged -- the generation half is read where it
-        // now lives, the send half stays on the ViewModel.
-        val source = sourceFile("MainViewModel.kt")
+        // P3 step 1 moved the startGeneration execution body to ChatExecutionOperations;
+        // sendMessage moved to ChatWorkflowCoordinator; the snapshot/prefix-cache assertions
+        // are unchanged -- the generation and send halves are read where they now live.
+        val source = sourceFile("ChatWorkflowCoordinator.kt")
         val execution = sourceFile("ChatExecutionOperations.kt")
         val startGeneration = functionBody(execution, "ChatGenerationExecutionPort.runChatGeneration")
         val sendMessage = functionBody(source, "sendPreparedMessageAsync")
 
         assertTrue(functionBody(source, "sendPreparedMessage")
-            .contains("sendPreparedMessageAsync(state, preparedInput)"))
+            .contains("sendPreparedMessageAsync(viewModel, state, preparedInput)"))
         assertTrue(startGeneration.contains("val frozenSession = initialState.chatSessions.first"))
         assertTrue(startGeneration.contains("val frozenAssistantSnapshot = requireNotNull(frozenSession.assistantSnapshot)"))
         assertTrue(startGeneration.contains("val assistantSnapshot = frozenAssistantSnapshot"))

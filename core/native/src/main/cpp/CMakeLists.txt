@@ -96,7 +96,8 @@ target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract mca_j
 add_library(mca_native SHARED
         native_engine.cpp
         mca/llm/llm_prefill_tracker.cpp
-        mca/llm/llm_prefix_cache_manager.cpp)
+        mca/llm/llm_prefix_cache_manager.cpp
+        mca/llm/llm_stats_collector.cpp)
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
 add_library(mca_prompt_handoff SHARED
         mnn_qnn_prompt_handoff.cpp
@@ -113,7 +114,8 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_request.cpp
         mca/qnn/qnn_preview_manager.cpp
         mca/qnn/qnn_bundle_files.cpp
-        mca/qnn/qnn_sdxl_phase_support.cpp)
+        mca/qnn/qnn_sdxl_phase_support.cpp
+        mca/qnn/qnn_tensor_codec.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
@@ -130,7 +132,8 @@ add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_template_parser.cpp
         mca/mnn/mnn_vision_adapter.cpp
         mca/mnn/mnn_stats_collector.cpp
-        mca/mnn/mnn_prompt_cache_manager.cpp)
+        mca/mnn/mnn_prompt_cache_manager.cpp
+        mca/mnn/mnn_protocol_parser.cpp)
 target_include_directories(mca_mnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
@@ -231,6 +234,12 @@ if(MCA_QNN_INCLUDE_DIR)
     target_compile_definitions(mca_qnn_native PRIVATE
             MCA_WITH_QNN_SDK_HEADERS=1
             MCA_QNN_SDK_ROOT_CONFIGURED=1)
+    target_include_directories(mca_qnn_runtime PUBLIC
+            "${MCA_QNN_INCLUDE_DIR}"
+            "${MCA_QNN_INCLUDE_DIR}/QNN")
+    target_compile_definitions(mca_qnn_runtime PUBLIC
+            MCA_WITH_QNN_SDK_HEADERS=1
+            MCA_QNN_SDK_ROOT_CONFIGURED=1)
 else()
     if(MCA_QNN_TYPED_BINDINGS_REQUIRED)
         message(FATAL_ERROR
@@ -238,6 +247,9 @@ else()
     endif()
     message(STATUS "MCA QNN SDK headers not found. Building an explicit stub; set MCA_QNN_SDK_ROOT, QNN_SDK_ROOT, or QAIRT_SDK_ROOT to enable typed QNN graph bindings.")
     target_compile_definitions(mca_qnn_native PRIVATE
+            MCA_WITH_QNN_SDK_HEADERS=0
+            MCA_QNN_SDK_ROOT_CONFIGURED=$<BOOL:${MCA_QNN_SDK_ROOT}>)
+    target_compile_definitions(mca_qnn_runtime PUBLIC
             MCA_WITH_QNN_SDK_HEADERS=0
             MCA_QNN_SDK_ROOT_CONFIGURED=$<BOOL:${MCA_QNN_SDK_ROOT}>)
 endif()

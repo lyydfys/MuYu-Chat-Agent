@@ -116,7 +116,7 @@ class MainViewModel @JvmOverloads constructor(
         modelIdentityReferenceMigration.migratePendingReferences()
     }
     // R2/S12：组合根接管装配（本片 7 个 application-only store；1:1 构造，零行为变化）。
-    private val container = McaAppContainer(application)
+    internal val container = McaAppContainer(application)
     // R3/C2（插队裁定 2/3）：装配与运行期准入态迁入组合根；以下别名保持既有调用点与初始化时点不变。
     private val modelStore = container.modelStore
     private val runtimeProfileStore = container.runtimeProfileStore
@@ -144,7 +144,7 @@ class MainViewModel @JvmOverloads constructor(
     fun installAppUpdate() = appUpdateOwner.installAppUpdate()
     fun openAppUpdateRelease() = appUpdateOwner.openAppUpdateRelease()
 
-    private val engine: McaInferenceService = injectedEngine ?: container.createInferenceService(
+    internal val engine: McaInferenceService = injectedEngine ?: container.createInferenceService(
         runners = container.isolatedLocalChatRunners.runners,
         installationScopeId = installationScopeId
     )
@@ -160,13 +160,13 @@ class MainViewModel @JvmOverloads constructor(
     /** Deduplicates repeated process-foreground callbacks and their worker health probes. */
     private var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
-    private val chatSessionStore = container.chatSessionStore
+    internal val chatSessionStore = container.chatSessionStore
     private val characterMemorySummaryCoordinator = CharacterMemorySummaryCoordinator()
     private val chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore
     private val worldBookStore = container.worldBookStore
     private val knowledgeBaseStore = container.knowledgeBaseStore
     private val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
-    private val chatContextComposer =
+    internal val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
     private val imageLibraryBackup: ImageLibraryBackup
         get() = container.imageLibraryBackup
@@ -272,8 +272,6 @@ class MainViewModel @JvmOverloads constructor(
     private var replyGenerationMetrics: ReplyGenerationMetrics? = null
     /** Prevents double taps from invalidating the stop epoch twice and losing UI cleanup. */
     private val stopGenerationInProgress = AtomicBoolean(false)
-    /** Serializes the final content-hash check for multi-image chat turns off the UI thread. */
-    private val chatImageSubmissionPreflight = AtomicBoolean(false)
     /** New UI generations join this job before entering the engine, preventing a stale stop. */
     /** Invalidates late cleanup from a cancelled generation before another lifecycle operation. */
     /** Identity, cancellation and the published run handle for the UI chat run. */
@@ -301,7 +299,7 @@ class MainViewModel @JvmOverloads constructor(
         chatStreamAccumulator.flush(generationRunId)
 
     /** Delegates to [ChatStreamAccumulator.discard]. Signature kept verbatim. */
-    private fun discardPendingAssistantOutput(generationRunId: Long? = null) =
+    internal fun discardPendingAssistantOutput(generationRunId: Long? = null) =
         chatStreamAccumulator.discard(generationRunId)
 
     private var localConversationContextNeedsInvalidation: Boolean
@@ -371,10 +369,10 @@ class MainViewModel @JvmOverloads constructor(
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
         set(value) { container.runtimeAdmission.activeModelForRuntimeProfile = value }
     private val localApiIdempotencyJournalLock = Any()
-    private var activeImageGenerationJobId: String?
+    internal var activeImageGenerationJobId: String?
         get() = container.runtimeAdmission.activeImageGenerationJobId
         set(value) { container.runtimeAdmission.activeImageGenerationJobId = value }
-    private var activeImageGenerationBackend: ImageBackend?
+    internal var activeImageGenerationBackend: ImageBackend?
         get() = container.runtimeAdmission.activeImageGenerationBackend
         set(value) { container.runtimeAdmission.activeImageGenerationBackend = value }
     private var activeImageGenerationModelId: String?
@@ -426,7 +424,7 @@ class MainViewModel @JvmOverloads constructor(
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
     private val webSearchWorkflowCoordinator: WebSearchWorkflowCoordinator =
         container.createWebSearchWorkflowCoordinator(uiStateStore, chatTerminalSettlementPort, viewModelScope)
-    private val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
+    internal val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
     private val tuningOwner = container.createTuningOwner(
         store = uiStateStore,
@@ -696,7 +694,7 @@ class MainViewModel @JvmOverloads constructor(
         override suspend fun hostEnsureLocalConversationContextInvalidated() =
             this@MainViewModel.ensureLocalConversationContextInvalidated()
         override fun hostPrepareChatInput(state: MainUiState) =
-            state.prepareChatInput()
+            this@MainViewModel.prepareChatInput(state)
     }
 
     private val coordinatorAssembly: MainCoordinatorAssembly = MainCoordinatorAssembly.create(
@@ -708,14 +706,14 @@ class MainViewModel @JvmOverloads constructor(
 
     private val modelImportAndDownloadCoordinator get() = coordinatorAssembly.modelImportAndDownloadCoordinator
     private val localImageLibraryAndModelCoordinator get() = coordinatorAssembly.localImageLibraryAndModelCoordinator
-    private val assistantImageContinuationCoordinator get() = coordinatorAssembly.assistantImageContinuationCoordinator
+    internal val assistantImageContinuationCoordinator get() = coordinatorAssembly.assistantImageContinuationCoordinator
     private val offlinePromptTranslationAndChatImageCoordinator get() = coordinatorAssembly.offlinePromptTranslationAndChatImageCoordinator
     private val agentTuningCoordinator get() = coordinatorAssembly.agentTuningCoordinator
     private val chatModelCoordinator get() = coordinatorAssembly.chatModelCoordinator
     private val localApiControlPlaneCoordinator get() = coordinatorAssembly.localApiControlPlaneCoordinator
     private val modelScopeHubCoordinator get() = coordinatorAssembly.modelScopeHubCoordinator
     private val assistantProfileCoordinator get() = coordinatorAssembly.assistantProfileCoordinator
-    private val contextCompressionCoordinator get() = coordinatorAssembly.contextCompressionCoordinator
+    internal val contextCompressionCoordinator get() = coordinatorAssembly.contextCompressionCoordinator
     private val managedRuntimeReadinessPort get() = coordinatorAssembly.managedRuntimeReadinessPort
     private val contentImportPreviewCoordinator get() = coordinatorAssembly.contentImportPreviewCoordinator
     private val mainPostStartupCoordinator get() = coordinatorAssembly.mainPostStartupCoordinator
@@ -1352,330 +1350,13 @@ class MainViewModel @JvmOverloads constructor(
     fun unloadModel(model: ModelManifest) = chatModelCoordinator.unloadModel(model)
     fun deleteModel(model: ModelManifest) = chatModelCoordinator.deleteModel(model)
 
-    fun sendMessage() {
-        val state = uiStateStore.current
-        if (rejectWhileConversationMutationInProgress()) return
-        if (assistantImageContinuationCoordinator.hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
-            return
-        }
-        val preparedInput = state.prepareChatInput()
-        if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
-        if (preparedInput.imageAttachments.size > 1) {
-            if (!chatImageSubmissionPreflight.compareAndSet(false, true)) return
-            viewModelScope.launch(Dispatchers.IO) {
-                // The composer already performs an asynchronous dedup pass, but keep a final
-                // model-boundary check here as well. This protects message persistence and the
-                // actual runner input if a picker/import callback races that UI preflight.
-                val uniqueAttachments = preparedInput.imageAttachments
-                    .deduplicatedVisionAttachmentsForSend(getApplication<Application>())
-                withContext(Dispatchers.Main.immediate) {
-                    val current = uiStateStore.current
-                    if (current.input != state.input || current.isGenerating) return@withContext
-                    sendPreparedMessageAsync(current, preparedInput.copy(imageAttachments = uniqueAttachments))
-                }
-            }.invokeOnCompletion {
-                chatImageSubmissionPreflight.set(false)
-            }
-            return
-        }
-        sendPreparedMessage(state, preparedInput)
-    }
+    fun sendMessage() { chatWorkflowCoordinator.sendMessage(this) }
 
-    private fun sendPreparedMessage(
+    internal fun sendPreparedMessage(
         state: MainUiState,
         preparedInput: PreparedChatInput
     ) {
-        if (!chatImageSubmissionPreflight.compareAndSet(false, true)) return
-        viewModelScope.launch {
-            try {
-                sendPreparedMessageAsync(state, preparedInput)
-            } finally {
-                chatImageSubmissionPreflight.set(false)
-            }
-        }
-    }
-
-    private suspend fun sendPreparedMessageAsync(
-        state: MainUiState,
-        preparedInput: PreparedChatInput
-    ) {
-        if (rejectWhileConversationMutationInProgress()) return
-        if (!state.canWriteToActiveAssistantSession()) {
-            showStatus("此对话的角色归属不明确或角色已删除，请在历史中查看并手动分支。")
-            return
-        }
-        if (assistantImageContinuationCoordinator.hasUnresolvedAssistantImageToolTurn(state.activeChatSessionId)) {
-            showStatus("请先确认、取消或等待上一张角色请求的图片完成。")
-            return
-        }
-        if ((preparedInput.text.isBlank() && preparedInput.imageAttachments.isEmpty()) || state.isGenerating) return
-        // Reject unsupported image input before creating/persisting a chat turn.
-        // Previously the request was first saved and marked as generating, then
-        // failed deeper in startGeneration. Besides confusing users, that sent
-        // stale/unsupported image state closer to native runtimes and made a
-        // repeated tap look like a duplicate-image submission.
-        if (preparedInput.imageAttachments.isNotEmpty()) {
-            if (state.selectedChatBackend == ChatBackend.CLOUD) {
-                val cloud = state.selectedChatCloudConfig()?.normalized()
-                val unavailable = when {
-                    cloud == null || !cloud.configured -> "请先配置并选择云端聊天模型，再发送图片。"
-                    !cloud.supportsVision -> "当前云端模型未开启图片输入。请在模型管理中为该模型启用图片输入后重试。"
-                    else -> null
-                }
-                if (unavailable != null) {
-                    showStatus(unavailable)
-                    return
-                }
-            } else if (!isLocalVisionRunnerAvailable(visionAttachmentPort)) {
-                uiStateStore.update {
-                    it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { engine.nativeStatsJson() }.getOrNull()))
-                }
-                return
-            }
-        }
-        if (hasExplicitChatImageCommand(preparedInput.text)) {
-            if (preparedInput.imageAttachments.isNotEmpty() ||
-                preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
-            ) {
-                uiStateStore.update {
-                    it.copy(statusMessage = "聊天生图暂不支持把已附加的图片或文件作为参考。请先移除附件，再发送 /image 图片描述。")
-                }
-                return
-            }
-            val imageIntent = parseExplicitChatImageIntent(preparedInput.text)
-            if (imageIntent == null) {
-                showStatus("请在 /image 后输入图片描述，再发送。")
-                return
-            }
-            sendChatImageRequestWithPromptBridge(
-                visibleUserText = preparedInput.text,
-                prompt = imageIntent.sourceText,
-                requestedOutputCount = classifyChatImageIntent(preparedInput.text).requestedOutputCount
-            )
-            return
-        }
-        if (preparedInput.imageAttachments.isEmpty() &&
-            !preparedInput.text.contains(FILE_ATTACHMENT_MARKER)
-        ) {
-            val lastImageRequest = state.messages.asReversed().firstNotNullOfOrNull {
-                it.generatedImageRequest
-            }
-            val imageDecision = classifyChatImageIntent(
-                preparedInput.text,
-                ChatImageIntentContext(
-                    sessionId = state.activeChatSessionId,
-                    lastImageRequestId = lastImageRequest?.id,
-                    lastImageSessionId = state.activeChatSessionId,
-                    recentText = state.messages.takeLast(8).map { it.content },
-                    characterName = state.activeAssistantSnapshot()?.name ?: state.selectedAssistant()?.name
-                )
-            )
-            when (imageDecision.route) {
-                ChatImageIntentRoute.GENERATE -> {
-                    imageDecision.intent?.let { intent ->
-                        sendChatImageRequestWithPromptBridge(
-                            visibleUserText = preparedInput.text,
-                            prompt = intent.sourceText,
-                            requestedOutputCount = imageDecision.requestedOutputCount
-                        )
-                        return
-                    }
-                }
-                ChatImageIntentRoute.AMBIGUOUS -> {
-                    val actionId = UUID.randomUUID().toString()
-                    container.runtimeAdmission.pendingChatImageAction = PendingChatImageAction(
-                        id = actionId,
-                        kind = com.muyuchat.feature.chat.ChatImageActionKind.AMBIGUOUS,
-                        visibleUserText = preparedInput.text,
-                        requestedOutputCount = imageDecision.requestedOutputCount,
-                        stillOwned = {
-                            val current = uiStateStore.current
-                            current.activeChatSessionId == state.activeChatSessionId &&
-                                current.messages == state.messages &&
-                                current.input == state.input &&
-                                current.selectedChatBackend == state.selectedChatBackend &&
-                                current.selectedImageBackend == state.selectedImageBackend
-                        }
-                    )
-                    uiStateStore.update {
-                        it.copy(
-                            pendingChatImageActionDraft = com.muyuchat.feature.chat.ChatImageActionDraftUi(
-                                id = actionId,
-                                sourceText = preparedInput.text,
-                                kind = com.muyuchat.feature.chat.ChatImageActionKind.AMBIGUOUS,
-                                reason = "这句话可能是图片请求。请选择本轮操作，也可先编辑描述。"
-                            ),
-                            statusMessage = null
-                        )
-                    }
-                    return
-                }
-                ChatImageIntentRoute.CHAT -> Unit
-            }
-        }
-        if (activeImageGenerationBackend == ImageBackend.LOCAL &&
-            activeImageGenerationJobId != null &&
-            state.selectedChatBackend == ChatBackend.LOCAL
-        ) {
-            uiStateStore.update {
-                it.copy(statusMessage = "本地生图正在运行，请等图片完成或停止后再启动本地聊天，避免设备内存冲突。")
-            }
-            return
-        }
-        val assistantSnapshot = state.activeAssistantSnapshot()
-            ?: state.selectedAssistant()?.toConversationSnapshot()
-        val conversationParams = assistantSnapshot?.applyTo(state.params) ?: state.params
-        val conversationAssistantId = assistantSnapshot?.assistantId ?: state.selectedAssistantId
-        val characterMemoryContext = if (state.assistants.any {
-                it.id == conversationAssistantId && it.memoryEnabled
-            }) {
-            withContext(Dispatchers.IO) {
-                buildCharacterMemoryContext(
-                    assistantId = conversationAssistantId,
-                    memories = chatSessionStore.loadMemories(conversationAssistantId),
-                    pendingTurns = chatSessionStore.loadMemoryTurns(conversationAssistantId),
-                    currentSessionId = state.activeChatSessionId
-                )
-            }
-        } else ""
-        val user = ChatMessage(
-            role = Role.USER,
-            content = preparedInput.text.ifBlank {
-                if (preparedInput.imageAttachments.isNotEmpty()) "请描述这张图片。" else ""
-            },
-            imageAttachments = preparedInput.imageAttachments
-        )
-        // Context compression must run before the first admission decision.  The
-        // old ordering rejected an over-budget request (or let a trimmed
-        // request proceed without using that trimmed list) before the automatic
-        // compression policy could fold historical turns.  Build a logical
-        // request first, compress it in memory, then rebuild runtime context
-        // and perform the final safety admission.  The persisted conversation
-        // remains untouched; only the request crossing the runtime boundary is
-        // compressed/trimmed.
-        val preflightMessages = state.messages + user
-        val preflightContext = withContext(Dispatchers.IO) { chatContextComposer.compose(
-            messages = preflightMessages,
-            params = conversationParams,
-            assistantId = conversationAssistantId,
-            chatSessionId = state.activeChatSessionId,
-            knowledgeBaseIds = state.selectedKnowledgeBaseIds,
-            fileContextEnabled = assistantSnapshot?.fileContextEnabled
-                ?: state.selectedAssistant()?.fileContextEnabled
-                ?: true
-        ) }
-        val preflightRequest = ChatRequest(
-            messages = preflightMessages,
-            params = conversationParams,
-            protectedMessageIds = preflightMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-            runtimeSystemContext = listOf(preflightContext.runtimeSystemContext, characterMemoryContext)
-                .filter(String::isNotBlank).joinToString("\n\n")
-        )
-        val initialAdmission = localContextWindowAdmission(preflightRequest)
-        val preflightCompression = compressChatRequestContext(
-            request = preflightRequest,
-            settings = ContextCompressionSettings(
-                threshold = contextCompressionCoordinator.loadContextCompressionThreshold(),
-                keepRecentMessages = 8
-            ),
-            // Force a compression attempt when the first safety decision is a
-            // rejection.  This matters when the conservative token estimate is
-            // below the configured threshold but runtime bytes/code points are
-            // already over the window.
-            trigger = if (initialAdmission.isAccepted) {
-                ContextCompressionTrigger.AUTOMATIC
-            } else {
-                ContextCompressionTrigger.MANUAL
-            }
-        )
-        val compressedPreflightMessages = preflightCompression.request.messages
-        val rebuiltPreflightContext = withContext(Dispatchers.IO) { chatContextComposer.compose(
-            messages = compressedPreflightMessages,
-            params = conversationParams,
-            assistantId = conversationAssistantId,
-            chatSessionId = state.activeChatSessionId,
-            knowledgeBaseIds = state.selectedKnowledgeBaseIds,
-            fileContextEnabled = assistantSnapshot?.fileContextEnabled
-                ?: state.selectedAssistant()?.fileContextEnabled
-                ?: true
-        ) }
-        val finalPreflightRequest = preflightCompression.request.copy(
-            runtimeSystemContext = listOf(rebuiltPreflightContext.runtimeSystemContext, characterMemoryContext)
-                .filter(String::isNotBlank).joinToString("\n\n")
-        )
-        val admission = localContextWindowAdmission(finalPreflightRequest)
-        if (!admission.isAccepted) {
-            uiStateStore.update {
-                it.copy(
-                    statusMessage = if (state.input.contains(FILE_ATTACHMENT_MARKER)) {
-                        "当前文件内容超过模型上下文，消息未发送。请将长文件导入知识库后再提问。"
-                    } else {
-                        admission.userMessage
-                            ?: "当前输入无法放入本机安全上下文，请缩短后重试。"
-                    }
-                )
-            }
-            return
-        }
-        val currentOwner = uiStateStore.current
-        if (currentOwner.activeChatSessionId != state.activeChatSessionId ||
-            !currentOwner.canWriteToActiveAssistantSession() ||
-            currentOwner.input != state.input || currentOwner.messages != state.messages ||
-            currentOwner.selectedAssistantId != state.selectedAssistantId ||
-            currentOwner.assistants != state.assistants ||
-            currentOwner.assistantMemories != state.assistantMemories ||
-            currentOwner.selectedKnowledgeBaseIds != state.selectedKnowledgeBaseIds ||
-            currentOwner.worldBooks != state.worldBooks || currentOwner.params != state.params ||
-            currentOwner.selectedChatBackend != state.selectedChatBackend ||
-            currentOwner.loadedModelId != state.loadedModelId ||
-            currentOwner.selectedCloudChatModelId != state.selectedCloudChatModelId || currentOwner.isGenerating
-        ) return
-        discardPendingAssistantOutput()
-        val assistant = ChatMessage(Role.ASSISTANT, "")
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        var chatSessionIdForKnowledgeBinding: String? = null
-        var selectedKnowledgeBaseIdsForBinding: Set<String> = emptySet()
-        uiStateStore.update {
-            val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
-            chatSessionIdForKnowledgeBinding = sessionId
-            selectedKnowledgeBaseIdsForBinding = it.selectedKnowledgeBaseIds
-            val messages = it.messages + user + assistant
-            sessionsToPersist = it.chatSessions.upsertSessionFor(
-                state = it,
-                sessionId = sessionId,
-                messages = messages,
-                assistantId = conversationAssistantId,
-                assistantSnapshot = assistantSnapshot,
-                modelMode = it.selectedChatBackend.bindingValue(),
-                modelId = it.currentChatModelId()
-            )
-            it.copy(
-                input = "",
-                messages = messages,
-                activeChatSessionId = sessionId,
-                chatSessions = sessionsToPersist,
-                isGenerating = true,
-                promptContextUsage = contextCompressionCoordinator.promptContextUsageFor(
-                    plan = rebuiltPreflightContext,
-                    admission = admission,
-                    params = conversationParams
-                ),
-                statusMessage = null
-            ).withGenerationProgressCleared()
-        }
-        persistChatSessions(
-            sessions = sessionsToPersist,
-            knowledgeBinding = chatSessionIdForKnowledgeBinding?.let { sessionId ->
-                sessionId to selectedKnowledgeBaseIdsForBinding
-            }
-        )
-
-        // Retain originals for source IDs while carrying the exact admitted preflight snapshot.
-        startGeneration(
-            preflightMessages,
-            preflightCompression = preflightCompression.copy(request = finalPreflightRequest)
-        )
+        chatWorkflowCoordinator.sendPreparedMessage(this, state, preparedInput)
     }
 
     private fun invalidatePendingChatImagePreparation() =
@@ -1710,7 +1391,7 @@ class MainViewModel @JvmOverloads constructor(
         offlinePromptTranslationAndChatImageCoordinator.sendChatImagePrompt()
 
     /** Delegates to [runChatImagePromptBridge]. Signature kept verbatim. */
-    private fun sendChatImageRequestWithPromptBridge(
+    internal fun sendChatImageRequestWithPromptBridge(
         visibleUserText: String,
         prompt: String,
         requestedOutputCount: Int? = null,
@@ -1835,6 +1516,26 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun cancelGenerationJob(): UiGenerationCancellation =
         chatRuns.cancelCurrentAndCancelOwner()
+
+    internal fun startGenerationFromCoordinator(
+        requestMessages: List<ChatMessage>,
+        reservation: UiGenerationReservation? = null,
+        toolExchanges: List<ChatToolExchange> = emptyList(),
+        paramsOverride: GenerationParams? = null,
+        offerAssistantImageTool: Boolean = true,
+        chatModelIdOverride: String? = null,
+        continuationRequestId: String? = null,
+        preflightCompression: com.muyuchat.core.engine.ContextCompressionResult? = null
+    ): Boolean = startGeneration(
+        requestMessages = requestMessages,
+        reservation = reservation,
+        toolExchanges = toolExchanges,
+        paramsOverride = paramsOverride,
+        offerAssistantImageTool = offerAssistantImageTool,
+        chatModelIdOverride = chatModelIdOverride,
+        continuationRequestId = continuationRequestId,
+        preflightCompression = preflightCompression
+    )
 
     private fun startGeneration(
         requestMessages: List<ChatMessage>,
@@ -2607,7 +2308,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
-    private fun persistChatSessions(
+    internal fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
@@ -2687,8 +2388,8 @@ class MainViewModel @JvmOverloads constructor(
     private fun apiUrl(host: String): String =
         localApiRuntimeOwner.apiUrl(host)
 
-    private fun MainUiState.prepareChatInput(): PreparedChatInput =
-        chatInputAndAttachmentCoordinator.prepareChatInput(this)
+    internal fun prepareChatInput(state: MainUiState): PreparedChatInput =
+        chatInputAndAttachmentCoordinator.prepareChatInput(state)
 
     private fun mimeTypeForUri(uriString: String): String =
         chatInputAndAttachmentCoordinator.mimeTypeForUri(uriString)

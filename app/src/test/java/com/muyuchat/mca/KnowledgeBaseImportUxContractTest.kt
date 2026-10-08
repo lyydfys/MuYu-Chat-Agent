@@ -21,10 +21,22 @@ class KnowledgeBaseImportUxContractTest {
 
     @Test
     fun oversizedInlineFileGetsKnowledgeBaseRecoveryAdvice() {
-        val body = functionBody(mainViewModelSource(), "sendPreparedMessageAsync")
+        val body = functionBody(chatWorkflowCoordinatorSource(), "sendPreparedMessageAsync")
 
         assertTrue(body.contains("FILE_ATTACHMENT_MARKER"))
         assertTrue(body.contains("请将长文件导入知识库后再提问"))
+    }
+
+    private fun chatWorkflowCoordinatorSource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
+            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate ChatWorkflowCoordinator.kt")
     }
 
     private fun mainViewModelSource(): String {

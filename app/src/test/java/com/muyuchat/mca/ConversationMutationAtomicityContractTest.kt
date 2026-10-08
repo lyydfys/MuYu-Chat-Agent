@@ -97,7 +97,7 @@ class ConversationMutationAtomicityContractTest {
         val relative = when (functionName) {
             "selectChatSession" -> "src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"
             "stopGeneration" -> "src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt"
-            "deleteLastConversationTurn" -> "src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt"
+            "deleteLastConversationTurn", "sendMessage" -> "src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt"
             else -> return ""
         }
         return listOf(File(relative), File("app/$relative"))

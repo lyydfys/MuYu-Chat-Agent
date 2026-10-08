@@ -101,6 +101,12 @@ import org.junit.Test
  * (`continueAssistantImageToolTurnFor`, `removeChatImageContinuationPlaceholderFor`); one raw
  * `isGenerating = true` start site and one raw `isGenerating = false` reset left `MainViewModel`
  * (true: 3 -> 2, false: 2 -> 1). The accounting now scans the continuation owner file (1 start, 1 reset).
+ *
+ * ## Re-derivation recorded (R5)
+ *
+ * `sendMessage` / `sendPreparedMessageAsync` moved to `ChatWorkflowCoordinator.kt`; one raw
+ * `isGenerating = true` start site left `MainViewModel` (2 -> 1). The accounting now scans the
+ * workflow coordinator file (1 start, 0 reset).
  */
 class GenerationFlagAccountingContractTest {
 
@@ -130,13 +136,17 @@ class GenerationFlagAccountingContractTest {
     private val assistantImageContinuation: String by lazy {
         sourceFile("app/src/main/java/com/muyuchat/mca/AssistantImageToolContinuationOperations.kt")
     }
+    /** R5：sendMessage / sendPreparedMessageAsync 迁移至 ChatWorkflowCoordinator.kt。 */
+    private val chatWorkflow: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
+    }
 
     /**
      * Measured baseline across the files that own the flag's transitions.
      *
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
-    private val expectedTrueInViewModel = 2
+    private val expectedTrueInViewModel = 1
     private val expectedFalseInViewModel = 1
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
@@ -148,6 +158,8 @@ class GenerationFlagAccountingContractTest {
     private val expectedFalseInRuntimeLifecycle = 1
     private val expectedTrueInAssistantImageContinuation = 1
     private val expectedFalseInAssistantImageContinuation = 1
+    private val expectedTrueInChatWorkflow = 1
+    private val expectedFalseInChatWorkflow = 0
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -253,6 +265,8 @@ class GenerationFlagAccountingContractTest {
         val falseInRuntimeLifecycle = assignments(runtimeLifecycle).count { it.second == "false" }
         val trueInAssistantImageContinuation = assignments(assistantImageContinuation).count { it.second == "true" }
         val falseInAssistantImageContinuation = assignments(assistantImageContinuation).count { it.second == "false" }
+        val trueInChatWorkflow = assignments(chatWorkflow).count { it.second == "true" }
+        val falseInChatWorkflow = assignments(chatWorkflow).count { it.second == "false" }
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -280,6 +294,16 @@ class GenerationFlagAccountingContractTest {
             expectedFalseInAssistantImageContinuation,
             falseInAssistantImageContinuation
         )
+        assertEquals(
+            "ChatWorkflowCoordinator starts changed",
+            expectedTrueInChatWorkflow,
+            trueInChatWorkflow
+        )
+        assertEquals(
+            "ChatWorkflowCoordinator resets changed",
+            expectedFalseInChatWorkflow,
+            falseInChatWorkflow
+        )
     }
 
     @Test
@@ -295,7 +319,7 @@ class GenerationFlagAccountingContractTest {
         val owners = assignments(mainViewModel).filter { it.second == "true" }.map { ownerOf(it.first) }.toSet()
         assertEquals(
             "Start sites moved; this test's KDoc lists the entry points and must move with them.",
-            setOf("sendPreparedMessageAsync", "regenerateLastResponse"),
+            setOf("regenerateLastResponse"),
             owners
         )
         val continuationLines = assistantImageContinuation.lines()
@@ -312,6 +336,20 @@ class GenerationFlagAccountingContractTest {
             setOf("continueAssistantImageToolTurnFor"),
             continuationOwners
         )
+        val workflowLines = chatWorkflow.lines()
+        fun workflowOwnerOf(index: Int): String {
+            for (cursor in index downTo 0) {
+                Regex("""^\s*(?:internal |private |public )?(?:suspend )?fun (\w+)\(""")
+                    .find(workflowLines[cursor])?.let { return it.groupValues[1] }
+            }
+            return "?"
+        }
+        val workflowOwners = assignments(chatWorkflow).filter { it.second == "true" }
+            .map { workflowOwnerOf(it.first) }.toSet()
+        assertEquals(
+            setOf("sendPreparedMessageAsync"),
+            workflowOwners
+        )
     }
 
     @Test
@@ -323,6 +361,7 @@ class GenerationFlagAccountingContractTest {
         assertEquals("ChatGenerationUiPublisher", 0, exceptionSafeResets(publisher))
         assertEquals("ChatStopGenerationOperations", 0, exceptionSafeResets(stopOperations))
         assertEquals("AssistantImageToolContinuationOperations", 0, exceptionSafeResets(assistantImageContinuation))
+        assertEquals("ChatWorkflowCoordinator", 0, exceptionSafeResets(chatWorkflow))
     }
 
     // ── Positive controls ───────────────────────────────────────────────────────────────

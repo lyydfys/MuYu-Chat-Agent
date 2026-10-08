@@ -186,9 +186,9 @@ class KnowledgeBaseRoomContractTest {
             "replaceKnowledgeBindings("
         )
 
-        val source = sourceFile("MainViewModel.kt")
-        // P4: the session writer moved to ChatSessionPersistenceOperations; the assertions are
-        // unchanged -- the body is read where it now lives.
+        val source = sourceFile("ChatWorkflowCoordinator.kt")
+        // P4: the session writer moved to ChatSessionPersistenceOperations; sendMessage moved to
+        // ChatWorkflowCoordinator; the assertions are unchanged -- the body is read where it now lives.
         val persistBody = functionBody(sourceFile("ChatSessionPersistenceOperations.kt"), "runChatSessionPersistence")
         assertTrue(persistBody.contains("pendingKnowledgeBindings[sessionId] = knowledgeBaseIds.toSet()"))
         assertTrue(persistBody.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))

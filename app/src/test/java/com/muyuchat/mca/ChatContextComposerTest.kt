@@ -125,7 +125,7 @@ class ChatContextComposerTest {
     fun assistantFileContextSettingIsPassedToPreflightAndGenerationComposition() {
         // P3 step 1 moved the generation composition to ChatExecutionOperations.runChatGeneration;
         // the assertions are unchanged -- the generation half is read where it now lives.
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
         val execution = sourceFile("app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt")
 
         listOf(
@@ -138,7 +138,7 @@ class ChatContextComposerTest {
 
     @Test
     fun sendMessageCompressesAndRebuildsRuntimeContextBeforeFinalAdmission() {
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
         // The public sendMessage entry point performs the asynchronous attachment preflight;
         // the request admission/compression and persistence live in the synchronous handoff it
         // calls so the final request uses the exact deduplicated attachment snapshot.

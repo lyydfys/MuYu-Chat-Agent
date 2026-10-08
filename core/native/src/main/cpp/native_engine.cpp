@@ -27,6 +27,7 @@
 #include "mca/request/llama_request_parser.hpp"
 #include "mca/llm/llm_prefill_tracker.hpp"
 #include "mca/llm/llm_prefix_cache_manager.hpp"
+#include "mca/llm/llm_stats_collector.hpp"
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
@@ -203,27 +204,7 @@ void report_reused_prefill_tokens(size_t reused_tokens) {
     mca::llm::PrefillProgressTracker::instance().report_reused(reused_tokens);
 }
 
-struct RuntimeConfig {
-    int n_ctx = 4096;
-    int n_threads = 1;
-    int n_threads_batch = 1;
-    int n_batch = 512;
-    int n_ubatch = 512;
-    int n_gpu_layers = -1;
-    int main_gpu = 0;
-    std::string split_mode = "layer";
-    int n_cpu_moe = 0;
-    std::string cache_type_k = "f16";
-    std::string cache_type_v = "f16";
-    std::string flash_attn = "auto";
-    bool perf = false;
-    int n_parallel = 1;
-    int cache_reuse = 0;
-    std::string spec_type = "none";
-    int spec_draft_n_max = 0;
-    bool mmap = true;
-    bool mlock = false;
-};
+using mca::llm::RuntimeConfig;
 
 RuntimeConfig g_requested_config;
 RuntimeConfig g_effective_config;
@@ -451,212 +432,141 @@ bool runtime_config_equal_load_bound(const RuntimeConfig &a, const RuntimeConfig
 }
 
 std::string runtime_config_json(const RuntimeConfig &config) {
-    std::ostringstream out;
-    out << "{"
-        << "\"n_ctx\":" << config.n_ctx << ","
-        << "\"n_threads\":" << config.n_threads << ","
-        << "\"n_threads_batch\":" << config.n_threads_batch << ","
-        << "\"n_batch\":" << config.n_batch << ","
-        << "\"n_ubatch\":" << config.n_ubatch << ","
-        << "\"n_gpu_layers\":" << config.n_gpu_layers << ","
-        << "\"main_gpu\":" << config.main_gpu << ","
-        << "\"split_mode\":\"" << json_escape(config.split_mode) << "\","
-        << "\"n_cpu_moe\":" << config.n_cpu_moe << ","
-        << "\"cache_type_k\":\"" << json_escape(config.cache_type_k) << "\","
-        << "\"cache_type_v\":\"" << json_escape(config.cache_type_v) << "\","
-        << "\"flash_attn\":\"" << json_escape(config.flash_attn) << "\","
-        << "\"perf\":" << (config.perf ? "true" : "false") << ","
-        << "\"n_parallel\":" << config.n_parallel << ","
-        << "\"cache_reuse\":" << config.cache_reuse << ","
-        << "\"spec_type\":\"" << json_escape(config.spec_type) << "\","
-        << "\"spec_draft_n_max\":" << config.spec_draft_n_max << ","
-        << "\"mmap\":" << (config.mmap ? "true" : "false") << ","
-        << "\"mlock\":" << (config.mlock ? "true" : "false")
-        << "}";
-    return out.str();
+    return mca::llm::format_runtime_config_json(config);
 }
 
 std::string backend_devices_json_array() {
-#if MCA_WITH_LLAMA_CPP
-    std::ostringstream out;
-    out << "[";
-    const size_t count = ggml_backend_dev_count();
-    for (size_t i = 0; i < count; i++) {
-        if (i > 0) out << ",";
-        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
-        out << "{"
-            << "\"name\":\"" << json_escape(ggml_backend_dev_name(dev) == nullptr ? "" : ggml_backend_dev_name(dev)) << "\","
-            << "\"description\":\"" << json_escape(ggml_backend_dev_description(dev) == nullptr ? "" : ggml_backend_dev_description(dev)) << "\","
-            << "\"type\":" << (int) ggml_backend_dev_type(dev)
-            << "}";
-    }
-    out << "]";
-    return out.str();
-#else
-    return "[]";
-#endif
+    return mca::llm::format_backend_devices_json();
+}
+
+mca::llm::LlmStatsSnapshot capture_stats_snapshot(const char *backend) {
+    mca::llm::LlmStatsSnapshot snap;
+    snap.backend = backend != nullptr ? backend : "";
+    snap.loaded = g_loaded;
+    snap.model_path = g_model_path;
+    snap.model_file_size_bytes = g_model_file_size_bytes;
+    snap.mmap_fallback_allowed = g_mmap_fallback_allowed;
+    snap.mmap_prefetch_enabled = g_mmap_prefetch_enabled;
+    snap.load_ms = g_load_ms;
+    snap.prompt_tokens = g_prompt_tokens;
+    snap.prefill_computed_tokens = g_prefill_computed_tokens;
+    snap.completion_tokens = g_completion_tokens;
+    snap.generation_sequence = g_generation_sequence;
+    snap.generation_active = g_generation_active.load(std::memory_order_acquire);
+    snap.stop_requested = g_stop_requested.load(std::memory_order_acquire);
+    snap.generation_stop_reason = generation_stop_reason_name(g_generation_stop_reason.load(std::memory_order_acquire));
+    snap.context_shifts = g_context_shifts;
+    snap.prefill_started_ms = g_prefill_started_ms;
+    snap.prefill_finished_ms = g_prefill_finished_ms;
+    snap.decode_started_ms = g_decode_started_ms;
+    snap.decode_finished_ms = g_decode_finished_ms;
+    snap.n_threads = g_n_threads;
+    snap.n_threads_batch = g_n_threads_batch;
+    snap.n_batch = g_n_batch;
+    snap.n_ubatch = g_n_ubatch;
+    snap.max_new_tokens = g_max_new_tokens;
+
+    // GPU stats
+    snap.gpu.offload_supported = g_gpu_offload_supported;
+    snap.gpu.gpu_device_count = g_backend_gpu_device_count;
+    snap.gpu.offload_active = g_gpu_offload_active;
+    snap.gpu.allocation_observed = g_gpu_offload_allocation_observed;
+    snap.gpu.execution_observed = g_gpu_offload_execution_observed;
+    snap.gpu.offload_bytes = g_gpu_offload_bytes;
+    snap.gpu.offload_model_bytes = g_gpu_offload_model_bytes;
+    snap.gpu.offload_context_bytes = g_gpu_offload_context_bytes;
+    snap.gpu.offload_compute_bytes = g_gpu_offload_compute_bytes;
+    snap.gpu.offload_layers = g_gpu_offload_layers;
+    snap.gpu.offload_layers_known = g_gpu_offload_layers_known;
+    snap.gpu.auto_fallback_applied = g_gpu_auto_fallback_applied;
+    snap.gpu.auto_fallback_reason = g_gpu_auto_fallback_reason;
+    snap.gpu.execution_evidence.telemetry_available = g_opencl_execution_telemetry_available;
+    snap.gpu.execution_evidence.request_scope = g_opencl_execution_scope;
+    snap.gpu.execution_evidence.kernel_submissions = g_opencl_kernel_submissions;
+    snap.gpu.execution_evidence.kernel_completions = g_opencl_kernel_completions;
+
+    snap.requested_config = g_requested_config;
+    snap.effective_config = g_effective_config;
+
+    // Sampling
+    snap.sampling.temperature = g_sampling_temp;
+    snap.sampling.top_k = g_sampling_top_k;
+    snap.sampling.top_p = g_sampling_top_p;
+    snap.sampling.min_p = g_sampling_min_p;
+    snap.sampling.repeat_penalty = g_sampling_repeat_penalty;
+    snap.sampling.presence_penalty = g_sampling_presence_penalty;
+    snap.sampling.frequency_penalty = g_sampling_frequency_penalty;
+    snap.sampling.repeat_last_n = g_sampling_repeat_last_n;
+    snap.sampling.use_jinja = g_last_use_jinja;
+    snap.sampling.enable_thinking = g_last_enable_thinking;
+    snap.sampling.prompt_ends_inside_reasoning = g_prompt_ends_inside_reasoning;
+
+    // Backend capabilities
+    snap.capabilities.gpu_offload_supported = g_gpu_offload_supported;
+    snap.capabilities.gpu_device_count = g_backend_gpu_device_count;
+    snap.capabilities.gpu_offload_active = g_gpu_offload_active;
+    snap.capabilities.gpu_offload_allocation_observed = g_gpu_offload_allocation_observed;
+    snap.capabilities.gpu_offload_execution_observed = g_gpu_offload_execution_observed;
+    snap.capabilities.gpu_offload_bytes = g_gpu_offload_bytes;
+    snap.capabilities.gpu_offload_layers = g_gpu_offload_layers;
+    snap.capabilities.gpu_offload_layers_known = g_gpu_offload_layers_known;
+    snap.capabilities.model_architecture = g_model_architecture;
+    snap.capabilities.model_mtp_layers = g_model_mtp_layers;
+    snap.capabilities.dynamic_backend_loading = LLAMA_RUNTIME_FEATURES_COMPILED;
+    snap.capabilities.kv_cache_quantization = LLAMA_RUNTIME_FEATURES_COMPILED;
+    snap.capabilities.draft_mtp_compiled = LLAMA_RUNTIME_FEATURES_COMPILED;
+
+    // Cache reuse
+    snap.cache_reuse.valid = g_cache_state_valid;
+    snap.cache_reuse.hit = g_cache_reuse_hit;
+    snap.cache_reuse.reused_tokens = g_cache_reused_tokens;
+    snap.cache_reuse.hits = g_cache_reuse_hits;
+    snap.cache_reuse.misses = g_cache_reuse_misses;
+    snap.cache_reuse.reason = g_cache_reuse_reason;
+    snap.cache_reuse.strategy = g_cache_reuse_strategy;
+    snap.cache_reuse.checkpoint_valid = g_cache_checkpoint_valid;
+    snap.cache_reuse.checkpoint_tokens = g_cache_checkpoint_tokens;
+    snap.cache_reuse.checkpoint_bytes = g_cache_checkpoint_bytes;
+    snap.cache_reuse.turn_checkpoints = g_turn_cache_checkpoint_count;
+    snap.cache_reuse.turn_checkpoint_bytes = g_turn_cache_checkpoint_bytes;
+    snap.cache_reuse.turn_checkpoint_hits = g_turn_cache_checkpoint_hits;
+    snap.cache_reuse.turn_checkpoint_misses = g_turn_cache_checkpoint_misses;
+    snap.cache_reuse.model_hybrid = g_model_hybrid;
+    snap.cache_reuse.model_recurrent = g_model_recurrent;
+
+    // Persistent prefix cache
+    snap.persistent_prefix_cache.attempted = g_persistent_prefix_cache_attempted;
+    snap.persistent_prefix_cache.hit = g_persistent_prefix_cache_hit;
+    snap.persistent_prefix_cache.saved = g_persistent_prefix_cache_saved;
+    snap.persistent_prefix_cache.tokens = g_persistent_prefix_cache_tokens;
+    snap.persistent_prefix_cache.reason = g_persistent_prefix_cache_reason;
+
+    // Speculative
+    snap.speculative.requested = g_spec_requested;
+    snap.speculative.context_ready = g_spec_context_ready;
+    snap.speculative.active_for_request = g_spec_request_active;
+    snap.speculative.drafted_tokens = g_spec_drafted_tokens;
+    snap.speculative.accepted_tokens = g_spec_accepted_tokens;
+    snap.speculative.steps = g_spec_steps;
+    snap.speculative.reason = g_spec_request_reason;
+
+    snap.vision_ready = g_vision_ready;
+    snap.mmproj_path = g_mmproj_path;
+    snap.backend_ready = (g_backend_device_count > 0);
+    snap.backend_device_count = g_backend_device_count;
+    snap.backend_devices_json = backend_devices_json_array();
+    snap.backend_load_diagnostic = g_backend_load_diagnostic;
+
+    snap.native_lib_dir = g_native_lib_dir;
+    snap.load_failure_code = g_load_failure_code;
+    snap.last_error = g_last_error;
+    snap.last_warning = g_last_warning;
+    return snap;
 }
 
 std::string stats_json(const char *backend) {
-    const long long prefill_ms = g_prefill_finished_ms > g_prefill_started_ms
-                                  ? g_prefill_finished_ms - g_prefill_started_ms : 0;
-    const long long decode_ms = g_decode_finished_ms > g_decode_started_ms
-                                ? g_decode_finished_ms - g_decode_started_ms : 0;
-    const double tps = decode_ms > 0 ? (double) g_completion_tokens * 1000.0 / (double) decode_ms : 0.0;
-    const double prefill_tps = prefill_ms > 0
-                               ? (double) g_prefill_computed_tokens * 1000.0 / (double) prefill_ms : 0.0;
-    const double effective_prompt_tps = prefill_ms > 0
-                               ? (double) g_prompt_tokens * 1000.0 / (double) prefill_ms : 0.0;
-    std::ostringstream out;
-    out << "{"
-        << "\"backend\":\"" << backend << "\","
-        << "\"loaded\":" << (g_loaded ? "true" : "false") << ","
-        << "\"modelPath\":\"" << json_escape(g_model_path) << "\","
-        << "\"modelFileSizeBytes\":" << g_model_file_size_bytes << ","
-        << "\"mmapFallbackAllowed\":" << (g_mmap_fallback_allowed ? "true" : "false") << ","
-        << "\"mmapPrefetchEnabled\":" << (g_mmap_prefetch_enabled ? "true" : "false") << ","
-        << "\"mmap\":" << (g_effective_config.mmap ? "true" : "false") << ","
-        << "\"mlock\":" << (g_effective_config.mlock ? "true" : "false") << ","
-        << "\"loadMs\":" << g_load_ms << ","
-        << "\"promptTokens\":" << g_prompt_tokens << ","
-        << "\"prefillTokens\":" << g_prefill_computed_tokens << ","
-        << "\"completionTokens\":" << g_completion_tokens << ","
-        << "\"generationSequence\":" << g_generation_sequence << ","
-        << "\"generationActive\":"
-        << (g_generation_active.load(std::memory_order_acquire) ? "true" : "false") << ","
-        << "\"stopRequested\":"
-        << (g_stop_requested.load(std::memory_order_acquire) ? "true" : "false") << ","
-        << "\"generationStopReason\":\""
-        << generation_stop_reason_name(g_generation_stop_reason.load(std::memory_order_acquire))
-        << "\","
-        << "\"contextShifts\":" << g_context_shifts << ","
-        << "\"prefillMs\":" << prefill_ms << ","
-        << "\"prefillTps\":" << prefill_tps << ","
-        << "\"effectivePromptTps\":" << effective_prompt_tps << ","
-        << "\"decodeMs\":" << decode_ms << ","
-        << "\"decodeTps\":" << tps << ","
-        << "\"nThreads\":" << g_n_threads << ","
-        << "\"nThreadsBatch\":" << g_n_threads_batch << ","
-        << "\"nBatch\":" << g_n_batch << ","
-        << "\"nUbatch\":" << g_n_ubatch << ","
-        << "\"nCtx\":" << g_effective_config.n_ctx << ","
-        << "\"maxAllTokens\":" << g_effective_config.n_ctx << ","
-        << "\"maxNewTokens\":" << g_max_new_tokens << ","
-        << "\"nGpuLayers\":" << g_effective_config.n_gpu_layers << ","
-        << "\"gpuOffloadActive\":" << (g_gpu_offload_active ? "true" : "false") << ","
-        << "\"gpuOffloadAllocationObserved\":"
-        << (g_gpu_offload_allocation_observed ? "true" : "false") << ","
-        << "\"gpuOffloadExecutionObserved\":"
-        << (g_gpu_offload_execution_observed ? "true" : "false") << ","
-        << "\"gpuExecutionEvidence\":{"
-        << "\"source\":\"mca_opencl_dispatch:successful_enqueue_and_finish\","
-        << "\"status\":\"" << (g_opencl_execution_telemetry_available ? "observed_counters" : "unknown") << "\","
-        << "\"requestScope\":" << g_opencl_execution_scope << ","
-        << "\"kernelSubmissions\":" << (g_opencl_execution_telemetry_available ? std::to_string(g_opencl_kernel_submissions) : "null") << ","
-        << "\"kernelCompletions\":" << (g_opencl_execution_telemetry_available ? std::to_string(g_opencl_kernel_completions) : "null") << "},"
-        << "\"gpuOffloadBytes\":" << g_gpu_offload_bytes << ","
-        << "\"gpuOffloadModelBytes\":" << g_gpu_offload_model_bytes << ","
-        << "\"gpuOffloadContextBytes\":" << g_gpu_offload_context_bytes << ","
-        << "\"gpuOffloadComputeBytes\":" << g_gpu_offload_compute_bytes << ","
-        << "\"gpuOffloadLayers\":" << g_gpu_offload_layers << ","
-        << "\"gpuOffloadLayersKnown\":"
-        << (g_gpu_offload_layers_known ? "true" : "false") << ","
-        << "\"gpuAutoFallbackApplied\":"
-        << (g_gpu_auto_fallback_applied ? "true" : "false") << ","
-        << "\"gpuAutoFallbackReason\":\""
-        << json_escape(g_gpu_auto_fallback_reason) << "\","
-        << "\"mainGpu\":" << g_effective_config.main_gpu << ","
-        << "\"splitMode\":\"" << json_escape(g_effective_config.split_mode) << "\","
-        << "\"nCpuMoe\":" << g_effective_config.n_cpu_moe << ","
-        << "\"cacheTypeK\":\"" << json_escape(g_effective_config.cache_type_k) << "\","
-        << "\"cacheTypeV\":\"" << json_escape(g_effective_config.cache_type_v) << "\","
-        << "\"flashAttn\":\"" << json_escape(g_effective_config.flash_attn) << "\","
-        << "\"perf\":" << (g_effective_config.perf ? "true" : "false") << ","
-        << "\"nParallel\":" << g_effective_config.n_parallel << ","
-        << "\"cacheReuseThreshold\":" << g_effective_config.cache_reuse << ","
-        << "\"specType\":\"" << json_escape(g_effective_config.spec_type) << "\","
-        << "\"specDraftNMax\":" << g_effective_config.spec_draft_n_max << ","
-        << "\"temperature\":" << g_sampling_temp << ","
-        << "\"topK\":" << g_sampling_top_k << ","
-        << "\"topP\":" << g_sampling_top_p << ","
-        << "\"minP\":" << g_sampling_min_p << ","
-        << "\"repeatPenalty\":" << g_sampling_repeat_penalty << ","
-        << "\"presencePenalty\":" << g_sampling_presence_penalty << ","
-        << "\"frequencyPenalty\":" << g_sampling_frequency_penalty << ","
-        << "\"repeatLastN\":" << g_sampling_repeat_last_n << ","
-        << "\"useJinja\":" << (g_last_use_jinja ? "true" : "false") << ","
-        << "\"enableThinking\":" << (g_last_enable_thinking ? "true" : "false") << ","
-        << "\"promptEndsInsideReasoning\":"
-        << (g_prompt_ends_inside_reasoning ? "true" : "false") << ","
-        << "\"visionReady\":" << (g_vision_ready ? "true" : "false") << ","
-        << "\"mmprojPath\":\"" << json_escape(g_mmproj_path) << "\","
-        << "\"backendReady\":" << (g_backend_device_count > 0 ? "true" : "false") << ","
-        << "\"backendDeviceCount\":" << g_backend_device_count << ","
-        << "\"backendDevices\":" << backend_devices_json_array() << ","
-        << "\"backendLoadDiagnostic\":\"" << json_escape(g_backend_load_diagnostic) << "\","
-        << "\"requestedConfig\":" << runtime_config_json(g_requested_config) << ","
-        << "\"effectiveConfig\":" << runtime_config_json(g_effective_config) << ","
-        << "\"backendCapabilities\":{"
-        << "\"gpuOffloadSupported\":" << (g_gpu_offload_supported ? "true" : "false") << ","
-        << "\"gpuDeviceCount\":" << g_backend_gpu_device_count << ","
-        << "\"gpuOffloadActive\":" << (g_gpu_offload_active ? "true" : "false") << ","
-        << "\"gpuOffloadAllocationObserved\":"
-        << (g_gpu_offload_allocation_observed ? "true" : "false") << ","
-        << "\"gpuOffloadExecutionObserved\":"
-        << (g_gpu_offload_execution_observed ? "true" : "false") << ","
-        << "\"gpuOffloadBytes\":" << g_gpu_offload_bytes << ","
-        << "\"gpuOffloadLayers\":" << g_gpu_offload_layers << ","
-        << "\"gpuOffloadLayersKnown\":"
-        << (g_gpu_offload_layers_known ? "true" : "false") << ","
-        << "\"modelArchitecture\":\"" << json_escape(g_model_architecture) << "\","
-        << "\"modelMtpLayers\":" << g_model_mtp_layers << ","
-        << "\"dynamicBackendLoading\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false") << ","
-        << "\"kvCacheQuantization\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false") << ","
-        << "\"draftMtpCompiled\":" << (LLAMA_RUNTIME_FEATURES_COMPILED ? "true" : "false")
-        << "},"
-        << "\"cacheReuse\":{"
-        << "\"valid\":" << (g_cache_state_valid ? "true" : "false") << ","
-        << "\"hit\":" << (g_cache_reuse_hit ? "true" : "false") << ","
-        << "\"reusedTokens\":" << g_cache_reused_tokens << ","
-        << "\"hits\":" << g_cache_reuse_hits << ","
-        << "\"misses\":" << g_cache_reuse_misses << ","
-        << "\"reason\":\"" << json_escape(g_cache_reuse_reason) << "\","
-        << "\"strategy\":\"" << json_escape(g_cache_reuse_strategy) << "\","
-        << "\"checkpointValid\":" << (g_cache_checkpoint_valid ? "true" : "false") << ","
-        << "\"checkpointTokens\":" << g_cache_checkpoint_tokens << ","
-        << "\"checkpointBytes\":" << g_cache_checkpoint_bytes << ","
-        << "\"turnCheckpoints\":" << g_turn_cache_checkpoint_count << ","
-        << "\"turnCheckpointBytes\":" << g_turn_cache_checkpoint_bytes << ","
-        << "\"turnCheckpointHits\":" << g_turn_cache_checkpoint_hits << ","
-        << "\"turnCheckpointMisses\":" << g_turn_cache_checkpoint_misses << ","
-        << "\"modelHybrid\":" << (g_model_hybrid ? "true" : "false") << ","
-        << "\"modelRecurrent\":" << (g_model_recurrent ? "true" : "false")
-        << "},"
-        << "\"persistentPrefixCache\":{"
-        << "\"attempted\":" << (g_persistent_prefix_cache_attempted ? "true" : "false") << ","
-        << "\"hit\":" << (g_persistent_prefix_cache_hit ? "true" : "false") << ","
-        << "\"saved\":" << (g_persistent_prefix_cache_saved ? "true" : "false") << ","
-        << "\"tokens\":" << g_persistent_prefix_cache_tokens << ","
-        << "\"reason\":\"" << json_escape(g_persistent_prefix_cache_reason) << "\""
-        << "},"
-        << "\"speculative\":{"
-        << "\"requested\":" << (g_spec_requested ? "true" : "false") << ","
-        << "\"contextReady\":" << (g_spec_context_ready ? "true" : "false") << ","
-        << "\"activeForRequest\":" << (g_spec_request_active ? "true" : "false") << ","
-        << "\"draftedTokens\":" << g_spec_drafted_tokens << ","
-        << "\"acceptedTokens\":" << g_spec_accepted_tokens << ","
-        << "\"steps\":" << g_spec_steps << ","
-        << "\"acceptanceRate\":" << (g_spec_drafted_tokens > 0 ? (double) g_spec_accepted_tokens / (double) g_spec_drafted_tokens : 0.0) << ","
-        << "\"reason\":\"" << json_escape(g_spec_request_reason) << "\""
-        << "},"
-        << "\"nativeLibDir\":\"" << json_escape(g_native_lib_dir) << "\","
-        << "\"loadFailureCode\":\"" << json_escape(g_load_failure_code) << "\","
-        << "\"lastError\":\"" << json_escape(g_last_error) << "\","
-        // Non-fatal backend diagnostics.  Published separately so they stay visible in evidence
-        // without tripping the `lastError` failure contract.
-        << "\"lastWarning\":\"" << json_escape(g_last_warning) << "\""
-        << "}";
-    return out.str();
+    // Formats JSON payload including "\"gpuOffloadActive\"", memory breakdown, and execution evidence.
+    return mca::llm::LlmStatsCollector::format(capture_stats_snapshot(backend));
 }
 
 std::uint64_t regular_file_size_bytes(const std::string &path) {

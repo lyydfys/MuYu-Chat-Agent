@@ -122,7 +122,22 @@ int main(int argc, char** argv) {
     assert(argc == 2);
     const std::string source = read_text(argv[1]);
 
-    const auto parser = function_body(source, "bool parse_mnn_semantic_execution_contract(");
+    std::string parser_source = source;
+    if (parser_source.find("const size_t expectedTokenCount =") == std::string::npos) {
+        std::string dir = argv[1];
+        const auto last_slash = dir.find_last_of("/\\");
+        if (last_slash != std::string::npos) {
+            dir = dir.substr(0, last_slash);
+        }
+        const std::string extracted_path = dir + "/mca/mnn/mnn_protocol_parser.cpp";
+        std::ifstream extracted_file(extracted_path, std::ios::binary);
+        if (extracted_file.good()) {
+            std::ostringstream buf;
+            buf << extracted_file.rdbuf();
+            parser_source = buf.str();
+        }
+    }
+    const auto parser = function_body(parser_source, "bool parse_mnn_semantic_execution_contract(");
     require_contains(parser, "const size_t expectedTokenCount =");
     require_contains(parser, "(contract.use_cfg ? 2U : 1U)");
     require_contains(parser, "contract.token_count != expectedTokenCount");
