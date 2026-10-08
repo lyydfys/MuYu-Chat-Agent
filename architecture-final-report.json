@@ -1,19 +1,32 @@
 {
-  "title": "MCA Enterprise S-Grade Architecture Final Audit Report",
+  "title": "MCA Enterprise S-Grade Architecture Audit Report (Corrected Baseline)",
   "working_tree": "E:\\MAC",
-  "overall_status": "S_GRADE_READY",
+  "overall_status": "IN_PROGRESS_SCAFFOLDING",
+  "real_progress_estimate": "25% (R0/R1 85%, R2 40%, R3 15%, R4-R6 0%, R7 55%)",
   "gate_results": {
-    "architecture_rules": "PASSED",
-    "release_integrity": "PASSED",
-    "fault_injection_matrix": "PASSED",
+    "architecture_rules": "PASSED_SCAFFOLD",
+    "release_integrity": "PASSED_ARTIFACTS",
+    "fault_injection_matrix": "PAPER_SCAFFOLD",
     "local_only_guard": "PASSED",
     "required_reports": "PASSED"
   },
   "universal_device_admission": "VERIFIED_COMPLIANT",
   "local_only_guard": "VERIFIED_ISOLATED",
   "rating_evaluation": {
-    "S-C": "VERIFIED (Full Cross-layer Single-Owner Contract Frozen)",
-    "S-R": "VERIFIED (22-Scenario Fault Matrix, 16KB Page-Size, RAII & Epoch Watchdogs)",
-    "S-O": "VERIFIED (Redacted PII Telemetry, SLO Runbook, Incident Playbooks)"
+    "S-C": "PARTIAL_SCAFFOLD (Cross-layer contracts frozen, 36,147 lines in 4 giant bridges remain untouched)",
+    "S-R": "UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still 2,734 lines)",
+    "S-O": "UNVERIFIED_DEVICE (SBOM & Docs scaffolded, pending real ARM64 hardware build and release logs)"
+  },
+  "giant_bridges_debt": {
+    "qnn_native_bridge.cpp": 14366,
+    "mnn_native_engine.cpp": 11398,
+    "native_engine.cpp": 4480,
+    "stable_diffusion_bridge.cpp": 5903,
+    "total_unmigrated_lines": 36147
+  },
+  "viewmodel_debt": {
+    "MainViewModel.kt": 2760,
+    "target_lines": 600,
+    "over_lines": 2160
   }
 }
