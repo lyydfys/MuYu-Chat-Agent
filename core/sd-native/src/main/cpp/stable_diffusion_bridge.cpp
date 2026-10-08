@@ -48,6 +48,7 @@
 #include "mca/sd/sd_runtime_diagnostics.hpp"
 #include "mca/sd/sd_upscaler.hpp"
 #include "mca/sd/sd_context_key.hpp"
+#include "mca/sd/sd_effective_config.hpp"
 using mca::sd::progress_to_json;
 using mca::sd::runtime_config_json;
 using mca::sd::set_progress_from_sd_log;
@@ -122,6 +123,9 @@ using mca::sd::backend_denoising_strength;
 using mca::sd::resolve_qwen_turbo_schedule;
 using mca::sd::resolve_sampler_contract;
 using mca::sd::parse_execution_contract;
+using mca::sd::observed_prediction_wire;
+using mca::sd::runtime_failure;
+using mca::sd::native_effective_json;
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -664,92 +668,6 @@ sd_ctx_t *ensure_context(const ComponentPaths &paths,
     }
     g_ctx_key = ctx_key;
     return g_ctx;
-}
-
-std::string observed_prediction_wire(int prediction) {
-    switch (prediction) {
-        case EPS_PRED: return "EPSILON";
-        case V_PRED:
-        case EDM_V_PRED: return "V_PREDICTION";
-        case FLOW_PRED:
-        case FLUX_FLOW_PRED:
-        case FLUX2_FLOW_PRED: return "FLOW";
-        default:
-            unsupported_contract(
-                    "predictionType",
-                    "stable-diffusion.cpp did not expose an observed prediction mode");
-    }
-}
-
-json runtime_failure(const std::string &code, const std::string &message) {
-    return json({
-            {"ok", false},
-            {"errorCode", code},
-            {"error", message}
-    });
-}
-
-json native_effective_json(const StableDiffusionExecutionContract &contract,
-                           const std::string &prediction_wire,
-                           int actual_steps,
-                           int actual_timetable_count,
-                           int actual_unet_execution_count,
-                           double actual_cfg_scale,
-                           bool actual_use_cfg,
-                           int actual_token_count,
-                           bool actual_prompt_weighting_applied,
-                           int actual_positive_weighted_token_count,
-                           int actual_negative_weighted_token_count,
-                           const std::string &actual_prompt_weight_fingerprint,
-                           int actual_width,
-                           int actual_height) {
-    return json({
-            {"profileId", contract.profile_id},
-            {"profileRevision", contract.profile_revision},
-            {"modelFingerprint", lower_copy(contract.model_fingerprint)},
-            {"runtime", "STABLE_DIFFUSION_CPP"},
-            {"scheduler", contract.scheduler_wire},
-            {"predictionType", prediction_wire},
-            {"steps", actual_steps},
-            {"timetableCount", actual_timetable_count},
-            {"unetExecutionCount", actual_unet_execution_count},
-            {"cfgScale", actual_cfg_scale},
-            {"useCfg", actual_use_cfg},
-            {"unconditionalBranch", actual_use_cfg},
-            {"tokenizerBackend", "SDCPP_NATIVE"},
-            {"tokenCount", actual_token_count},
-            {"resolvedTokenCount", contract.token_count},
-            {"tokenizerMaxLength", contract.tokenizer_max_length},
-            {"promptWeightingSupported", contract.prompt_weighting_supported},
-            {"promptWeightingApplied", actual_prompt_weighting_applied},
-            {"positiveWeightedTokenCount", actual_positive_weighted_token_count},
-            {"negativeWeightedTokenCount", actual_negative_weighted_token_count},
-            {"promptWeightFingerprint", actual_prompt_weight_fingerprint},
-            {"embeddingDiskDataType", "RUNTIME_NATIVE"},
-            {"vaeScalingLocation", "RUNTIME_NATIVE"},
-            {"vaeScalingFactor", 1.0},
-            {"width", actual_width},
-            {"height", actual_height},
-            {"seed", contract.seed},
-            {"graphName", "runtime-native"},
-            {"fallback", false},
-            {"taskMode", contract.task_mode},
-            {"inputImagePath", ""},
-            {"maskImagePath", ""},
-            {"controlImagePath", ""},
-            {"inputImageExecutionCount", 0},
-            {"maskImageExecutionCount", 0},
-            {"controlImageExecutionCount", 0},
-            {"strength", contract.strength},
-            {"controlStrength", contract.control_strength},
-            {"clipSkip", contract.clip_skip},
-            {"batchCount", contract.batch_count},
-            {"vaeTiling", {
-                    {"enabled", contract.vae_tiling_enabled},
-                    {"tileSize", contract.vae_tile_size},
-                    {"overlap", contract.vae_tile_overlap}
-            }}
-    });
 }
 
 std::string generate_impl(const std::string &model_path,

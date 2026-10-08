@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.app.Application
 import com.muyuchat.mca.composition.MainCoordinatorAssembly
 import com.muyuchat.mca.composition.MainCoordinatorHost
+import com.muyuchat.mca.composition.MainCoordinatorHostAdapter
 import com.muyuchat.mca.composition.McaAppContainer
 import com.muyuchat.mca.composition.MainViewModelPortFactory
 import android.content.Context
@@ -84,7 +85,7 @@ enum class AppTab(val title: String) {
 class MainViewModel @JvmOverloads constructor(
     application: Application,
     private val deferStartup: Boolean = false,
-    private val skipInitialModelDiscovery: Boolean = false,
+    internal val skipInitialModelDiscovery: Boolean = false,
     injectedEngine: McaInferenceService? = null,
     injectedLocalApiRuntimeOwner: Any? = null,
     injectedChatAppearanceCoordinator: Any? = null,
@@ -115,7 +116,7 @@ class MainViewModel @JvmOverloads constructor(
         const val LOCAL_IMAGE_MODEL_CHOICE_PREFIX = "localimagemodel:"
     }
 
-    private val modelIdentityReferenceMigration = ModelIdentityReferenceMigration(application)
+    internal val modelIdentityReferenceMigration = ModelIdentityReferenceMigration(application)
     private val restoredModelIdentityReferences = runBlocking(Dispatchers.IO) {
         modelIdentityReferenceMigration.migratePendingReferences()
     }
@@ -126,10 +127,10 @@ class MainViewModel @JvmOverloads constructor(
     private val runtimeProfileStore = container.runtimeProfileStore
     /** User-facing sampling/reasoning values, isolated by local/cloud model identity. */
     private val modelGenerationProfileStore = container.modelGenerationProfileStore
-    private val installationScopeId = runBlocking(Dispatchers.IO) {
+    internal val installationScopeId = runBlocking(Dispatchers.IO) {
         runtimeProfileStore.installationScopeId()
     }
-    private val modelScopeClient = ModelScopeClient()
+    internal val modelScopeClient = ModelScopeClient()
     private val downloader = ResumableDownloader()
     /** R3-S37：应用更新端口具名适配器（容器工厂装配，出清 11 行匿名实现与 3 处 this@VM）。 */
     private val appUpdatePort: AppUpdatePort =
@@ -153,7 +154,7 @@ class MainViewModel @JvmOverloads constructor(
         installationScopeId = installationScopeId
     )
     private val apiKey = GenerationPreferences.loadOrCreateApiKey(application)
-    private val localApiRuntimeOwner: LocalApiRuntimeOwner =
+    internal val localApiRuntimeOwner: LocalApiRuntimeOwner =
         (injectedLocalApiRuntimeOwner as? LocalApiRuntimeOwner) ?: container.createLocalApiRuntimeOwner()
     private val initialApiPreferences = loadApiPreferences(application)
     /** Listener, notification, persisted intent, and UI state share this single lifecycle gate. */
@@ -164,14 +165,14 @@ class MainViewModel @JvmOverloads constructor(
         get() = localApiServerCoordinator.apiLifecycleRequestJob
         set(value) { localApiServerCoordinator.apiLifecycleRequestJob = value }
     /** Deduplicates repeated process-foreground callbacks and their worker health probes. */
-    private var foregroundRecoveryJob: Job? = null
+    internal var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
     internal val chatSessionStore = container.chatSessionStore
-    private val characterMemorySummaryCoordinator = CharacterMemorySummaryCoordinator()
+    internal val characterMemorySummaryCoordinator = CharacterMemorySummaryCoordinator()
     private val chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore
     private val worldBookStore = container.worldBookStore
     private val knowledgeBaseStore = container.knowledgeBaseStore
-    private val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
+    internal val knowledgeLibraryPort = StoreKnowledgeLibraryPort(worldBookStore, knowledgeBaseStore)
     internal val chatContextComposer =
         ChatContextComposer(StoreChatContextSources(worldBookStore, knowledgeBaseStore))
     private val imageLibraryBackup: ImageLibraryBackup
@@ -189,7 +190,7 @@ class MainViewModel @JvmOverloads constructor(
 
     private val cloudApiStore = container.cloudApiStore
     private val cloudChatProvider = container.cloudChatProvider
-    private val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    internal val offlinePromptTranslationService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         OfflinePromptTranslationService(AppOfflinePromptTranslationRuntimeProvider(application))
     }
     private val cloudImageProvider = container.cloudImageProvider
@@ -198,12 +199,12 @@ class MainViewModel @JvmOverloads constructor(
         set(value) {
             container.runtimeAdmission.activeWebSearchDeferred = value
         }
-    @Volatile private var activeWebSearchTaskId: String? = null
+    @Volatile internal var activeWebSearchTaskId: String? = null
     private val localImageModelStore = container.localImageModelStore
     private val localImageLoraStore = container.localImageLoraStore
     private val imageUpscalerPreferences: android.content.SharedPreferences
         get() = container.imageUpscalerPreferences
-    private val contextCompressionPreferences = application.getSharedPreferences(
+    internal val contextCompressionPreferences = application.getSharedPreferences(
         CONTEXT_COMPRESSION_PREFERENCES,
         Context.MODE_PRIVATE
     )
@@ -212,11 +213,11 @@ class MainViewModel @JvmOverloads constructor(
     private val localImageWorkerClient: LocalImageWorkerClient
         get() = container.localImageWorkerClient
     private val deviceProfileReader = container.deviceProfileReader
-    private val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
-    private val agentLogger = AgentDecisionLogger(application)
+    internal val benchmarkRunner = BenchmarkRunner(engine, deviceProfileReader)
+    internal val agentLogger = AgentDecisionLogger(application)
     private val benchmarkHistoryLogger = container.benchmarkHistoryLogger
     // R3/C1: 诊断族读写随 C1 裁定 B 移入 DiagnosticsOperations（体逐字、评测点不变）。
-    private val diagnosticsOperations = DiagnosticsOperations(
+    internal val diagnosticsOperations = DiagnosticsOperations(
         engine = engine,
         currentState = { uiStateStore.current },
         updateUiState = { transform -> uiStateStore.update(transform) },
@@ -231,7 +232,7 @@ class MainViewModel @JvmOverloads constructor(
     private val initialAssistants = assistantStore.loadAssistants(initialParams)
     private val loadedChatSessions = chatSessionStore.load()
     private val initialStoredSelectedAssistantId = assistantStore.loadSelectedAssistantId(initialAssistants)
-    private val initialChatSessions = loadedChatSessions
+    internal val initialChatSessions = loadedChatSessions
         .withInterruptedChatImageRequests()
         .withBackfilledAssistantSnapshots(initialAssistants)
         .let { sessions ->
@@ -286,7 +287,7 @@ class MainViewModel @JvmOverloads constructor(
     private val chatStreamAccumulator: ChatStreamAccumulator
         get() = container.chatStreamAccumulator
     /** Delegates to [ChatStreamAccumulator.append]. Signature kept verbatim. */
-    private fun appendAssistant(
+    internal fun appendAssistant(
         delta: String,
         reasoningDelta: String = "",
         reasoningDurationMs: Long = 0L,
@@ -301,7 +302,7 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     /** Delegates to [ChatStreamAccumulator.flush]. Signature kept verbatim. */
-    private fun flushPendingAssistantOutput(generationRunId: Long? = null): Boolean =
+    internal fun flushPendingAssistantOutput(generationRunId: Long? = null): Boolean =
         chatStreamAccumulator.flush(generationRunId)
 
     /** Delegates to [ChatStreamAccumulator.discard]. Signature kept verbatim. */
@@ -316,7 +317,7 @@ class MainViewModel @JvmOverloads constructor(
     private var localConversationContextInvalidationJob: Job?
         get() = container.runtimeAdmission.localConversationContextInvalidationJob
         set(value) { container.runtimeAdmission.localConversationContextInvalidationJob = value }
-    private val persistentPrefixCacheOperationSequence: AtomicLong
+    internal val persistentPrefixCacheOperationSequence: AtomicLong
         get() = cacheManagementCoordinator.persistentPrefixCacheOperationSequence
     /**
      * A destructive conversation edit is published to Room before native KV
@@ -375,7 +376,7 @@ class MainViewModel @JvmOverloads constructor(
     private var activeModelForRuntimeProfile: ModelManifest?
         get() = container.runtimeAdmission.activeModelForRuntimeProfile
         set(value) { container.runtimeAdmission.activeModelForRuntimeProfile = value }
-    private val localApiIdempotencyJournalLock = Any()
+    internal val localApiIdempotencyJournalLock = Any()
     internal var activeImageGenerationJobId: String?
         get() = container.runtimeAdmission.activeImageGenerationJobId
         set(value) { container.runtimeAdmission.activeImageGenerationJobId = value }
@@ -409,11 +410,11 @@ class MainViewModel @JvmOverloads constructor(
     ): ImageGenerationJobSpec? =
         chatImageWorkflowCoordinator.buildChatImageRetrySnapshot(request, chatSessionId)
 
-    private val uiStateStore = UiStateStore(bootstrapResult.uiState)
+    internal val uiStateStore = UiStateStore(bootstrapResult.uiState)
     // R3/C3-S5：chatRuns/流缓冲累加器入容器；terminalSettlement 端口具名化。
     private val chatStreamAccumulatorInit = container.initializeChatStreamAccumulator(uiStateStore, viewModelScope)
 
-    private val chatAppearanceCoordinator: ChatAppearanceCoordinator =
+    internal val chatAppearanceCoordinator: ChatAppearanceCoordinator =
         (injectedChatAppearanceCoordinator as? ChatAppearanceCoordinator)
             ?: container.createChatAppearanceCoordinator(
                 scope = viewModelScope,
@@ -423,13 +424,13 @@ class MainViewModel @JvmOverloads constructor(
 
     // R3/C3-S13：启动对账 owner（lazy async + await 状态写随 body 移出；start() 调用点不变；
     // 声明位于 init/startAfterConstruction 之前，保持与旧字段等价的初始化序）。
-    private val imageLibraryStartupReconciliation = container.createImageLibraryStartupReconciliation(
+    internal val imageLibraryStartupReconciliation = container.createImageLibraryStartupReconciliation(
         uiStateStore, viewModelScope, chatImageCommitRecoveryPort, bootstrapResult.initialKnowledgeBases
     )
-    private val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
+    internal val chatTerminalSettlementPort = container.createChatTerminalSettlementPort(uiStateStore)
     // R3/C3-S3：token 测量 host 具名化——容器工厂构造，两个缓存随迁（仅本端口使用）。
-    private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
-    private val webSearchWorkflowCoordinator: WebSearchWorkflowCoordinator =
+    internal val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
+    internal val webSearchWorkflowCoordinator: WebSearchWorkflowCoordinator =
         container.createWebSearchWorkflowCoordinator(uiStateStore, chatTerminalSettlementPort, viewModelScope)
     private val cacheManagementCoordinator: CacheManagementCoordinator =
         (injectedCacheManagementCoordinator as? CacheManagementCoordinator)
@@ -444,14 +445,14 @@ class MainViewModel @JvmOverloads constructor(
             )
     internal val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
-    private val tuningOwner = container.createTuningOwner(
+    internal val tuningOwner = container.createTuningOwner(
         store = uiStateStore,
         scope = viewModelScope,
         engine = engine
     )
     // R3/C2: 生图准入/执行唯一 owner（C0-a）：三处端口实现与两个直连调用点收敛到同一实例。
     // R3/C2-S3: host 由 McaAppContainer 工厂装配具名适配器，出清 97 行匿名 object 与 33 处 this 引用。
-    private val imageGenerationOwner: ImageGenerationOwner = container.createImageGenerationOwner(
+    internal val imageGenerationOwner: ImageGenerationOwner = container.createImageGenerationOwner(
         store = uiStateStore,
         scope = viewModelScope,
         engine = engine,
@@ -485,7 +486,7 @@ class MainViewModel @JvmOverloads constructor(
      * New code that only wants to say something to the user must call this, not `copy` directly.
      * `StatusMessageWriterContractTest` fails if a new single-field assignment appears.
      */
-    private fun showStatus(message: String?) {
+    internal fun showStatus(message: String?) {
         // R1/S11: 首个接入 UiStateStore 的生产写路径（同一底层流，CAS 语义不变）。
         // R3/C2: 漏斗体下移至 UiStateStore.showStatus；本方法保留为 VM 内唯一入口委托。
         uiStateStore.showStatus(message)
@@ -497,7 +498,7 @@ class MainViewModel @JvmOverloads constructor(
      * A failed contender keeps the flag asserted when another epoch still owns the coordinator.
      */
     /** Delegates to [tryAcquireObservedImageGenerationLeaseFor]. Signature kept verbatim. */
-    private fun tryAcquireObservedImageGenerationLease(
+    internal fun tryAcquireObservedImageGenerationLease(
         requestId: String
     ): LocalImageGenerationCoordinator.Lease? =
         tryAcquireObservedImageGenerationLeaseFor(
@@ -508,7 +509,7 @@ class MainViewModel @JvmOverloads constructor(
         )
 
     /** Delegates to [releaseObservedImageGenerationLeaseFor]. Signature kept verbatim. */
-    private fun releaseObservedImageGenerationLease(
+    internal fun releaseObservedImageGenerationLease(
         lease: LocalImageGenerationCoordinator.Lease
     ): Boolean = releaseObservedImageGenerationLeaseFor(
         store = uiStateStore,
@@ -586,7 +587,7 @@ class MainViewModel @JvmOverloads constructor(
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
         chatImageWorkflowCoordinator.updateGenerationImageGrantReleaseDefer(defer)
 
-    private fun observeManagedDownloads() {
+    internal fun observeManagedDownloads() {
         modelImportAndDownloadCoordinator.observeManagedDownloads { image ->
             val selection = settleLocalImageSelection(image)
             uiStateStore.update { it.copy(
@@ -598,138 +599,7 @@ class MainViewModel @JvmOverloads constructor(
         }
     }
 
-    private val coordinatorHost = object : MainCoordinatorHost {
-        override val store get() = uiStateStore
-        override val scope get() = viewModelScope
-        override val application get() = getApplication<Application>()
-        override val container get() = this@MainViewModel.container
-        override val engine get() = this@MainViewModel.engine
-        override val initialChatSessions get() = this@MainViewModel.initialChatSessions
-        override val chatContextComposer get() = this@MainViewModel.chatContextComposer
-        override val tuningOwner get() = this@MainViewModel.tuningOwner
-        override val agentLogger get() = this@MainViewModel.agentLogger
-        override val benchmarkRunner get() = this@MainViewModel.benchmarkRunner
-        override val diagnosticsOperations get() = this@MainViewModel.diagnosticsOperations
-        override val localApiRuntimeOwner get() = this@MainViewModel.localApiRuntimeOwner
-        override val modelScopeClient get() = this@MainViewModel.modelScopeClient
-        override val installationScopeId get() = this@MainViewModel.installationScopeId
-        override val localApiIdempotencyJournalLock get() = this@MainViewModel.localApiIdempotencyJournalLock
-        override val characterMemorySummaryCoordinator get() = this@MainViewModel.characterMemorySummaryCoordinator
-        override val knowledgeLibraryPort get() = this@MainViewModel.knowledgeLibraryPort
-        override val contextCompressionPreferences get() = this@MainViewModel.contextCompressionPreferences
-        override val imageLibraryStartupReconciliation get() = this@MainViewModel.imageLibraryStartupReconciliation
-        override val persistentPrefixCacheOperationSequence get() = this@MainViewModel.persistentPrefixCacheOperationSequence
-        override val modelIdentityReferenceMigration get() = this@MainViewModel.modelIdentityReferenceMigration
-        override val skipInitialModelDiscovery get() = this@MainViewModel.skipInitialModelDiscovery
-        override val imagePromptTokenMeasurementHost get() = this@MainViewModel.imagePromptTokenMeasurementHost
-        override val visionAttachmentPort get() = this@MainViewModel.visionAttachmentPort
-        override val chatTerminalSettlementPort get() = this@MainViewModel.chatTerminalSettlementPort
-        override val webSearchWorkflowCoordinator get() = this@MainViewModel.webSearchWorkflowCoordinator
-        override val chatAppearanceCoordinator get() = this@MainViewModel.chatAppearanceCoordinator
-        override val imageUpscaleOwner get() = this@MainViewModel.imageUpscaleOwner
-        override val chatImageRequestPort get() = this@MainViewModel.chatImageRequestPort
-        override val imageLibraryCommitPort get() = this@MainViewModel.imageLibraryCommitPort
-        override val imageGenerationOwner get() = this@MainViewModel.imageGenerationOwner
-        override val offlinePromptTranslationService get() = this@MainViewModel.offlinePromptTranslationService
-
-        override var activeWebSearchTaskId: String?
-            get() = this@MainViewModel.activeWebSearchTaskId
-            set(value) { this@MainViewModel.activeWebSearchTaskId = value }
-        override var foregroundRecoveryJob: Job?
-            get() = this@MainViewModel.foregroundRecoveryJob
-            set(value) { this@MainViewModel.foregroundRecoveryJob = value }
-
-        override fun hostShowStatus(message: String?) = this@MainViewModel.showStatus(message)
-        override fun hostFail(message: String) = this@MainViewModel.fail(message)
-        override fun hostBusy(message: String) = this@MainViewModel.busy(message)
-        override fun hostFailDownload(message: String) = this@MainViewModel.failDownload(message)
-        override fun hostLoadModel(requestedModel: ModelManifest) = this@MainViewModel.loadModel(requestedModel)
-        override fun hostLaunchModelOperation(message: String, operation: suspend CoroutineScope.() -> Unit) =
-            this@MainViewModel.launchModelOperation(message, operation)
-        override fun hostTryAcquireObservedImageGenerationLease(requestId: String) =
-            this@MainViewModel.tryAcquireObservedImageGenerationLease(requestId)
-        override fun hostReleaseObservedImageGenerationLease(lease: LocalImageGenerationCoordinator.Lease) =
-            this@MainViewModel.releaseObservedImageGenerationLease(lease)
-        override fun hostPersistFiles(files: List<FileAssetRecord>) {
-            this@MainViewModel.persistFiles(files)
-        }
-        override fun hostPersistChatSessions(
-            sessions: List<ChatSessionRecord>?,
-            binding: Pair<String, Set<String>>?,
-            generationRunId: Long?
-        ) = this@MainViewModel.persistChatSessions(sessions, binding, generationRunId)
-        override fun hostBuildChatImageRetrySnapshot(request: ChatGeneratedImageRequest, sessionId: String) =
-            this@MainViewModel.buildChatImageRetrySnapshot(request, sessionId)
-        override fun hostChatImageNegativePromptSupported(state: MainUiState) =
-            this@MainViewModel.chatImageNegativePromptSupported(state)
-        override fun hostCancelImageGenerationForJob(expectedJobId: String?) =
-            this@MainViewModel.cancelImageGenerationForJob(expectedJobId)
-        override fun hostReserveUiGenerationStart() = this@MainViewModel.reserveUiGenerationStart()
-        override fun hostStartGeneration(
-            requestMessages: List<ChatMessage>,
-            reservation: UiGenerationReservation?,
-            toolExchanges: List<ChatToolExchange>,
-            paramsOverride: GenerationParams?,
-            offerAssistantImageTool: Boolean,
-            chatModelIdOverride: String?,
-            continuationRequestId: String?,
-            preflightCompression: com.muyuchat.core.engine.ContextCompressionResult?
-        ) = this@MainViewModel.startGeneration(
-            requestMessages, reservation, toolExchanges, paramsOverride,
-            offerAssistantImageTool, chatModelIdOverride, continuationRequestId, preflightCompression
-        )
-        override fun hostSendChatImageRequestWithPromptBridge(
-            visibleUserText: String,
-            prompt: String,
-            requestedOutputCount: Int?,
-            allowCloudTranslationFallback: Boolean
-        ) = this@MainViewModel.sendChatImageRequestWithPromptBridge(
-            visibleUserText, prompt, requestedOutputCount, allowCloudTranslationFallback
-        )
-        override fun hostSendPreparedMessage(state: MainUiState, preparedInput: PreparedChatInput) =
-            this@MainViewModel.sendPreparedMessage(state, preparedInput)
-        override fun hostPersistModelGenerationParams(state: MainUiState, params: GenerationParams) =
-            this@MainViewModel.persistModelGenerationParams(state, params)
-        override fun hostPersistModelGenerationParams(backend: ChatBackend, modelId: String?, params: GenerationParams) =
-            this@MainViewModel.persistModelGenerationParams(backend, modelId, params)
-        override fun hostUpdateParams(params: GenerationParams) = this@MainViewModel.updateParams(params)
-        override fun hostCancelGenerationJob() = this@MainViewModel.cancelGenerationJob()
-        override fun hostPublishManagedChatCatalogAfterValidation() =
-            this@MainViewModel.publishManagedChatCatalogAfterValidation()
-        override fun hostLoadModelGenerationParams(backend: ChatBackend, modelId: String?, defaults: GenerationParams) =
-            this@MainViewModel.loadModelGenerationParams(backend, modelId, defaults)
-        override fun hostCurrentDeviceProfile() = this@MainViewModel.currentDeviceProfile()
-        override fun hostMarkLocalConversationContextInvalid() = this@MainViewModel.markLocalConversationContextInvalid()
-        override fun hostEnqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
-            this@MainViewModel.enqueueManagedDownload(request, useAfterDownload)
-        override fun hostSelectChatSession(sessionId: String) = this@MainViewModel.selectChatSession(sessionId)
-        override fun hostNewChatForAssistant(assistant: AssistantRecord, bindDefaultModel: Boolean) =
-            this@MainViewModel.newChatForAssistant(assistant, bindDefaultModel)
-        override fun hostCaptureContentImportOwner() = this@MainViewModel.captureContentImportOwner()
-        override suspend fun hostStageContentImportPreview(preview: ContentImportPreview) =
-            this@MainViewModel.stageContentImportPreview(preview)
-        override fun hostReadAttachmentText(uri: Uri, maxBytes: Int) =
-            com.muyuchat.mca.readAttachmentText(getApplication<Application>().contentResolver, uri, maxBytes)
-        override fun hostObserveManagedDownloads() = this@MainViewModel.observeManagedDownloads()
-        override fun hostSchedulePersistentPrefixCacheClear(
-            operation: Long,
-            successMessage: String,
-            failureMessage: String
-        ) = this@MainViewModel.schedulePersistentPrefixCacheClear(operation, successMessage, failureMessage)
-        override fun hostAppendAssistant(
-            delta: String,
-            reasoningDelta: String,
-            reasoningDurationMs: Long,
-            forcePublish: Boolean,
-            generationRunId: Long?
-        ) = this@MainViewModel.appendAssistant(delta, reasoningDelta, reasoningDurationMs, forcePublish, generationRunId)
-        override fun hostFlushPendingAssistantOutput(generationRunId: Long?) =
-            this@MainViewModel.flushPendingAssistantOutput(generationRunId)
-        override suspend fun hostEnsureLocalConversationContextInvalidated() =
-            this@MainViewModel.ensureLocalConversationContextInvalidated()
-        override fun hostPrepareChatInput(state: MainUiState) =
-            this@MainViewModel.prepareChatInput(state)
-    }
+    private val coordinatorHost: MainCoordinatorHost = MainCoordinatorHostAdapter(this)
 
     private val coordinatorAssembly: MainCoordinatorAssembly = MainCoordinatorAssembly.create(
         host = coordinatorHost,
@@ -856,7 +726,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Delegates to [publishChatCatalogSnapshot]. */
-    private fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot =
+    internal fun publishManagedChatCatalogAfterValidation(): ManagedChatCatalogSnapshot =
         publishChatCatalogSnapshot(managedRuntimeReadinessPort)
 
 
@@ -971,7 +841,7 @@ class MainViewModel @JvmOverloads constructor(
     // R3/C3-S15：资产生成/放大两端口的具名适配器（owner 与 S13 对账 owner 均为真实对象注入）。
     private val imageAssetCreationPort: ImageAssetCreationPort
         get() = chatImageWorkflowCoordinator.imageAssetCreationPort
-    private val imageUpscaleOwner: ImageUpscaleOwner
+    internal val imageUpscaleOwner: ImageUpscaleOwner
         get() = chatImageWorkflowCoordinator.imageUpscaleOwner
     private val imagePromptTranslationPort: ImagePromptTranslationPort
         get() = chatImageWorkflowCoordinator.imagePromptTranslationPort
@@ -991,7 +861,7 @@ class MainViewModel @JvmOverloads constructor(
 
     fun cancelImageGeneration() = chatImageWorkflowCoordinator.cancelImageGeneration()
 
-    private fun cancelImageGenerationForJob(expectedJobId: String?) =
+    internal fun cancelImageGenerationForJob(expectedJobId: String?) =
         chatImageWorkflowCoordinator.cancelImageGenerationForJob(expectedJobId)
 
     private fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
@@ -1192,7 +1062,7 @@ class MainViewModel @JvmOverloads constructor(
     fun importAssistantCard(rawJson: String) = assistantProfileCoordinator.importAssistantCard(rawJson)
     internal fun restorePendingContentImportPreview() = contentImportPreviewCoordinator.restorePendingContentImportPreview()
     fun removeLocalImageModelRecord(modelId: String) = localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
-    private suspend fun stageContentImportPreview(preview: ContentImportPreview) = contentImportPreviewCoordinator.stageContentImportPreview(preview)
+    internal suspend fun stageContentImportPreview(preview: ContentImportPreview) = contentImportPreviewCoordinator.stageContentImportPreview(preview)
     fun cancelContentImportPreview(id: String) = contentImportPreviewCoordinator.cancelContentImportPreview(id)
     fun confirmContentImportPreview(id: String) = contentImportPreviewCoordinator.confirmContentImportPreview(id) { documentImportCoordinator.confirmKnowledgeDocumentImport(it) }
 
@@ -1306,7 +1176,7 @@ class MainViewModel @JvmOverloads constructor(
     fun resumeManagedDownloads() = modelImportAndDownloadCoordinator.resumeManagedDownloads()
 
 
-    private fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
+    internal fun enqueueManagedDownload(request: ManagedDownloadRequest, useAfterDownload: Boolean) =
         modelImportAndDownloadCoordinator.enqueueManagedDownload(request, useAfterDownload)
 
     internal fun launchModelOperation(
@@ -1362,7 +1232,7 @@ class MainViewModel @JvmOverloads constructor(
         offlinePromptTranslationAndChatImageCoordinator.sendChatImagePrompt()
 
     /** Delegates to [runChatImagePromptBridge]. Signature kept verbatim. */
-    private fun sendChatImageRequestWithPromptBridge(
+    internal fun sendChatImageRequestWithPromptBridge(
         visibleUserText: String,
         prompt: String,
         requestedOutputCount: Int? = null,
@@ -1393,7 +1263,7 @@ class MainViewModel @JvmOverloads constructor(
      * explicit non-empty options.negativePrompt would otherwise be rejected as a user override.
      */
     /** Delegates to [chatImageNegativePromptSupportedFor]. Signature kept verbatim. */
-    private fun chatImageNegativePromptSupported(state: MainUiState): Boolean =
+    internal fun chatImageNegativePromptSupported(state: MainUiState): Boolean =
         chatImageNegativePromptSupportedFor(state)
 
     internal fun chatImageToolPermissionUiState(): ChatImageToolPermissionUiState =
@@ -1494,10 +1364,10 @@ class MainViewModel @JvmOverloads constructor(
 
 
 
-    private fun reserveUiGenerationStart(): UiGenerationReservation? =
+    internal fun reserveUiGenerationStart(): UiGenerationReservation? =
         chatRuns.reserveStartAndCancelSuperseded()
 
-    private fun cancelGenerationJob(): UiGenerationCancellation =
+    internal fun cancelGenerationJob(): UiGenerationCancellation =
         chatRuns.cancelCurrentAndCancelOwner()
 
     internal fun startGenerationFromCoordinator(
@@ -1520,7 +1390,7 @@ class MainViewModel @JvmOverloads constructor(
         preflightCompression = preflightCompression
     )
 
-    private fun startGeneration(
+    internal fun startGeneration(
         requestMessages: List<ChatMessage>,
         reservation: UiGenerationReservation? = null,
         toolExchanges: List<ChatToolExchange> = emptyList(),
@@ -1581,7 +1451,7 @@ class MainViewModel @JvmOverloads constructor(
         if (!rejectWhileConversationMutationInProgress()) newChatForAssistant(uiStateStore.current.selectedAssistant())
     }
 
-    private fun newChatForAssistant(
+    internal fun newChatForAssistant(
         assistant: AssistantRecord?,
         bindDefaultModel: Boolean = false
     ): Boolean {
@@ -1639,7 +1509,7 @@ class MainViewModel @JvmOverloads constructor(
     fun clearPersistentPrefixCache() =
         cacheManagementCoordinator.clearPersistentPrefixCache()
 
-    private fun schedulePersistentPrefixCacheClear(
+    internal fun schedulePersistentPrefixCacheClear(
         operation: Long,
         successMessage: String,
         failureMessage: String
@@ -1849,10 +1719,10 @@ class MainViewModel @JvmOverloads constructor(
     )
 
     private val chatSessionPersistencePort: ChatSessionPersistencePort = ports.chatSessionPersistencePort
-    private val chatImageRequestPort: ChatImageRequestPort = ports.chatImageRequestPort
+    internal val chatImageRequestPort: ChatImageRequestPort = ports.chatImageRequestPort
     private val sendChatImageRequestPort: SendChatImageRequestPort = ports.sendChatImageRequestPort
     private val chatImageRetryPort: ChatImageRetryPort = ports.chatImageRetryPort
-    private val imageLibraryCommitPort: ImageLibraryCommitPort = ports.imageLibraryCommitPort
+    internal val imageLibraryCommitPort: ImageLibraryCommitPort = ports.imageLibraryCommitPort
     private val imageAssetDeletionPort: ImageAssetDeletionPort
         get() = chatImageWorkflowCoordinator.imageAssetDeletionPort
 
@@ -1908,12 +1778,12 @@ class MainViewModel @JvmOverloads constructor(
         mainPostStartupCoordinator.refreshPersistentPrefixCacheSummary()
 
 
-    private fun markLocalConversationContextInvalid() =
+    internal fun markLocalConversationContextInvalid() =
         markLocalConversationContextInvalidInto(container.runtimeAdmission, uiStateStore, viewModelScope, engine)
     private fun rejectWhileConversationMutationInProgress(): Boolean =
         rejectWhileConversationMutationInProgressInto(uiStateStore, container.runtimeAdmission)
 
-    private suspend fun ensureLocalConversationContextInvalidated(): Boolean {
+    internal suspend fun ensureLocalConversationContextInvalidated(): Boolean {
         // A delete/edit first commits Room, then invalidates native KV. Joining
         // this job preserves that ordering when the user immediately sends the
         // next message after a destructive conversation mutation.
@@ -1944,7 +1814,7 @@ class MainViewModel @JvmOverloads constructor(
     }
 
     /** Delegates to [runChatSessionPersistence]. Signature kept verbatim. */
-    private fun persistChatSessions(
+    internal fun persistChatSessions(
         sessions: List<ChatSessionRecord>? = null,
         knowledgeBinding: Pair<String, Set<String>>? = null,
         generationRunId: Long? = null
@@ -1973,20 +1843,20 @@ class MainViewModel @JvmOverloads constructor(
         )
     }
 
-    private fun persistFiles(files: List<FileAssetRecord> = uiStateStore.current.files) =
+    internal fun persistFiles(files: List<FileAssetRecord> = uiStateStore.current.files) =
         chatInputAndAttachmentCoordinator.persistFiles(files)
 
-    private fun busy(message: String) {
+    internal fun busy(message: String) {
         uiStateStore.update { it.copy(busy = true, statusMessage = message) }
     }
 
-    private fun failDownload(message: String) {
+    internal fun failDownload(message: String) {
         uiStateStore.update { it.copy(busy = false, downloadStatus = DownloadStatus.FAILED,
             downloadFailureSource = com.muyuchat.feature.modelhub.ModelHubDownloadFailureSource.DOWNLOAD,
             downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null, statusMessage = message) }
     }
 
-    private fun fail(message: String) {
+    internal fun fail(message: String) {
         uiStateStore.update { it.copy(busy = false, statusMessage = message) }
     }
 
@@ -2010,13 +1880,13 @@ class MainViewModel @JvmOverloads constructor(
     private fun persistApiPreferences(apiEnabled: Boolean, restEnabled: Boolean) =
         GenerationPreferences.persistApiPreferences(context = getApplication(), apiEnabled = apiEnabled, restEnabled = restEnabled)
 
-    private fun loadModelGenerationParams(backend: ChatBackend, modelId: String?, defaults: GenerationParams): GenerationParams =
+    internal fun loadModelGenerationParams(backend: ChatBackend, modelId: String?, defaults: GenerationParams): GenerationParams =
         loadModelGenerationParamsFor(modelGenerationProfileStore, backend, modelId, defaults)
 
-    private fun persistModelGenerationParams(state: MainUiState, params: GenerationParams) =
+    internal fun persistModelGenerationParams(state: MainUiState, params: GenerationParams) =
         persistModelGenerationParams(backend = state.selectedChatBackend, modelId = state.currentChatModelId(), params = params)
 
-    private fun persistModelGenerationParams(backend: ChatBackend, modelId: String?, params: GenerationParams) =
+    internal fun persistModelGenerationParams(backend: ChatBackend, modelId: String?, params: GenerationParams) =
         GenerationPreferences.persistModelGenerationParams(modelGenerationProfileStore, backend, modelId, params)
 
     private fun loadGenerationParams(application: Application): GenerationParams =

@@ -123,7 +123,8 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_device_support.cpp
         mca/qnn/qnn_tensor_inspect.cpp
         mca/qnn/qnn_ultrafix_handler.cpp
-        mca/qnn/qnn_inpaint_blend.cpp)
+        mca/qnn/qnn_inpaint_blend.cpp
+        mca/qnn/qnn_contract_parser.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
