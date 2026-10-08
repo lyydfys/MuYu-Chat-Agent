@@ -58,6 +58,7 @@
 #include "mca/qnn/qnn_tensor_inspect.hpp"
 #include "mca/qnn/qnn_ultrafix_handler.hpp"
 #include "mca/qnn/qnn_image_writer.hpp"
+#include "mca/qnn/qnn_inpaint_blend.hpp"
 #include "../../../../../third_party/llama.cpp/vendor/nlohmann/json.hpp"
 
 using mca::qnn::QnnImagePreviewProgress;
@@ -3748,105 +3749,8 @@ std::string qnn_tensor_list_debug_json(const std::vector<QnnTensorBinding>& tens
     return out.str();
 }
 
-bool qnn_laplacian_blend_inpaint_vae_output(
-        const QnnTensorBinding& tensor,
-        const std::vector<float>& generated_values,
-        mca::qnn::ImagePixelRange pixel_range,
-        const std::vector<float>& source_nchw,
-        const std::vector<float>& full_mask,
-        std::vector<float>* blended_values,
-        int* blend_levels,
-        uint64_t* blend_checksum,
-        std::string* error) {
-    if (blended_values == nullptr || blend_levels == nullptr ||
-        blend_checksum == nullptr || error == nullptr || tensor.dimensions.size() != 4U) {
-        if (error != nullptr) *error = "Inpaint VAE pixel blend arguments are invalid.";
-        return false;
-    }
-    bool nchw = false;
-    size_t width = 0U;
-    size_t height = 0U;
-    if (tensor.dimensions[0] == 1U && tensor.dimensions[1] == 3U) {
-        nchw = true;
-        height = tensor.dimensions[2];
-        width = tensor.dimensions[3];
-    } else if (tensor.dimensions[0] == 1U && tensor.dimensions[3] == 3U) {
-        height = tensor.dimensions[1];
-        width = tensor.dimensions[2];
-    } else {
-        *error = "Inpaint VAE pixel blend requires one RGB NCHW or NHWC output.";
-        return false;
-    }
-    const uint64_t plane_u64 = static_cast<uint64_t>(width) * static_cast<uint64_t>(height);
-    if (width == 0U || height == 0U ||
-        plane_u64 > std::numeric_limits<size_t>::max() / 3U) {
-        *error = "Inpaint VAE pixel blend dimensions overflow the host buffer.";
-        return false;
-    }
-    const size_t plane = static_cast<size_t>(plane_u64);
-    const size_t expected = plane * 3U;
-    if (generated_values.size() != expected || source_nchw.size() != expected ||
-        full_mask.size() != plane) {
-        *error = "Inpaint VAE pixel blend tensors do not share one full-resolution shape.";
-        return false;
-    }
-    const auto to_canonical = [pixel_range](float value) -> float {
-        switch (pixel_range) {
-            case mca::qnn::ImagePixelRange::NegativeOneToOne: return value;
-            case mca::qnn::ImagePixelRange::ZeroToOne: return value * 2.0f - 1.0f;
-            case mca::qnn::ImagePixelRange::ZeroTo255: return value * (2.0f / 255.0f) - 1.0f;
-        }
-        return std::numeric_limits<float>::quiet_NaN();
-    };
-    const auto from_canonical = [pixel_range](float value) -> float {
-        switch (pixel_range) {
-            case mca::qnn::ImagePixelRange::NegativeOneToOne: return value;
-            case mca::qnn::ImagePixelRange::ZeroToOne: return (value + 1.0f) * 0.5f;
-            case mca::qnn::ImagePixelRange::ZeroTo255: return (value + 1.0f) * 127.5f;
-        }
-        return std::numeric_limits<float>::quiet_NaN();
-    };
-    std::vector<float> generated_nchw(expected, 0.0f);
-    for (size_t channel = 0U; channel < 3U; ++channel) {
-        for (size_t pixel = 0U; pixel < plane; ++pixel) {
-            const size_t source_index = nchw ? channel * plane + pixel : pixel * 3U + channel;
-            generated_nchw[channel * plane + pixel] = to_canonical(generated_values[source_index]);
-        }
-    }
-    std::vector<float> blended_nchw;
-    if (!mca::qnn::inpaint::laplacian_pyramid_blend_nchw(
-            source_nchw,
-            generated_nchw,
-            full_mask,
-            static_cast<uint32_t>(width),
-            static_cast<uint32_t>(height),
-            &blended_nchw,
-            blend_levels,
-            error)) {
-        return false;
-    }
-    *blend_checksum = checksum_float_vector(blended_nchw);
-    if (*blend_checksum == 0U) {
-        *error = "Inpaint Laplacian blend produced no checksum evidence.";
-        return false;
-    }
-    blended_values->assign(expected, 0.0f);
-    for (size_t channel = 0U; channel < 3U; ++channel) {
-        for (size_t pixel = 0U; pixel < plane; ++pixel) {
-            const size_t target_index = nchw ? channel * plane + pixel : pixel * 3U + channel;
-            (*blended_values)[target_index] = from_canonical(blended_nchw[channel * plane + pixel]);
-        }
-    }
-    if (!std::all_of(blended_values->begin(), blended_values->end(), [](float value) {
-            return std::isfinite(value);
-        })) {
-        blended_values->clear();
-        *error = "Inpaint Laplacian blend could not be represented in the VAE output range.";
-        return false;
-    }
-    error->clear();
-    return true;
-}
+// Delegated to mca::qnn (see mca/qnn/qnn_inpaint_blend.hpp)
+using mca::qnn::qnn_laplacian_blend_inpaint_vae_output;
 
 // Delegated to mca::qnn (see mca/qnn/qnn_image_writer.hpp)
 using mca::qnn::write_vae_tensor_png;

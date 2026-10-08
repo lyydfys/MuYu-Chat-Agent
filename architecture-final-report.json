@@ -18,15 +18,15 @@
     "S-O": "UNVERIFIED_DEVICE (SBOM & Docs scaffolded, pending real ARM64 hardware build and release logs)"
   },
   "giant_bridges_debt": {
-    "qnn_native_bridge.cpp": 12518,
-    "mnn_native_engine.cpp": 7705,
-    "native_engine.cpp": 3278,
+    "qnn_native_bridge.cpp": 12422,
+    "mnn_native_engine.cpp": 7605,
+    "native_engine.cpp": 3125,
     "stable_diffusion_bridge.cpp": 2800,
-    "total_unmigrated_lines": 26301
+    "total_unmigrated_lines": 25952
   },
   "viewmodel_debt": {
-    "MainViewModel.kt": 2160,
+    "MainViewModel.kt": 2059,
     "target_lines": 600,
-    "over_lines": 1560
+    "over_lines": 1459
   }
 }

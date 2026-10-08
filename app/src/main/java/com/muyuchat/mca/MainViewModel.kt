@@ -4,6 +4,7 @@ import android.app.Application
 import com.muyuchat.mca.composition.MainCoordinatorAssembly
 import com.muyuchat.mca.composition.MainCoordinatorHost
 import com.muyuchat.mca.composition.McaAppContainer
+import com.muyuchat.mca.composition.MainViewModelPortFactory
 import android.content.Context
 import android.net.Uri
 import android.os.Build
@@ -93,7 +94,8 @@ class MainViewModel @JvmOverloads constructor(
     injectedChatImageWorkflowCoordinator: Any? = null,
     injectedChatWorkflowCoordinator: Any? = null,
     injectedDocumentImportCoordinator: Any? = null,
-    injectedAppLifecycleCoordinator: Any? = null
+    injectedAppLifecycleCoordinator: Any? = null,
+    injectedCacheManagementCoordinator: Any? = null
 ) : AndroidViewModel(application) {
     companion object {
         private val localApiProcessLifecycleLock = Any()
@@ -314,7 +316,8 @@ class MainViewModel @JvmOverloads constructor(
     private var localConversationContextInvalidationJob: Job?
         get() = container.runtimeAdmission.localConversationContextInvalidationJob
         set(value) { container.runtimeAdmission.localConversationContextInvalidationJob = value }
-    private val persistentPrefixCacheOperationSequence = AtomicLong(0L)
+    private val persistentPrefixCacheOperationSequence: AtomicLong
+        get() = cacheManagementCoordinator.persistentPrefixCacheOperationSequence
     /**
      * A destructive conversation edit is published to Room before native KV
      * state is invalidated.  The barrier is joined by the next generation, so
@@ -428,6 +431,17 @@ class MainViewModel @JvmOverloads constructor(
     private val imagePromptTokenMeasurementHost = container.createImagePromptTokenMeasurementHost(uiStateStore)
     private val webSearchWorkflowCoordinator: WebSearchWorkflowCoordinator =
         container.createWebSearchWorkflowCoordinator(uiStateStore, chatTerminalSettlementPort, viewModelScope)
+    private val cacheManagementCoordinator: CacheManagementCoordinator =
+        (injectedCacheManagementCoordinator as? CacheManagementCoordinator)
+            ?: CacheManagementCoordinator(
+                application = getApplication(),
+                store = uiStateStore,
+                scope = viewModelScope,
+                engine = engine,
+                chatRuns = chatRuns,
+                refreshPersistentPrefixCacheSummary = { refreshPersistentPrefixCacheSummary() },
+                markLocalConversationContextInvalid = { markLocalConversationContextInvalid() }
+            )
     internal val visionAttachmentPort = container.createVisionAttachmentPort(uiStateStore, engine)
     // R3/C2（插队裁定 2）：TuningOwner 由组合根工厂构造（真实依赖注入）；VM 仅 intent 委托。
     private val tuningOwner = container.createTuningOwner(
@@ -1619,79 +1633,17 @@ class MainViewModel @JvmOverloads constructor(
     }
 
 
-    fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
-        val current = uiStateStore.current.persistentPrefixCacheEnabled
-        if (current == enabled) {
-            refreshPersistentPrefixCacheSummary()
-            return
-        }
-        val operation = persistentPrefixCacheOperationSequence.incrementAndGet()
-        GenerationPreferences.persistPersistentPrefixCacheEnabled(getApplication(), enabled)
-        engine.setPersistentPrefixCacheEnabled(enabled)
-        // R3/S21: 前缀缓存族写入统一经 UiStateStore。
-        uiStateStore.update {
-            it.copy(
-                persistentPrefixCacheEnabled = enabled,
-                statusMessage = if (enabled) {
-                    "已启用持久化前缀缓存"
-                } else {
-                    "已关闭持久化前缀缓存，正在清理本机缓存"
-                }
-            )
-        }
-        if (enabled) {
-            refreshPersistentPrefixCacheSummary()
-        } else {
-            // A disk-backed prefix must never outlive a user opt-out. The
-            // normal edit barrier also clears the live text KV before another
-            // local request can begin.
-            markLocalConversationContextInvalid()
-            schedulePersistentPrefixCacheClear(
-                operation = operation,
-                successMessage = "已关闭持久化前缀缓存，并清空本机缓存",
-                failureMessage = "已关闭持久化前缀缓存；缓存清理未完成，可稍后重试"
-            )
-        }
-    }
+    fun setPersistentPrefixCacheEnabled(enabled: Boolean) =
+        cacheManagementCoordinator.setPersistentPrefixCacheEnabled(enabled)
 
-    fun clearPersistentPrefixCache() {
-        val operation = persistentPrefixCacheOperationSequence.incrementAndGet()
-        schedulePersistentPrefixCacheClear(
-            operation = operation,
-            successMessage = "已清空持久化前缀缓存",
-            failureMessage = "前缀缓存清理未完成，请在当前生成结束后重试"
-        )
-    }
+    fun clearPersistentPrefixCache() =
+        cacheManagementCoordinator.clearPersistentPrefixCache()
 
     private fun schedulePersistentPrefixCacheClear(
         operation: Long,
         successMessage: String,
         failureMessage: String
-    ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            // A native state export owns the cache-store lock until prefill
-            // finishes. Temporarily suppress new exports, then wait for the
-            // in-flight UI turn so clear cannot race a late atomic commit.
-            engine.setPersistentPrefixCacheEnabled(false)
-            chatRuns.activePublishedJob()?.join()
-            val cleared = engine.clearPersistentPrefixCache()
-            val summary = engine.persistentPrefixCacheSummary()
-            val enabledNow = uiStateStore.current.persistentPrefixCacheEnabled
-            engine.setPersistentPrefixCacheEnabled(enabledNow)
-            // R3/S21: 前缀缓存族写入统一经 UiStateStore。
-            uiStateStore.update { state ->
-                state.copy(
-                    persistentPrefixCacheEntryCount = summary.entryCount,
-                    persistentPrefixCacheBytes = summary.totalBytes,
-                    statusMessage = if (operation == persistentPrefixCacheOperationSequence.get()) {
-                        if (cleared) successMessage else failureMessage
-                    } else {
-                        state.statusMessage
-                    }
-                )
-            }
-        }
-    }
+    ) = cacheManagementCoordinator.schedulePersistentPrefixCacheClear(operation, successMessage, failureMessage)
 
     fun clearChat() {
         viewModelScope.launch {
@@ -1870,26 +1822,37 @@ class MainViewModel @JvmOverloads constructor(
     private fun stopApiServer() =
         localApiServerCoordinator.stopApiServer()
 
-    // R3/C3-S11：会话持久化端口具名化——容器工厂构造（真实依赖全对象化）。
-    private val chatSessionPersistencePort = container.createChatSessionPersistencePort(uiStateStore, viewModelScope, engine)
+    private val ports = MainViewModelPortFactory.createPorts(
+        container = container,
+        uiStateStore = uiStateStore,
+        scope = viewModelScope,
+        engine = engine,
+        imageGenerationOwner = imageGenerationOwner,
+        chatImageCommitJournalProvider = { chatImageCommitJournal },
+        localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
+        benchmarkRunner = benchmarkRunner,
+        buildRecommendationAction = ::buildRecommendation,
+        generateLocalApiImageAction = ::generateLocalApiImage,
+        cancelActiveLocalApiImageGenerationAction = ::cancelActiveLocalApiImageGeneration,
+        chatContextComposer = chatContextComposer,
+        showStatus = ::showStatus,
+        chatImageOptionsForCurrentSelection = ::chatImageOptionsForCurrentSelection,
+        offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
+        verifiedOfflineTranslationBundleRef = { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() },
+        chatImageNegativePromptSupported = ::chatImageNegativePromptSupported,
+        rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress,
+        stopGenerationInProgress = stopGenerationInProgress,
+        currentReplyMetricsRef = { replyGenerationMetrics },
+        cancelGenerationJobRef = { cancelGenerationJob() },
+        flushPendingAssistantOutputRef = { flushPendingAssistantOutput() },
+        persistConversationMutationRef = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
+    )
 
-    // R3/C3-S12：图片请求簿记端口的具名适配器。
-    private val chatImageRequestPort: ChatImageRequestPort =
-        container.createChatImageRequestPort(uiStateStore, chatSessionPersistencePort)
-
-    // R3/C3-S14：图片发送/重试两端口的具名适配器（owner/admission/coordinator 均为真实对象）。
-    private val sendChatImageRequestPort: SendChatImageRequestPort =
-        container.createSendChatImageRequestPort(
-            uiStateStore, chatSessionPersistencePort, chatImageRequestPort, imageGenerationOwner
-        )
-    private val chatImageRetryPort: ChatImageRetryPort =
-        container.createChatImageRetryPort(
-            uiStateStore, sendChatImageRequestPort, { chatImageCommitJournal }
-        )
-
-    // R3/C3-S16：图片库提交/删除两端口的具名适配器（依赖全部对象化；journal 保持 lazy）。
-    private val imageLibraryCommitPort: ImageLibraryCommitPort =
-        container.createImageLibraryCommitPort(uiStateStore, chatImageRequestPort)
+    private val chatSessionPersistencePort: ChatSessionPersistencePort = ports.chatSessionPersistencePort
+    private val chatImageRequestPort: ChatImageRequestPort = ports.chatImageRequestPort
+    private val sendChatImageRequestPort: SendChatImageRequestPort = ports.sendChatImageRequestPort
+    private val chatImageRetryPort: ChatImageRetryPort = ports.chatImageRetryPort
+    private val imageLibraryCommitPort: ImageLibraryCommitPort = ports.imageLibraryCommitPort
     private val imageAssetDeletionPort: ImageAssetDeletionPort
         get() = chatImageWorkflowCoordinator.imageAssetDeletionPort
 
@@ -1934,77 +1897,11 @@ class MainViewModel @JvmOverloads constructor(
                 }
             )
 
-
-    private val localApiAuxProviderPort: LocalApiAuxProviderPort =
-        container.createLocalApiAuxProviderPort(
-            store = uiStateStore,
-            engine = engine,
-            localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
-            benchmarkRunner = benchmarkRunner,
-            buildRecommendationAction = ::buildRecommendation,
-            generateLocalApiImageAction = ::generateLocalApiImage,
-        )
-
-    private val chatLocalApiProviderPort: ChatLocalApiProviderPort =
-        container.createChatLocalApiProviderPort(
-            engine = engine,
-            store = uiStateStore,
-            cancelActiveLocalApiImageGenerationAction = ::cancelActiveLocalApiImageGeneration,
-            localApiPayloadPortProvider = { localApiControlPlaneCoordinator.localApiPayloadPort },
-        )
+    private val localApiAuxProviderPort: LocalApiAuxProviderPort = ports.localApiAuxProviderPort
+    private val chatLocalApiProviderPort: ChatLocalApiProviderPort = ports.chatLocalApiProviderPort
     private val chatExecutionPort: ChatGenerationExecutionPort get() = coordinatorAssembly.chatExecutionPort
-
-    /** The ViewModel side of [ChatImagePromptBridgePort]. */
-    private val chatImagePromptBridgePort: ChatImagePromptBridgePort =
-        container.createChatImagePromptBridgePort(
-            store = uiStateStore,
-            chatContextComposer = chatContextComposer,
-            engine = engine,
-            currentBridgeGenerationRef = { container.runtimeAdmission.chatImagePromptBridgeGeneration.get() },
-            incrementBridgeGenerationRef = { container.runtimeAdmission.chatImagePromptBridgeGeneration.incrementAndGet() },
-            cancelBridgeJobRef = { container.runtimeAdmission.chatImagePromptBridgeJob?.cancel() },
-            setBridgeJobRef = { container.runtimeAdmission.chatImagePromptBridgeJob = it },
-            bridgeScopeRef = { viewModelScope },
-            setPendingChatImageActionRef = { id, kind, visibleUserText, requestedOutputCount, stillOwned ->
-                container.runtimeAdmission.pendingChatImageAction = PendingChatImageAction(
-                    id = id,
-                    kind = kind,
-                    visibleUserText = visibleUserText,
-                    requestedOutputCount = requestedOutputCount,
-                    stillOwned = stillOwned
-                )
-            },
-            setPendingImageTranslationRef = { container.runtimeAdmission.pendingImageTranslation = it },
-            showStatusRef = { showStatus(it) },
-            chatImageOptionsForCurrentSelectionRef = { chatImageOptionsForCurrentSelection(it) },
-            offlinePromptTranslationServiceProvider = { offlinePromptTranslationService },
-            verifiedOfflineTranslationBundleRef = { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() },
-            sendChatImageRequestRef = { visibleUserText, prompt, optionsOverride, promptEnvelope, contextTraceJson ->
-                SendChatImageRequestOperations.sendChatImageRequest(
-                    port = sendChatImageRequestPort,
-                    visibleUserText = visibleUserText,
-                    prompt = prompt,
-                    optionsOverride = optionsOverride,
-                    promptEnvelope = promptEnvelope,
-                    contextTraceJson = contextTraceJson
-                )
-            },
-            negativePromptSupportedRef = { chatImageNegativePromptSupported(it) },
-        )
-
-    /** The ViewModel side of [ChatStopGenerationPort]. */
-    private val chatStopGenerationPort: ChatStopGenerationPort =
-        container.createChatStopGenerationPort(
-            store = uiStateStore,
-            engine = engine,
-            stopScopeRef = { viewModelScope },
-            rejectWhileConversationMutationInProgressRef = { rejectWhileConversationMutationInProgress() },
-            stopGenerationInProgressRef = stopGenerationInProgress,
-            currentReplyMetricsRef = { replyGenerationMetrics },
-            cancelGenerationJobRef = { cancelGenerationJob() },
-            flushPendingAssistantOutputRef = { flushPendingAssistantOutput() },
-            persistConversationMutationRef = { sessions, rollback -> persistConversationMutation(sessions, rollback) },
-        )
+    private val chatImagePromptBridgePort: ChatImagePromptBridgePort = ports.chatImagePromptBridgePort
+    private val chatStopGenerationPort: ChatStopGenerationPort = ports.chatStopGenerationPort
 
 
     private fun refreshPersistentPrefixCacheSummary() =
@@ -2127,6 +2024,8 @@ class MainViewModel @JvmOverloads constructor(
 
     private fun loadPersistentPrefixCacheEnabled(application: Application): Boolean =
         GenerationPreferences.loadPersistentPrefixCacheEnabled(application)
+    private fun persistPersistentPrefixCacheEnabled(application: Application, enabled: Boolean) =
+        GenerationPreferences.persistPersistentPrefixCacheEnabled(application, enabled)
 
 
 

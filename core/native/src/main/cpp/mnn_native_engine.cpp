@@ -55,6 +55,7 @@
 #include "mca/mnn/mnn_file_utils.hpp"
 #include "mca/mnn/mnn_vae_image_writer.hpp"
 #include "mca/mnn/mnn_clip_weighting.hpp"
+#include "mca/mnn/mnn_pndm_scheduler.hpp"
 #include "mnn_qnn_prompt_handoff.hpp"
 #include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
@@ -4009,117 +4010,16 @@ bool pndm_step(
         const std::vector<float>& alphas,
         std::vector<float>& previous,
         std::string& error) {
-    if (index < 0 || static_cast<size_t>(index) >= timesteps.size()) {
-        error = "PNDM scheduler step index is outside the timestep schedule.";
-        return false;
-    }
-    if (sample.empty() || modelOutput.size() != sample.size()) {
-        error = "PNDM scheduler sample and model output sizes must match and be non-empty.";
-        return false;
-    }
-    if (!validate_finite_float_vector(sample, "PNDM sample", error) ||
-        !validate_finite_float_vector(modelOutput, "PNDM model output", error)) {
-        return false;
-    }
-
-    int timestep = timesteps[static_cast<size_t>(index)];
-    int prevTimestep = 0;
-    if (static_cast<size_t>(index + 1) < timesteps.size()) {
-        prevTimestep = timesteps[static_cast<size_t>(index + 1)];
-    }
-    std::vector<float> adjusted = modelOutput;
-    const std::vector<float>* sampleForStep = &sample;
-
-    if (index == 0) {
-        firstSample = sample;
-    }
-    if (index != 1) {
-        if (ets.size() >= 4) {
-            ets.erase(ets.begin());
-        }
-        ets.push_back(modelOutput);
-    } else {
-        if (timesteps.size() < 2 || ets.empty()) {
-            error = "PNDM scheduler is missing the first model output for its second step.";
-            return false;
-        }
-        if (firstSample.size() != sample.size()) {
-            error = "PNDM scheduler is missing the first latent sample for its second step.";
-            return false;
-        }
-        timestep = timesteps[0];
-        prevTimestep = timesteps[1];
-        sampleForStep = &firstSample;
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] = (adjusted[i] + ets.back()[i]) * 0.5f;
-        }
-    }
-
-    if (ets.empty()) {
-        error = "PNDM scheduler has no model output history.";
-        return false;
-    }
-    for (const auto& previousOutput : ets) {
-        if (previousOutput.size() != sample.size() ||
-            !validate_finite_float_vector(previousOutput, "PNDM model output history", error)) {
-            return false;
-        }
-    }
-    const int etsIndex = static_cast<int>(ets.size()) - 1;
-    if (index != 1 && etsIndex == 1) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] = (3.0f * ets[etsIndex][i] - ets[etsIndex - 1][i]) * 0.5f;
-        }
-    } else if (index != 1 && etsIndex == 2) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] = (23.0f * ets[etsIndex][i] - 16.0f * ets[etsIndex - 1][i] +
-                           5.0f * ets[etsIndex - 2][i]) / 12.0f;
-        }
-    } else if (index != 1 && etsIndex >= 3) {
-        for (size_t i = 0; i < adjusted.size(); ++i) {
-            adjusted[i] = (55.0f * ets[etsIndex][i] - 59.0f * ets[etsIndex - 1][i] +
-                           37.0f * ets[etsIndex - 2][i] - 9.0f * ets[etsIndex - 3][i]) / 24.0f;
-        }
-    }
-
-    if (timestep < 0 || prevTimestep < 0 ||
-        static_cast<size_t>(timestep) >= alphas.size() ||
-        static_cast<size_t>(prevTimestep) >= alphas.size()) {
-        error = "PNDM scheduler timestep is outside the alpha schedule.";
-        return false;
-    }
-    const float alphaProdT = alphas[static_cast<size_t>(timestep)];
-    const float alphaProdPrev = alphas[static_cast<size_t>(prevTimestep)];
-    if (!std::isfinite(alphaProdT) || !std::isfinite(alphaProdPrev) ||
-        alphaProdT <= 0.0f || alphaProdT > 1.0f ||
-        alphaProdPrev <= 0.0f || alphaProdPrev > 1.0f) {
-        error = "PNDM scheduler received invalid alpha values.";
-        return false;
-    }
-    const float betaProdT = 1.0f - alphaProdT;
-    const float betaProdPrev = 1.0f - alphaProdPrev;
-    if (betaProdT < 0.0f || betaProdPrev < 0.0f) {
-        error = "PNDM scheduler received invalid beta values.";
-        return false;
-    }
-    const float sampleCoeff = std::sqrt(alphaProdPrev / alphaProdT);
-    const float denom = alphaProdT * std::sqrt(betaProdPrev) +
-            std::sqrt(alphaProdT * betaProdT * alphaProdPrev);
-    if (!std::isfinite(sampleCoeff) || !std::isfinite(denom) ||
-        denom <= std::numeric_limits<float>::epsilon()) {
-        error = "PNDM scheduler produced invalid integration coefficients.";
-        return false;
-    }
-    const float modelCoeff = (alphaProdPrev - alphaProdT) / denom;
-    if (!std::isfinite(modelCoeff)) {
-        error = "PNDM scheduler produced a non-finite model coefficient.";
-        return false;
-    }
-    previous.resize(sample.size());
-    for (size_t i = 0; i < sample.size(); ++i) {
-        previous[i] = sampleCoeff * (*sampleForStep)[i] - modelCoeff * adjusted[i];
-    }
-    return validate_finite_float_vector(previous, "PNDM previous sample", error);
+    return mca::mnn::pndm_step(
+            sample,
+            ets,
+            firstSample,
+            modelOutput,
+            index,
+            timesteps,
+            alphas,
+            previous,
+            error);
 }
 #endif
 

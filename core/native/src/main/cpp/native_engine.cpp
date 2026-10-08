@@ -31,6 +31,7 @@
 #include "mca/llm/llm_stats_collector.hpp"
 #include "mca/llm/llm_runtime_config.hpp"
 #include "mca/llm/llm_backend_loader.hpp"
+#include "mca/llm/llm_prompt_formatter.hpp"
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
@@ -1216,63 +1217,14 @@ using mca::llm::ChatTemplateOptions;
 // prefix-cache probe render in prepare_persistent_prefix_locked uses a
 // truncated probe message list and must not disturb the flag.
 bool prompt_ends_inside_reasoning(const std::string &prompt) {
-    static const std::vector<std::string> reasoning_openers = {
-            "<think>",
-            "<|think|>",
-            "<|channel>thought",
-            "<|channel|>thought",
-            "<|channel>analysis",
-            "<|channel|>analysis",
-    };
-    size_t end = prompt.size();
-    while (end > 0 && std::isspace((unsigned char) prompt[end - 1])) end--;
-    for (const auto &opener: reasoning_openers) {
-        const size_t n = opener.size();
-        if (end >= n && prompt.compare(end - n, n, opener) == 0) {
-            return true;
-        }
-    }
-    return false;
+    return mca::llm::prompt_ends_inside_reasoning(prompt);
 }
 
 void clear_target_context_locked(const std::string &reason);
 bool trim_context_locked(llama_context *ctx, llama_pos position, const char *label);
 
 std::string format_messages(const std::vector<ParsedMessage> &messages, const ChatTemplateOptions &options) {
-    const bool has_template = g_chat_templates != nullptr;
-
-    if (has_template) {
-        common_chat_templates_inputs inputs;
-        inputs.use_jinja = options.use_jinja;
-        inputs.enable_thinking = options.enable_thinking;
-        inputs.add_generation_prompt = true;
-        // MCA only needs the rendered prompt. For Android in-app streaming we parse
-        // reasoning ourselves, so avoid llama.cpp's PEG/autoparser path here; some
-        // recent Jinja templates raise while the parser is being generated even
-        // though direct prompt rendering is valid.
-        inputs.force_pure_content = true;
-        if (options.use_jinja && options.thinking_budget > 0) {
-            inputs.chat_template_kwargs["thinking_budget"] = std::to_string(options.thinking_budget);
-        }
-
-        for (const auto &message: messages) {
-            common_chat_msg msg;
-            msg.role = message.role.empty() ? "user" : message.role;
-            msg.content = message.content;
-            inputs.messages.push_back(msg);
-        }
-
-        const std::string prompt = common_chat_templates_apply(g_chat_templates.get(), inputs).prompt;
-        return prompt;
-    }
-
-    std::string formatted;
-    for (const auto &message: messages) {
-        const std::string role = message.role.empty() ? "user" : message.role;
-        formatted += role + ": " + message.content + "\n";
-    }
-    formatted += "assistant: ";
-    return formatted;
+    return mca::llm::format_messages(g_chat_templates.get(), messages, options);
 }
 
 using PersistentPrefixPreparation = mca::llm::PrefixCacheDecision;
@@ -1359,141 +1311,36 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
 }
 
 bool messages_have_images(const std::vector<ParsedMessage> &messages) {
-    for (const auto &message: messages) {
-        if (!message.image_paths.empty()) return true;
-    }
-    return false;
+    return mca::llm::messages_have_images(messages);
 }
 
 std::vector<ParsedMessage> with_media_markers(const std::vector<ParsedMessage> &messages) {
-    std::vector<ParsedMessage> out;
-    out.reserve(messages.size());
-    const char *marker = mtmd_default_marker();
-    for (auto message: messages) {
-        if (!message.image_paths.empty()) {
-            std::string prefix;
-            for (size_t i = 0; i < message.image_paths.size(); i++) {
-                prefix += marker;
-            }
-            message.content = prefix + (message.content.empty() ? "请描述这张图片。" : message.content);
-        }
-        out.push_back(std::move(message));
-    }
-    return out;
+    return mca::llm::with_media_markers(messages);
 }
 
 int prefill_multimodal_locked(
         const std::vector<ParsedMessage> &messages,
         const ChatTemplateOptions &chat_options
 ) {
-    if (g_mtmd_context == nullptr || !g_vision_ready) {
-        g_last_error = "Local vision is not ready. Attach a matching mmproj projector and reload the model.";
-        return -4;
-    }
+    mca::llm::MultimodalPrefillEnvironment env;
+    env.mtmd_ctx = g_mtmd_context;
+    env.vision_ready = g_vision_ready;
+    env.llama_ctx = g_context;
+    env.n_ctx = g_n_ctx;
+    env.n_batch = g_n_batch;
+    env.overflow_headroom = OVERFLOW_HEADROOM;
+    env.completion_stopped_code = COMPLETION_STOPPED;
+    env.chat_templates = g_chat_templates.get();
+    env.is_stop_requested = []() { return g_stop_requested.load(std::memory_order_acquire); };
+    env.last_error = &g_last_error;
+    env.current_position = &g_current_position;
+    env.prompt_tokens = &g_prompt_tokens;
+    env.prefill_computed_tokens = &g_prefill_computed_tokens;
+    env.prompt_ends_inside_reasoning = &g_prompt_ends_inside_reasoning;
+    env.begin_prefill_progress = [](size_t total) { begin_prefill_progress(total); };
+    env.report_reused_prefill_tokens = [](size_t reused) { report_reused_prefill_tokens(reused); };
 
-    std::vector<mtmd_bitmap *> owned_bitmaps;
-    std::vector<mtmd_helper_video *> owned_videos;
-    const auto free_media = [&]() {
-        for (auto *owned: owned_bitmaps) mtmd_bitmap_free(owned);
-        for (auto *owned: owned_videos) mtmd_helper_video_free(owned);
-    };
-    std::vector<const mtmd_bitmap *> bitmap_ptrs;
-    for (const auto &message: messages) {
-        for (const auto &path: message.image_paths) {
-            if (g_stop_requested.load(std::memory_order_acquire)) {
-                free_media();
-                return COMPLETION_STOPPED;
-            }
-            const auto loaded = mtmd_helper_bitmap_init_from_file(
-                    g_mtmd_context,
-                    path.c_str(),
-                    false,
-                    mtmd_helper_init_opt_default());
-            mtmd_bitmap *bitmap = loaded.bitmap;
-            if (bitmap == nullptr) {
-                if (loaded.video_ctx != nullptr) mtmd_helper_video_free(loaded.video_ctx);
-                free_media();
-                g_last_error = "Failed to load local vision image: " + path;
-                return -5;
-            }
-            owned_bitmaps.push_back(bitmap);
-            if (loaded.video_ctx != nullptr) owned_videos.push_back(loaded.video_ctx);
-            bitmap_ptrs.push_back(bitmap);
-        }
-    }
-
-    if (g_stop_requested.load(std::memory_order_acquire)) {
-        free_media();
-        return COMPLETION_STOPPED;
-    }
-    mtmd_input_chunks *chunks = mtmd_input_chunks_init();
-    if (chunks == nullptr) {
-        free_media();
-        g_last_error = "mtmd_input_chunks_init returned null.";
-        return -6;
-    }
-
-    const auto marked_messages = with_media_markers(messages);
-    const auto formatted = format_messages(marked_messages, chat_options);
-    g_prompt_ends_inside_reasoning = prompt_ends_inside_reasoning(formatted);
-    mtmd_input_text text{};
-    text.text = formatted.c_str();
-    text.text_len = formatted.size();
-    text.add_special = true;
-    text.parse_special = true;
-
-    int tokenize_rc = mtmd_tokenize(
-            g_mtmd_context,
-            chunks,
-            &text,
-            bitmap_ptrs.empty() ? nullptr : bitmap_ptrs.data(),
-            bitmap_ptrs.size());
-    free_media();
-    if (tokenize_rc != 0) {
-        mtmd_input_chunks_free(chunks);
-        if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
-        g_last_error = "mtmd_tokenize failed: " + std::to_string(tokenize_rc);
-        return -7;
-    }
-    if (g_stop_requested.load(std::memory_order_acquire)) {
-        mtmd_input_chunks_free(chunks);
-        return COMPLETION_STOPPED;
-    }
-
-    const size_t multimodal_prompt_tokens = mtmd_helper_get_n_tokens(chunks);
-    if (multimodal_prompt_tokens == 0 ||
-        multimodal_prompt_tokens >= static_cast<size_t>(g_n_ctx - OVERFLOW_HEADROOM)) {
-        mtmd_input_chunks_free(chunks);
-        g_last_error = "Vision prompt needs " + std::to_string(multimodal_prompt_tokens) +
-                       " tokens, but n_ctx=" + std::to_string(g_n_ctx) +
-                       " must also leave room for generation. Reduce image size or history, "
-                       "or reload with a larger context.";
-        return -9;
-    }
-    begin_prefill_progress(multimodal_prompt_tokens);
-
-    llama_pos new_position = 0;
-    const int eval_rc = mtmd_helper_eval_chunks(
-            g_mtmd_context,
-            g_context,
-            chunks,
-            0,
-            0,
-            g_n_batch,
-            true,
-            &new_position);
-    g_prompt_tokens = (long long) multimodal_prompt_tokens;
-    mtmd_input_chunks_free(chunks);
-    if (eval_rc != 0) {
-        if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
-        g_last_error = "mtmd_helper_eval_chunks failed: " + std::to_string(eval_rc);
-        return -8;
-    }
-    if (g_stop_requested.load(std::memory_order_acquire)) return COMPLETION_STOPPED;
-    g_current_position = new_position;
-    g_prefill_computed_tokens = (long long) multimodal_prompt_tokens;
-    report_reused_prefill_tokens(multimodal_prompt_tokens);
-    return 0;
+    return mca::llm::prefill_multimodal_locked(messages, chat_options, env);
 }
 
 void clear_target_context_locked(const std::string &reason) {

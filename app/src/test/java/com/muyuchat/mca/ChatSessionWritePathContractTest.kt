@@ -9,13 +9,18 @@ import org.junit.Test
  *
  * The full write semantics (coalescing sequence, run gates, reconcile/publish, world-book
  * cleanup, durable boundary) now live in two named owner functions in
- * `ChatSessionPersistenceOperations.kt`. Three guarded direct `chatSessionStore.save(` sites
- * remain in `MainViewModel` on purpose, when this record was written:
+ * `ChatSessionPersistenceOperations.kt`. One guarded direct `chatSessionStore.save(` site
+ * remains in `MainViewModel` on purpose:
  *
  *  1. startup bootstrap normalization (`runCatching { chatSessionStore.save(snapshots) }`) --
- *     runs during init, before the runtime owners can observe state;
- *  2. and 3. two suspend-IO blocks that hold the persistence mutex and bump the coalescing
- *     sequence themselves, carrying reconcile/publish duties in their surrounding functions.
+ *     runs during init, before the runtime owners can observe state.
+ *
+ * A second direct site that used to live in `MainViewModel` was deliberately moved to
+ * `DocumentImportCoordinator.confirmKnowledgeDocumentImport` on 2026-10-08: the suspend-IO
+ * block there still bumps the coalescing sequence, holds the same persistence mutex, and
+ * carries the same durable/reconcile and knowledge-binding cleanup duties around the write,
+ * so moving it changed no write semantics -- only its owner. The other direct sites in
+ * `AssistantProfileOperations.kt` keep their existing guarded shape.
  *
  * This test is an accounting guard, not a behaviour claim: a new direct site fails here and
  * forces a deliberate decision -- converge it into an owner function, or extend this record
@@ -29,7 +34,8 @@ class ChatSessionWritePathContractTest {
             mapOf(
                 "AssistantProfileOperations.kt" to 1,
                 "ChatSessionPersistenceOperations.kt" to 2,
-                "MainViewModel.kt" to 2
+                "DocumentImportCoordinator.kt" to 1,
+                "MainViewModel.kt" to 1
             ),
             sessionSaveSites()
         )
@@ -39,6 +45,7 @@ class ChatSessionWritePathContractTest {
     fun theResidualViewModelSitesKeepTheirExactGuardedShapes() {
         val vm = sourceFile("MainViewModel.kt")
         val assistantOps = sourceFile("AssistantProfileOperations.kt")
+        val documentImportCoordinator = sourceFile("DocumentImportCoordinator.kt")
 
         assertEquals(
             1,
@@ -50,7 +57,8 @@ class ChatSessionWritePathContractTest {
         )
         assertEquals(
             1,
-            Regex(Regex.escape("chatSessionStore.save(snapshot.chatSessions, bindings)")).findAll(vm).count()
+            Regex(Regex.escape("chatSessionStore.save(snapshot.chatSessions, bindings)"))
+                .findAll(documentImportCoordinator).count()
         )
     }
 

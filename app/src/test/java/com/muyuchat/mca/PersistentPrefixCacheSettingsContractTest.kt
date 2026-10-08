@@ -12,13 +12,14 @@ class PersistentPrefixCacheSettingsContractTest {
         // keeps forwarding members with the same names. Both files are read so the contract below
         // still covers the same facts, and the assertions are unchanged.
         val preferences = sourceFile("GenerationPreferenceStore.kt")
-        val both = source + preferences
-        val toggle = functionBody(source, "setPersistentPrefixCacheEnabled")
-        val clear = functionBody(source, "schedulePersistentPrefixCacheClear")
+        val coordinator = sourceFile("CacheManagementCoordinator.kt")
+        val both = source + preferences + coordinator
+        val toggle = functionBody(coordinator, "setPersistentPrefixCacheEnabled")
+        val clear = functionBody(coordinator, "schedulePersistentPrefixCacheClear")
 
         assertTrue(both.contains("PERSISTENT_PREFIX_CACHE_ENABLED_KEY"))
         assertTrue(source.contains("loadPersistentPrefixCacheEnabled"))
-        assertTrue(source.contains("persistPersistentPrefixCacheEnabled"))
+        assertTrue(both.contains("persistPersistentPrefixCacheEnabled"))
         assertTrue(toggle.contains("engine.setPersistentPrefixCacheEnabled(enabled)"))
         assertTrue(toggle.contains("markLocalConversationContextInvalid()"))
         assertTrue(clear.contains("engine.clearPersistentPrefixCache()"))
