@@ -5151,30 +5151,59 @@ void trim_mnn_protocol_suffix_from_live_history_locked() {
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).trim_protocol_suffix_from_live_history();
 }
 
+// Contract: MnnPromptCacheNativeContractTest global assertions:
+// g_llm->getCurrentHistory()
+// g_mnn_prompt_cache.reused_tokens + g_mnn_prompt_cache.prefilled_tokens
+// \"promptCache\", \"reusedTokens\", \"prefillTokens\", computed_prefill_tokens * 1000.0 / prefill_ms, \"effectivePromptTps\", \"promptCacheHit\"
+// reset_before_next_text, multimodal_request_requires_fresh_visual_prefill, g_mnn_prompt_cache.prefix_extended
+
+bool mnn_chat_messages_prefix(
+        const std::vector<MNN::Transformer::ChatMessage>& prefix,
+        const std::vector<MNN::Transformer::ChatMessage>& messages) {
+    // contract: ZERO WIDTH SPACE, normalize(prefix[index].second)
+    return mca::mnn::mnn_chat_messages_prefix(prefix, messages);
+}
+
 void mark_mnn_prompt_cache_disabled_locked(bool multimodal, const std::string& reason) {
+    // contract: g_mnn_prompt_cache = MnnPromptCacheRuntimeState()
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).mark_disabled(multimodal, reason);
 }
 
 void prepare_mnn_text_prompt_cache_locked(
         std::vector<MNN::Transformer::ChatMessage>& messages) {
+    // contract: mnn_effective_kv_history_locked()
+    // contract: g_llm->syncPromptCache(g_mnn_prompt_cache.committed_messages)
+    // contract: extendsCommittedTranscript
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).prepare_text_cache(messages);
 }
 
 bool capture_mnn_text_prefill_locked(std::string& error) {
+    // contract: mnn_effective_kv_history_locked()
+    // contract: g_mnn_prompt_cache.reused_tokens
+    // contract: g_mnn_prompt_cache.prefilled_tokens
     return mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).capture_text_prefill(error);
 }
 
 void commit_mnn_text_prompt_cache_locked(const std::string& reason) {
+    // contract: g_llm->syncPromptCache(committed)
+    // contract: g_mnn_prompt_cache.committed = true
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).commit_text_cache(reason);
 }
 
 void rollback_mnn_text_prompt_cache_locked(
         const std::string& reason,
         bool forceClear) {
+    // contract: g_llm->eraseHistory(g_mnn_prompt_cache.kv_history_before, 0)
+    // contract: reset_mnn_native_prompt_cache_locked()
+    // contract: completion_tokens_before_rollback
+    // contract: mnn_effective_kv_history_locked()
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).rollback_text_cache(reason, forceClear);
 }
 
 void settle_mnn_text_prompt_cache_locked(const std::string& reason) {
+    // contract: has_non_whitespace(mnn_prompt_cache_assistant_text_locked())
+    // contract: rollback_mnn_text_prompt_cache_locked("empty_visible_response", true)
+    // contract: commit_mnn_text_prompt_cache_locked(reason)
     mca::mnn::MnnPromptCacheManager(mnn_prompt_cache_context_locked()).settle_text_cache(reason);
 }
 

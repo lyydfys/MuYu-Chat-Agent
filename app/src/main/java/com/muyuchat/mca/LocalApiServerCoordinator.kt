@@ -2,7 +2,6 @@ package com.muyuchat.mca
 
 import android.app.Application
 import com.muyuchat.api.local.LocalApiRuntime
-import com.muyuchat.core.engine.GenerationPreferences
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong

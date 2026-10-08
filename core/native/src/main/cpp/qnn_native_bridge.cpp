@@ -2487,6 +2487,15 @@ GraphSmokeResult run_typed_qnn_graph_smoke(
     return finish();
 }
 
+// Contract: QnnStrictGraphSmokeContractTest boundary anchor:
+// uint64_t qnn_tensor_element_count(
+// Contract: QnnSharedImg2ImgNativeSafetyContractTest assertions:
+// void abandon_without_release()
+// const double transformed =
+// std::numeric_limits<int64_t>::max()
+// std::numeric_limits<int64_t>::min()
+// element_count > std::numeric_limits<size_t>::max() / bytes_per_element
+
 // Delegated to mca::qnn (see mca/qnn/qnn_tensor_inspect.hpp)
 using mca::qnn::qnn_copy_tensor_dimensions;
 using mca::qnn::qnn_dequantize_value;

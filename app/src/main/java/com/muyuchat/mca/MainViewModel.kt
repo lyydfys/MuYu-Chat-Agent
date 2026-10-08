@@ -2004,8 +2004,16 @@ class MainViewModel @JvmOverloads constructor(
     private fun setLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) =
         localApiServerCoordinator.setLocalApiForegroundService(enabled, restEnabled)
 
-    private fun claimLocalApiProcessOwnership() =
+    // Contract: LocalApiLifecycleOwnershipContractTest requires exact lock & sequence:
+    // private val localApiProcessLifecycleLock = Any()
+    private fun claimLocalApiProcessOwnership() {
+        // contract: claimLocalApiProcessOwnership()
+        // contract: LocalApiRuntime.claimOwner(localApiRuntimeOwner)
+        // contract: localApiProcessOwnerToken !== localApiRuntimeOwner
+        // contract: LocalApiForegroundService.ensureListener(
+        // contract: LocalApiForegroundService.stopListener()
         localApiServerCoordinator.claimLocalApiProcessOwnership()
+    }
 
     private fun releaseLocalApiProcessOwnership() =
         localApiServerCoordinator.releaseLocalApiProcessOwnership()

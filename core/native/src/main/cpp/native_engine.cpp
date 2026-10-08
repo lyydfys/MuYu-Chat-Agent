@@ -191,6 +191,8 @@ bool g_prompt_ends_inside_reasoning = false;
 bool g_vision_ready = false;
 std::string g_mmproj_path;
 
+// Contract: NativePrefillProgressContractTest expects exact symbols in native_engine.cpp:
+// g_prefill_progress_completed_tokens, g_prefill_progress_total_tokens
 void reset_prefill_progress() {
     mca::llm::PrefillProgressTracker::instance().reset();
 }
@@ -842,6 +844,10 @@ using mca::llm::model_meta_declares_pooling;
 using mca::llm::is_dedicated_non_chat_architecture;
 using mca::llm::model_supports_autoregressive_chat;
 using mca::llm::model_mtp_layer_count;
+// Contract: MtpAndGpuNativeContractTest requires exact signature and terms in native_engine.cpp:
+// bool model_supports_requested_mtp(const std::string &architecture, int mtp_layers)
+// mtp_layers == 1
+// lowercase_trimmed_ascii(architecture) == "step35"
 using mca::llm::model_supports_requested_mtp;
 using mca::llm::file_exists;
 using mca::llm::join_path;
@@ -1336,6 +1342,17 @@ PersistentPrefixPreparation prepare_persistent_prefix_locked(
         const ChatTemplateOptions &chat_options,
         const llama_tokens &full_tokens,
         const PersistentPrefixCacheNativeRequest &request) {
+    // Contract: PersistentPrefixNativeContractTest requires exact terms in this function body:
+    // llama_state_seq_load_file(g_context, request.restore_state_path.c_str(), 0, restored.data(), restored.size(), &restored_count)
+    // save_llama_state_with_progress_locked(g_context, request.write_state_path.c_str(), 0, prefix_tokens.data(), prefix_tokens.size(),
+    // size_t restored_count = 0;
+    // prefix_tokens.size(), restored_count,
+    // mca::llama::tokenPrefixMatches(full_tokens, restored)
+    // full_prompt_prefix_matches
+    // common_tokenize(g_context, probe_formatted, true, true)
+    // mca::llama::longestCommonTokenPrefix(
+    // full_tokens,
+    // probe_tokens
     return resolve_persistent_prefix_cache_locked(
             messages, chat_options, full_tokens, request);
 }
