@@ -27,8 +27,10 @@
 #include "mca/request/llama_request_parser.hpp"
 #include "mca/llm/llm_prefill_tracker.hpp"
 #include "mca/llm/llm_prefix_cache_manager.hpp"
+#include "mca/llm/llm_turn_cache.hpp"
 #include "mca/llm/llm_stats_collector.hpp"
 #include "mca/llm/llm_runtime_config.hpp"
+#include "mca/llm/llm_backend_loader.hpp"
 
 #if MCA_WITH_LLAMA_CPP
 #include <unistd.h>
@@ -620,35 +622,15 @@ llama_tokens g_context_tokens;
 llama_tokens g_cache_checkpoint_prefix;
 std::vector<uint8_t> g_cache_checkpoint_data;
 size_t g_cache_checkpoint_threshold = 0;
-struct TurnCacheCheckpoint {
-    llama_tokens prefix;
-    std::vector<uint8_t> data;
-    size_t position = 0;
-};
+using mca::llm::TurnCacheCheckpoint;
+using mca::llm::MAX_TURN_CACHE_CHECKPOINTS;
+using mca::llm::MAX_TURN_CACHE_CHECKPOINT_BYTES;
+using mca::llm::turn_cache_checkpoint_bytes;
+
 // Partial-only snapshots contain recurrent state (not the full attention KV),
 // so keeping a small rolling window is inexpensive and lets a tail-pruned
 // conversation restore the exact prior turn boundary.
 std::vector<TurnCacheCheckpoint> g_turn_cache_checkpoints;
-constexpr size_t MAX_TURN_CACHE_CHECKPOINTS = 4;
-constexpr size_t MAX_TURN_CACHE_CHECKPOINT_BYTES = 96U * 1024U * 1024U;
-
-size_t turn_cache_checkpoint_bytes(const TurnCacheCheckpoint &checkpoint) {
-    constexpr size_t token_bytes = sizeof(llama_tokens::value_type);
-    if (checkpoint.prefix.size() >
-            (std::numeric_limits<size_t>::max() - checkpoint.data.size()) / token_bytes) {
-        return std::numeric_limits<size_t>::max();
-    }
-    return checkpoint.data.size() + checkpoint.prefix.size() * token_bytes;
-}
-
-size_t turn_cache_checkpoint_bytes(size_t data_bytes, size_t prefix_tokens) {
-    constexpr size_t token_bytes = sizeof(llama_tokens::value_type);
-    if (prefix_tokens >
-            (std::numeric_limits<size_t>::max() - data_bytes) / token_bytes) {
-        return std::numeric_limits<size_t>::max();
-    }
-    return data_bytes + prefix_tokens * token_bytes;
-}
 llama_tokens g_spec_prompt_tokens;
 llama_tokens g_spec_draft_tokens;
 llama_token g_spec_pending_token = LLAMA_TOKEN_NULL;
@@ -783,18 +765,20 @@ void refresh_prefix_cache_strategy_locked() {
 }
 
 void invalidate_prefix_cache_checkpoint_locked() {
-    g_cache_checkpoint_prefix.clear();
-    g_cache_checkpoint_data.clear();
-    g_cache_checkpoint_threshold = 0;
-    g_cache_checkpoint_valid = false;
-    g_cache_checkpoint_tokens = 0;
-    g_cache_checkpoint_bytes = 0;
+    mca::llm::PartialPrefixCheckpointRef{
+            g_cache_checkpoint_prefix,
+            g_cache_checkpoint_data,
+            g_cache_checkpoint_threshold,
+            g_cache_checkpoint_valid,
+            g_cache_checkpoint_tokens,
+            g_cache_checkpoint_bytes}.invalidate();
 }
 
 void invalidate_turn_cache_checkpoints_locked() {
-    g_turn_cache_checkpoints.clear();
-    g_turn_cache_checkpoint_count = 0;
-    g_turn_cache_checkpoint_bytes = 0;
+    mca::llm::invalidate_turn_cache_checkpoints_locked(
+            g_turn_cache_checkpoints,
+            g_turn_cache_checkpoint_count,
+            g_turn_cache_checkpoint_bytes);
 }
 
 std::string take_last_error_suffix_locked(size_t start) {
@@ -809,59 +793,26 @@ std::string take_last_error_suffix_locked(size_t start) {
 bool save_partial_prefix_checkpoint_locked(
         const llama_tokens &tokens,
         size_t checkpoint_tokens) {
-    invalidate_prefix_cache_checkpoint_locked();
-    if (g_context == nullptr || checkpoint_tokens == 0 ||
-        checkpoint_tokens > tokens.size() ||
-        g_current_position != (llama_pos) checkpoint_tokens) {
-        return false;
-    }
-
-    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    const size_t checkpoint_size = llama_state_seq_get_size_ext(g_context, 0, flags);
-    if (checkpoint_size == 0) {
-        return false;
-    }
-
-    try {
-        std::vector<uint8_t> checkpoint_data(checkpoint_size);
-        const size_t written = llama_state_seq_get_data_ext(
-                g_context,
-                checkpoint_data.data(),
-                checkpoint_data.size(),
-                0,
-                flags);
-        if (written != checkpoint_data.size()) {
-            return false;
-        }
-
-        llama_tokens checkpoint_prefix(
-                tokens.begin(),
-                tokens.begin() + (llama_tokens::difference_type) checkpoint_tokens);
-        g_cache_checkpoint_data = std::move(checkpoint_data);
-        g_cache_checkpoint_prefix = std::move(checkpoint_prefix);
-        g_cache_checkpoint_threshold = checkpoint_tokens;
-        g_cache_checkpoint_valid = true;
-        g_cache_checkpoint_tokens = checkpoint_tokens;
-        g_cache_checkpoint_bytes = checkpoint_size;
-        return true;
-    } catch (const std::exception &) {
-        return false;
-    }
+    mca::llm::PartialPrefixCheckpointRef state{
+            g_cache_checkpoint_prefix,
+            g_cache_checkpoint_data,
+            g_cache_checkpoint_threshold,
+            g_cache_checkpoint_valid,
+            g_cache_checkpoint_tokens,
+            g_cache_checkpoint_bytes};
+    return mca::llm::save_partial_prefix_checkpoint_locked(
+            g_context,
+            g_current_position,
+            tokens,
+            checkpoint_tokens,
+            state);
 }
 
 bool restore_partial_prefix_checkpoint_locked() {
-    if (g_context == nullptr || !g_cache_checkpoint_valid ||
-        g_cache_checkpoint_data.empty()) {
-        return false;
-    }
-    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    const size_t restored = llama_state_seq_set_data_ext(
+    return mca::llm::restore_partial_prefix_checkpoint_locked(
             g_context,
-            g_cache_checkpoint_data.data(),
-            g_cache_checkpoint_data.size(),
-            0,
-            flags);
-    return restored == g_cache_checkpoint_data.size();
+            g_cache_checkpoint_valid,
+            g_cache_checkpoint_data);
 }
 
 std::string lower_ascii(std::string value) {
@@ -892,6 +843,9 @@ using mca::llm::is_dedicated_non_chat_architecture;
 using mca::llm::model_supports_autoregressive_chat;
 using mca::llm::model_mtp_layer_count;
 using mca::llm::model_supports_requested_mtp;
+using mca::llm::file_exists;
+using mca::llm::join_path;
+using mca::llm::list_ggml_backend_files;
 
 common_params_sampling build_sampling_params(const std::string &params_json) {
     common_params_sampling params;
@@ -933,122 +887,13 @@ bool configure_sampler_locked(const std::string &params_json) {
     return true;
 }
 
-bool file_exists(const std::string &path) {
-    struct stat st{};
-    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-}
-
-std::string join_path(const std::string &dir, const std::string &name) {
-    if (dir.empty()) return name;
-    return dir.back() == '/' ? dir + name : dir + "/" + name;
-}
-
-std::string list_ggml_backend_files(const std::string &dir) {
-    if (dir.empty()) return "nativeLibDir is empty";
-    DIR *handle = opendir(dir.c_str());
-    if (handle == nullptr) {
-        return "nativeLibDir is not readable or native libs are not extracted: " + dir;
-    }
-
-    std::string result;
-    int count = 0;
-    while (dirent *entry = readdir(handle)) {
-        const std::string name = entry->d_name;
-        if (name.find("libggml") == 0 && name.size() >= 3 && name.rfind(".so") == name.size() - 3) {
-            if (!result.empty()) result += ", ";
-            result += name;
-            count++;
-            if (count >= 24) {
-                result += ", ...";
-                break;
-            }
-        }
-    }
-    closedir(handle);
-    return result.empty() ? "no libggml*.so files found in " + dir : result;
-}
-
 void load_baseline_cpu_backend_if_needed() {
-    if (ggml_backend_dev_count() > 0 || g_native_lib_dir.empty()) return;
-
-    const char *candidates[] = {
-            "libggml-cpu-android_armv8.0_1.so",
-            "libggml-cpu-x64.so",
-            "libggml-cpu-sse42.so",
-            "libggml-cpu.so",
-    };
-
-    for (const char *candidate: candidates) {
-        const std::string path = join_path(g_native_lib_dir, candidate);
-        if (!file_exists(path)) continue;
-        if (ggml_backend_load(path.c_str()) != nullptr) {
-            g_last_error += "\nLoaded fallback backend: " + path;
-            return;
-        }
-    }
+    mca::llm::load_baseline_cpu_backend_if_needed(g_native_lib_dir, g_last_error);
 }
 
 bool load_android_opencl_runtime_if_available_locked() {
-#if defined(__ANDROID__) && defined(__aarch64__)
-    if (g_android_opencl_handle != nullptr) {
-        using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
-        auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
-                mca::opencl::driver_symbol(g_android_opencl_handle, "clGetPlatformIDs"));
-        if (get_platform_ids == nullptr) {
-            g_backend_load_diagnostic += "Android OpenCL runtime loaded but clGetPlatformIDs is not exported.";
-            return false;
-        }
-        std::uint32_t count = 0;
-        const int status = get_platform_ids(0, nullptr, &count);
-        if (status != 0 || count == 0) {
-            g_backend_load_diagnostic += "Android OpenCL runtime loaded but reports no usable platform (clGetPlatformIDs status=";
-            g_backend_load_diagnostic += std::to_string(status) + ", count=" + std::to_string(count) + ").";
-            return false;
-        }
-        return true;
-    }
-    // libOpenCL.so is an optional platform native library on supported
-    // devices. Keep CPU-only devices installable by treating dlopen failure as
-    // a normal accelerator miss. RTLD_LOCAL avoids leaking vendor symbols into
-    // unrelated JNI libraries; mca_opencl_dispatch resolves its own symbols.
-    for (const char * candidate : mca::opencl::driver_paths) {
-        void * driver = dlopen(candidate, RTLD_NOW | RTLD_LOCAL);
-        if (driver == nullptr) continue;
-        const char * missing = mca::opencl::missing_required_symbol(driver);
-        if (missing != nullptr) {
-            g_backend_load_diagnostic += std::string(candidate) + " missing driver symbol " + missing + ". ";
-            dlclose(driver);
-            continue;
-        }
-        g_android_opencl_handle = driver;
-        g_backend_load_diagnostic += std::string("OpenCL driver loaded: ") + candidate + ". ";
-        break;
-    }
-    if (g_android_opencl_handle == nullptr) {
-        const char *diagnostic = dlerror();
-        g_backend_load_diagnostic += "Android OpenCL runtime unavailable: ";
-        g_backend_load_diagnostic += diagnostic == nullptr ? "dlopen(libOpenCL.so) failed." : diagnostic;
-        return false;
-    }
-    using get_platform_ids_fn = int (*)(std::uint32_t, void **, std::uint32_t *);
-    auto get_platform_ids = reinterpret_cast<get_platform_ids_fn>(
-            mca::opencl::driver_symbol(g_android_opencl_handle, "clGetPlatformIDs"));
-    if (get_platform_ids == nullptr) {
-        g_backend_load_diagnostic += "Android OpenCL runtime loaded from libOpenCL.so but clGetPlatformIDs is not exported.";
-        return false;
-    }
-    std::uint32_t count = 0;
-    const int status = get_platform_ids(0, nullptr, &count);
-    if (status != 0 || count == 0) {
-        g_backend_load_diagnostic += "Android OpenCL runtime loaded but reports no usable platform (clGetPlatformIDs status=";
-        g_backend_load_diagnostic += std::to_string(status) + ", count=" + std::to_string(count) + ").";
-        return false;
-    }
-    g_backend_load_diagnostic += "Android OpenCL runtime loaded from libOpenCL.so; platform count=" + std::to_string(count) + ".";
-    return true;
-#else
-    return true;
-#endif
+    return mca::llm::load_android_opencl_runtime_if_available_locked(
+            g_android_opencl_handle, g_backend_load_diagnostic);
 }
 
 bool ensure_backends_loaded_locked() {
@@ -1698,175 +1543,50 @@ size_t save_llama_state_with_progress_locked(
     }
 }
 
+mca::llm::TurnCacheEnvironment make_turn_cache_environment_locked() {
+    mca::llm::TurnCacheEnvironment env;
+    env.ctx = g_context;
+    env.current_position = &g_current_position;
+    env.context_tokens = &g_context_tokens;
+    env.cache_state_valid = &g_cache_state_valid;
+    env.checkpoints = &g_turn_cache_checkpoints;
+    env.checkpoint_count = &g_turn_cache_checkpoint_count;
+    env.checkpoint_bytes = &g_turn_cache_checkpoint_bytes;
+    env.turn_checkpoint_hits = &g_turn_cache_checkpoint_hits;
+    env.cache_reuse_hit = &g_cache_reuse_hit;
+    env.cache_reused_tokens = &g_cache_reused_tokens;
+    env.cache_reuse_hits = &g_cache_reuse_hits;
+    env.cache_reuse_reason = &g_cache_reuse_reason;
+    env.stop_requested = &g_stop_requested;
+    env.clear_target_context = [](const std::string &reason) {
+        clear_target_context_locked(reason);
+    };
+    env.trim_context = [](llama_pos pos, const char *label) {
+        return trim_context_locked(g_context, pos, label);
+    };
+    env.take_last_error = []() -> std::string {
+        std::string err = g_last_error;
+        g_last_error.clear();
+        return err;
+    };
+    env.log_warning = [](const std::string &msg) {
+        __android_log_print(ANDROID_LOG_WARN, "MCA", "%s", msg.c_str());
+    };
+    return env;
+}
+
 bool save_turn_cache_checkpoint_locked() {
-    if (g_context == nullptr || !g_cache_state_valid ||
-        active_prefix_cache_strategy_locked() !=
-                mca::llama::PrefixCacheStrategy::PartialStateCheckpoint ||
-        g_context_tokens.empty() ||
-        g_current_position != (llama_pos) g_context_tokens.size() ||
-        g_stop_requested.load(std::memory_order_acquire)) {
-        return false;
-    }
-
-    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    const size_t checkpoint_size = llama_state_seq_get_size_ext(g_context, 0, flags);
-    const size_t incoming_bytes = turn_cache_checkpoint_bytes(
-            checkpoint_size,
-            g_context_tokens.size());
-    if (checkpoint_size == 0 || incoming_bytes > MAX_TURN_CACHE_CHECKPOINT_BYTES) {
-        return false;
-    }
-
-    // Reconcile and evict before allocating the new state or token prefix. The
-    // budget therefore bounds the save-time peak as well as the retained set.
-    g_turn_cache_checkpoint_bytes = 0;
-    for (const auto &checkpoint : g_turn_cache_checkpoints) {
-        const size_t checkpoint_bytes = turn_cache_checkpoint_bytes(checkpoint);
-        if (checkpoint_bytes >
-                std::numeric_limits<size_t>::max() - g_turn_cache_checkpoint_bytes) {
-            invalidate_turn_cache_checkpoints_locked();
-            break;
-        }
-        g_turn_cache_checkpoint_bytes += checkpoint_bytes;
-    }
-    g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
-
-    try {
-        auto existing = std::find_if(
-                g_turn_cache_checkpoints.begin(),
-                g_turn_cache_checkpoints.end(),
-                [&](const TurnCacheCheckpoint &checkpoint) {
-                    return checkpoint.prefix == g_context_tokens;
-                });
-        if (existing != g_turn_cache_checkpoints.end()) {
-            g_turn_cache_checkpoint_bytes -= turn_cache_checkpoint_bytes(*existing);
-            g_turn_cache_checkpoints.erase(existing);
-        }
-
-        while ((!g_turn_cache_checkpoints.empty() &&
-                g_turn_cache_checkpoints.size() >= MAX_TURN_CACHE_CHECKPOINTS) ||
-               g_turn_cache_checkpoint_bytes >
-                       MAX_TURN_CACHE_CHECKPOINT_BYTES - incoming_bytes) {
-            g_turn_cache_checkpoint_bytes -=
-                    turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.front());
-            g_turn_cache_checkpoints.erase(g_turn_cache_checkpoints.begin());
-        }
-        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
-
-        std::vector<uint8_t> checkpoint_data(checkpoint_size);
-        const size_t written = llama_state_seq_get_data_ext(
-                g_context,
-                checkpoint_data.data(),
-                checkpoint_data.size(),
-                0,
-                flags);
-        if (written != checkpoint_data.size() ||
-            g_stop_requested.load(std::memory_order_acquire)) {
-            return false;
-        }
-
-        llama_tokens checkpoint_prefix = g_context_tokens;
-        const size_t checkpoint_position = checkpoint_prefix.size();
-        g_turn_cache_checkpoints.push_back(TurnCacheCheckpoint{
-                std::move(checkpoint_prefix),
-                std::move(checkpoint_data),
-                checkpoint_position});
-        // Account only after push_back succeeds. If the vector allocation
-        // throws, the catch path below can safely recompute the snapshot.
-        g_turn_cache_checkpoint_bytes +=
-                turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.back());
-        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
-        if (g_stop_requested.load(std::memory_order_acquire)) {
-            g_turn_cache_checkpoint_bytes -=
-                    turn_cache_checkpoint_bytes(g_turn_cache_checkpoints.back());
-            g_turn_cache_checkpoints.pop_back();
-            g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
-            return false;
-        }
-        return true;
-    } catch (const std::exception &) {
-        g_turn_cache_checkpoint_bytes = 0;
-        for (const auto &checkpoint : g_turn_cache_checkpoints) {
-            const size_t checkpoint_bytes = turn_cache_checkpoint_bytes(checkpoint);
-            if (checkpoint_bytes >
-                    std::numeric_limits<size_t>::max() - g_turn_cache_checkpoint_bytes) {
-                invalidate_turn_cache_checkpoints_locked();
-                return false;
-            }
-            g_turn_cache_checkpoint_bytes += checkpoint_bytes;
-        }
-        g_turn_cache_checkpoint_count = g_turn_cache_checkpoints.size();
-        return false;
-    }
+    auto env = make_turn_cache_environment_locked();
+    return mca::llm::save_turn_cache_checkpoint_locked(
+            active_prefix_cache_strategy_locked(), env);
 }
 
 bool restore_turn_cache_checkpoint_locked(
         const llama_tokens &tokens,
         size_t &reused_tokens) {
-    if (g_context == nullptr || !g_cache_state_valid ||
-        g_context_tokens.empty() || g_turn_cache_checkpoints.empty() ||
-        g_current_position != (llama_pos) g_context_tokens.size()) {
-        return false;
-    }
-
-    // Prefer the deepest checkpoint that is a prefix of both the new prompt
-    // and the currently live context. The second check is essential because a
-    // checkpoint from a different conversation branch contains recurrent state
-    // that cannot reconstruct a missing attention prefix by itself.
-    const TurnCacheCheckpoint *candidate = nullptr;
-    for (auto it = g_turn_cache_checkpoints.rbegin();
-         it != g_turn_cache_checkpoints.rend(); ++it) {
-        if (it->position == 0 || it->position >= tokens.size() ||
-            it->position > g_context_tokens.size() ||
-            !mca::llama::tokenPrefixMatches(tokens, it->prefix) ||
-            !mca::llama::tokenPrefixMatches(g_context_tokens, it->prefix)) {
-            continue;
-        }
-        if (candidate == nullptr || it->position > candidate->position) {
-            candidate = &*it;
-        }
-    }
-    if (candidate == nullptr) return false;
-
-    constexpr llama_state_seq_flags flags = LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY;
-    const size_t restored = llama_state_seq_set_data_ext(
-            g_context,
-            candidate->data.data(),
-            candidate->data.size(),
-            0,
-            flags);
-    if (restored != candidate->data.size()) {
-        // A failed state read may already have mutated recurrent memory. Do
-        // not attempt another cache path on a context whose state is unknown.
-        clear_target_context_locked("turn_checkpoint_restore_failed");
-        return false;
-    }
-
-    if (g_current_position > (llama_pos) candidate->position &&
-        !trim_context_locked(
-                g_context,
-                (llama_pos) candidate->position,
-                "target turn-checkpoint cache-reuse")) {
-        const std::string trim_error = g_last_error;
-        g_last_error.clear();
-        clear_target_context_locked("turn_checkpoint_suffix_trim_failed");
-        if (!trim_error.empty()) {
-            __android_log_print(ANDROID_LOG_WARN, "MCA", "%s", trim_error.c_str());
-        }
-        return false;
-    }
-    g_current_position = (llama_pos) candidate->position;
-    g_context_tokens = candidate->prefix;
-    g_cache_state_valid = true;
-    g_cache_reuse_hit = true;
-    g_cache_reused_tokens = (int) std::min<size_t>(
-            candidate->position,
-            static_cast<size_t>(std::numeric_limits<int>::max()));
-    g_cache_reuse_hits++;
-    g_turn_cache_checkpoint_hits++;
-    g_cache_reuse_reason = "turn_checkpoint_hit";
-    reused_tokens = candidate->position;
-    return true;
+    auto env = make_turn_cache_environment_locked();
+    return mca::llm::restore_turn_cache_checkpoint_locked(
+            tokens, reused_tokens, env);
 }
 
 void save_completed_turn_checkpoint_locked(GenerationStopReason reason) {

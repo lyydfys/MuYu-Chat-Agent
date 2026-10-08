@@ -105,8 +105,8 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun apiSideEffectsAndFailureRollbackShareTheSerializedLifecycleGate() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "private suspend fun applyLocalApiState(")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
+        val body = functionBody(coordinator, "suspend fun applyLocalApiState(")
 
         assertTrue(body.contains("apiLifecycleMutex.withLock"))
         assertTrue(body.contains("operationIsCurrent()"))
@@ -184,20 +184,20 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun apiStartRejectionReachesTheExistingLifecycleRollback() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "private fun setLocalApiForegroundService(")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
+        val body = functionBody(coordinator, "fun setLocalApiForegroundService(")
         assertTrue(body.contains("check(LocalApiForegroundService.start("))
     }
 
     @Test
     fun apiListenerIsPublishedOnlyAfterForegroundServicePromotion() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "private suspend fun applyLocalApiState(")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
+        val body = functionBody(coordinator, "suspend fun applyLocalApiState(")
         val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiForegroundService.kt")
 
         assertTrue(body.contains("ensureLocalApiForegroundServiceReady("))
         assertTrue(body.indexOf("ensureLocalApiForegroundServiceReady(") < body.indexOf("startApiServer("))
-        assertTrue(viewModel.contains("awaitLocalApiForegroundServiceReady()"))
+        assertTrue(coordinator.contains("awaitLocalApiForegroundServiceReady()"))
         assertTrue(service.contains("fun isForegroundReady(): Boolean"))
     }
 
@@ -216,8 +216,8 @@ class AppForegroundRecoveryContractTest {
 
     @Test
     fun apiServerBindingRequiresCurrentProcessOwnership() {
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "private fun startApiServer(")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
+        val body = functionBody(coordinator, "fun startApiServer(")
 
         assertTrue(body.contains("synchronized(localApiProcessLifecycleLock)"))
         assertTrue(body.contains("localApiProcessOwnerToken !== localApiRuntimeOwner"))

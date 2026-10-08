@@ -98,7 +98,9 @@ add_library(mca_native SHARED
         mca/llm/llm_prefill_tracker.cpp
         mca/llm/llm_prefix_cache_manager.cpp
         mca/llm/llm_stats_collector.cpp
-        mca/llm/llm_runtime_config.cpp)
+        mca/llm/llm_runtime_config.cpp
+        mca/llm/llm_backend_loader.cpp
+        mca/llm/llm_turn_cache.cpp)
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
 add_library(mca_prompt_handoff SHARED
         mnn_qnn_prompt_handoff.cpp
@@ -116,7 +118,9 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_preview_manager.cpp
         mca/qnn/qnn_bundle_files.cpp
         mca/qnn/qnn_sdxl_phase_support.cpp
-        mca/qnn/qnn_tensor_codec.cpp)
+        mca/qnn/qnn_tensor_codec.cpp
+        mca/qnn/qnn_device_support.cpp
+        mca/qnn/qnn_tensor_inspect.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
@@ -135,7 +139,8 @@ add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_stats_collector.cpp
         mca/mnn/mnn_prompt_cache_manager.cpp
         mca/mnn/mnn_protocol_parser.cpp
-        mca/mnn/mnn_clip_tokenizer.cpp)
+        mca/mnn/mnn_clip_tokenizer.cpp
+        mca/mnn/mnn_file_utils.cpp)
 target_include_directories(mca_mnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
@@ -148,7 +153,8 @@ target_link_libraries(mca_qnn_native PRIVATE mca_prompt_handoff mca_contract mca
 target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
-        diffusion_scheduler.cpp)
+        diffusion_scheduler.cpp
+        mca/mnn/mnn_tensor_ops.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp

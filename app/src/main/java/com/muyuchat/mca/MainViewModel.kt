@@ -153,10 +153,12 @@ class MainViewModel @JvmOverloads constructor(
         (injectedLocalApiRuntimeOwner as? LocalApiRuntimeOwner) ?: container.createLocalApiRuntimeOwner()
     private val initialApiPreferences = loadApiPreferences(application)
     /** Listener, notification, persisted intent, and UI state share this single lifecycle gate. */
-    private val apiLifecycleMutex = Mutex()
-    private val apiLifecycleSequence = AtomicLong(0L)
-    private val apiLifecycleClosed = AtomicBoolean(false)
-    private var apiLifecycleRequestJob: Job? = null
+    private val apiLifecycleMutex get() = localApiServerCoordinator.apiLifecycleMutex
+    private val apiLifecycleSequence get() = localApiServerCoordinator.apiLifecycleSequence
+    private val apiLifecycleClosed get() = localApiServerCoordinator.apiLifecycleClosed
+    private var apiLifecycleRequestJob: Job?
+        get() = localApiServerCoordinator.apiLifecycleRequestJob
+        set(value) { localApiServerCoordinator.apiLifecycleRequestJob = value }
     /** Deduplicates repeated process-foreground callbacks and their worker health probes. */
     private var foregroundRecoveryJob: Job? = null
     private val foregroundRecoverySequence = AtomicLong(0L)
@@ -548,6 +550,22 @@ class MainViewModel @JvmOverloads constructor(
             true
         }
     }
+
+    private val localApiServerCoordinator = LocalApiServerCoordinator(
+        application = application,
+        scope = viewModelScope,
+        store = uiStateStore,
+        localApiRuntimeOwner = localApiRuntimeOwner,
+        apiKey = apiKey,
+        cancelActiveLocalApiImageGeneration = ::cancelActiveLocalApiImageGeneration,
+        persistApiPreferences = ::persistApiPreferences,
+        apiUrl = ::apiUrl,
+        currentOpenApiAddress = ::currentOpenApiAddress,
+        onInterruptForegroundRecovery = {
+            foregroundRecoverySequence.incrementAndGet()
+            foregroundRecoveryJob?.cancel()
+        }
+    )
 
     private fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
         chatImageWorkflowCoordinator.updateGenerationImageGrantReleaseDefer(defer)
@@ -1961,187 +1979,42 @@ class MainViewModel @JvmOverloads constructor(
     private fun retireLocalApiListener(
         stopForegroundService: Boolean,
         forceServerStop: Boolean
-    ) {
-        apiLifecycleClosed.set(true)
-        apiLifecycleSequence.incrementAndGet()
-        foregroundRecoverySequence.incrementAndGet()
-        foregroundRecoveryJob?.cancel()
-        apiLifecycleRequestJob?.cancel()
-        if (forceServerStop) stopApiServer()
-        if (stopForegroundService) {
-            releaseLocalApiProcessOwnership()
-        }
-    }
+    ) = localApiServerCoordinator.retireLocalApiListener(stopForegroundService, forceServerStop)
 
     private fun requestLocalApiState(
         enabled: Boolean,
         restEnabled: Boolean,
         failurePrefix: String
-    ) {
-        if (apiLifecycleClosed.get()) return
-        foregroundRecoverySequence.incrementAndGet()
-        foregroundRecoveryJob?.cancel()
-        val operation = apiLifecycleSequence.incrementAndGet()
-        apiLifecycleRequestJob?.cancel()
-        apiLifecycleRequestJob = viewModelScope.launch(Dispatchers.IO) {
-            applyLocalApiState(operation, enabled, restEnabled, failurePrefix)
-        }
-    }
+    ) = localApiServerCoordinator.requestLocalApiState(enabled, restEnabled, failurePrefix)
 
     private suspend fun applyLocalApiState(
         operation: Long,
         enabled: Boolean,
         restEnabled: Boolean,
         failurePrefix: String
-    ): LocalApiApplyResult? = apiLifecycleMutex.withLock {
-        fun operationIsCurrent(): Boolean =
-            !apiLifecycleClosed.get() && apiLifecycleSequence.get() == operation
+    ): LocalApiApplyResult? =
+        localApiServerCoordinator.applyLocalApiState(operation, enabled, restEnabled, failurePrefix)
 
-        if (!operationIsCurrent()) return@withLock null
-        var committed = false
-        try {
-            if (enabled) {
-                // Android may return from startForegroundService before
-                // onCreate/onStartCommand has promoted the service.  Starting
-                // the socket first creates a window where the API advertises
-                // itself but is not protected from process/background limits;
-                // on some cold starts that race left port 11435 unbound after
-                // the service request was lost.  Promote and wait first, then
-                // publish the listener.
-                check(ensureLocalApiForegroundServiceReady(restEnabled)) {
-                    "本机 API 后台服务未就绪，请回到应用前台后重试。"
-                }
-                startApiServer(if (restEnabled) "0.0.0.0" else "127.0.0.1")
-            } else {
-                stopApiServer()
-                setLocalApiForegroundService(false, false)
-            }
-            currentCoroutineContext().ensureActive()
-            if (!operationIsCurrent()) return@withLock null
+    private suspend fun awaitLocalApiForegroundServiceReady(): Boolean =
+        localApiServerCoordinator.awaitLocalApiForegroundServiceReady()
 
-            persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
-            uiStateStore.update { state ->
-                if (!operationIsCurrent()) {
-                    state
-                } else {
-                    state.copy(
-                        apiEnabled = enabled,
-                        restEnabled = enabled && restEnabled,
-                        localApiAddress = apiUrl("127.0.0.1"),
-                        openApiAddress = currentOpenApiAddress()
-                    )
-                }
-            }
-            if (!operationIsCurrent()) return@withLock null
-            committed = true
-            LocalApiApplyResult(
-                running = enabled,
-                restEnabled = enabled && restEnabled
-            )
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Throwable) {
-            if (!operationIsCurrent()) return@withLock null
-            stopApiServer()
-            runCatching { setLocalApiForegroundService(false, false) }
-            uiStateStore.update { state ->
-                if (!operationIsCurrent()) {
-                    state
-                } else {
-                    state.copy(
-                        apiEnabled = false,
-                        restEnabled = false,
-                        statusMessage = "${failurePrefix}：${error.message ?: "端口不可用"}"
-                    )
-                }
-            }
-            committed = true
-            LocalApiApplyResult(running = false, restEnabled = false, failure = error)
-        } finally {
-            // A superseded operation must not tear down a replacement operation's
-            // listener or foreground service. The replacement owns cleanup after
-            // it acquires the same mutex; onCleared() handles process teardown.
-            if (!committed && operationIsCurrent()) {
-                stopApiServer()
-                runCatching { setLocalApiForegroundService(false, false) }
-            }
-        }
-    }
+    private suspend fun ensureLocalApiForegroundServiceReady(restEnabled: Boolean): Boolean =
+        localApiServerCoordinator.ensureLocalApiForegroundServiceReady(restEnabled)
 
-    private suspend fun awaitLocalApiForegroundServiceReady(): Boolean {
-        if (LocalApiForegroundService.isForegroundReady()) return true
-        return withTimeoutOrNull(LOCAL_API_FOREGROUND_READY_TIMEOUT_MS) {
-            while (!LocalApiForegroundService.isForegroundReady()) {
-                currentCoroutineContext().ensureActive()
-                delay(25L)
-            }
-            true
-        } == true
-    }
+    private fun setLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) =
+        localApiServerCoordinator.setLocalApiForegroundService(enabled, restEnabled)
 
-    private suspend fun ensureLocalApiForegroundServiceReady(restEnabled: Boolean): Boolean {
-        repeat(LOCAL_API_FOREGROUND_READY_ATTEMPTS) { attempt ->
-            if (LocalApiForegroundService.isForegroundReady()) return true
-            if (attempt > 0) delay(100L)
-            runCatching {
-                setLocalApiForegroundService(true, restEnabled)
-            }.getOrElse { error ->
-                if (attempt == LOCAL_API_FOREGROUND_READY_ATTEMPTS - 1) throw error
-            }
-            if (awaitLocalApiForegroundServiceReady()) return true
-            // A timed-out start can leave an OEM service request queued. Clear
-            // that request before the bounded retry so the next attempt is a
-            // fresh startForegroundService call instead of an idempotent no-op.
-            runCatching { LocalApiForegroundService.stop(getApplication()) }
-        }
-        return false
-    }
+    private fun claimLocalApiProcessOwnership() =
+        localApiServerCoordinator.claimLocalApiProcessOwnership()
 
-    private fun setLocalApiForegroundService(enabled: Boolean, restEnabled: Boolean) {
-        synchronized(localApiProcessLifecycleLock) {
-            // A cancelled operation from a replaced ViewModel may reach its finally block late.
-            // Only the current process owner may mutate the shared notification service.
-            if (localApiProcessOwnerToken !== localApiRuntimeOwner || apiLifecycleClosed.get()) return
-            if (enabled) {
-                check(LocalApiForegroundService.start(getApplication(), restEnabled)) {
-                    "系统拒绝启动 API 后台服务，请回到应用前台后重新开启 API。"
-                }
-            } else {
-                LocalApiForegroundService.stop(getApplication())
-            }
-        }
-    }
+    private fun releaseLocalApiProcessOwnership() =
+        localApiServerCoordinator.releaseLocalApiProcessOwnership()
 
-    private fun claimLocalApiProcessOwnership() {
-        synchronized(localApiProcessLifecycleLock) {
-            localApiProcessOwnerToken = localApiRuntimeOwner
-        }
-    }
+    private fun startApiServer(bindHost: String) =
+        localApiServerCoordinator.startApiServer(bindHost)
 
-    private fun releaseLocalApiProcessOwnership() {
-        synchronized(localApiProcessLifecycleLock) {
-            if (localApiProcessOwnerToken !== localApiRuntimeOwner) return
-            localApiProcessOwnerToken = null
-            LocalApiForegroundService.stop(getApplication())
-        }
-    }
-
-    private fun startApiServer(bindHost: String) {
-        synchronized(localApiProcessLifecycleLock) {
-            if (localApiProcessOwnerToken !== localApiRuntimeOwner || apiLifecycleClosed.get()) {
-                throw CancellationException("Local API process ownership changed before server start")
-            }
-            if (!LocalApiForegroundService.isListenerRunning(bindHost)) {
-                cancelActiveLocalApiImageGeneration("Local API server is restarting.")
-            }
-            LocalApiForegroundService.ensureListener(bindHost, apiKey)
-        }
-    }
-
-    private fun stopApiServer() {
-        cancelActiveLocalApiImageGeneration("Local API server stopped.")
-        LocalApiForegroundService.stopListener()
-    }
+    private fun stopApiServer() =
+        localApiServerCoordinator.stopApiServer()
 
     // R3/C3-S11：会话持久化端口具名化——容器工厂构造（真实依赖全对象化）。
     private val chatSessionPersistencePort = container.createChatSessionPersistencePort(uiStateStore, viewModelScope, engine)

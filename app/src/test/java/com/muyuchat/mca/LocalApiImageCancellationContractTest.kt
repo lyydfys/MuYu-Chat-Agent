@@ -17,8 +17,9 @@ class LocalApiImageCancellationContractTest {
         val stopProvider = installSource.substring(
             installSource.indexOf("LocalApiRuntime.stopGenerationProvider =")
         )
-        val startServer = functionBody(source, "private fun startApiServer(")
-        val stopServer = functionBody(source, "private fun stopApiServer()")
+        val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
+        val startServer = functionBody(coordinator, "fun startApiServer(")
+        val stopServer = functionBody(coordinator, "fun stopApiServer()")
 
         val register = api.indexOf("registerLocalApiImageGenerationOwnership(ownership)")
         val cancellationCheck = api.indexOf("currentCoroutineContext().ensureActive()")

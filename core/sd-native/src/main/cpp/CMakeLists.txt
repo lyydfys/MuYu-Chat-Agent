@@ -70,11 +70,13 @@ add_library(mca_sd_native SHARED
         mca/sd/sd_image_io.cpp
         mca/sd/sd_textual_inversion.cpp
         mca/sd/sd_contract_parser.cpp
+        mca/sd/sd_component_resolver.cpp
         mca/sd/sd_output_transaction.cpp
         mca/sd/sd_input_contract.cpp
         mca/sd/sd_phase_machine.cpp
         mca/sd/sd_request.cpp
         mca/sd/sd_runtime_owner.cpp
+        mca/sd/sd_runtime_diagnostics.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/common/logging.cpp)
