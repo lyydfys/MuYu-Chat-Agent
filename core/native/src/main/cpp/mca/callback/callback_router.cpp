@@ -1,12 +1,10 @@
 #include "callback_router.hpp"
 #include "mca/common/logging.hpp"
 #include <chrono>
+#include <exception>
 
 namespace mca {
 namespace callback {
-
-CallbackRouter::CallbackRouter(size_t max_queue_capacity)
-    : max_capacity_(max_queue_capacity) {}
 
 CallbackRouter::~CallbackRouter() {
     reset();
@@ -23,6 +21,12 @@ DispatchResult CallbackRouter::dispatch(
     int64_t active_generation,
     int64_t active_worker
 ) {
+    std::lock_guard<std::recursive_mutex> dispatch_lock(dispatch_mutex_);
+
+    if (!event.identity.is_valid() || event.sequence < 0) {
+        return DispatchResult::StaleRejected;
+    }
+
     // 1. Check stale epoch/generation/worker
     if (event.is_stale(active_epoch, active_generation, active_worker)) {
         MCA_LOGD("CallbackRouter", "Dropping stale event [ep=%lld, gen=%lld]",
@@ -31,24 +35,38 @@ DispatchResult CallbackRouter::dispatch(
         return DispatchResult::StaleRejected;
     }
 
-    // 2. Check monotonic sequence
-    const int64_t last_seq = last_sequence_.load(std::memory_order_relaxed);
-    if (event.sequence <= last_seq && event.sequence > 0) {
-        MCA_LOGW("CallbackRouter", "Dropping non-monotonic sequence event %lld <= %lld",
-                 static_cast<long long>(event.sequence),
-                 static_cast<long long>(last_seq));
+    if (!identity_initialized_) {
+        request_id_ = event.identity.request_id;
+        attempt_id_ = event.identity.attempt_id;
+        runtime_epoch_ = event.identity.runtime_epoch;
+        session_generation_ = event.identity.session_generation;
+        worker_incarnation_ = event.identity.worker_incarnation;
+        identity_initialized_ = true;
+    } else if (event.identity.request_id != request_id_ ||
+               event.identity.attempt_id != attempt_id_ ||
+               event.identity.runtime_epoch != runtime_epoch_ ||
+               event.identity.session_generation != session_generation_ ||
+               event.identity.worker_incarnation != worker_incarnation_) {
         return DispatchResult::StaleRejected;
     }
 
-    // 3. Check duplicate terminal
-    if (event.is_terminal) {
-        if (terminal_delivered_.exchange(true, std::memory_order_relaxed)) {
-            MCA_LOGW("CallbackRouter", "Duplicate terminal event ignored");
-            return DispatchResult::DuplicateTerminalIgnored;
-        }
-    } else if (terminal_delivered_.load(std::memory_order_relaxed)) {
-        // Non-terminal event arrived after terminal was delivered
+    // 2. A repeated terminal is classified independently of its duplicate sequence.
+    if (terminal_delivered_) {
+        return event.is_terminal
+            ? DispatchResult::DuplicateTerminalIgnored
+            : DispatchResult::StaleRejected;
+    }
+
+    // 3. Check monotonic sequence
+    if (event.sequence <= last_sequence_ && event.sequence >= 0) {
+        MCA_LOGW("CallbackRouter", "Dropping non-monotonic sequence event %lld <= %lld",
+                 static_cast<long long>(event.sequence),
+                 static_cast<long long>(last_sequence_));
         return DispatchResult::StaleRejected;
+    }
+
+    if (event.is_terminal) {
+        terminal_delivered_ = true;
     }
 
     SinkFunction sink_copy;
@@ -58,17 +76,30 @@ DispatchResult CallbackRouter::dispatch(
         in_flight_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    last_sequence_.store(event.sequence, std::memory_order_relaxed);
+    last_sequence_ = event.sequence;
 
-    if (sink_copy) {
-        sink_copy(event);
-    }
-
-    {
+    const auto finish_dispatch = [this]() {
         std::lock_guard<std::mutex> lock(mutex_);
         in_flight_.fetch_sub(1, std::memory_order_relaxed);
+        cv_drain_.notify_all();
+    };
+
+    if (!sink_copy) {
+        finish_dispatch();
+        return DispatchResult::SinkFailed;
     }
-    cv_drain_.notify_all();
+    try {
+        sink_copy(event);
+    } catch (const std::exception& error) {
+        MCA_LOGE("CallbackRouter", "Callback sink failed: %s", error.what());
+        finish_dispatch();
+        return DispatchResult::SinkFailed;
+    } catch (...) {
+        MCA_LOGE("CallbackRouter", "Callback sink failed with an unknown exception");
+        finish_dispatch();
+        return DispatchResult::SinkFailed;
+    }
+    finish_dispatch();
 
     return DispatchResult::Delivered;
 }
@@ -86,10 +117,16 @@ size_t CallbackRouter::pending_count() const noexcept {
 }
 
 void CallbackRouter::reset() {
+    std::lock_guard<std::recursive_mutex> dispatch_lock(dispatch_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
-    terminal_delivered_.store(false, std::memory_order_relaxed);
-    last_sequence_.store(-1, std::memory_order_relaxed);
-    in_flight_.store(0, std::memory_order_relaxed);
+    terminal_delivered_ = false;
+    last_sequence_ = -1;
+    identity_initialized_ = false;
+    request_id_.clear();
+    attempt_id_ = -1;
+    runtime_epoch_ = -1;
+    session_generation_ = -1;
+    worker_incarnation_ = -1;
     cv_drain_.notify_all();
 }
 

@@ -36,6 +36,14 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef MCA_WITH_MNN_LLM
+#define MCA_WITH_MNN_LLM 0
+#endif
+
+#ifndef MCA_WITH_MNN_DIFFUSION
+#define MCA_WITH_MNN_DIFFUSION 0
+#endif
+
 #include "nlohmann/json.hpp"
 #include "diffusion_scheduler.hpp"
 #include "image_conditioning.hpp"
@@ -51,11 +59,8 @@
 #include "mca/mnn/mnn_prompt_cache_manager.hpp"
 #include "mca/mnn/mnn_protocol_parser.hpp"
 #include "mca/mnn/mnn_clip_tokenizer.hpp"
-#include "mca/mnn/mnn_tensor_ops.hpp"
 #include "mca/mnn/mnn_file_utils.hpp"
-#include "mca/mnn/mnn_vae_image_writer.hpp"
-#include "mca/mnn/mnn_clip_weighting.hpp"
-#include "mca/mnn/mnn_pndm_scheduler.hpp"
+#include "mca/mnn/mnn_prompt_weighting.hpp"
 #include "mnn_qnn_prompt_handoff.hpp"
 #include "native_prompt_language_contract.hpp"
 #include "mnn_runtime_capability_policy.hpp"
@@ -70,8 +75,11 @@
 #include "llm/llm.hpp"
 #endif
 
-#ifndef MCA_WITH_MNN_DIFFUSION
-#define MCA_WITH_MNN_DIFFUSION 0
+#if MCA_WITH_MNN_DIFFUSION
+#include "mca/mnn/mnn_tensor_ops.hpp"
+#include "mca/mnn/mnn_vae_image_writer.hpp"
+#include "mca/mnn/mnn_clip_weighting.hpp"
+#include "mca/mnn/mnn_pndm_scheduler.hpp"
 #endif
 
 #ifndef MCA_WITH_TOKENIZERS_CPP

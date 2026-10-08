@@ -24,7 +24,7 @@ PACKAGES = [
         "license": "Apache-2.0",
         "supplier": "Organization: MuYuChat MCA Team",
         "originator": "Organization: MuYuChat MCA Team",
-        "description": "Pure Kotlin domain engine runtime lifecycle and contract module."
+        "description": "Android engine runtime, request lifecycle, callback routing, and contracts."
     },
     {
         "name": "mca-native-common",
@@ -47,7 +47,7 @@ PACKAGES = [
     {
         "name": "alibaba-mnn",
         "spdx_id": "SPDXRef-Package-Alibaba-MNN",
-        "version": "2.9.0-mca-patched",
+        "version": "3.6.1-mca-patched",
         "license": "Apache-2.0",
         "supplier": "Organization: Alibaba Group",
         "originator": "Organization: Alibaba Group",
@@ -72,9 +72,9 @@ PACKAGES = [
         "description": "Stable Diffusion in pure C/C++ with text2img, img2img, and ControlNet pipelines."
     },
     {
-        "name": "litert-android-runtime",
+        "name": "litertlm-android-runtime",
         "spdx_id": "SPDXRef-Package-Google-LiteRT",
-        "version": "1.4.0",
+        "version": "0.16.1",
         "license": "Apache-2.0",
         "supplier": "Organization: Google LLC",
         "originator": "Organization: Google LLC",
@@ -92,7 +92,7 @@ PACKAGES = [
     {
         "name": "androidx-workmanager",
         "spdx_id": "SPDXRef-Package-AndroidX-WorkManager",
-        "version": "2.10.0",
+        "version": "2.11.0",
         "license": "Apache-2.0",
         "supplier": "Organization: Google LLC",
         "originator": "Organization: Google LLC",
@@ -101,7 +101,7 @@ PACKAGES = [
     {
         "name": "androidx-room",
         "spdx_id": "SPDXRef-Package-AndroidX-Room",
-        "version": "2.7.0",
+        "version": "2.8.4",
         "license": "Apache-2.0",
         "supplier": "Organization: Google LLC",
         "originator": "Organization: Google LLC",

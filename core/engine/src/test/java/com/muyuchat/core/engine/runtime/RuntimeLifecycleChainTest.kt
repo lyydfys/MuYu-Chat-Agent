@@ -10,6 +10,10 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class RuntimeLifecycleChainTest {
 
@@ -72,6 +76,8 @@ class RuntimeLifecycleChainTest {
         val identity = RequestIdentity(requestId = "req-fixed", runtimeEpoch = 1L)
         registry.register(identity)
 
+        assertFalse(registry.markTerminal("req-fixed", RequestState.Succeeded))
+
         assertTrue(registry.transitionState("req-fixed", RequestState.Accepted))
         assertTrue(registry.transitionState("req-fixed", RequestState.Preparing))
         assertTrue(registry.transitionState("req-fixed", RequestState.Running))
@@ -106,7 +112,7 @@ class RuntimeLifecycleChainTest {
         )
 
         val receivedEvents = mutableListOf<CallbackEvent>()
-        router.subscribe("req-stream") { event ->
+        router.subscribe(identity) { event ->
             receivedEvents.add(event)
         }
 
@@ -169,6 +175,64 @@ class RuntimeLifecycleChainTest {
 
         assertEquals(2, receivedEvents.size)
         assertTrue(router.droppedStaleCount() >= 4)
+    }
+
+    @Test
+    fun callbackRouterSerializesConcurrentTerminalDeliveryAndRejectsOldAttempts() {
+        val router = CallbackRouter()
+        val identity = RequestIdentity(requestId = "req-race", attemptId = 2L, runtimeEpoch = 3L)
+        val delivered = AtomicInteger()
+        router.subscribe(identity) { delivered.incrementAndGet() }
+
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(8)
+        try {
+            val tasks = (1L..32L).map { sequence ->
+                pool.submit {
+                    start.await()
+                    router.routeEvent(
+                        CallbackEvent.terminal(identity, sequence, RequestState.Succeeded),
+                        currentRuntimeEpoch = 3L,
+                        currentSessionGeneration = 0L
+                    )
+                }
+            }
+            start.countDown()
+            tasks.forEach { it.get(5, TimeUnit.SECONDS) }
+        } finally {
+            pool.shutdownNow()
+        }
+        assertEquals(1, delivered.get())
+
+        router.subscribe(identity.copy(attemptId = 3L)) { delivered.incrementAndGet() }
+        assertFalse(
+            router.routeEvent(
+                CallbackEvent.token(identity, 33L, "late", 0L),
+                currentRuntimeEpoch = 3L,
+                currentSessionGeneration = 0L
+            )
+        )
+        assertEquals(1, delivered.get())
+    }
+
+    @Test
+    fun requestStateMachineRejectsCallbacksFromOtherAttemptsAndFutureIdentities() {
+        val identity = RequestIdentity(
+            requestId = "req-attempt",
+            attemptId = 4L,
+            sessionGeneration = 2L,
+            runtimeEpoch = 7L,
+            workerIncarnation = 3L
+        )
+        val machine = com.muyuchat.core.engine.contract.RequestStateMachine(identity)
+        val oldAttempt = CallbackEvent.token(identity.copy(attemptId = 3L), 1L, "old", 0L)
+        val futureEpoch = CallbackEvent.token(identity.copy(runtimeEpoch = 8L), 1L, "future", 0L)
+
+        assertTrue(machine.processEvent(oldAttempt, 7L, 2L, 3L) is
+            com.muyuchat.core.engine.contract.EventProcessResult.StaleRejected)
+        assertTrue(machine.processEvent(futureEpoch, 7L, 2L, 3L) is
+            com.muyuchat.core.engine.contract.EventProcessResult.StaleRejected)
+        assertEquals(RequestState.Created, machine.currentState)
     }
 
     @Test

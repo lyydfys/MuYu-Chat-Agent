@@ -158,10 +158,7 @@ target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
         diffusion_scheduler.cpp
-        mca/mnn/mnn_tensor_ops.cpp
-        mca/mnn/mnn_vae_image_writer.cpp
-        mca/mnn/mnn_clip_weighting.cpp
-        mca/mnn/mnn_pndm_scheduler.cpp)
+        mca/mnn/mnn_prompt_weighting.cpp)
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
@@ -536,6 +533,10 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
             AND EXISTS "${MCA_MNN_CV_IMGCODECS_SRC}")
         message(STATUS "MCA building MNN Stable Diffusion safe runner shim.")
         target_sources(mca_mnn_native PRIVATE
+                mca/mnn/mnn_tensor_ops.cpp
+                mca/mnn/mnn_vae_image_writer.cpp
+                mca/mnn/mnn_clip_weighting.cpp
+                mca/mnn/mnn_pndm_scheduler.cpp
                 "${CMAKE_CURRENT_LIST_DIR}/mnn_diffusion_tokenizer.cpp"
                 "${MCA_MNN_SANA_SESSION_SRC}"
                 "${MCA_MNN_DIFFUSION_SAFE_SRC}"

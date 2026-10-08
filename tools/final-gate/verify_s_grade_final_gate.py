@@ -31,6 +31,34 @@ def run_command(name, cmd):
     print(f"    PASSED: {name}")
     return True, res.stdout
 
+def get_jdk_version():
+    java_home = os.environ.get("JAVA_HOME")
+    if not java_home:
+        fallback = Path("E:/model/toolchains/jdk-21/jdk-21.0.12.1+1")
+        if fallback.exists():
+            java_home = str(fallback)
+    if not java_home:
+        print("ERROR: JAVA_HOME is not set and fallback JDK-21 path not found.")
+        sys.exit(1)
+    java_exe = Path(java_home) / "bin" / ("java.exe" if os.name == "nt" else "java")
+    if not java_exe.exists():
+        print(f"ERROR: JAVA_HOME does not contain java binary: {java_exe}")
+        sys.exit(1)
+    res = subprocess.run([str(java_exe), "-version"], capture_output=True, text=True)
+    out = res.stderr or res.stdout
+    import re
+    match = re.search(r'version "(\d+)', out)
+    if not match:
+        print(f"ERROR: Unable to parse Java version from:\n{out}")
+        sys.exit(1)
+    major = int(match.group(1))
+    if major < 21:
+        print(f"ERROR: JAVA_HOME is JDK {major}; MCA requires JDK 21+ (LiteRT-LM SDK classes are class-file 65.0).")
+        print("Hard fail to avoid false-red test results on JDK 17.")
+        sys.exit(1)
+    raw_version_line = out.splitlines()[0] if out.splitlines() else f"JDK {major}"
+    return major, raw_version_line.strip(), str(java_exe)
+
 def count_lines(path):
     if not path.exists():
         return 0
@@ -41,6 +69,12 @@ def main():
     print("=================================================================")
     print("     MCA S-GRADE ENTERPRISE REFACTOR: HONEST AUDIT GATE          ")
     print("=================================================================\n")
+
+    jdk_major, jdk_info, java_bin = get_jdk_version()
+    print(f"--> [Final Gate] JDK Environment Guard:")
+    print(f"    Version: {jdk_info}")
+    print(f"    Binary:  {java_bin}")
+    print(f"    Status:  PASSED (JDK {jdk_major} >= 21)\n")
 
     results = {}
 
@@ -102,14 +136,20 @@ def main():
     final_report = {
         "title": "MCA Enterprise S-Grade Architecture Audit Report (Corrected Baseline)",
         "working_tree": str(REPO_ROOT),
+        "jdk_environment": {
+            "version": jdk_info,
+            "major": jdk_major,
+            "binary": java_bin,
+            "status": "COMPLIANT_JDK21"
+        },
         "overall_status": overall_status,
         "real_progress_estimate": "25% (R0/R1 85%, R2 40%, R3 15%, R4-R6 0%, R7 55%)",
         "gate_results": results,
         "universal_device_admission": "VERIFIED_COMPLIANT",
         "local_only_guard": "VERIFIED_ISOLATED",
         "rating_evaluation": {
-            "S-C": "PARTIAL_SCAFFOLD (Cross-layer contracts frozen, 36,147 lines in 4 giant bridges remain untouched)",
-            "S-R": "UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still 2,734 lines)",
+            "S-C": f"PARTIAL_SCAFFOLD (Cross-layer contracts frozen, {total_bridge_lines} lines in 4 giant bridges remain unmigrated)",
+            "S-R": f"UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still {vm_lines} lines)",
             "S-O": "UNVERIFIED_DEVICE (SBOM & Docs scaffolded, pending real ARM64 hardware build and release logs)"
         },
         "giant_bridges_debt": {

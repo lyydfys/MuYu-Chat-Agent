@@ -22,17 +22,33 @@ contract::RequestState NativeRequestContext::get_state() const noexcept {
 }
 
 void NativeRequestContext::request_cancel() noexcept {
-    if (!cancel_requested_.exchange(true, std::memory_order_relaxed)) {
-        MCA_LOGI("RequestContext", "[%s] Cancellation requested", identity_.request_id.c_str());
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!is_terminal_.load(std::memory_order_relaxed)) {
-            state_.store(contract::RequestState::CancelRequested, std::memory_order_relaxed);
-        }
-    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (is_terminal_.load(std::memory_order_relaxed) ||
+        cancel_requested_.load(std::memory_order_relaxed)) return;
+
+    const auto current = state_.load(std::memory_order_relaxed);
+    if (!contract::can_transition(current, contract::RequestState::CancelRequested)) return;
+
+    cancel_requested_.store(true, std::memory_order_relaxed);
+    state_.store(contract::RequestState::CancelRequested, std::memory_order_relaxed);
+    MCA_LOGI("RequestContext", "[%s] Cancellation requested", identity_.request_id.c_str());
 }
 
 bool NativeRequestContext::is_cancel_requested() const noexcept {
     return cancel_requested_.load(std::memory_order_relaxed);
+}
+
+bool NativeRequestContext::transition_to(contract::RequestState target_state) noexcept {
+    if (contract::is_terminal_state(target_state)) return false;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (is_terminal_.load(std::memory_order_relaxed)) return false;
+
+    const auto current = state_.load(std::memory_order_relaxed);
+    if (!contract::can_transition(current, target_state)) return false;
+
+    state_.store(target_state, std::memory_order_relaxed);
+    return true;
 }
 
 bool NativeRequestContext::mark_terminal(contract::RequestState terminal_state) noexcept {
@@ -48,6 +64,9 @@ bool NativeRequestContext::mark_terminal(contract::RequestState terminal_state) 
                  contract::request_state_to_string(terminal_state));
         return false;
     }
+
+    const auto current = state_.load(std::memory_order_relaxed);
+    if (!contract::can_transition(current, terminal_state)) return false;
 
     is_terminal_.store(true, std::memory_order_relaxed);
     state_.store(terminal_state, std::memory_order_relaxed);

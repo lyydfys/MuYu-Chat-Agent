@@ -5,99 +5,77 @@ import com.muyuchat.core.engine.contract.RequestIdentity
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
-/**
- * Routes asynchronous callback events from native and worker pipelines to subscribers.
- * Invariants:
- * 1. Strict stale detection: Events with runtimeEpoch < currentEpoch or sessionGeneration < currentGeneration are dropped.
- * 2. Native sequence ordering: Events must arrive with strictly non-decreasing sequence numbers per request.
- * 3. Terminal exactly-once: Once a terminal event is routed, no further events for that attempt are routed.
- */
+/** Routes callbacks only to the exact subscribed request attempt. */
 class CallbackRouter {
 
-    private val subscribers = ConcurrentHashMap<String, EventConsumer>()
-    private val lastSeenSequence = ConcurrentHashMap<String, AtomicLong>()
-    private val terminalDispatched = ConcurrentHashMap<String, Boolean>()
+    private data class RouteState(
+        val identity: RequestIdentity,
+        val consumer: EventConsumer,
+        var lastSequence: Long = -1L,
+        var terminalDispatched: Boolean = false
+    )
+
+    private val routes = ConcurrentHashMap<String, RouteState>()
     private val droppedStaleEventsCount = AtomicLong(0)
+    private val callbackFailuresCount = AtomicLong(0)
 
-    /**
-     * Registers a listener for events of a specific request ID.
-     */
-    fun subscribe(requestId: String, consumer: EventConsumer) {
-        subscribers[requestId] = consumer
-        lastSeenSequence.putIfAbsent(requestId, AtomicLong(-1L))
+    fun subscribe(identity: RequestIdentity, consumer: EventConsumer) {
+        routes[identity.requestId] = RouteState(identity, consumer)
     }
 
-    /**
-     * Unregisters a listener for a request ID.
-     */
     fun unsubscribe(requestId: String) {
-        subscribers.remove(requestId)
-        lastSeenSequence.remove(requestId)
-        terminalDispatched.remove(requestId)
+        routes.remove(requestId)
     }
 
-    /**
-     * Routes an incoming callback event.
-     * Returns true if event was valid and dispatched, false if dropped as stale, out-of-order, or post-terminal.
-     */
     fun routeEvent(
         event: CallbackEvent,
         currentRuntimeEpoch: Long,
         currentSessionGeneration: Long
     ): Boolean {
-        val identity = event.identity
-        val reqId = identity.requestId
-
-        // 1. Stale runtime epoch or session generation verification
-        if (identity.runtimeEpoch < currentRuntimeEpoch) {
-            droppedStaleEventsCount.incrementAndGet()
-            return false
-        }
-        if (identity.sessionGeneration < currentSessionGeneration) {
-            droppedStaleEventsCount.incrementAndGet()
-            return false
+        val eventIdentity = event.identity
+        val route = routes[eventIdentity.requestId] ?: return dropStale()
+        if (eventIdentity.runtimeEpoch < currentRuntimeEpoch ||
+            eventIdentity.sessionGeneration < currentSessionGeneration) {
+            return dropStale()
         }
 
-        // 2. Post-terminal check
-        if (terminalDispatched[reqId] == true) {
-            droppedStaleEventsCount.incrementAndGet()
-            return false
-        }
-
-        // 3. Sequence monotonicity check
-        val seqTracker = lastSeenSequence[reqId]
-        if (seqTracker != null) {
-            val lastSeq = seqTracker.get()
-            if (event.sequence <= lastSeq) {
-                // Out of order or duplicate sequence dropped
-                droppedStaleEventsCount.incrementAndGet()
-                return false
+        synchronized(route) {
+            if (routes[eventIdentity.requestId] !== route || !route.identity.matchesAttempt(eventIdentity)) {
+                return dropStale()
             }
-            seqTracker.set(event.sequence)
-        }
+            if (route.terminalDispatched) return dropStale()
+            if (event.sequence <= route.lastSequence) return dropStale()
 
-        // 4. Mark terminal dispatch
-        if (event.isTerminal) {
-            terminalDispatched[reqId] = true
-        }
+            route.lastSequence = event.sequence
+            if (event.isTerminal) route.terminalDispatched = true
 
-        // 5. Dispatch to consumer
-        val consumer = subscribers[reqId] ?: return false
-        consumer.onEvent(event)
-        return true
+            return try {
+                route.consumer.onEvent(event)
+                true
+            } catch (_: Exception) {
+                callbackFailuresCount.incrementAndGet()
+                false
+            }
+        }
     }
 
-    /**
-     * Returns the total count of stale or out-of-order dropped events.
-     */
     fun droppedStaleCount(): Long = droppedStaleEventsCount.get()
 
-    /**
-     * Clears all subscriptions.
-     */
+    fun callbackFailureCount(): Long = callbackFailuresCount.get()
+
     fun clear() {
-        subscribers.clear()
-        lastSeenSequence.clear()
-        terminalDispatched.clear()
+        routes.clear()
     }
+
+    private fun dropStale(): Boolean {
+        droppedStaleEventsCount.incrementAndGet()
+        return false
+    }
+
+    private fun RequestIdentity.matchesAttempt(other: RequestIdentity): Boolean =
+        requestId == other.requestId &&
+            attemptId == other.attemptId &&
+            sessionGeneration == other.sessionGeneration &&
+            runtimeEpoch == other.runtimeEpoch &&
+            workerIncarnation == other.workerIncarnation
 }

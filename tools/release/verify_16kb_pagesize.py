@@ -1,133 +1,127 @@
 #!/usr/bin/env python3
-"""
-verify_16kb_pagesize.py
+"""Audit every Android ABI native library packaged in a specific APK."""
 
-Validates 16 KB page-size alignment for ARM64 ELF dynamic shared objects (.so).
-Android 15 (API 35+) requires all native binaries to align PT_LOAD segments to
-at least 16 KB (0x4000 = 16,384 bytes).
-
-Directly parses 64-bit ELF program headers using standard library struct,
-guaranteeing platform-independent execution on Windows, Linux, and macOS.
-"""
-
+import argparse
+import hashlib
 import json
-import os
 import struct
 import sys
+import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_PATH = REPO_ROOT / "tools" / "release" / "16kb_page_size_report.json"
+REQUIRED_ALIGNMENT = 0x4000
+ANDROID_ABI_MACHINES = {"arm64-v8a": 183, "x86_64": 62}
 
-REQUIRED_ALIGNMENT = 0x4000  # 16 KB = 16384 bytes
 
-def check_elf_alignment(file_path: Path):
-    """
-    Parses ELF64 header and Program Header table.
-    Returns (is_elf64, max_align, is_compliant, details)
-    """
-    try:
-        with open(file_path, "rb") as f:
-            magic = f.read(4)
-            if magic != b"\x7fELF":
-                return False, 0, False, "Not an ELF file"
+def check_elf_alignment(data: bytes) -> dict:
+    if len(data) < 64 or data[:4] != b"\x7fELF":
+        return {"compliant": False, "details": "Not an ELF64 binary"}
+    if data[4] != 2 or data[5] != 1:
+        return {"compliant": False, "details": "Expected little-endian ELF64"}
 
-            ei_class = f.read(1)[0]
-            if ei_class != 2:  # 2 = ELFCLASS64
-                return False, 0, False, f"Not 64-bit ELF (class={ei_class})"
+    machine = struct.unpack_from("<H", data, 18)[0]
+    phoff = struct.unpack_from("<Q", data, 32)[0]
+    phentsize = struct.unpack_from("<H", data, 54)[0]
+    phnum = struct.unpack_from("<H", data, 56)[0]
+    if phoff == 0 or phnum == 0 or phentsize < 56:
+        return {"compliant": False, "machine": machine, "details": "Invalid program header table"}
 
-            # Seek to e_phoff (offset 32 in ELF64 header)
-            f.seek(32)
-            e_phoff = struct.unpack("<Q", f.read(8))[0]
+    alignments = []
+    for index in range(phnum):
+        offset = phoff + index * phentsize
+        if offset + phentsize > len(data):
+            return {"compliant": False, "machine": machine, "details": "Truncated program header table"}
+        if struct.unpack_from("<I", data, offset)[0] != 1:
+            continue
+        file_offset = struct.unpack_from("<Q", data, offset + 8)[0]
+        virtual_address = struct.unpack_from("<Q", data, offset + 16)[0]
+        alignment = struct.unpack_from("<Q", data, offset + 48)[0]
+        congruent = alignment in (0, 1) or (virtual_address - file_offset) % alignment == 0
+        alignments.append({"p_align": alignment, "congruent": congruent})
 
-            # Seek to e_phentsize (offset 54) and e_phnum (offset 56)
-            f.seek(54)
-            e_phentsize = struct.unpack("<H", f.read(2))[0]
-            e_phnum = struct.unpack("<H", f.read(2))[0]
-
-            if e_phnum == 0 or e_phoff == 0:
-                return True, 0, False, "No program headers found"
-
-            max_align = 0
-            pt_loads = []
-
-            for i in range(e_phnum):
-                f.seek(e_phoff + i * e_phentsize)
-                p_type = struct.unpack("<I", f.read(4))[0]
-                if p_type == 1:  # PT_LOAD
-                    # In ELF64, p_align is at offset 48 from start of program header
-                    f.seek(e_phoff + i * e_phentsize + 48)
-                    p_align = struct.unpack("<Q", f.read(8))[0]
-                    pt_loads.append(p_align)
-                    if p_align > max_align:
-                        max_align = p_align
-
-            if not pt_loads:
-                return True, 0, False, "No PT_LOAD segments found"
-
-            is_compliant = max_align >= REQUIRED_ALIGNMENT
-            return True, max_align, is_compliant, f"{len(pt_loads)} PT_LOAD segments found (max_align=0x{max_align:x})"
-    except Exception as e:
-        return False, 0, False, f"Read error: {e}"
-
-def main():
-    print("=== MCA 16 KB Page-Size Native Binary Alignment Verification ===")
-    print(f"Required PT_LOAD alignment: >= 0x{REQUIRED_ALIGNMENT:x} ({REQUIRED_ALIGNMENT} bytes)\n")
-
-    search_dirs = [
-        REPO_ROOT / "vendor",
-        REPO_ROOT / "app" / "src" / "main" / "jniLibs",
-        REPO_ROOT / "core" / "native" / "build",
-        REPO_ROOT / "core" / "sd-native" / "build",
-    ]
-
-    so_files = []
-    for d in search_dirs:
-        if d.is_dir():
-            for root, _, files in os.walk(d):
-                for f in files:
-                    if f.endswith(".so"):
-                        so_files.append(Path(root) / f)
-
-    results = []
-    compliant_count = 0
-    non_compliant_count = 0
-
-    print(f"Discovered {len(so_files)} native shared objects (.so):")
-    for so_path in sorted(so_files):
-        rel_path = so_path.relative_to(REPO_ROOT)
-        is_elf64, max_align, is_compliant, details = check_elf_alignment(so_path)
-        status_str = "COMPLIANT" if is_compliant else "LEGACY_4KB" if max_align == 0x1000 else "NON_COMPLIANT"
-
-        print(f"  [{status_str:14}] {rel_path} -> align=0x{max_align:x} ({details})")
-
-        if is_compliant:
-            compliant_count += 1
-        else:
-            non_compliant_count += 1
-
-        results.append({
-            "path": str(rel_path).replace("\\", "/"),
-            "is_elf64": is_elf64,
-            "max_align": max_align,
-            "is_16kb_compliant": is_compliant,
-            "status": status_str,
-            "details": details
-        })
-
-    report = {
-        "title": "MCA 16 KB Page-Size Alignment Audit Report",
-        "target_page_size_bytes": REQUIRED_ALIGNMENT,
-        "total_binaries_scanned": len(so_files),
-        "compliant_binaries": compliant_count,
-        "legacy_or_unaligned_binaries": non_compliant_count,
-        "binaries": results
+    compliant = bool(alignments) and all(
+        segment["p_align"] >= REQUIRED_ALIGNMENT and segment["congruent"]
+        for segment in alignments
+    )
+    return {
+        "compliant": compliant,
+        "machine": machine,
+        "pt_load_segments": alignments,
+        "details": "All PT_LOAD segments meet 16 KB alignment" if compliant else
+            "At least one PT_LOAD segment fails 16 KB alignment",
     }
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--apk",
+        type=Path,
+        default=REPO_ROOT / "app/build/outputs/apk/release/app-release.apk",
+        help="APK to audit (defaults to the release APK)",
+    )
+    args = parser.parse_args()
+    apk = args.apk.resolve()
+    if not apk.is_file():
+        print(f"FAILED: APK does not exist: {apk}", file=sys.stderr)
+        return 2
+
+    results = []
+    with zipfile.ZipFile(apk) as archive:
+        entries = sorted(
+            name for name in archive.namelist()
+            if name.startswith("lib/") and name.endswith(".so")
+        )
+        if not entries:
+            print("FAILED: APK contains no packaged native libraries", file=sys.stderr)
+            return 1
+
+        for name in entries:
+            parts = name.split("/")
+            abi = parts[1] if len(parts) >= 3 else ""
+            audit = check_elf_alignment(archive.read(name))
+            expected_machine = ANDROID_ABI_MACHINES.get(abi)
+            machine_matches = expected_machine is not None and audit.get("machine") == expected_machine
+            compliant = audit["compliant"] and machine_matches
+            results.append({
+                "path": name,
+                "abi": abi,
+                "machine": audit.get("machine"),
+                "machine_matches_abi": machine_matches,
+                "is_16kb_compliant": compliant,
+                "pt_load_segments": audit.get("pt_load_segments", []),
+                "details": audit["details"] if machine_matches else
+                    f"ELF machine does not match Android ABI {abi}",
+            })
+            status = "COMPLIANT" if compliant else "NON_COMPLIANT"
+            print(f"[{status}] {name}: {results[-1]['details']}")
+
+    compliant_count = sum(item["is_16kb_compliant"] for item in results)
+    report = {
+        "title": "MCA APK 16 KB Page-Size Alignment Audit",
+        "apk_path": str(apk.relative_to(REPO_ROOT)) if apk.is_relative_to(REPO_ROOT) else str(apk),
+        "apk_sha256": sha256_file(apk),
+        "target_page_size_bytes": REQUIRED_ALIGNMENT,
+        "total_binaries_scanned": len(results),
+        "compliant_binaries": compliant_count,
+        "non_compliant_binaries": len(results) - compliant_count,
+        "binaries": results,
+    }
     REPORT_PATH.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"\nAudit report saved to: {REPORT_PATH}")
-    print(f"Summary: {compliant_count} compliant, {non_compliant_count} legacy (advisory tracked for production packaging).")
+    print(f"Report: {REPORT_PATH}")
+    print(f"Summary: {compliant_count}/{len(results)} packaged libraries compliant")
+    return 0 if compliant_count == len(results) else 1
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

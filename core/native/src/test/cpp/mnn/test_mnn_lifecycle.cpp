@@ -74,10 +74,10 @@ void test_token_emitter_utf8_split() {
     std::cout << "  -> test_token_emitter_utf8_split PASSED" << std::endl;
 }
 
-void test_stream_router_backpressure_and_order() {
-    std::cout << "[Test] test_stream_router_backpressure_and_order..." << std::endl;
+void test_stream_router_order_and_terminal() {
+    std::cout << "[Test] test_stream_router_order_and_terminal..." << std::endl;
 
-    auto callback_router = std::make_shared<mca::callback::CallbackRouter>(100);
+    auto callback_router = std::make_shared<mca::callback::CallbackRouter>();
     std::vector<CallbackEvent> delivered_events;
 
     callback_router->set_sink([&delivered_events](const CallbackEvent& ev) {
@@ -122,7 +122,7 @@ void test_stream_router_backpressure_and_order() {
     assert(!router.emit_token(3, " extra", false));
 
     assert(router.drain(500));
-    std::cout << "  -> test_stream_router_backpressure_and_order PASSED" << std::endl;
+    std::cout << "  -> test_stream_router_order_and_terminal PASSED" << std::endl;
 }
 
 void test_session_isolation_and_generation() {
@@ -286,7 +286,7 @@ int main() {
     std::cout << "==================================================" << std::endl;
 
     test_token_emitter_utf8_split();
-    test_stream_router_backpressure_and_order();
+    test_stream_router_order_and_terminal();
     test_session_isolation_and_generation();
     test_cancel_lifecycle_and_transitions();
     test_universal_device_admission();

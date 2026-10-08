@@ -37,12 +37,27 @@ SdxlPhase QnnRequest::get_current_phase() const noexcept {
 }
 
 bool QnnRequest::transition_phase(SdxlPhase next_phase) noexcept {
-    const SdxlPhase prev = current_phase_.exchange(next_phase, std::memory_order_relaxed);
-    MCA_LOGD(kTag, "[%s] Phase transition: %s -> %s",
-             get_identity().request_id.c_str(),
-             sdxl_phase_to_string(prev),
-             sdxl_phase_to_string(next_phase));
-    return true;
+    SdxlPhase current = current_phase_.load(std::memory_order_relaxed);
+    while (true) {
+        const bool current_terminal = current == SdxlPhase::Cancelled ||
+            current == SdxlPhase::Completed || current == SdxlPhase::Failed;
+        const bool normal_forward =
+            next_phase > current && next_phase <= SdxlPhase::OutputTransaction;
+        const bool terminal_transition =
+            (next_phase == SdxlPhase::Failed && !current_terminal) ||
+            (next_phase == SdxlPhase::Cancelling && !current_terminal) ||
+            (next_phase == SdxlPhase::Cancelled && current == SdxlPhase::Cancelling) ||
+            (next_phase == SdxlPhase::Completed && current == SdxlPhase::OutputTransaction);
+        if (!normal_forward && !terminal_transition) return false;
+        if (current_phase_.compare_exchange_weak(
+                current, next_phase, std::memory_order_relaxed)) {
+            MCA_LOGD(kTag, "[%s] Phase transition: %s -> %s",
+                     get_identity().request_id.c_str(),
+                     sdxl_phase_to_string(current),
+                     sdxl_phase_to_string(next_phase));
+            return true;
+        }
+    }
 }
 
 const SdxlExecutionContract& QnnRequest::get_contract() const noexcept {
@@ -108,7 +123,7 @@ void QnnRequest::emit_progress(
 contract::RequestState QnnRequest::execute(
     std::shared_ptr<callback::CallbackRouter> router
 ) {
-    MCA_LOGI(kTag, "[%s] Beginning SDXL request execution", get_identity().request_id.c_str());
+    MCA_LOGI(kTag, "[%s] Starting SDXL request", get_identity().request_id.c_str());
 
     // 1. Validate contract
     std::string validation_error;
@@ -134,69 +149,11 @@ contract::RequestState QnnRequest::execute(
         return contract::RequestState::Cancelled;
     }
 
-    // 4. Acquire exclusive execution lease on the session
-    auto lease = session->acquire_execution_lease();
-    if (!lease || !lease->is_held()) {
-        MCA_LOGE(kTag, "[%s] Failed to acquire exclusive execution lease",
-                 get_identity().request_id.c_str());
-        transition_phase(SdxlPhase::Failed);
-        mark_terminal(contract::RequestState::Failed);
-        return contract::RequestState::Failed;
-    }
-
-    const float total_steps = static_cast<float>(contract_.steps);
-
-    // 5. Pipeline execution
-    transition_phase(SdxlPhase::Preparing);
-    emit_progress(router.get(), 0.0f, total_steps, "Preparing");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::ContextLock);
-    emit_progress(router.get(), 0.0f, total_steps, "ContextLock");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::ContextCreate);
-    emit_progress(router.get(), 0.0f, total_steps, "ContextCreate");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::TextEncoder1);
-    emit_progress(router.get(), 0.0f, total_steps, "TextEncoder1");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::TextEncoder2);
-    emit_progress(router.get(), 0.0f, total_steps, "TextEncoder2");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::UnetLoop);
-    for (uint32_t step = 1; step <= contract_.steps; ++step) {
-        if (check_cancellation_point()) {
-            return contract::RequestState::Cancelled;
-        }
-        emit_progress(router.get(), static_cast<float>(step), total_steps,
-                      "UnetLoop", "Denoising step " + std::to_string(step));
-    }
-
-    transition_phase(SdxlPhase::VaeDecode);
-    emit_progress(router.get(), total_steps, total_steps, "VaeDecode");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::PostProcess);
-    emit_progress(router.get(), total_steps, total_steps, "PostProcess");
-    if (check_cancellation_point()) return contract::RequestState::Cancelled;
-
-    transition_phase(SdxlPhase::OutputTransaction);
-    emit_progress(router.get(), total_steps, total_steps, "OutputTransaction");
-
-    SdxlPhaseArtifact out_art;
-    out_art.phase_name = "OutputTransaction";
-    out_art.file_path = contract_.output_path.empty() ? "/tmp/sdxl_output.png" : contract_.output_path;
-    out_art.tensor_shape = {1, 3, contract_.height, contract_.width};
-    out_art.data_sha256 = "sdxl_phase_output_verified";
-    out_art.byte_count = static_cast<int64_t>(contract_.height * contract_.width * 3);
-    add_artifact(std::move(out_art));
-
-    transition_phase(SdxlPhase::Completed);
-    mark_terminal(contract::RequestState::Succeeded);
+    // This lifecycle scaffold has no graph executor. Never synthesize a successful artifact.
+    MCA_LOGE(kTag, "[%s] QNN SDXL graph execution is not connected",
+             get_identity().request_id.c_str());
+    transition_phase(SdxlPhase::Failed);
+    mark_terminal(contract::RequestState::Failed);
 
     if (router) {
         contract::CallbackEvent term_event;
@@ -207,8 +164,7 @@ contract::RequestState QnnRequest::execute(
         update_sequence(term_event.sequence);
 
         contract::TerminalPayload payload;
-        payload.final_state = contract::RequestState::Succeeded;
-        payload.total_tokens = contract_.steps;
+        payload.final_state = contract::RequestState::Failed;
         term_event.payload = payload;
 
         router->dispatch(
@@ -219,8 +175,7 @@ contract::RequestState QnnRequest::execute(
         );
     }
 
-    MCA_LOGI(kTag, "[%s] SDXL request completed successfully", get_identity().request_id.c_str());
-    return contract::RequestState::Succeeded;
+    return contract::RequestState::Failed;
 }
 
 } // namespace qnn

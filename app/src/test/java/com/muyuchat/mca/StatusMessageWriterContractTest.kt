@@ -84,8 +84,9 @@ class StatusMessageWriterContractTest {
 
     @Test
     fun `the funnel is defined exactly once and writes the field it owns`() {
-        val declarations = Regex("""private fun showStatus\(message: String\?\)""").findAll(viewModelSource).count()
-        assertEquals("showStatus must have a single definition", 1, declarations)
+        val declarations = Regex("""(?:private|internal) fun showStatus\(message: String\?\)""").findAll(viewModelSource).count()
+        assertEquals("MainViewModel must keep one status delegate", 1, declarations)
+        assertTrue(viewModelSource.contains("uiStateStore.showStatus(message)"))
         assertTrue(
             // R3/C2: 漏斗体下移至 UiStateStore.showStatus；断言读漏斗现在的家。
             "the funnel must be the plain status-only update it replaced",

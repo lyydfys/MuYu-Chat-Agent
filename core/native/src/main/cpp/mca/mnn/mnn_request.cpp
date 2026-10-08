@@ -23,14 +23,12 @@ MnnRequest::~MnnRequest() {
 }
 
 bool MnnRequest::transition_state(contract::RequestState target_state) {
-    std::lock_guard<std::mutex> lock(request_mutex_);
-    const contract::RequestState current_state = get_state();
-
     if (contract::is_terminal_state(target_state)) {
         return mark_terminal(target_state);
     }
 
-    if (!contract::can_transition(current_state, target_state)) {
+    const contract::RequestState current_state = get_state();
+    if (!transition_to(target_state)) {
         MCA_LOGW("MnnRequest", "[%s] Invalid state transition: %s -> %s rejected",
                  get_identity().request_id.c_str(),
                  contract::request_state_to_string(current_state),

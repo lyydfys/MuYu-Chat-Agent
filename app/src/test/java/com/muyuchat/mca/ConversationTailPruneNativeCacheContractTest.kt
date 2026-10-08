@@ -10,7 +10,7 @@ class ConversationTailPruneNativeCacheContractTest {
     fun `tail prune preserves verified native prefix while arbitrary deletion invalidates`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val deleteAt = functionBody(source, "fun deleteMessageAt(index: Int)", "fun deleteLastConversationTurn()")
-        val deleteTail = functionBody(source, "fun deleteLastConversationTurn()", "private fun cancelGenerationJob()") +
+        val deleteTail = functionBody(source, "fun deleteLastConversationTurn()", "fun cancelGenerationJob()") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
         // P4: the durable boundary moved to ChatSessionPersistenceOperations; the assertions are
         // unchanged -- it is read there now.

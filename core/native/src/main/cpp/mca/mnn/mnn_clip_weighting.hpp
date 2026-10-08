@@ -20,14 +20,6 @@ namespace mca {
 namespace mnn {
 
 /**
- * Checks whether the prompt contains attention weights different from 1.0 (non-unity).
- */
-bool prompt_has_non_unity_attention_weight(
-        const std::string& prompt,
-        bool& weighted,
-        std::string& error);
-
-/**
  * Checks whether the bundle root path contains all assets for a community CLIP model.
  */
 bool has_community_clip_bundle(

@@ -46,7 +46,7 @@ class ChatSessionPersistenceOperationsTest {
     fun theViewModelKeepsOnlyTheDelegateAndNoInlineSave() {
         val vm = sourceFile("MainViewModel.kt")
 
-        assertEquals(1, Regex("""private fun persistChatSessions\(""").findAll(vm).count())
+        assertEquals(1, Regex("""(?:private|internal) fun persistChatSessions\(""").findAll(vm).count())
         assertTrue(vm.contains("runChatSessionPersistence(chatSessionPersistencePort"))
         assertFalse(vm.contains("chatSessionStore.save(snapshot, knowledgeBindingsForSave)"))
     }

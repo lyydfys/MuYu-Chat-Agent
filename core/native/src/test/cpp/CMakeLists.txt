@@ -242,3 +242,23 @@ add_test(
 # A real model is deliberately supplied by CI or a local validation run, never
 # committed as a binary fixture. The executable returns 77 when none is given.
 set_tests_properties(mca_persistent_prefix_cache_equivalence PROPERTIES SKIP_RETURN_CODE 77)
+
+add_executable(mca_native_lifecycle_chain_test
+    runtime/test_lifecycle_chain.cpp
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/runtime/process_runtime_host.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/runtime/backend_runtime.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/runtime/engine.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/runtime/engine_session.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/request/native_request_context.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/callback/callback_router.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_request.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/common/logging.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/common/safe_path.cpp"
+)
+target_compile_features(mca_native_lifecycle_chain_test PRIVATE cxx_std_17)
+target_include_directories(mca_native_lifecycle_chain_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp")
+target_compile_options(mca_native_lifecycle_chain_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_native_lifecycle_chain COMMAND mca_native_lifecycle_chain_test)

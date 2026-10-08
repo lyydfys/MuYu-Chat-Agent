@@ -44,10 +44,11 @@ class RequestRegistry {
      */
     fun transitionState(requestId: String, targetState: RequestState): Boolean {
         val entry = activeRequests[requestId] ?: return false
-        if (entry.terminalReached.get()) {
-            return false
+        if (targetState.isTerminal) return false
+        synchronized(entry) {
+            if (entry.terminalReached.get()) return false
+            return entry.stateMachine.transitionTo(targetState)
         }
-        return entry.stateMachine.transitionTo(targetState)
     }
 
     /**
@@ -65,14 +66,14 @@ class RequestRegistry {
         }
         val entry = activeRequests[requestId] ?: return false
 
-        // Atomic check-and-set ensures terminal transition is strictly exactly-once
-        if (!entry.terminalReached.compareAndSet(false, true)) {
-            return false
-        }
+        synchronized(entry) {
+            if (entry.terminalReached.get()) return false
+            if (!entry.stateMachine.transitionTo(terminalState)) return false
 
-        entry.terminalError = error
-        entry.stateMachine.transitionTo(terminalState)
-        return true
+            entry.terminalError = error
+            entry.terminalReached.set(true)
+            return true
+        }
     }
 
     /**
@@ -114,8 +115,11 @@ class RequestRegistry {
     fun drainAll(reason: String = "Registry drained"): List<RequestEntry> {
         val snapshot = activeRequests.values.toList()
         for (entry in snapshot) {
-            if (entry.terminalReached.compareAndSet(false, true)) {
-                entry.stateMachine.transitionTo(RequestState.Aborted)
+            synchronized(entry) {
+                if (!entry.terminalReached.get() &&
+                    entry.stateMachine.transitionTo(RequestState.Aborted)) {
+                    entry.terminalReached.set(true)
+                }
             }
         }
         return snapshot

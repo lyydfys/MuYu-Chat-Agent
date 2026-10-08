@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 using namespace mca::runtime;
@@ -50,6 +51,10 @@ void test_lifecycle_chain() {
     assert(request != nullptr);
     assert(!request->is_terminal());
     assert(!request->is_cancel_requested());
+
+    assert(!request->mark_terminal(RequestState::Succeeded));
+    assert(request->transition_to(RequestState::Preparing));
+    assert(request->transition_to(RequestState::Running));
 
     // Invariant: Terminal exactly-once
     assert(request->mark_terminal(RequestState::Succeeded));
@@ -103,6 +108,21 @@ void test_callback_router() {
     auto resTerm2 = router.dispatch(event, 5, 2);
     assert(resTerm2 == DispatchResult::DuplicateTerminalIgnored);
     assert(received_count == 2);
+
+    event.identity.attempt_id = 1;
+    event.sequence = 3;
+    assert(router.dispatch(event, 5, 2) == DispatchResult::StaleRejected);
+
+    CallbackRouter throwing_router;
+    throwing_router.set_sink([](const CallbackEvent&) {
+        throw std::runtime_error("sink failure");
+    });
+    event.identity = identity;
+    event.is_terminal = false;
+    event.sequence = 1;
+    assert(throwing_router.dispatch(event, 5, 2) == DispatchResult::SinkFailed);
+    assert(throwing_router.pending_count() == 0);
+    assert(throwing_router.drain(10));
 
     // Drain
     assert(router.drain(500));

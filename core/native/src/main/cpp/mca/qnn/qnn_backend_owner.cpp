@@ -68,9 +68,11 @@ bool QnnBackendOwner::initialize_with_probe(
         return initialize(report.system_path, report.htp_path, report.rpc_path, error);
     }
 
-    // In environment where files are not yet deployed, we acknowledge admission without crashing
-    is_active_.store(true, std::memory_order_relaxed);
-    return true;
+    const std::string message =
+        "Required QNN runtime libraries are missing; device admission remains allowed, but execution is unavailable";
+    if (error) *error = message;
+    MCA_LOGE(kTag, "%s", message.c_str());
+    return false;
 }
 
 void QnnBackendOwner::release() noexcept {
@@ -111,7 +113,8 @@ bool QnnBackendOwner::is_valid() const noexcept {
     if (loader_ && loader_->is_poisoned()) {
         return false;
     }
-    return true;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return backend_handle_ != nullptr && device_handle_ != nullptr && context_handle_ != nullptr;
 }
 
 void QnnBackendOwner::set_backend_handle(void* handle) noexcept {

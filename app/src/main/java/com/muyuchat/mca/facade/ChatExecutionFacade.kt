@@ -46,7 +46,7 @@ class ChatExecutionFacade(
 
         // 1. Register for cancellation tracking and callback routing
         cancellation.registerRequest(identity)
-        router.subscribe(identity.requestId, onEvent)
+        router.subscribe(identity, onEvent)
 
         // 2. Register with Exactly-Once state machine
         registry.register(identity)

@@ -131,9 +131,9 @@ class ChatImagePromptBridgeOperationsContractTest {
         val viewModel = mainViewModelSource()
         // The wrapper has an expression body, so the region is delimited by the next declaration
         // instead of by brace matching.
-        val delegateStart = viewModel.indexOf("private fun sendChatImageRequestWithPromptBridge(")
+        val delegateStart = viewModel.indexOf("fun sendChatImageRequestWithPromptBridge(")
         assertTrue("Missing ViewModel wrapper", delegateStart >= 0)
-        val delegateEnd = viewModel.indexOf("private fun chatImageNegativePromptSupported(", delegateStart)
+        val delegateEnd = viewModel.indexOf("fun chatImageNegativePromptSupported(", delegateStart)
         assertTrue("Missing neighbour declaration", delegateEnd > delegateStart)
         val delegate = viewModel.substring(delegateStart, delegateEnd)
         assertTrue(
@@ -194,7 +194,7 @@ class ChatImagePromptBridgeOperationsContractTest {
         // port consumes it too, so the bridge port only delegates to it.
         assertTrue(
             "Negative-prompt capability must stay owned by the ViewModel",
-            viewModel.contains("private fun chatImageNegativePromptSupported(state: MainUiState): Boolean")
+            viewModel.contains("fun chatImageNegativePromptSupported(state: MainUiState): Boolean")
         )
         assertFalse(
             "The moved file must not re-implement the capability probe",

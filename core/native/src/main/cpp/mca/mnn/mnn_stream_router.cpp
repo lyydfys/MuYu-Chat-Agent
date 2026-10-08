@@ -47,8 +47,8 @@ bool MnnStreamRouter::emit_token(int64_t token_index, const std::string& text, b
         return true;
     }
 
-    if (result == callback::DispatchResult::QueueFullBackpressure) {
-        MCA_LOGW("MnnStreamRouter", "[%s] Backpressure triggered at seq %lld",
+    if (result == callback::DispatchResult::SinkFailed) {
+        MCA_LOGW("MnnStreamRouter", "[%s] Callback sink failed at seq %lld",
                  event.identity.request_id.c_str(), static_cast<long long>(seq));
     }
     return false;

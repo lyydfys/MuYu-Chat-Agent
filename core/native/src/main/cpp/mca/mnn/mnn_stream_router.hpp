@@ -13,7 +13,7 @@ namespace mca {
 namespace mnn {
 
 /**
- * Stream router managing token, progress, and terminal callback event ordering and backpressure.
+ * Stream router managing token, progress, and terminal callback event ordering.
  *
  * Enforces strictly monotonic sequence numbering and exactly-once terminal delivery.
  */
@@ -46,7 +46,7 @@ public:
     bool emit_terminal(contract::RequestState final_state, int64_t total_tokens, int64_t elapsed_ms);
 
     /**
-     * Blocks until all queued stream events are drained.
+     * Blocks until all in-flight stream callbacks finish.
      */
     bool drain(int64_t timeout_ms = 3000);
 

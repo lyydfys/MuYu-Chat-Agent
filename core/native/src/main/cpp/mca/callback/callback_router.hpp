@@ -1,7 +1,6 @@
 #ifndef MCA_CALLBACK_CALLBACK_ROUTER_HPP
 #define MCA_CALLBACK_CALLBACK_ROUTER_HPP
 
-#include <queue>
 #include <mutex>
 #include <condition_variable>
 #include <functional>
@@ -15,17 +14,17 @@ enum class DispatchResult : uint8_t {
     Delivered = 0,
     StaleRejected = 1,
     DuplicateTerminalIgnored = 2,
-    QueueFullBackpressure = 3
+    SinkFailed = 3
 };
 
 /**
- * Thread-safe callback router managing stream routing, backpressure, and drain synchronization.
+ * Synchronous callback router serializing event order and drain synchronization.
  */
 class CallbackRouter {
 public:
     using SinkFunction = std::function<void(const contract::CallbackEvent&)>;
 
-    explicit CallbackRouter(size_t max_queue_capacity = 2048);
+    CallbackRouter() = default;
     ~CallbackRouter();
 
     void set_sink(SinkFunction sink);
@@ -42,7 +41,7 @@ public:
     );
 
     /**
-     * Blocks until all queued events are drained or timeout expires.
+     * Blocks until all in-flight sink callbacks finish or timeout expires.
      */
     bool drain(int64_t timeout_ms = 3000);
 
@@ -50,10 +49,16 @@ public:
     void reset();
 
 private:
-    size_t max_capacity_{2048};
     SinkFunction sink_;
-    std::atomic<bool> terminal_delivered_{false};
-    std::atomic<int64_t> last_sequence_{-1};
+    std::recursive_mutex dispatch_mutex_;
+    std::string request_id_;
+    int64_t attempt_id_{-1};
+    int64_t runtime_epoch_{-1};
+    int64_t session_generation_{-1};
+    int64_t worker_incarnation_{-1};
+    bool identity_initialized_{false};
+    bool terminal_delivered_{false};
+    int64_t last_sequence_{-1};
     mutable std::mutex mutex_;
     std::condition_variable cv_drain_;
     std::atomic<size_t> in_flight_{0};

@@ -464,7 +464,7 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadT
     @Test
     fun `download registration selects the detected model and active model cannot be deleted`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val bundleDownload = functionBody(source, "private fun observeManagedDownloads(")
+        val bundleDownload = functionBody(source, "fun observeManagedDownloads(")
         val delete = functionBody(source, "fun deleteLocalImageModel(")
         val selectChoice = functionBody(source, "fun selectImageGenerationModel(")
 

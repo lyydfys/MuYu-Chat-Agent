@@ -57,7 +57,8 @@ class RuntimeSupervisor(initialEpoch: Long = 1L) : RuntimePort {
             totalSessions = backends.size,
             details = mapOf(
                 "activeBackends" to backends.keys.joinToString(","),
-                "droppedStaleEvents" to callbackRouter.droppedStaleCount().toString()
+                "droppedStaleEvents" to callbackRouter.droppedStaleCount().toString(),
+                "callbackFailures" to callbackRouter.callbackFailureCount().toString()
             )
         )
     }

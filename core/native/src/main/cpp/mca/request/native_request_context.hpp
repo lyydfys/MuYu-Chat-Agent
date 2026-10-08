@@ -28,6 +28,9 @@ public:
     void request_cancel() noexcept;
     [[nodiscard]] bool is_cancel_requested() const noexcept;
 
+    /** Attempts a valid non-terminal lifecycle transition. */
+    bool transition_to(contract::RequestState target_state) noexcept;
+
     /**
      * Attempts to transition to a terminal state.
      * Invariant: Terminal exactly-once. Repeated calls return false.

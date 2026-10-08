@@ -1,32 +1,38 @@
 {
   "title": "MCA Enterprise S-Grade Architecture Audit Report (Corrected Baseline)",
   "working_tree": "E:\\MAC",
+  "jdk_environment": {
+    "version": "openjdk version \"21.0.12.1\" 2026-08-18 LTS",
+    "major": 21,
+    "binary": "E:\\model\\toolchains\\jdk-21\\jdk-21.0.12.1+1\\bin\\java.exe",
+    "status": "COMPLIANT_JDK21"
+  },
   "overall_status": "IN_PROGRESS_SCAFFOLDING",
   "real_progress_estimate": "25% (R0/R1 85%, R2 40%, R3 15%, R4-R6 0%, R7 55%)",
   "gate_results": {
     "architecture_rules": "PASSED_SCAFFOLD",
-    "release_integrity": "PASSED_ARTIFACTS",
-    "fault_injection_matrix": "PAPER_SCAFFOLD",
+    "release_integrity": "FAILED",
+    "fault_injection_matrix": "FAILED",
     "local_only_guard": "PASSED",
     "required_reports": "PASSED"
   },
   "universal_device_admission": "VERIFIED_COMPLIANT",
   "local_only_guard": "VERIFIED_ISOLATED",
   "rating_evaluation": {
-    "S-C": "PARTIAL_SCAFFOLD (Cross-layer contracts frozen, 36,147 lines in 4 giant bridges remain untouched)",
-    "S-R": "UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still 2,734 lines)",
+    "S-C": "PARTIAL_SCAFFOLD (Cross-layer contracts frozen, 25348 lines in 4 giant bridges remain unmigrated)",
+    "S-R": "UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still 1929 lines)",
     "S-O": "UNVERIFIED_DEVICE (SBOM & Docs scaffolded, pending real ARM64 hardware build and release logs)"
   },
   "giant_bridges_debt": {
-    "qnn_native_bridge.cpp": 12422,
-    "mnn_native_engine.cpp": 7605,
+    "qnn_native_bridge.cpp": 11892,
+    "mnn_native_engine.cpp": 7613,
     "native_engine.cpp": 3125,
-    "stable_diffusion_bridge.cpp": 2800,
-    "total_unmigrated_lines": 25952
+    "stable_diffusion_bridge.cpp": 2718,
+    "total_unmigrated_lines": 25348
   },
   "viewmodel_debt": {
-    "MainViewModel.kt": 2059,
+    "MainViewModel.kt": 1929,
     "target_lines": 600,
-    "over_lines": 1459
+    "over_lines": 1329
   }
 }

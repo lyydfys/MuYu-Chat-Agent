@@ -314,7 +314,7 @@ class MainViewModelCompletionFallbackTest {
         assertFalse(body.contains("backgroundedJob.cancel()"))
         assertFalse(body.contains("afterBackgroundGenerationStopped"))
 
-        val generation = functionBody(source, "private fun startGeneration(")
+        val generation = functionBody(source, "fun startGeneration(")
         assertTrue(generation.contains("val foregroundLease = McaGenerationForegroundService.acquire("))
         assertTrue(generation.contains("ownedGenerationJob.invokeOnCompletion"))
         assertTrue(generation.contains("McaGenerationForegroundService.release(getApplication<Application>(), foregroundLease)"))
@@ -329,7 +329,7 @@ class MainViewModelCompletionFallbackTest {
         // execution body to its own owner. P3 step 1 has now moved it: the launcher shape is pinned
         // on MainViewModel, the body's own handle and its five markPhase calls on the execution
         // owner. The assertions are otherwise unchanged.
-        val launcher = functionBody(mainViewModelSource(), "private fun startGeneration(")
+        val launcher = functionBody(mainViewModelSource(), "fun startGeneration(")
         assertTrue(launcher.contains("val ownedGenerationJob = viewModelScope.launch(start = CoroutineStart.LAZY)"))
         assertFalse(launcher.contains("lateinit var ownedGenerationJob"))
         val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")

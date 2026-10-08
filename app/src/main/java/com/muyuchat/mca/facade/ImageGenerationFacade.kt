@@ -44,7 +44,7 @@ class ImageGenerationFacade(
         )
 
         cancellation.registerRequest(identity)
-        router.subscribe(identity.requestId, onEvent)
+        router.subscribe(identity, onEvent)
 
         registry.register(identity)
         registry.transitionState(identity.requestId, RequestState.Accepted)
