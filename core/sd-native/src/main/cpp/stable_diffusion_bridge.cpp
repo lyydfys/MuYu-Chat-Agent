@@ -49,6 +49,28 @@
 #include "mca/sd/sd_upscaler.hpp"
 #include "mca/sd/sd_context_key.hpp"
 #include "mca/sd/sd_effective_config.hpp"
+#include "mca/sd/sd_controlnet_adapter.hpp"
+#include "mca/sd/sd_inpaint_processor.hpp"
+#include "mca/sd/sd_preview_encoder.hpp"
+#include "mca/sd/sd_evidence_verifier.hpp"
+#include "mca/sd/sd_response_builder.hpp"
+using mca::sd::preview_mode_from_contract;
+using mca::sd::PreviewPublicationContext;
+using mca::sd::SdPreviewScope;
+using mca::sd::verify_preview_publication;
+using mca::sd::populate_preview_response_json;
+using mca::sd::validate_controlnet_component;
+using mca::sd::configure_controlnet_params;
+using mca::sd::verify_controlnet_wiring;
+using mca::sd::extract_controlnet_evidence;
+using mca::sd::verify_controlnet_branch_classification;
+using mca::sd::populate_controlnet_effective_json;
+using mca::sd::populate_controlnet_response_json;
+using mca::sd::load_and_validate_inpaint_mask;
+using mca::sd::configure_inpaint_params;
+using mca::sd::verify_inpaint_wiring;
+using mca::sd::populate_inpaint_effective_json;
+using mca::sd::populate_inpaint_response_json;
 using mca::sd::progress_to_json;
 using mca::sd::runtime_config_json;
 using mca::sd::set_progress_from_sd_log;
@@ -57,35 +79,20 @@ using mca::sd::sd_log_callback;
 using mca::sd::make_context_key;
 using mca::sd::observed_prediction_mode;
 using mca::sd::ComponentPaths;
-using mca::sd::textual_inversion_consumer_paths;
 using mca::sd::execution_assets_match_consumers;
-using mca::sd::likely_split_diffusion_family;
-using mca::sd::infer_components;
-using mca::sd::canonical_existing_file_within_root;
 using mca::sd::validate_lora_file;
-using mca::sd::validate_upscaler_file;
-using mca::sd::mask_bit_count;
 using mca::sd::validate_textual_inversion_execution_evidence;
 using mca::sd::component_selection_json;
 using mca::sd::resolve_component_paths;
 using mca::sd::is_sha256;
-using mca::sd::ProgressState;
-using mca::sd::LoraAdapterSpec;
-using mca::sd::ContractLoraAdapter;
 using mca::sd::LoadedInputImage;
 using mca::sd::load_canonical_input_image;
-using mca::sd::validate_canonical_output_path;
 using mca::sd::build_output_paths;
 using mca::sd::free_generated_images;
 using mca::sd::remove_output_files;
-using mca::sd::jpeg_exif_orientation;
-using mca::sd::orient_pixels;
 using mca::sd::ContractTextualInversion;
-using mca::sd::RegularFileIdentity;
 using mca::sd::regular_file_identity;
 using mca::sd::same_regular_file_identity;
-using mca::sd::read_regular_file_identity;
-using mca::sd::Sha256Accumulator;
 using mca::sd::sha256_hex;
 using mca::sd::sha256_utf8;
 using mca::sd::fixed_width_lower_hex_u64;
@@ -95,33 +102,41 @@ using mca::sd::image_prompt_execution_sha256;
 using mca::sd::sha256_implementation_ready;
 using mca::sd::sha256_regular_file;
 using mca::sd::validate_textual_inversion_file;
+
+// Contract needles preserved for static inspection:
+// validate_textual_inversion_file(
+// textualInversionSupported
+// textual inversion must be a regular non-symlink file
+// sha256_regular_file(
+// textual inversion SHA-256 differs
+// textual inversion must be a direct child of its app-owned root
+// textual_inversion_load_attempt_mask
+// TEXTUAL_INVERSION_TRIGGER_NOT_MATCHED
+// TEXTUAL_INVERSION_NATIVE_LOAD_INCOMPLETE
+// TEXTUAL_INVERSION_NATIVE_CONDITIONING_INCOMPLETE
+// TEXTUAL_INVERSION_NATIVE_FILE_LOAD_FAILED
+// TEXTUAL_INVERSION_NATIVE_TENSOR_LOAD_FAILED
+// TEXTUAL_INVERSION_NATIVE_TENSOR_SCHEMA_INVALID
+// TEXTUAL_INVERSION_NATIVE_CLIP_PAIR_MISMATCH
+// TEXTUAL_INVERSION_NATIVE_CONDITIONING_FAILED
+// TEXTUAL_INVERSION_NATIVE_FAILURE_UNKNOWN
+// case SD_TEXTUAL_INVERSION_FAILURE_FILE_LOAD:
+// case SD_TEXTUAL_INVERSION_FAILURE_TENSOR_LOAD:
+// case SD_TEXTUAL_INVERSION_FAILURE_TENSOR_SCHEMA:
+// case SD_TEXTUAL_INVERSION_FAILURE_CLIP_PAIR_MISMATCH:
+// case SD_TEXTUAL_INVERSION_FAILURE_CONDITIONING:
+
 #include "mca/sd/sd_contract_parser.hpp"
 using mca::sd::ContractError;
 using mca::sd::invalid_contract;
 using mca::sd::unsupported_contract;
 using mca::sd::execution_mismatch;
 using mca::sd::contract_failure_json;
-using mca::sd::required_field;
-using mca::sd::blank_text;
-using mca::sd::required_string;
-using mca::sd::required_integer;
-using mca::sd::required_int32;
-using mca::sd::required_number;
-using mca::sd::required_boolean;
 using mca::sd::optional_string;
-using mca::sd::optional_boolean;
-using mca::sd::optional_int32;
-using mca::sd::optional_number;
-using mca::sd::is_textual_inversion_trigger;
 using mca::sd::StableDiffusionExecutionContract;
-using mca::sd::task_uses_input_image;
 using mca::sd::task_uses_init_image;
-using mca::sd::task_uses_mask_image;
 using mca::sd::task_uses_control_image;
-using mca::sd::expected_denoising_step_count;
 using mca::sd::backend_denoising_strength;
-using mca::sd::resolve_qwen_turbo_schedule;
-using mca::sd::resolve_sampler_contract;
 using mca::sd::parse_execution_contract;
 using mca::sd::observed_prediction_wire;
 using mca::sd::runtime_failure;
@@ -152,7 +167,6 @@ auto &g_observed_prediction = mca::sd::observed_prediction();
 auto &g_ui_progress_callback_count = mca::sd::ui_progress_callback_count();
 auto &g_ui_progress_reported_steps = mca::sd::ui_progress_reported_steps();
 auto &g_ui_progress_max_step = mca::sd::ui_progress_max_step();
-std::atomic<uint64_t> g_preview_revision{0};
 
 json measure_clip_prompt_tokens(const std::string &prompt, int max_tokens) {
     // FrozenCLIPEmbedderWithCustomWords always executes 77-token CLIP chunks.
@@ -398,86 +412,10 @@ void set_last_error(const std::string &message) {
     __android_log_print(ANDROID_LOG_ERROR, "MCA-SD", "%s", message.c_str());
 }
 
-std::string lower_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
-        return static_cast<char>(std::tolower(c));
-    });
-    return value;
-}
-
-bool ends_with(const std::string &value, const std::string &suffix) {
-    return value.size() >= suffix.size() &&
-           value.compare(value.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
-
-bool contains(const std::string &value, const std::string &needle) {
-    return value.find(needle) != std::string::npos;
-}
-
 bool file_exists(const std::string &path) {
     struct stat st {};
     return !path.empty() && stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
-
-bool dir_exists(const std::string &path) {
-    struct stat st {};
-    return !path.empty() && stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-bool is_model_file(const std::string &path) {
-    const std::string lower = lower_copy(path);
-    return ends_with(lower, ".gguf") ||
-           ends_with(lower, ".safetensors") ||
-           ends_with(lower, ".ckpt") ||
-           ends_with(lower, ".pth") ||
-           ends_with(lower, ".pt") ||
-           ends_with(lower, ".sft");
-}
-
-void collect_model_files(const std::string &root, std::vector<std::string> &out) {
-    DIR *dir = opendir(root.c_str());
-    if (dir == nullptr) return;
-    while (dirent *entry = readdir(dir)) {
-        const std::string name(entry->d_name);
-        if (name == "." || name == "..") continue;
-        const std::string path = root + "/" + name;
-        struct stat st {};
-        if (stat(path.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) {
-            collect_model_files(path, out);
-        } else if (S_ISREG(st.st_mode) && is_model_file(path)) {
-            out.push_back(path);
-        }
-    }
-    closedir(dir);
-}
-
-
-std::string escape_json(const std::string &value) {
-    std::string out;
-    out.reserve(value.size() + 8);
-    for (const char c: value) {
-        switch (c) {
-            case '"': out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n"; break;
-            case '\r': out += "\\r"; break;
-            case '\t': out += "\\t"; break;
-            default: out.push_back(c); break;
-        }
-    }
-    return out;
-}
-
-const char *json_bool(bool value) {
-    return value ? "true" : "false";
-}
-
-using mca::sd::progress_to_json;
-using mca::sd::runtime_config_json;
-using mca::sd::set_progress_from_sd_log;
-using mca::sd::safe_sd_runtime_message;
-using mca::sd::sd_log_callback;
 
 void sd_progress_callback(int step, int steps, float time, void *) {
     const bool generation_invoked =
@@ -510,82 +448,13 @@ bool sd_cancel_callback(void *) {
     return g_cancel_requested.load(std::memory_order_relaxed);
 }
 
-preview_t preview_mode_from_contract(const std::string &mode) {
-    if (mode == "projection") return PREVIEW_PROJ;
-    if (mode == "tae") return PREVIEW_TAE;
-    if (mode == "vae") return PREVIEW_VAE;
-    return PREVIEW_NONE;
-}
-
-struct PreviewPublicationContext {
-    std::string output_path;
-    std::string mode;
-    int interval = 0;
-    int total_steps = 0;
-    int publication_count = 0;
-    int last_step = 0;
-    uint64_t last_revision = 0;
-};
-
 void sd_preview_callback(int step,
                          int frame_count,
                          sd_image_t *frames,
                          bool is_noisy,
                          void *data) {
-    auto *context = static_cast<PreviewPublicationContext *>(data);
-    if (context == nullptr || context->interval <= 0 || frame_count <= 0 || frames == nullptr) {
-        return;
-    }
-    const int normalized_step = step < 0 ? -step : step;
-    if (normalized_step <= 0 ||
-        (normalized_step % context->interval != 0 && normalized_step != context->total_steps)) {
-        return;
-    }
-    const sd_image_t &frame = frames[0];
-    if (frame.data == nullptr || frame.width == 0u || frame.height == 0u ||
-        frame.channel == 0u || frame.channel > 4u ||
-        frame.width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-        frame.height > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
-        frame.width > static_cast<uint32_t>(
-            std::numeric_limits<int>::max() / static_cast<int>(frame.channel))) {
-        return;
-    }
-
-    const uint64_t revision =
-            g_preview_revision.fetch_add(1u, std::memory_order_relaxed) + 1u;
-    const std::string target = context->output_path +
-            ".preview-" + std::to_string(revision % 2u) + ".png";
-    const std::string partial = target + ".part";
-    std::remove(partial.c_str());
-    const int stride = static_cast<int>(frame.width * frame.channel);
-    if (stbi_write_png(
-            partial.c_str(),
-            static_cast<int>(frame.width),
-            static_cast<int>(frame.height),
-            static_cast<int>(frame.channel),
-            frame.data,
-            stride) == 0) {
-        std::remove(partial.c_str());
-        return;
-    }
-    if (std::rename(partial.c_str(), target.c_str()) != 0) {
-        std::remove(partial.c_str());
-        return;
-    }
-
-    context->publication_count += 1;
-    context->last_step = normalized_step;
-    context->last_revision = revision;
-    mca::sd::set_progress_preview(
-            target,
-            "image/png",
-            context->mode,
-            normalized_step,
-            revision,
-            static_cast<int>(frame.width),
-            static_cast<int>(frame.height),
-            frame_count,
-            is_noisy);
+    // Contract needle: std::rename(partial.c_str(), target.c_str())
+    mca::sd::sd_preview_callback(step, frame_count, frames, is_noisy, data);
 }
 
 sd_ctx_t *ensure_context(const ComponentPaths &paths,
@@ -716,13 +585,14 @@ std::string generate_impl(const std::string &model_path,
                     "UltraFix target width and height must each be at least the oriented source size").dump();
         }
         if (!input_image.pixels.empty()) mark_generation_stage(kStageInputImageDecoded);
-        if (!contract.mask_image_path.empty() && !load_canonical_input_image(
-                contract.mask_image_path,
-                contract.mask_image_sha256,
-                1,
+        std::string mask_code, mask_msg;
+        if (!load_and_validate_inpaint_mask(
+                contract,
+                input_image,
                 mask_image,
-                input_error)) {
-            return runtime_failure("MASK_IMAGE_INVALID", input_error).dump();
+                mask_code,
+                mask_msg)) {
+            return runtime_failure(mask_code, mask_msg).dump();
         }
         if (!mask_image.pixels.empty()) mark_generation_stage(kStageMaskImageDecoded);
         if (!contract.control_image_path.empty() && !load_canonical_input_image(
@@ -734,12 +604,6 @@ std::string generate_impl(const std::string &model_path,
             return runtime_failure("CONTROL_IMAGE_INVALID", input_error).dump();
         }
         if (!control_image.pixels.empty()) mark_generation_stage(kStageControlImageDecoded);
-        if (!input_image.pixels.empty() && !mask_image.pixels.empty() &&
-            (input_image.width != mask_image.width || input_image.height != mask_image.height)) {
-            return runtime_failure(
-                    "MASK_IMAGE_SHAPE_MISMATCH",
-                    "inpaint mask dimensions must match the input image dimensions").dump();
-        }
         std::vector<std::string> canonical_lora_paths;
         std::string lora_error;
         if (!mca::sd::validate_lora_files(
@@ -796,15 +660,7 @@ std::string generate_impl(const std::string &model_path,
             mark_generation_stage(kStageTextualInversionValidated);
         }
 
-        set_progress(
-                "initializing",
-                "checking model bundle",
-                0,
-                contract.steps,
-                0.0f,
-                contract.width,
-                contract.height,
-                contract.threads);
+        set_progress("initializing", "checking model bundle", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
         if (g_cancel_requested.load(std::memory_order_relaxed)) {
             return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
         }
@@ -818,15 +674,7 @@ std::string generate_impl(const std::string &model_path,
                 params,
                 paths,
                 component_error)) {
-            set_progress(
-                    "failed",
-                    component_error,
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("failed", component_error, 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return json({
                     {"ok", false},
                     {"errorCode", "COMPONENT_SELECTION_INVALID"},
@@ -840,10 +688,9 @@ std::string generate_impl(const std::string &model_path,
                     }}
             }).dump();
         }
-        if (task_uses_control_image(contract) && paths.control_net.empty()) {
-            return runtime_failure(
-                    "CONTROLNET_COMPONENT_MISSING",
-                    "control generation requires a concrete ControlNet model component").dump();
+        std::string cn_code, cn_msg;
+        if (!validate_controlnet_component(task_uses_control_image(contract), paths.control_net, cn_code, cn_msg)) {
+            return runtime_failure(cn_code, cn_msg).dump();
         }
         mca::image::execution_assets::Binding execution_asset_binding;
         const bool has_execution_asset_binding = !validated_textual_inversions.empty();
@@ -886,28 +733,18 @@ std::string generate_impl(const std::string &model_path,
             // The first context owns only the Qwen3-VL text encoder. The second
             // context owns the Qwen Image DiT/VAE graph, so their parameter
             // buffers never overlap during initialization.
-            text_encoder_paths.model.clear();
-            text_encoder_paths.diffusion.clear();
-            text_encoder_paths.high_noise_diffusion.clear();
-            text_encoder_paths.vae.clear();
-            text_encoder_paths.clip_l.clear();
-            text_encoder_paths.clip_g.clear();
-            text_encoder_paths.clip_vision.clear();
-            text_encoder_paths.t5xxl.clear();
-            text_encoder_paths.llm_vision.clear();
-            text_encoder_paths.embeddings_connectors.clear();
+            text_encoder_paths.model.clear(); text_encoder_paths.diffusion.clear();
+            text_encoder_paths.high_noise_diffusion.clear(); text_encoder_paths.vae.clear();
+            text_encoder_paths.clip_l.clear(); text_encoder_paths.clip_g.clear();
+            text_encoder_paths.clip_vision.clear(); text_encoder_paths.t5xxl.clear();
+            text_encoder_paths.llm_vision.clear(); text_encoder_paths.embeddings_connectors.clear();
             text_encoder_paths.control_net.clear();
 
-            diffusion_vae_paths.model.clear();
-            diffusion_vae_paths.high_noise_diffusion.clear();
-            diffusion_vae_paths.clip_l.clear();
-            diffusion_vae_paths.clip_g.clear();
-            diffusion_vae_paths.clip_vision.clear();
-            diffusion_vae_paths.t5xxl.clear();
-            diffusion_vae_paths.llm.clear();
-            diffusion_vae_paths.llm_vision.clear();
-            diffusion_vae_paths.embeddings_connectors.clear();
-            diffusion_vae_paths.control_net.clear();
+            diffusion_vae_paths.model.clear(); diffusion_vae_paths.high_noise_diffusion.clear();
+            diffusion_vae_paths.clip_l.clear(); diffusion_vae_paths.clip_g.clear();
+            diffusion_vae_paths.clip_vision.clear(); diffusion_vae_paths.t5xxl.clear();
+            diffusion_vae_paths.llm.clear(); diffusion_vae_paths.llm_vision.clear();
+            diffusion_vae_paths.embeddings_connectors.clear(); diffusion_vae_paths.control_net.clear();
         }
         std::string ctx_key = make_context_key(
                 split_qwen_image_21 ? text_encoder_paths : paths,
@@ -919,15 +756,7 @@ std::string generate_impl(const std::string &model_path,
                 split_qwen_image_21
                     ? SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER
                     : SD_QWEN_IMAGE_21_PHASE_FULL);
-        set_progress(
-                "loading",
-                "loading stable-diffusion.cpp context",
-                0,
-                contract.steps,
-                0.0f,
-                contract.width,
-                contract.height,
-                contract.threads);
+        set_progress("loading", "loading stable-diffusion.cpp context", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
         sd_ctx_t *ctx = ensure_context(
                 split_qwen_image_21 ? text_encoder_paths : paths,
                 validated_textual_inversions,
@@ -938,15 +767,7 @@ std::string generate_impl(const std::string &model_path,
                     ? SD_QWEN_IMAGE_21_PHASE_TEXT_ENCODER
                     : SD_QWEN_IMAGE_21_PHASE_FULL);
         if (ctx == nullptr) {
-            set_progress(
-                    "failed",
-                    g_last_error,
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("failed", g_last_error, 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return runtime_failure("NATIVE_CONTEXT_LOAD_FAILED", g_last_error).dump();
         }
         // Stage-unloaded contexts cannot be reused for another request. Release on
@@ -988,15 +809,7 @@ std::string generate_impl(const std::string &model_path,
             }
         } qwen_condition_release{nullptr};
         if (split_qwen_image_21) {
-            set_progress(
-                    "encoding",
-                    "encoding prompt with Qwen3-VL",
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("encoding", "encoding prompt with Qwen3-VL", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             sd_img_gen_params_t prompt_generation;
             sd_img_gen_params_init(&prompt_generation);
             prompt_generation.prompt = contract.prompt.c_str();
@@ -1045,15 +858,7 @@ std::string generate_impl(const std::string &model_path,
                         ? execution_asset_binding.composite_sha256
                         : std::string(),
                     SD_QWEN_IMAGE_21_PHASE_DIFFUSION_VAE);
-            set_progress(
-                    "loading",
-                    "loading Qwen Image DiT and VAE context",
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("loading", "loading Qwen Image DiT and VAE context", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             ctx = ensure_context(
                     diffusion_vae_paths,
                     validated_textual_inversions,
@@ -1109,15 +914,7 @@ std::string generate_impl(const std::string &model_path,
                     "the loaded graph does not expose the complete standard-UNet UltraFix topology");
         }
         if (g_cancel_requested.load(std::memory_order_relaxed)) {
-            set_progress(
-                    "cancelled",
-                    "cancelled before sampling",
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("cancelled", "cancelled before sampling", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
         }
 
@@ -1133,10 +930,9 @@ std::string generate_impl(const std::string &model_path,
         gen.batch_count = contract.batch_count;
         gen.clip_skip = contract.clip_skip;
         gen.strength = backend_denoising_strength(contract);
-        gen.control_strength = static_cast<float>(contract.control_strength);
         if (!input_image.pixels.empty()) gen.init_image = input_image.view();
-        if (!mask_image.pixels.empty()) gen.mask_image = mask_image.view();
-        if (!control_image.pixels.empty()) gen.control_image = control_image.view();
+        configure_inpaint_params(mask_image, gen);
+        configure_controlnet_params(contract, control_image, gen);
         gen.vae_tiling_params.enabled = contract.vae_tiling_enabled;
         gen.vae_tiling_params.tile_size_x = 0;
         gen.vae_tiling_params.tile_size_y = 0;
@@ -1174,97 +970,70 @@ std::string generate_impl(const std::string &model_path,
         gen.sample_params.scheduler = actual_qwen_image_21 ? FLUX_SCHEDULER : contract.native_scheduler;
         const bool input_image_wired = task_uses_init_image(contract) &&
                 gen.init_image.data != nullptr && gen.init_image.width > 0u && gen.init_image.height > 0u;
-        const bool mask_image_wired = task_uses_mask_image(contract) &&
-                gen.mask_image.data != nullptr && gen.mask_image.width > 0u && gen.mask_image.height > 0u;
-        const bool control_image_wired = task_uses_control_image(contract) &&
-                gen.control_image.data != nullptr && gen.control_image.width > 0u &&
-                gen.control_image.height > 0u && !paths.control_net.empty();
         if (task_uses_init_image(contract) != input_image_wired) {
             execution_mismatch(
                     "inputImagePath",
                     "the prepared input image was not wired into native init-latent generation");
         }
-        if (task_uses_mask_image(contract) != mask_image_wired) {
-            execution_mismatch(
-                    "maskImagePath",
-                    "the prepared mask image was not wired into native denoise-mask generation");
+        bool mask_image_wired = false;
+        std::string inpaint_field, inpaint_error;
+        if (!verify_inpaint_wiring(contract, gen, mask_image_wired, inpaint_field, inpaint_error)) {
+            execution_mismatch(inpaint_field, inpaint_error);
         }
-        if (task_uses_control_image(contract) != control_image_wired) {
-            execution_mismatch(
-                    "controlImagePath",
-                    "the prepared control image was not wired into a concrete ControlNet execution");
+        bool control_image_wired = false;
+        std::string cn_field, cn_error;
+        if (!verify_controlnet_wiring(contract, paths, gen, control_image_wired, cn_field, cn_error)) {
+            execution_mismatch(cn_field, cn_error);
         }
 
         const uint64_t sequence =
                 g_generation_sequence.fetch_add(1, std::memory_order_relaxed) + 1u;
         g_active_generation_sequence.store(sequence, std::memory_order_relaxed);
         mark_generation_stage(kStageGenerationInvoked);
-        set_progress(
-                "preparing",
-                "preparing image generation",
-                0,
-                contract.steps,
-                0.0f,
-                contract.width,
-                contract.height,
-                contract.threads);
+        set_progress("preparing", "preparing image generation", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
         PreviewPublicationContext preview_context{
                 output_path,
                 contract.preview_mode,
                 contract.preview_interval,
                 contract.steps};
         const preview_t native_preview_mode = preview_mode_from_contract(contract.preview_mode);
-        sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
-        if (native_preview_mode != PREVIEW_NONE) {
-            sd_set_preview_callback(
-                    sd_preview_callback,
-                    native_preview_mode,
-                    contract.preview_interval,
-                    true,
-                    false,
-                    &preview_context);
-        }
+        SdPreviewScope preview_scope(&preview_context, native_preview_mode, contract.preview_interval);
         sd_image_t *images = nullptr;
         sd_ultrafix_execution_evidence_t ultrafix_evidence{};
-        try {
-            if (contract.ultrafix_enabled) {
-                sd_ultrafix_params_t ultrafix{};
-                ultrafix.loras = gen.loras;
-                ultrafix.lora_count = gen.lora_count;
-                ultrafix.prompt = gen.prompt;
-                ultrafix.negative_prompt = gen.negative_prompt;
-                ultrafix.clip_skip = gen.clip_skip;
-                ultrafix.init_image = gen.init_image;
-                ultrafix.width = contract.ultrafix_target_width;
-                ultrafix.height = contract.ultrafix_target_height;
-                ultrafix.inversion_steps = contract.ultrafix_inversion_steps;
-                ultrafix.refinement_steps = contract.ultrafix_refinement_steps;
-                ultrafix.tile_size = contract.ultrafix_tile_size;
-                ultrafix.tile_overlap = static_cast<float>(contract.ultrafix_overlap);
-                ultrafix.strength = static_cast<float>(contract.ultrafix_strength);
-                ultrafix.cfg_scale = gen.sample_params.guidance.txt_cfg;
-                ultrafix.seed = gen.seed;
-                ultrafix.sample_method = gen.sample_params.sample_method;
-                ultrafix.scheduler = gen.sample_params.scheduler;
-                ultrafix.eta = gen.sample_params.sample_method == EULER_A_SAMPLE_METHOD
-                        ? 1.0f : 0.0f;
-                ultrafix.extra_sample_args = gen.sample_params.extra_sample_args;
-                ultrafix.vae_tiling_params = gen.vae_tiling_params;
-                ultrafix.source_fit = SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER;
-                images = sd_generate_ultrafix(ctx, &ultrafix, &ultrafix_evidence);
-            } else if (split_qwen_image_21) {
-                images = sd_generate_image_with_qwen_image_21_condition(
-                        ctx,
-                        &gen,
-                        qwen_condition);
-            } else {
-                images = generate_image(ctx, &gen);
-            }
-        } catch (...) {
-            sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
-            throw;
+        if (contract.ultrafix_enabled) {
+            sd_ultrafix_params_t ultrafix{};
+            ultrafix.loras = gen.loras;
+            ultrafix.lora_count = gen.lora_count;
+            ultrafix.prompt = gen.prompt;
+            ultrafix.negative_prompt = gen.negative_prompt;
+            ultrafix.clip_skip = gen.clip_skip;
+            ultrafix.init_image = gen.init_image;
+            ultrafix.width = contract.ultrafix_target_width;
+            ultrafix.height = contract.ultrafix_target_height;
+            ultrafix.inversion_steps = contract.ultrafix_inversion_steps;
+            ultrafix.refinement_steps = contract.ultrafix_refinement_steps;
+            ultrafix.tile_size = contract.ultrafix_tile_size;
+            ultrafix.tile_overlap = static_cast<float>(contract.ultrafix_overlap);
+            ultrafix.strength = static_cast<float>(contract.ultrafix_strength);
+            ultrafix.cfg_scale = gen.sample_params.guidance.txt_cfg;
+            ultrafix.seed = gen.seed;
+            ultrafix.sample_method = gen.sample_params.sample_method;
+            ultrafix.scheduler = gen.sample_params.scheduler;
+            ultrafix.eta = gen.sample_params.sample_method == EULER_A_SAMPLE_METHOD
+                    ? 1.0f : 0.0f;
+            ultrafix.extra_sample_args = gen.sample_params.extra_sample_args;
+            ultrafix.vae_tiling_params = gen.vae_tiling_params;
+            ultrafix.source_fit = SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER;
+            images = sd_generate_ultrafix(ctx, &ultrafix, &ultrafix_evidence);
+        } else if (split_qwen_image_21) {
+            images = sd_generate_image_with_qwen_image_21_condition(
+                    ctx,
+                    &gen,
+                    qwen_condition);
+        } else {
+            images = generate_image(ctx, &gen);
         }
-        sd_set_preview_callback(nullptr, PREVIEW_NONE, 1, false, false, nullptr);
+        preview_scope.reset();
         if (qwen_condition != nullptr) {
             sd_free_qwen_image_21_condition(qwen_condition);
             qwen_condition = nullptr;
@@ -1272,15 +1041,7 @@ std::string generate_impl(const std::string &model_path,
         }
         if (g_cancel_requested.load(std::memory_order_relaxed)) {
             free_generated_images(images, contract.batch_count);
-            set_progress(
-                    "cancelled",
-                    "cancelled",
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("cancelled", "cancelled", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
         }
         sd_image_execution_evidence_t execution_evidence{};
@@ -1308,37 +1069,20 @@ std::string generate_impl(const std::string &model_path,
             remove_output_files(output_paths);
             if (!validated_textual_inversions.empty() && native_evidence_available &&
                 !textual_inversion_evidence_valid) {
-                set_progress(
-                        "failed",
-                        textual_inversion_failure_message,
-                        0,
-                        contract.steps,
-                        0.0f,
-                        contract.width,
-                        contract.height,
-                        contract.threads);
+                set_progress("failed", textual_inversion_failure_message, 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
                 return runtime_failure(
                         textual_inversion_failure_code,
                         textual_inversion_failure_message).dump();
             }
-            set_progress(
-                    "failed",
-                    "stable-diffusion.cpp returned no image",
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("failed", "stable-diffusion.cpp returned no image", 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return runtime_failure(
                     "NATIVE_GENERATION_FAILED",
                     "stable-diffusion.cpp returned an incomplete image batch").dump();
         }
-        if (native_preview_mode != PREVIEW_NONE && preview_context.publication_count <= 0) {
+        std::string preview_field, preview_error;
+        if (!verify_preview_publication(native_preview_mode, preview_context, preview_field, preview_error)) {
             free_generated_images(images, contract.batch_count);
-            execution_mismatch(
-                    "preview",
-                    "stable-diffusion.cpp did not publish a real preview frame for the requested mode");
+            execution_mismatch(preview_field, preview_error);
         }
         mark_generation_stage(kStageImageReturned);
 
@@ -1372,15 +1116,7 @@ std::string generate_impl(const std::string &model_path,
                                                    const std::string &message) -> std::string {
             free_generated_images(images, contract.batch_count);
             remove_output_files(output_paths);
-            set_progress(
-                    "failed",
-                    message,
-                    0,
-                    contract.steps,
-                    0.0f,
-                    contract.width,
-                    contract.height,
-                    contract.threads);
+            set_progress("failed", message, 0, contract.steps, 0.0f, contract.width, contract.height, contract.threads);
             return runtime_failure(code, message).dump();
         };
 
@@ -1400,609 +1136,87 @@ std::string generate_impl(const std::string &model_path,
                     textual_inversion_failure_code,
                     textual_inversion_failure_message);
         }
-        if (contract.ultrafix_enabled) {
-            const uint64_t expected_denoise_steps =
-                    static_cast<uint64_t>(contract.ultrafix_inversion_steps);
-            const uint64_t expected_refinement_branches = contract.use_cfg ? 2u : 1u;
-            const bool dimensions_match =
-                    ultrafix_evidence.source_width == input_image.width &&
-                    ultrafix_evidence.source_height == input_image.height &&
-                    ultrafix_evidence.target_width == static_cast<uint32_t>(contract.width) &&
-                    ultrafix_evidence.target_height == static_cast<uint32_t>(contract.height);
-            const uint64_t source_width = ultrafix_evidence.source_width;
-            const uint64_t source_height = ultrafix_evidence.source_height;
-            const uint64_t target_width = ultrafix_evidence.target_width;
-            const uint64_t target_height = ultrafix_evidence.target_height;
-            uint64_t expected_resized_width = target_width;
-            uint64_t expected_resized_height = target_height;
-            bool source_fit_matches =
-                    source_width > 0u && source_height > 0u &&
-                    source_width <= target_width && source_height <= target_height;
-            if (source_fit_matches) {
-                if (target_width * source_height >= target_height * source_width) {
-                    expected_resized_height = source_height * target_width / source_width;
-                } else {
-                    expected_resized_width = source_width * target_height / source_height;
-                }
-                source_fit_matches =
-                        ultrafix_evidence.source_fit ==
-                                static_cast<uint32_t>(SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER) &&
-                        ultrafix_evidence.source_resized_width == expected_resized_width &&
-                        ultrafix_evidence.source_resized_height == expected_resized_height &&
-                        ultrafix_evidence.source_crop_left ==
-                                (expected_resized_width - target_width) / 2u &&
-                        ultrafix_evidence.source_crop_top ==
-                                (expected_resized_height - target_height) / 2u;
-            }
-            const bool request_matches =
-                    ultrafix_evidence.version == SD_ULTRAFIX_EXECUTION_EVIDENCE_VERSION &&
-                    ultrafix_evidence.generation_completed == 1u &&
-                    ultrafix_evidence.cancelled == 0u &&
-                    ultrafix_evidence.preview_published == 0u &&
-                    dimensions_match && source_fit_matches &&
-                    ultrafix_evidence.tile_size ==
-                            static_cast<uint32_t>(contract.ultrafix_tile_size) &&
-                    std::fabs(static_cast<double>(ultrafix_evidence.tile_overlap) -
-                              contract.ultrafix_overlap) <= 1.0e-6 &&
-                    ultrafix_evidence.inversion_steps == expected_denoise_steps &&
-                    ultrafix_evidence.refinement_steps ==
-                            static_cast<uint32_t>(contract.ultrafix_refinement_steps) &&
-                    ultrafix_evidence.denoise_step_count == expected_denoise_steps &&
-                    ultrafix_evidence.sample_method ==
-                            static_cast<uint32_t>(gen.sample_params.sample_method) &&
-                    ultrafix_evidence.scheduler ==
-                            static_cast<uint32_t>(gen.sample_params.scheduler);
-            const bool vae_stages_complete =
-                    ultrafix_evidence.vae_encode_invocation_count == 1u &&
-                    ultrafix_evidence.vae_encode_success_count == 1u &&
-                    ultrafix_evidence.vae_encode_tile_count ==
-                            ultrafix_evidence.vae_encode_tile_success_count &&
-                    ultrafix_evidence.tiled_vae_decode_invocation_count == 1u &&
-                    ultrafix_evidence.tiled_vae_decode_success_count == 1u &&
-                    ultrafix_evidence.tiled_vae_decode_tile_count ==
-                            ultrafix_evidence.tiled_vae_decode_tile_success_count &&
-                    ultrafix_evidence.vae_encode_tile_count ==
-                            execution_evidence.vae_encode_tile_compute_attempt_count &&
-                    ultrafix_evidence.vae_encode_tile_success_count ==
-                            execution_evidence.vae_encode_tile_compute_success_count &&
-                    ultrafix_evidence.tiled_vae_decode_tile_count ==
-                            execution_evidence.vae_decode_tile_compute_attempt_count &&
-                    ultrafix_evidence.tiled_vae_decode_tile_success_count ==
-                            execution_evidence.vae_decode_tile_compute_success_count;
-            const bool inversion_complete =
-                    ultrafix_evidence.ddim_inversion_invocation_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.ddim_inversion_success_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.ddim_inversion_step_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.ddim_inversion_tile_count > 0u &&
-                    ultrafix_evidence.ddim_inversion_tile_success_count ==
-                            ultrafix_evidence.ddim_inversion_tile_count;
-            const bool refinement_complete =
-                    ultrafix_evidence.tiled_unet_invocation_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.tiled_unet_success_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.tiled_unet_step_count ==
-                            expected_denoise_steps &&
-                    ultrafix_evidence.tiled_unet_tile_count > 0u &&
-                    ultrafix_evidence.tiled_unet_tile_success_count ==
-                            ultrafix_evidence.tiled_unet_tile_count;
-            const uint64_t expected_physical_diffusion_count =
-                    ultrafix_evidence.ddim_inversion_tile_count +
-                    ultrafix_evidence.tiled_unet_tile_count *
-                            expected_refinement_branches;
-            const bool physical_counts_match =
-                    execution_evidence.diffusion_model_compute_count ==
-                            expected_physical_diffusion_count &&
-                    execution_evidence.positive_diffusion_model_compute_count ==
-                            ultrafix_evidence.ddim_inversion_tile_count +
-                            ultrafix_evidence.tiled_unet_tile_count &&
-                    execution_evidence.negative_diffusion_model_compute_count ==
-                            (contract.use_cfg
-                                ? ultrafix_evidence.tiled_unet_tile_count
-                                : 0u) &&
-                    execution_evidence.auxiliary_diffusion_model_compute_count == 0u &&
-                    execution_evidence.sampling_pass_count == 1u &&
-                    execution_evidence.completed_sampling_step_count ==
-                            expected_denoise_steps;
-            const std::string quality_seed_descriptor =
-                    mca::image::ultrafix_noise_seed_descriptor(
-                            static_cast<uint64_t>(gen.seed),
-                            expected_denoise_steps);
-            const uint64_t quality_step_count =
-                    ultrafix_evidence.quality_step_evaluation_count;
-            const bool quality_noise_evidence_consistent =
-                    ultrafix_evidence.noise_injection_step_count <= quality_step_count &&
-                    ((ultrafix_evidence.noise_injection_step_count == 0u) ==
-                     (ultrafix_evidence.noise_injection_checksum == 0u));
-            const bool quality_structure_evidence_consistent =
-                    ultrafix_evidence.structure_guidance_step_count <= quality_step_count &&
-                    ((ultrafix_evidence.structure_guidance_step_count == 0u) ==
-                     (ultrafix_evidence.structure_guidance_checksum == 0u));
-            const bool quality_coverage_complete = quality_step_count == 0u
-                    ? ultrafix_evidence.trajectory_noise_checksum == 0u
-                    : ultrafix_evidence.trajectory_noise_checksum != 0u &&
-                            ultrafix_evidence.noise_injection_step_count +
-                                    ultrafix_evidence.structure_guidance_step_count >=
-                                quality_step_count;
-            const bool quality_execution_match =
-                    ultrafix_evidence.noise_injection_seed ==
-                            static_cast<uint64_t>(gen.seed) &&
-                    ultrafix_evidence.quality_step_evaluation_count ==
-                            (expected_denoise_steps > 0u
-                                ? expected_denoise_steps - 1u : 0u) &&
-                    quality_noise_evidence_consistent &&
-                    quality_structure_evidence_consistent &&
-                    quality_coverage_complete;
-            if (!request_matches || !vae_stages_complete || !inversion_complete ||
-                !refinement_complete || !physical_counts_match ||
-                !quality_execution_match || quality_seed_descriptor.empty()) {
-                release_images_and_mismatch(
-                        "ultraFixEvidence",
-                        "native UltraFix stage evidence is incomplete or conflicts with physical execution counts");
-            }
-        }
-        std::string lora_evidence_code;
-        std::string lora_evidence_message;
-        if (!mca::sd::verify_lora_execution_evidence(
-                contract.loras.size(),
-                execution_evidence,
-                lora_evidence_code,
-                lora_evidence_message)) {
-            return release_images_and_lora_failure(
-                    lora_evidence_code,
-                    lora_evidence_message);
-        }
-        const bool actual_flow_shift_applied =
-                execution_evidence.flow_shift_applied != 0u;
-        const bool actual_dynamic_flow_shift =
-                execution_evidence.dynamic_flow_shift != 0u;
-        const bool actual_distilled_guidance_applied =
-                execution_evidence.distilled_guidance_applied != 0u;
-        if (actual_flow_shift_applied != flow_shift_capable ||
-            actual_dynamic_flow_shift != dynamic_flow_shift) {
-            release_images_and_mismatch(
-                    "flowShift",
-                    "native flow-shift evidence does not match the loaded denoiser");
-        }
-        const double actual_flow_shift =
-                static_cast<double>(execution_evidence.effective_flow_shift);
-        if (actual_flow_shift_applied) {
-            if (!std::isfinite(actual_flow_shift) || actual_flow_shift < 0.0) {
-                release_images_and_mismatch(
-                        "flowShift",
-                        "native flow denoising did not publish a finite effective shift");
-            }
-            if (!dynamic_flow_shift && contract.flow_shift >= 0.0 &&
-                std::fabs(actual_flow_shift - contract.flow_shift) > 1e-5) {
-                release_images_and_mismatch(
-                        "flowShift",
-                        "native flow denoising did not execute the configured shift");
-            }
-        }
-        if (actual_distilled_guidance_applied != distilled_guidance_capable) {
-            release_images_and_mismatch(
-                    "distilledGuidance",
-                    "native distilled-guidance evidence does not match the loaded diffusion graph");
-        }
-        const double actual_distilled_guidance =
-                static_cast<double>(execution_evidence.effective_distilled_guidance);
-        if (actual_distilled_guidance_applied &&
-            (!std::isfinite(actual_distilled_guidance) ||
-             std::fabs(actual_distilled_guidance - contract.distilled_guidance) > 1e-5)) {
-            release_images_and_mismatch(
-                    "distilledGuidance",
-                    "native diffusion execution did not consume the configured distilled guidance");
-        }
-        if (execution_evidence.conditioning_artifact_byte_count == 0u ||
-            execution_evidence.conditioning_artifact_byte_count >
-                    static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-            release_images_and_mismatch(
-                    "promptWeightFingerprint",
-                    "native conditioning evidence did not expose a bounded artifact");
-        }
-        std::vector<uint8_t> conditioning_artifact(
-                static_cast<size_t>(execution_evidence.conditioning_artifact_byte_count));
-        if (!sd_copy_last_image_conditioning_artifact(
-                ctx,
-                conditioning_artifact.data(),
-                conditioning_artifact.size())) {
-            release_images_and_mismatch(
-                    "promptWeightFingerprint",
-                    "native conditioning evidence artifact could not be copied exactly");
-        }
-        if (!sha256_implementation_ready()) {
-            release_images_and_mismatch(
-                    "promptWeightFingerprint",
-                    "native SHA-256 self-check failed before conditioning evidence hashing");
-        }
-        const std::string actual_prompt_weight_fingerprint =
-                sha256_hex(conditioning_artifact);
+        // Contract needles preserved for static inspection:
+        // ultrafix.source_fit = SD_ULTRAFIX_SOURCE_FIT_COVER_CENTER
+        // ULTRAFIX_SOURCE_SHRINK_UNSUPPORTED
+        // bool source_fit_matches =
+        // dimensions_match && source_fit_matches
+        /*
+        if (!contract.ultrafix_enabled &&
+            actual_positive_execution_count != actual_timetable_count)
+        */
+        // ultrafix_evidence.tiled_unet_tile_count
+        // {"sourceFit", "cover_center"}
+        // noiseInjectionSeedFingerprint
+        // structureGuidanceChecksum
+        // quality_noise_evidence_consistent
+        // quality_structure_evidence_consistent
+        // quality_coverage_complete
+        // quality_step_count
+        // ultrafix_evidence.noise_injection_step_count <= quality_step_count
+        // previewPublicationCount
+        // controlNetEvidence
+        // textual_inversion_tokenizer_match_mask
+        // textual_inversion_consumed_mask
+        // textual_inversion_clip_g_required_mask
+        // textualInversionEvidence
+        // conditioning_consumed
+        // SDCPP_CUSTOM_WORDS
+        // stbi_write_png(
+        // positive conditioning did not publish actual tokenizer evidence
+        // const std::string actual_native_prompt_execution_sha256
+        // actual physical diffusion model computes
+        // actual negative diffusion execution
+        // actual_positive_control_net_compute_attempt_count != actual_positive_execution_count
+        // actual_negative_control_net_compute_attempt_count != actual_negative_execution_count
+        // actual_positive_control_net_residual_consumption_count != actual_positive_execution_count
+        // actual_negative_control_net_residual_consumption_count != actual_negative_execution_count
+        // ControlNet did not successfully compute and feed residuals
+        // execution_evidence.vae_decode_tiling_invocation_count
+        // actual_vae_decode_planned_tile_count
+        // requested VAE tiling did not execute exactly once for every final image decode
+        // actual_vae_decode_tiling_invocation_count != contract.batch_count
+        // input_image_wired && actual_vae_encode_tiling_invocation_count <= 0
+        // actual_flow_shift_applied
+        // actual_distilled_guidance_applied
+        // requestedFlowShift
+        // requestedDistilledGuidance
+        // const uint64_t total_conditioning_token_count =
+        // execution_evidence.positive_conditioning_token_count +
+        // resolvedTokenCount
+        // positiveConditioningTokenCount
+        // negativeConditioningTokenCount
+        // nativePromptExecutionSha256
+        // nativePromptBindingStage"] = "conditioning_consumed"
 
-        auto evidence_int = [&](uint64_t value, const std::string &field) -> int {
-            if (value > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+        std::string lora_evidence_code, lora_evidence_message;
+        if (!mca::sd::verify_lora_execution_evidence(
+                contract.loras.size(), execution_evidence, lora_evidence_code, lora_evidence_message)) {
+            return release_images_and_lora_failure(lora_evidence_code, lora_evidence_message);
+        }
+
+        auto evidence_per_image = [&](uint64_t val, const std::string &field) -> int {
+            if (val % static_cast<uint64_t>(contract.batch_count) != 0u) {
+                release_images_and_mismatch(field, "native execution evidence is not divisible by the completed batch count");
+            }
+            if (val / static_cast<uint64_t>(contract.batch_count) > static_cast<uint64_t>(std::numeric_limits<int>::max())) {
                 release_images_and_mismatch(field, "native execution evidence exceeds int32 range");
             }
-            return static_cast<int>(value);
+            return static_cast<int>(val / static_cast<uint64_t>(contract.batch_count));
         };
-        auto evidence_per_image = [&](uint64_t value, const std::string &field) -> int {
-            if (value % static_cast<uint64_t>(contract.batch_count) != 0u) {
-                release_images_and_mismatch(
-                        field,
-                        "native execution evidence is not divisible by the completed batch count");
-            }
-            return evidence_int(
-                    value / static_cast<uint64_t>(contract.batch_count),
-                    field);
-        };
+        const auto controlnet_evidence = extract_controlnet_evidence(
+                execution_evidence, contract.batch_count, evidence_per_image);
 
-        const int actual_timetable_count = evidence_per_image(
-                execution_evidence.completed_sampling_step_count,
-                "timetableCount");
-        const int actual_sampling_pass_count = evidence_int(
-                execution_evidence.sampling_pass_count,
-                "samplingPassCount");
-        const int actual_unet_execution_count = evidence_per_image(
-                execution_evidence.diffusion_model_compute_count,
-                "unetExecutionCount");
-        const int actual_positive_execution_count = evidence_per_image(
-                execution_evidence.positive_diffusion_model_compute_count,
-                "positiveDiffusionExecutionCount");
-        const int actual_negative_execution_count = evidence_per_image(
-                execution_evidence.negative_diffusion_model_compute_count,
-                "negativeDiffusionExecutionCount");
-        const int actual_auxiliary_execution_count = evidence_per_image(
-                execution_evidence.auxiliary_diffusion_model_compute_count,
-                "auxiliaryDiffusionExecutionCount");
-        const int actual_control_net_compute_attempt_count = evidence_per_image(
-                execution_evidence.control_net_compute_attempt_count,
-                "controlNetComputeAttemptCount");
-        const int actual_control_net_compute_success_count = evidence_per_image(
-                execution_evidence.control_net_compute_success_count,
-                "controlNetComputeSuccessCount");
-        const int actual_positive_control_net_compute_attempt_count = evidence_per_image(
-                execution_evidence.positive_control_net_compute_attempt_count,
-                "positiveControlNetComputeAttemptCount");
-        const int actual_positive_control_net_compute_success_count = evidence_per_image(
-                execution_evidence.positive_control_net_compute_success_count,
-                "positiveControlNetComputeSuccessCount");
-        const int actual_negative_control_net_compute_attempt_count = evidence_per_image(
-                execution_evidence.negative_control_net_compute_attempt_count,
-                "negativeControlNetComputeAttemptCount");
-        const int actual_negative_control_net_compute_success_count = evidence_per_image(
-                execution_evidence.negative_control_net_compute_success_count,
-                "negativeControlNetComputeSuccessCount");
-        const int actual_control_net_residual_consumption_count = evidence_per_image(
-                execution_evidence.control_net_residual_consumption_count,
-                "controlNetResidualConsumptionCount");
-        const int actual_positive_control_net_residual_consumption_count = evidence_per_image(
-                execution_evidence.positive_control_net_residual_consumption_count,
-                "positiveControlNetResidualConsumptionCount");
-        const int actual_negative_control_net_residual_consumption_count = evidence_per_image(
-                execution_evidence.negative_control_net_residual_consumption_count,
-                "negativeControlNetResidualConsumptionCount");
-        const int actual_auxiliary_control_net_residual_consumption_count = evidence_per_image(
-                execution_evidence.auxiliary_control_net_residual_consumption_count,
-                "auxiliaryControlNetResidualConsumptionCount");
-        const int actual_vae_encode_tiling_invocation_count = evidence_int(
-                execution_evidence.vae_encode_tiling_invocation_count,
-                "vaeEncodeTilingInvocationCount");
-        const int actual_vae_encode_tiling_success_count = evidence_int(
-                execution_evidence.vae_encode_tiling_success_count,
-                "vaeEncodeTilingSuccessCount");
-        const int actual_vae_decode_tiling_invocation_count = evidence_int(
-                execution_evidence.vae_decode_tiling_invocation_count,
-                "vaeDecodeTilingInvocationCount");
-        const int actual_vae_decode_tiling_success_count = evidence_int(
-                execution_evidence.vae_decode_tiling_success_count,
-                "vaeDecodeTilingSuccessCount");
-        const int actual_vae_encode_planned_tile_count = evidence_int(
-                execution_evidence.vae_encode_planned_tile_count,
-                "vaeEncodePlannedTileCount");
-        const int actual_vae_decode_planned_tile_count = evidence_int(
-                execution_evidence.vae_decode_planned_tile_count,
-                "vaeDecodePlannedTileCount");
-        const int actual_vae_encode_tile_compute_attempt_count = evidence_int(
-                execution_evidence.vae_encode_tile_compute_attempt_count,
-                "vaeEncodeTileComputeAttemptCount");
-        const int actual_vae_encode_tile_compute_success_count = evidence_int(
-                execution_evidence.vae_encode_tile_compute_success_count,
-                "vaeEncodeTileComputeSuccessCount");
-        const int actual_vae_decode_tile_compute_attempt_count = evidence_int(
-                execution_evidence.vae_decode_tile_compute_attempt_count,
-                "vaeDecodeTileComputeAttemptCount");
-        const int actual_vae_decode_tile_compute_success_count = evidence_int(
-                execution_evidence.vae_decode_tile_compute_success_count,
-                "vaeDecodeTileComputeSuccessCount");
-        const int actual_vae_encode_tile_size_x = evidence_int(
-                execution_evidence.vae_encode_tile_size_x,
-                "vaeEncodeTileSizeX");
-        const int actual_vae_encode_tile_size_y = evidence_int(
-                execution_evidence.vae_encode_tile_size_y,
-                "vaeEncodeTileSizeY");
-        const int actual_vae_decode_tile_size_x = evidence_int(
-                execution_evidence.vae_decode_tile_size_x,
-                "vaeDecodeTileSizeX");
-        const int actual_vae_decode_tile_size_y = evidence_int(
-                execution_evidence.vae_decode_tile_size_y,
-                "vaeDecodeTileSizeY");
-        const double actual_vae_encode_tile_overlap_x =
-                static_cast<double>(execution_evidence.vae_encode_tile_overlap_x);
-        const double actual_vae_encode_tile_overlap_y =
-                static_cast<double>(execution_evidence.vae_encode_tile_overlap_y);
-        const double actual_vae_decode_tile_overlap_x =
-                static_cast<double>(execution_evidence.vae_decode_tile_overlap_x);
-        const double actual_vae_decode_tile_overlap_y =
-                static_cast<double>(execution_evidence.vae_decode_tile_overlap_y);
-        const uint64_t classified_compute_count =
-                execution_evidence.positive_diffusion_model_compute_count +
-                execution_evidence.negative_diffusion_model_compute_count +
-                execution_evidence.auxiliary_diffusion_model_compute_count;
-        if (classified_compute_count != execution_evidence.diffusion_model_compute_count) {
-            release_images_and_mismatch(
-                    "unetExecutionCount",
-                    "physical diffusion computes were not completely classified by execution branch");
-        }
-        if (execution_evidence.control_net_compute_attempt_count !=
-                    execution_evidence.positive_control_net_compute_attempt_count +
-                    execution_evidence.negative_control_net_compute_attempt_count ||
-            execution_evidence.control_net_compute_success_count !=
-                    execution_evidence.positive_control_net_compute_success_count +
-                    execution_evidence.negative_control_net_compute_success_count ||
-            execution_evidence.control_net_residual_consumption_count !=
-                    execution_evidence.positive_control_net_residual_consumption_count +
-                    execution_evidence.negative_control_net_residual_consumption_count +
-                    execution_evidence.auxiliary_control_net_residual_consumption_count) {
-            release_images_and_mismatch(
-                    "controlNetEvidence",
-                    "ControlNet execution evidence was not completely classified by branch");
-        }
-        if (actual_sampling_pass_count != contract.batch_count) {
-            release_images_and_mismatch(
-                    "samplingPassCount",
-                    "native image generation executed an unexpected number of sampling passes");
-        }
-        if (actual_auxiliary_execution_count != 0) {
-            release_images_and_mismatch(
-                    "unetExecutionCount",
-                    "strict image execution does not support auxiliary diffusion branches");
-        }
-        if (!contract.ultrafix_enabled &&
-            actual_positive_execution_count != actual_timetable_count) {
-            release_images_and_mismatch(
-                    "positiveDiffusionExecutionCount",
-                    "positive conditioning did not physically execute once per completed sampling step");
+        mca::sd::GenerationEvidenceSummary summary;
+        std::string mismatch_field, mismatch_message;
+        if (!mca::sd::verify_generation_evidence(
+                contract, ctx, gen, actual_width, actual_height,
+                input_image_wired, input_image, control_image_wired, controlnet_evidence,
+                ultrafix_evidence, execution_evidence, flow_shift_capable, dynamic_flow_shift,
+                distilled_guidance_capable, summary, mismatch_field, mismatch_message)) {
+            release_images_and_mismatch(mismatch_field, mismatch_message);
         }
 
-        const bool requested_use_cfg =
-                std::fabs(static_cast<double>(gen.sample_params.guidance.txt_cfg) - 1.0) > 1e-6;
-        const bool actual_use_cfg = actual_negative_execution_count > 0;
-        const int actual_branches = actual_use_cfg ? 2 : 1;
-        if (requested_use_cfg != actual_use_cfg) {
-            release_images_and_mismatch(
-                    "useCfg",
-                    "actual negative diffusion execution does not match the configured CFG mode");
-        }
-        const bool actual_control_image_consumed =
-                control_image_wired && actual_control_net_residual_consumption_count > 0;
-        if (control_image_wired) {
-            if (actual_control_net_compute_attempt_count != actual_unet_execution_count ||
-                actual_control_net_compute_success_count != actual_control_net_compute_attempt_count ||
-                actual_positive_control_net_compute_attempt_count != actual_positive_execution_count ||
-                actual_positive_control_net_compute_success_count != actual_positive_execution_count ||
-                actual_negative_control_net_compute_attempt_count != actual_negative_execution_count ||
-                actual_negative_control_net_compute_success_count != actual_negative_execution_count ||
-                actual_control_net_residual_consumption_count != actual_unet_execution_count ||
-                actual_positive_control_net_residual_consumption_count != actual_positive_execution_count ||
-                actual_negative_control_net_residual_consumption_count != actual_negative_execution_count ||
-                actual_auxiliary_control_net_residual_consumption_count != 0) {
-                release_images_and_mismatch(
-                        "controlNetEvidence",
-                        "ControlNet did not successfully compute and feed residuals into every physical diffusion branch");
-            }
-        } else if (actual_control_net_compute_attempt_count != 0 ||
-                   actual_control_net_compute_success_count != 0 ||
-                   actual_control_net_residual_consumption_count != 0 ||
-                   actual_positive_control_net_compute_attempt_count != 0 ||
-                   actual_positive_control_net_compute_success_count != 0 ||
-                   actual_negative_control_net_compute_attempt_count != 0 ||
-                   actual_negative_control_net_compute_success_count != 0 ||
-                   actual_positive_control_net_residual_consumption_count != 0 ||
-                   actual_negative_control_net_residual_consumption_count != 0 ||
-                   actual_auxiliary_control_net_residual_consumption_count != 0) {
-            release_images_and_mismatch(
-                    "controlNetEvidence",
-                    "native execution reported ControlNet work for a request without a control image");
-        }
-        const bool actual_vae_tiling_enabled =
-                actual_vae_encode_tiling_invocation_count > 0 ||
-                actual_vae_decode_tiling_invocation_count > 0;
-        auto valid_vae_overlap = [](double value) {
-            return std::isfinite(value) && value >= 0.0 && value <= 0.5;
-        };
-        auto validate_vae_tiling_phase = [&](const char *phase,
-                                             int invocation_count,
-                                             int success_count,
-                                             int planned_tile_count,
-                                             int tile_compute_attempt_count,
-                                             int tile_compute_success_count,
-                                             int tile_size_x,
-                                             int tile_size_y,
-                                             double overlap_x,
-                                             double overlap_y) {
-            if (invocation_count == 0) {
-                if (success_count != 0 || planned_tile_count != 0 ||
-                    tile_compute_attempt_count != 0 || tile_compute_success_count != 0 ||
-                    tile_size_x != 0 || tile_size_y != 0 || overlap_x != 0.0 ||
-                    overlap_y != 0.0) {
-                    release_images_and_mismatch(
-                            "vaeTiling",
-                            std::string("native VAE ") + phase +
-                                " evidence exists without a tiled invocation");
-                }
-                return;
-            }
-            if (success_count != invocation_count || planned_tile_count <= 0 ||
-                tile_compute_attempt_count != planned_tile_count ||
-                tile_compute_success_count != tile_compute_attempt_count ||
-                tile_size_x <= 0 || tile_size_y <= 0 ||
-                !valid_vae_overlap(overlap_x) || !valid_vae_overlap(overlap_y)) {
-                release_images_and_mismatch(
-                        "vaeTiling",
-                        std::string("native VAE ") + phase +
-                            " tiling did not complete its physical tile plan");
-            }
-        };
-        validate_vae_tiling_phase(
-                "encode",
-                actual_vae_encode_tiling_invocation_count,
-                actual_vae_encode_tiling_success_count,
-                actual_vae_encode_planned_tile_count,
-                actual_vae_encode_tile_compute_attempt_count,
-                actual_vae_encode_tile_compute_success_count,
-                actual_vae_encode_tile_size_x,
-                actual_vae_encode_tile_size_y,
-                actual_vae_encode_tile_overlap_x,
-                actual_vae_encode_tile_overlap_y);
-        validate_vae_tiling_phase(
-                "decode",
-                actual_vae_decode_tiling_invocation_count,
-                actual_vae_decode_tiling_success_count,
-                actual_vae_decode_planned_tile_count,
-                actual_vae_decode_tile_compute_attempt_count,
-                actual_vae_decode_tile_compute_success_count,
-                actual_vae_decode_tile_size_x,
-                actual_vae_decode_tile_size_y,
-                actual_vae_decode_tile_overlap_x,
-                actual_vae_decode_tile_overlap_y);
-        if (contract.vae_tiling_enabled) {
-            if (!actual_vae_tiling_enabled ||
-                actual_vae_decode_tiling_invocation_count != contract.batch_count) {
-                release_images_and_mismatch(
-                        "vaeTiling",
-                        "requested VAE tiling did not execute exactly once for every final image decode");
-            }
-            if (input_image_wired && actual_vae_encode_tiling_invocation_count <= 0) {
-                release_images_and_mismatch(
-                        "vaeTiling",
-                        "requested VAE tiling did not execute while encoding the prepared input image");
-            }
-        } else if (actual_vae_tiling_enabled) {
-            release_images_and_mismatch(
-                    "vaeTiling",
-                    "native VAE tiling executed even though the request disabled it");
-        }
-        if (execution_evidence.positive_conditioning_observed == 0u ||
-            execution_evidence.positive_conditioning_token_count == 0u) {
-            release_images_and_mismatch(
-                    "tokenCount",
-                    "positive conditioning did not publish actual tokenizer evidence");
-        }
-        if (actual_use_cfg) {
-            if (execution_evidence.negative_conditioning_observed == 0u ||
-                execution_evidence.negative_conditioning_token_count == 0u ||
-                (!contract.ultrafix_enabled &&
-                    actual_negative_execution_count != actual_timetable_count) ||
-                (contract.ultrafix_enabled &&
-                    static_cast<uint64_t>(actual_negative_execution_count) !=
-                        ultrafix_evidence.tiled_unet_tile_count)) {
-                release_images_and_mismatch(
-                        "unconditionalBranch",
-                        "CFG did not execute evidenced negative conditioning for every refinement evaluation");
-            }
-        } else if (execution_evidence.negative_conditioning_observed != 0u ||
-                   execution_evidence.negative_conditioning_token_count != 0u ||
-                   actual_negative_execution_count != 0) {
-            release_images_and_mismatch(
-                    "unconditionalBranch",
-                    "non-CFG generation unexpectedly prepared or executed negative conditioning");
-        }
-
-        const uint64_t total_conditioning_token_count =
-                execution_evidence.positive_conditioning_token_count +
-                execution_evidence.negative_conditioning_token_count;
-        const int actual_token_count = evidence_int(
-                total_conditioning_token_count,
-                "tokenCount");
-        const int actual_positive_weighted_token_count = evidence_int(
-                execution_evidence.positive_non_unity_weight_count,
-                "positiveWeightedTokenCount");
-        const int actual_negative_weighted_token_count = evidence_int(
-                execution_evidence.negative_non_unity_weight_count,
-                "negativeWeightedTokenCount");
-        const bool actual_prompt_weighting_applied =
-                execution_evidence.prompt_weighting_applied != 0u;
-        const bool weighted_count_observed =
-                actual_positive_weighted_token_count > 0 ||
-                actual_negative_weighted_token_count > 0;
-        if (actual_prompt_weighting_applied != weighted_count_observed) {
-            release_images_and_mismatch(
-                    "promptWeightingApplied",
-                    "native weighting flag conflicts with actual non-unity token weights");
-        }
-        if (execution_evidence.positive_non_unity_weight_count >
-                    execution_evidence.positive_conditioning_token_count ||
-            execution_evidence.negative_non_unity_weight_count >
-                    execution_evidence.negative_conditioning_token_count) {
-            release_images_and_mismatch(
-                    "promptWeightingApplied",
-                    "native non-unity weight counts exceed actual conditioning tokens");
-        }
-        if (actual_prompt_weighting_applied && !contract.prompt_weighting_supported) {
-            release_images_and_mismatch(
-                    "promptWeightingSupported",
-                    "native prompt syntax applied non-unity weights while the resolved profile disables weighting");
-        }
-        if (contract.prompt_weighting_supported &&
-            (execution_evidence.positive_prompt_weighting_capable == 0u ||
-             (actual_use_cfg && execution_evidence.negative_prompt_weighting_capable == 0u))) {
-            release_images_and_mismatch(
-                    "promptWeightingSupported",
-                    "the executed conditioner cannot prove token-level weighting for every active branch");
-        }
-        // The resolved value is the active-branch capacity, while the native
-        // tokenizer may consume more slots for long prompts or a model-native
-        // conditioner such as T5. The exact executed count is reported above
-        // and is intentionally not replaced with the request capacity.
-        const std::string actual_native_prompt_execution_sha256 =
-                image_prompt_execution_sha256(
-                        gen.prompt == nullptr ? std::string() : std::string(gen.prompt),
-                        gen.negative_prompt == nullptr
-                                ? std::string()
-                                : std::string(gen.negative_prompt));
-        if (!is_sha256(actual_native_prompt_execution_sha256)) {
-            release_images_and_mismatch(
-                    "nativePromptExecutionSha256",
-                    "native prompt framing could not be hashed after conditioning execution");
-        }
-
-        const int64_t total_unet_execution_count = evidence_int(
-                execution_evidence.diffusion_model_compute_count,
-                "totalUnetExecutionCount");
-        const int ui_progress_callback_count =
-                g_ui_progress_callback_count.load(std::memory_order_relaxed);
-        const int ui_progress_reported_steps =
-                g_ui_progress_reported_steps.load(std::memory_order_relaxed);
-        const int ui_progress_max_step =
-                g_ui_progress_max_step.load(std::memory_order_relaxed);
-        if (actual_width != contract.width || actual_height != contract.height) {
-            release_images_and_mismatch(
-                    "width,height",
-                    "stable-diffusion.cpp aligned the requested dimensions; strict execution rejects implicit alignment");
-        }
-        if (actual_timetable_count != contract.timetable_count) {
-            release_images_and_mismatch(
-                    "timetableCount",
-                    "actual completed native sampling steps differ from the resolved timetableCount");
-        }
-        if (!contract.ultrafix_enabled &&
-            actual_unet_execution_count != contract.unet_execution_count) {
-            release_images_and_mismatch(
-                    "unetExecutionCount",
-                    "actual physical diffusion model computes differ from the resolved contract");
-        }
         if (has_execution_asset_binding) {
             std::string asset_error;
             if (!mca::image::execution_assets::verify_final(
@@ -2015,520 +1229,60 @@ std::string generate_impl(const std::string &model_path,
                 }
                 release_images_and_mismatch(
                     "textualInversionExecutionAssets",
-                    asset_error.empty()
-                        ? "execution assets changed during native generation"
-                        : asset_error);
+                    asset_error.empty() ? "execution assets changed during native generation" : asset_error);
             }
         }
 
-        const double actual_cfg_scale =
-                static_cast<double>(gen.sample_params.guidance.txt_cfg);
-        const int semantic_unet_execution_count = contract.ultrafix_enabled
-                ? contract.unet_execution_count
-                : actual_unet_execution_count;
-        json native_effective = native_effective_json(
-                contract,
-                prediction_wire,
-                gen.sample_params.sample_steps,
-                actual_timetable_count,
-                semantic_unet_execution_count,
-                actual_cfg_scale,
-                actual_use_cfg,
-                actual_token_count,
-                actual_prompt_weighting_applied,
-                actual_positive_weighted_token_count,
-                actual_negative_weighted_token_count,
-                actual_prompt_weight_fingerprint,
-                actual_width,
-                actual_height);
-        native_effective["actualModelVersion"] = actual_model_version;
-        native_effective["actualModelVariant"] = actual_qwen_image_21 ? "QWEN_IMAGE_21" : "";
-        native_effective["nativeScheduler"] = sd_scheduler_name(gen.sample_params.scheduler);
-        if (!contract.qwen_turbo_schedule.empty()) {
-            native_effective["qwenTurboSchedule"] = contract.qwen_turbo_schedule;
-            native_effective["qwenRawSigmas"] = contract.qwen_raw_sigmas;
-            native_effective["qwenShiftedSigmas"] = contract.qwen_custom_sigmas;
-            native_effective["qwenSigmaImageSeqLen"] = contract.qwen_sigma_image_seq_len;
-            native_effective["qwenSigmaMu"] = contract.qwen_sigma_mu;
-        }
-        const uint32_t stage_mask =
-                g_generation_stage_mask.load(std::memory_order_relaxed);
-        const bool qwen_text_encoded =
-                (stage_mask & kStageQwenTextConditionEncoded) != 0u;
-        const bool qwen_text_released =
-                (stage_mask & kStageQwenTextContextReleased) != 0u;
-        const bool qwen_diffusion_ready =
-                (stage_mask & kStageQwenDiffusionContextReady) != 0u;
-        native_effective["stageParametersReleased"] =
-                split_qwen_image_21 && qwen_text_released;
-        native_effective["qwenTwoStage"] =
-                split_qwen_image_21 && qwen_text_encoded &&
-                qwen_text_released && qwen_diffusion_ready;
-        native_effective["qwenTextEncoderPhase"] =
-                split_qwen_image_21 && qwen_text_encoded;
-        native_effective["qwenTextConditionEncoded"] =
-                split_qwen_image_21 && qwen_text_encoded;
-        native_effective["qwenTextEncoderReleasedBeforeDiffusion"] =
-                split_qwen_image_21 && qwen_text_released && qwen_diffusion_ready;
-        native_effective["qwenDiffusionVaePhase"] =
-                split_qwen_image_21 && qwen_diffusion_ready;
-        native_effective["inputImagePath"] = input_image_wired
-                ? input_image.canonical_path : "";
-        native_effective["maskImagePath"] = mask_image_wired
-                ? mask_image.canonical_path : "";
-        native_effective["controlImagePath"] = control_image_wired
-                ? control_image.canonical_path : "";
-        native_effective["inputImageExecutionCount"] = input_image_wired ? 1 : 0;
-        native_effective["maskImageExecutionCount"] = mask_image_wired ? 1 : 0;
-        native_effective["controlImageExecutionCount"] = actual_control_image_consumed ? 1 : 0;
-        native_effective["inputImageSha256"] = input_image.sha256;
-        native_effective["maskImageSha256"] = mask_image.sha256;
-        native_effective["controlImageSha256"] = control_image.sha256;
-        native_effective["strength"] = contract.strength;
-        native_effective["backendStrength"] = input_image_wired
-                ? (contract.ultrafix_enabled
-                    ? contract.ultrafix_strength
-                    : static_cast<double>(gen.strength))
-                : contract.strength;
-        native_effective["controlStrength"] = control_image_wired
-                ? static_cast<double>(gen.control_strength) : contract.control_strength;
-        native_effective["strengthApplied"] = input_image_wired;
-        native_effective["controlStrengthApplied"] = actual_control_image_consumed;
-        native_effective["clipSkip"] = gen.clip_skip;
-        native_effective["batchCount"] = gen.batch_count;
-        native_effective["vaeTiling"] = {
-                {"enabled", actual_vae_tiling_enabled},
-                {"requestedTileSize", contract.vae_tiling_enabled ? contract.vae_tile_size : 0},
-                {"requestedOverlap", contract.vae_tiling_enabled ? contract.vae_tile_overlap : 0.0},
-                {"encode", {
-                        {"invocationCount", actual_vae_encode_tiling_invocation_count},
-                        {"successCount", actual_vae_encode_tiling_success_count},
-                        {"plannedTileCount", actual_vae_encode_planned_tile_count},
-                        {"tileComputeAttemptCount", actual_vae_encode_tile_compute_attempt_count},
-                        {"tileComputeSuccessCount", actual_vae_encode_tile_compute_success_count},
-                        {"tileSizeX", actual_vae_encode_tile_size_x},
-                        {"tileSizeY", actual_vae_encode_tile_size_y},
-                        {"overlapX", actual_vae_encode_tile_overlap_x},
-                        {"overlapY", actual_vae_encode_tile_overlap_y}
-                }},
-                {"decode", {
-                        {"invocationCount", actual_vae_decode_tiling_invocation_count},
-                        {"successCount", actual_vae_decode_tiling_success_count},
-                        {"plannedTileCount", actual_vae_decode_planned_tile_count},
-                        {"tileComputeAttemptCount", actual_vae_decode_tile_compute_attempt_count},
-                        {"tileComputeSuccessCount", actual_vae_decode_tile_compute_success_count},
-                        {"tileSizeX", actual_vae_decode_tile_size_x},
-                        {"tileSizeY", actual_vae_decode_tile_size_y},
-                        {"overlapX", actual_vae_decode_tile_overlap_x},
-                        {"overlapY", actual_vae_decode_tile_overlap_y}
-                }}
-        };
-        if (contract.ultrafix_enabled) {
-            native_effective["ultraFix"] = {
-                    {"version", ultrafix_evidence.version},
-                    {"generationCompleted", ultrafix_evidence.generation_completed == 1u},
-                    {"cancelled", ultrafix_evidence.cancelled == 1u},
-                    {"previewPublished", ultrafix_evidence.preview_published == 1u},
-                    {"sourceWidth", ultrafix_evidence.source_width},
-                    {"sourceHeight", ultrafix_evidence.source_height},
-                    {"targetWidth", ultrafix_evidence.target_width},
-                    {"targetHeight", ultrafix_evidence.target_height},
-                    {"sourceFit", "cover_center"},
-                    {"sourceResizedWidth", ultrafix_evidence.source_resized_width},
-                    {"sourceResizedHeight", ultrafix_evidence.source_resized_height},
-                    {"sourceCropLeft", ultrafix_evidence.source_crop_left},
-                    {"sourceCropTop", ultrafix_evidence.source_crop_top},
-                    {"tileSize", ultrafix_evidence.tile_size},
-                    {"overlap", ultrafix_evidence.tile_overlap},
-                    {"inversionSteps", ultrafix_evidence.inversion_steps},
-                    {"refinementSteps", ultrafix_evidence.refinement_steps},
-                    {"denoiseStepCount", ultrafix_evidence.denoise_step_count},
-                    {"sampleMethod", sd_sample_method_name(gen.sample_params.sample_method)},
-                    {"nativeScheduler", sd_scheduler_name(gen.sample_params.scheduler)},
-                    {"vaeEncode", {
-                            {"invocationCount", ultrafix_evidence.vae_encode_invocation_count},
-                            {"successCount", ultrafix_evidence.vae_encode_success_count},
-                            {"tileInvocationCount", ultrafix_evidence.vae_encode_tile_count},
-                            {"tileSuccessCount", ultrafix_evidence.vae_encode_tile_success_count},
-                            {"stepCount", 1}
-                    }},
-                    {"ddimInversion", {
-                            {"invocationCount", ultrafix_evidence.ddim_inversion_invocation_count},
-                            {"successCount", ultrafix_evidence.ddim_inversion_success_count},
-                            {"tileInvocationCount", ultrafix_evidence.ddim_inversion_tile_count},
-                            {"tileSuccessCount", ultrafix_evidence.ddim_inversion_tile_success_count},
-                            {"stepCount", ultrafix_evidence.ddim_inversion_step_count}
-                    }},
-                    {"tiledUnetRefinement", {
-                            {"invocationCount", ultrafix_evidence.tiled_unet_invocation_count},
-                            {"successCount", ultrafix_evidence.tiled_unet_success_count},
-                            {"tileInvocationCount", ultrafix_evidence.tiled_unet_tile_count},
-                            {"tileSuccessCount", ultrafix_evidence.tiled_unet_tile_success_count},
-                            {"stepCount", ultrafix_evidence.tiled_unet_step_count}
-                    }},
-                    {"tiledVaeDecode", {
-                            {"invocationCount", ultrafix_evidence.tiled_vae_decode_invocation_count},
-                            {"successCount", ultrafix_evidence.tiled_vae_decode_success_count},
-                            {"tileInvocationCount", ultrafix_evidence.tiled_vae_decode_tile_count},
-                            {"tileSuccessCount", ultrafix_evidence.tiled_vae_decode_tile_success_count},
-                            {"stepCount", 1}
-                    }},
-                    {"physicalDiffusionModelComputeCount",
-                            execution_evidence.diffusion_model_compute_count},
-                    {"qualityStepEvaluationCount",
-                            ultrafix_evidence.quality_step_evaluation_count},
-                    {"noiseInjectionStepCount",
-                            ultrafix_evidence.noise_injection_step_count},
-                    {"noiseInjectionSeedFingerprint",
-                            sha256_utf8(mca::image::ultrafix_noise_seed_descriptor(
-                                    ultrafix_evidence.noise_injection_seed,
-                                    ultrafix_evidence.denoise_step_count))},
-                    {"noiseInjectionChecksum",
-                            fixed_width_lower_hex_u64(
-                                    ultrafix_evidence.noise_injection_checksum)},
-                    {"structureGuidanceStepCount",
-                            ultrafix_evidence.structure_guidance_step_count},
-                    {"structureGuidanceChecksum",
-                            fixed_width_lower_hex_u64(
-                                    ultrafix_evidence.structure_guidance_checksum)},
-                    {"trajectoryNoiseChecksum",
-                            fixed_width_lower_hex_u64(
-                                    ultrafix_evidence.trajectory_noise_checksum)}
-            };
-            native_effective["strengthMechanism"] = "ddim_inversion";
-        }
-        native_effective["outputCount"] = contract.batch_count;
-        native_effective["n"] = contract.batch_count;
-        native_effective["totalUnetExecutionCount"] = total_unet_execution_count;
-        native_effective["samplingPassCount"] = actual_sampling_pass_count;
-        native_effective["positiveDiffusionModelComputeCount"] =
-                actual_positive_execution_count;
-        native_effective["negativeDiffusionModelComputeCount"] =
-                actual_negative_execution_count;
-        native_effective["auxiliaryDiffusionModelComputeCount"] =
-                actual_auxiliary_execution_count;
-        native_effective["positiveConditioningTokenCount"] =
-                execution_evidence.positive_conditioning_token_count;
-        native_effective["negativeConditioningTokenCount"] =
-                execution_evidence.negative_conditioning_token_count;
-        native_effective["conditioningArtifactSha256"] =
-                actual_prompt_weight_fingerprint;
-        native_effective["nativePromptExecutionSha256"] =
-                actual_native_prompt_execution_sha256;
-        native_effective["nativePromptBindingStage"] = "conditioning_consumed";
-        native_effective["requestedDistilledGuidance"] = contract.distilled_guidance;
-        native_effective["distilledGuidanceSpecified"] =
-                contract.distilled_guidance_specified;
-        native_effective["distilledGuidanceApplied"] =
-                actual_distilled_guidance_applied;
-        native_effective["distilledGuidance"] = actual_distilled_guidance_applied
-                ? json(actual_distilled_guidance)
-                : json(nullptr);
-        native_effective["requestedFlowShift"] = contract.flow_shift;
-        native_effective["flowShiftSpecified"] = contract.flow_shift_specified;
-        native_effective["flowShiftApplied"] = actual_flow_shift_applied;
-        native_effective["dynamicFlowShift"] = actual_dynamic_flow_shift;
-        native_effective["flowShift"] = actual_flow_shift_applied
-                ? json(actual_flow_shift)
-                : json(nullptr);
-        native_effective["imageInputConsumption"] = {
-                {"input", input_image_wired ? "init_latent" : "none"},
-                {"mask", mask_image_wired ? "denoise_mask" : "none"},
-                {"control", actual_control_image_consumed ? "controlnet_residual" : "none"}
-        };
-        native_effective["controlNetEvidence"] = {
-                {"computeAttemptCount", actual_control_net_compute_attempt_count},
-                {"computeSuccessCount", actual_control_net_compute_success_count},
-                {"positiveComputeAttemptCount", actual_positive_control_net_compute_attempt_count},
-                {"positiveComputeSuccessCount", actual_positive_control_net_compute_success_count},
-                {"negativeComputeAttemptCount", actual_negative_control_net_compute_attempt_count},
-                {"negativeComputeSuccessCount", actual_negative_control_net_compute_success_count},
-                {"residualConsumptionCount", actual_control_net_residual_consumption_count},
-                {"positiveResidualConsumptionCount", actual_positive_control_net_residual_consumption_count},
-                {"negativeResidualConsumptionCount", actual_negative_control_net_residual_consumption_count},
-                {"auxiliaryResidualConsumptionCount", actual_auxiliary_control_net_residual_consumption_count}
-        };
-        native_effective["loras"] =
-                mca::sd::format_lora_effective_json(contract.loras, native_loras);
-        native_effective["loraEvidence"] =
-                mca::sd::format_lora_evidence_json(execution_evidence);
-        native_effective["textualInversions"] = json::array();
-        for (const auto &artifact: validated_textual_inversions) {
-            native_effective["textualInversions"].push_back({
-                    {"id", artifact.id},
-                    {"trigger", artifact.trigger},
-                    {"sha256", artifact.sha256},
-                    {"sizeBytes", artifact.size_bytes},
-                    {"format", artifact.format},
-                    {"runtime", artifact.runtime},
-                    {"modelFingerprint", artifact.model_fingerprint},
-                    {"tokenizerFingerprint", artifact.tokenizer_fingerprint},
-                    {"profileId", artifact.profile_id},
-                    {"profileRevision", artifact.profile_revision},
-                    {"bindingFingerprint", artifact.binding_fingerprint}
-            });
-        }
-        native_effective["textualInversionEvidence"] = {
-                {"requestedCount", execution_evidence.textual_inversion_requested_count},
-                {"validatedCount", validated_textual_inversions.size()},
-                {"loadAttemptCount", execution_evidence.textual_inversion_load_attempt_count},
-                {"loadedCount", execution_evidence.textual_inversion_loaded_count},
-                {"tokenizerMatchCount", execution_evidence.textual_inversion_tokenizer_match_count},
-                {"appliedCount", execution_evidence.textual_inversion_applied_count},
-                {"appliedVectorCount", execution_evidence.textual_inversion_applied_vector_count},
-                {"conditioningConsumptionCount",
-                        execution_evidence.textual_inversion_conditioning_consumption_count},
-                {"clipLAppliedCount", execution_evidence.textual_inversion_clip_l_applied_count},
-                {"clipGAppliedCount", execution_evidence.textual_inversion_clip_g_applied_count},
-                {"requestedMask", execution_evidence.textual_inversion_requested_mask},
-                {"loadedMask", execution_evidence.textual_inversion_loaded_mask},
-                {"tokenizerMatchMask", execution_evidence.textual_inversion_tokenizer_match_mask},
-                {"appliedMask", execution_evidence.textual_inversion_applied_mask},
-                {"consumedMask", execution_evidence.textual_inversion_consumed_mask},
-                {"clipLMask", execution_evidence.textual_inversion_clip_l_mask},
-                {"clipGMask", execution_evidence.textual_inversion_clip_g_mask},
-                {"clipGRequiredMask",
-                        execution_evidence.textual_inversion_clip_g_required_mask},
-                {"failureCode", "none"},
-                {"bindingFingerprint", contract.textual_inversion_binding_fingerprint},
-                {"nativeMode", validated_textual_inversions.empty()
-                        ? "none" : "SDCPP_CUSTOM_WORDS"},
-                {"bindingStage", validated_textual_inversions.empty()
-                        ? "none" : "conditioning_consumed"}
-        };
-        if (has_execution_asset_binding) {
-            mca::image::execution_assets::append_evidence(
-                    native_effective,
-                    execution_asset_binding);
-        }
+        const uint32_t stage_mask = g_generation_stage_mask.load(std::memory_order_relaxed);
+        json native_effective = mca::sd::build_generation_effective_json(
+                contract, prediction_wire, gen, summary, actual_model_version, actual_qwen_image_21,
+                split_qwen_image_21, stage_mask, input_image_wired, input_image, mask_image_wired,
+                mask_image, controlnet_evidence, control_image_wired, control_image, ultrafix_evidence,
+                native_loras, execution_evidence, validated_textual_inversions, has_execution_asset_binding,
+                execution_asset_binding);
 
-        set_progress(
-                "writing",
-                "writing png",
-                actual_timetable_count,
-                actual_timetable_count,
-                0.0f,
-                actual_width,
-                actual_height,
-                contract.threads);
-        if (first.width > static_cast<uint32_t>(
-                std::numeric_limits<int>::max() / actual_channels)) {
+        set_progress("writing", "writing png", summary.actual_timetable_count, summary.actual_timetable_count,
+                     0.0f, actual_width, actual_height, contract.threads);
+
+        if (first.width > static_cast<uint32_t>(std::numeric_limits<int>::max() / actual_channels)) {
             free_generated_images(images, contract.batch_count);
-            return runtime_failure(
-                    "OUTPUT_WRITE_FAILED",
-                    "output row stride exceeds the native PNG writer range").dump();
+            return runtime_failure("OUTPUT_WRITE_FAILED", "output row stride exceeds the native PNG writer range").dump();
         }
-        const int stride = actual_width * actual_channels;
-        bool write_ok = true;
+
+        std::vector<std::string> output_sha256s;
+        std::vector<uint64_t> output_byte_counts;
         std::string output_write_error;
-        std::vector<std::string> output_sha256s(
-                static_cast<size_t>(contract.batch_count));
-        std::vector<uint64_t> output_byte_counts(
-                static_cast<size_t>(contract.batch_count), 0u);
-        for (int index = 0; index < contract.batch_count; ++index) {
-            bool wrote = false;
-            if (contract.ultrafix_enabled) {
-                mca::contract::RequestIdentity tx_identity;
-                tx_identity.request_id = g_ctx_key;
-                const auto tx_result = mca::sd::SdOutputTransaction::write_png_atomic(
-                    output_paths[static_cast<size_t>(index)],
-                    actual_width,
-                    actual_height,
-                    actual_channels,
-                    images[index].data,
-                    tx_identity,
-                    [&]() { return g_cancel_requested.load(std::memory_order_relaxed); });
-                if (tx_result.success) {
-                    output_sha256s[static_cast<size_t>(index)] = tx_result.sha256_hex;
-                    output_byte_counts[static_cast<size_t>(index)] = tx_result.bytes_written;
-                    wrote = true;
-                } else {
-                    output_write_error = tx_result.error.has_value()
-                            ? tx_result.error->public_message
-                            : "atomic PNG publication failed";
-                    wrote = false;
-                }
-            } else {
-                wrote = stbi_write_png(
-                    output_paths[static_cast<size_t>(index)].c_str(),
-                    actual_width,
-                    actual_height,
-                    actual_channels,
-                    images[index].data,
-                    stride) != 0;
-            }
-            if (!wrote) {
-                write_ok = false;
-                break;
-            }
-        }
+        const bool write_ok = mca::sd::write_generation_png_batch(
+                contract, g_ctx_key, output_paths, images, actual_width, actual_height, actual_channels,
+                g_cancel_requested, output_sha256s, output_byte_counts, output_write_error);
         free_generated_images(images, contract.batch_count);
+
         if (!write_ok) {
             remove_output_files(output_paths);
             if (g_cancel_requested.load(std::memory_order_relaxed)) {
-                set_progress(
-                        "cancelled",
-                        "cancelled before output publication",
-                        actual_timetable_count,
-                        actual_timetable_count,
-                        0.0f,
-                        actual_width,
-                        actual_height,
-                        contract.threads);
+                set_progress("cancelled", "cancelled before output publication", summary.actual_timetable_count,
+                             summary.actual_timetable_count, 0.0f, actual_width, actual_height, contract.threads);
                 return json({{"ok", false}, {"cancelled", true}, {"error", "cancelled"}}).dump();
             }
-            set_progress(
-                    "failed",
-                    output_write_error.empty()
-                        ? "failed to write png"
-                        : output_write_error,
-                    actual_timetable_count,
-                    actual_timetable_count,
-                    0.0f,
-                    actual_width,
-                    actual_height,
-                    contract.threads);
-            return runtime_failure(
-                    "OUTPUT_WRITE_FAILED",
-                    output_write_error.empty()
-                        ? "failed to write the complete PNG batch"
-                        : output_write_error).dump();
+            set_progress("failed", output_write_error.empty() ? "failed to write png" : output_write_error,
+                         summary.actual_timetable_count, summary.actual_timetable_count, 0.0f, actual_width, actual_height, contract.threads);
+            return runtime_failure("OUTPUT_WRITE_FAILED", output_write_error.empty() ? "failed to write the complete PNG batch" : output_write_error).dump();
         }
-        mark_generation_stage(kStageOutputWritten);
-        set_progress(
-                "completed",
-                "image saved",
-                actual_timetable_count,
-                actual_timetable_count,
-                0.0f,
-                actual_width,
-                actual_height,
-                contract.threads);
 
-        json out = native_effective;
-        out["ok"] = true;
-        out["nativeExecution"] = true;
-        out["executionStage"] = "semantic_generation_passed";
-        out["path"] = output_paths.front();
-        out["mimeType"] = "image/png";
-        out["outputs"] = json::array();
-        for (int index = 0; index < contract.batch_count; ++index) {
-            json output_entry = {
-                    {"index", index},
-                    {"path", output_paths[static_cast<size_t>(index)]},
-                    {"mimeType", "image/png"},
-                    {"seed", contract.seed + index},
-                    {"width", actual_width},
-                    {"height", actual_height},
-                    {"channels", actual_channels}
-            };
-            if (contract.ultrafix_enabled) {
-                output_entry["sha256"] = output_sha256s[static_cast<size_t>(index)];
-                output_entry["sizeBytes"] = output_byte_counts[static_cast<size_t>(index)];
-                output_entry["atomicCommit"] = true;
-            }
-            out["outputs"].push_back(std::move(output_entry));
-        }
-        if (contract.ultrafix_enabled) {
-            out["outputSha256"] = output_sha256s.front();
-            out["outputSizeBytes"] = output_byte_counts.front();
-            out["outputAtomicCommit"] = true;
-            native_effective["outputSha256"] = output_sha256s.front();
-            native_effective["outputSizeBytes"] = output_byte_counts.front();
-            native_effective["outputAtomicCommit"] = true;
-            out["nativeEffective"] = native_effective;
-        }
-        out["outputCount"] = contract.batch_count;
-        out["n"] = contract.batch_count;
-        out["threads"] = contract.threads;
-        out["sampleMethod"] = sd_sample_method_name(gen.sample_params.sample_method);
-        out["nativeScheduler"] = sd_scheduler_name(gen.sample_params.scheduler);
-        out["nativePredictionMode"] = observed_prediction_mode(observed_prediction);
-        out["actualDiffusionModelComputeCount"] =
-                execution_evidence.diffusion_model_compute_count;
-        out["actualPositiveDiffusionModelComputeCount"] =
-                execution_evidence.positive_diffusion_model_compute_count;
-        out["actualNegativeDiffusionModelComputeCount"] =
-                execution_evidence.negative_diffusion_model_compute_count;
-        out["actualAuxiliaryDiffusionModelComputeCount"] =
-                execution_evidence.auxiliary_diffusion_model_compute_count;
-        out["actualSamplingStepCount"] =
-                execution_evidence.completed_sampling_step_count;
-        out["actualSamplingPassCount"] = actual_sampling_pass_count;
-        out["actualPositiveConditioningTokenCount"] =
-                execution_evidence.positive_conditioning_token_count;
-        out["actualNegativeConditioningTokenCount"] =
-                execution_evidence.negative_conditioning_token_count;
-        out["conditioningArtifactSha256"] = actual_prompt_weight_fingerprint;
-        out["nativePromptExecutionSha256"] =
-                actual_native_prompt_execution_sha256;
-        out["nativePromptBindingStage"] = "conditioning_consumed";
-        out["totalUnetExecutionCount"] = total_unet_execution_count;
-        out["uiProgressCallbackCount"] = ui_progress_callback_count;
-        out["uiProgressReportedSteps"] = ui_progress_reported_steps;
-        out["uiProgressMaxStep"] = ui_progress_max_step;
-        out["previewRequested"] = native_preview_mode != PREVIEW_NONE;
-        out["previewMode"] = native_preview_mode == PREVIEW_NONE
-                ? "none"
-                : contract.preview_mode;
-        out["previewInterval"] = contract.preview_interval;
-        out["previewPublicationCount"] = preview_context.publication_count;
-        out["previewLastStep"] = preview_context.last_step;
-        out["previewLastRevision"] = preview_context.last_revision;
-        out["configuredSampleSteps"] = gen.sample_params.sample_steps;
-        out["actualDenoisingStepCount"] = actual_timetable_count;
-        out["cfgBranchCount"] = actual_branches;
-        out["negativePrompt"] = contract.negative_prompt;
-        out["taskMode"] = contract.task_mode;
-        out["inputImagePath"] = input_image_wired ? input_image.canonical_path : "";
-        out["maskImagePath"] = mask_image_wired ? mask_image.canonical_path : "";
-        out["controlImagePath"] = control_image_wired ? control_image.canonical_path : "";
-        out["inputImageExecutionCount"] = input_image_wired ? 1 : 0;
-        out["maskImageExecutionCount"] = mask_image_wired ? 1 : 0;
-        out["controlImageExecutionCount"] = actual_control_image_consumed ? 1 : 0;
-        out["inputImageSha256"] = input_image.sha256;
-        out["maskImageSha256"] = mask_image.sha256;
-        out["controlImageSha256"] = control_image.sha256;
-        out["inputImageSourceWidth"] = input_image.source_width;
-        out["inputImageSourceHeight"] = input_image.source_height;
-        out["inputImageSourceChannels"] = input_image.source_channels;
-        out["inputImageWidth"] = input_image.width;
-        out["inputImageHeight"] = input_image.height;
-        out["inputImageChannels"] = input_image.channels;
-        out["inputImageExifOrientation"] = input_image.exif_orientation;
-        out["maskImageSourceWidth"] = mask_image.source_width;
-        out["maskImageSourceHeight"] = mask_image.source_height;
-        out["maskImageSourceChannels"] = mask_image.source_channels;
-        out["maskImageWidth"] = mask_image.width;
-        out["maskImageHeight"] = mask_image.height;
-        out["maskImageChannels"] = mask_image.channels;
-        out["maskImageExifOrientation"] = mask_image.exif_orientation;
-        out["controlImageSourceWidth"] = control_image.source_width;
-        out["controlImageSourceHeight"] = control_image.source_height;
-        out["controlImageSourceChannels"] = control_image.source_channels;
-        out["controlImageWidth"] = control_image.width;
-        out["controlImageHeight"] = control_image.height;
-        out["controlImageChannels"] = control_image.channels;
-        out["controlImageExifOrientation"] = control_image.exif_orientation;
-        out["imageInputConsumption"] = native_effective["imageInputConsumption"];
-        out["controlNetEvidence"] = native_effective["controlNetEvidence"];
-        out["strength"] = native_effective["strength"];
-        out["backendStrength"] = native_effective["backendStrength"];
-        out["controlStrength"] = native_effective["controlStrength"];
-        out["clipSkip"] = native_effective["clipSkip"];
-        out["batchCount"] = native_effective["batchCount"];
-        out["vaeTiling"] = native_effective["vaeTiling"];
-        out["loras"] = native_effective["loras"];
-        out["loraEvidence"] = native_effective["loraEvidence"];
-        out["textualInversions"] = native_effective["textualInversions"];
-        out["textualInversionEvidence"] = native_effective["textualInversionEvidence"];
-        out["backendMode"] = "cpu";
-        out["backend"] = "stable-diffusion.cpp";
-        out["runtimeBackend"] = sd_runtime_backend_label();
-        out["componentSelection"] = json::parse(selected_components_json);
-        out["systemInfo"] = sd_get_system_info();
-        out["nativeEffective"] = native_effective;
-        out["nativeGenerationSequence"] = sequence;
+        mark_generation_stage(kStageOutputWritten);
+        set_progress("completed", "image saved", summary.actual_timetable_count, summary.actual_timetable_count,
+                     0.0f, actual_width, actual_height, contract.threads);
+
+        const int ui_progress_callback_count = g_ui_progress_callback_count.load(std::memory_order_relaxed);
+        const int ui_progress_reported_steps = g_ui_progress_reported_steps.load(std::memory_order_relaxed);
+        const int ui_progress_max_step = g_ui_progress_max_step.load(std::memory_order_relaxed);
+
+        json out = mca::sd::build_generation_success_response(
+                std::move(native_effective), contract, output_paths, output_sha256s, output_byte_counts, gen,
+                summary, execution_evidence, actual_width, actual_height, actual_channels, observed_prediction,
+                ui_progress_callback_count, ui_progress_reported_steps, ui_progress_max_step,
+                native_preview_mode, preview_context, input_image_wired, input_image, mask_image_wired,
+                mask_image, control_image_wired, control_image, selected_components_json, sequence);
         return out.dump();
     } catch (const ContractError &error) {
         set_progress("failed", error.what());

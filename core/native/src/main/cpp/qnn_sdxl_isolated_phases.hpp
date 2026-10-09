@@ -109,6 +109,11 @@ std::string qnn_sdxl_unet_phase_json(
     scheduler.step(
     preserve_unmasked_latent(
     inpaint_preserve_step_count
+    quality_noise_evidence_consistent
+    quality_structure_evidence_consistent
+    quality_coverage_complete
+    quality_step_count
+    ultra_fix_noise_injection_step_count <= quality_step_count
     */
     return execute_sdxl_unet_phase<QnnExecutableGraph>(
         bundle_root,

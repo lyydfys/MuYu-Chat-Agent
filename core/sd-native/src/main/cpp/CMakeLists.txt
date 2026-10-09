@@ -80,6 +80,11 @@ add_library(mca_sd_native SHARED
         mca/sd/sd_upscaler.cpp
         mca/sd/sd_context_key.cpp
         mca/sd/sd_effective_config.cpp
+        mca/sd/sd_controlnet_adapter.cpp
+        mca/sd/sd_inpaint_processor.cpp
+        mca/sd/sd_preview_encoder.cpp
+        mca/sd/sd_evidence_verifier.cpp
+        mca/sd/sd_response_builder.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/common/logging.cpp)

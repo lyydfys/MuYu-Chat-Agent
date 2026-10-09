@@ -253,5 +253,132 @@ std::string LlmStatsCollector::format_gpu_evidence(const GpuExecutionEvidenceSna
     return format_gpu_execution_evidence_json(evidence);
 }
 
+GpuStatsSnapshot make_gpu_stats_snapshot(
+        const GpuEvidenceState &s,
+        size_t gpu_device_count,
+        bool auto_fallback_applied,
+        const std::string &auto_fallback_reason) {
+    GpuStatsSnapshot gpu;
+    gpu.offload_supported = s.offload_supported;
+    gpu.gpu_device_count = gpu_device_count;
+    gpu.offload_active = s.offload_active;
+    gpu.allocation_observed = s.allocation_observed;
+    gpu.execution_observed = s.execution_observed;
+    gpu.offload_bytes = s.offload_bytes;
+    gpu.offload_model_bytes = s.offload_model_bytes;
+    gpu.offload_context_bytes = s.offload_context_bytes;
+    gpu.offload_compute_bytes = s.offload_compute_bytes;
+    gpu.offload_layers = s.offload_layers;
+    gpu.offload_layers_known = s.layers_known;
+    gpu.auto_fallback_applied = auto_fallback_applied;
+    gpu.auto_fallback_reason = auto_fallback_reason;
+    gpu.execution_evidence.telemetry_available = s.opencl_execution_telemetry_available;
+    gpu.execution_evidence.request_scope = s.opencl_execution_scope;
+    gpu.execution_evidence.kernel_submissions = s.opencl_kernel_submissions;
+    gpu.execution_evidence.kernel_completions = s.opencl_kernel_completions;
+    return gpu;
+}
+
+SamplingStatsSnapshot make_sampling_stats_snapshot(
+        float temp, int top_k, float top_p, float min_p,
+        float rep_pen, float pres_pen, float freq_pen, int rep_last_n,
+        bool jinja, bool thinking, bool reasoning_end) {
+    SamplingStatsSnapshot sampling;
+    sampling.temperature = temp;
+    sampling.top_k = top_k;
+    sampling.top_p = top_p;
+    sampling.min_p = min_p;
+    sampling.repeat_penalty = rep_pen;
+    sampling.presence_penalty = pres_pen;
+    sampling.frequency_penalty = freq_pen;
+    sampling.repeat_last_n = rep_last_n;
+    sampling.use_jinja = jinja;
+    sampling.enable_thinking = thinking;
+    sampling.prompt_ends_inside_reasoning = reasoning_end;
+    return sampling;
+}
+
+BackendCapabilitiesSnapshot make_capabilities_snapshot(
+        const GpuStatsSnapshot &gpu,
+        const std::string &model_architecture,
+        int model_mtp_layers) {
+    BackendCapabilitiesSnapshot cap;
+    cap.gpu_offload_supported = gpu.offload_supported;
+    cap.gpu_device_count = gpu.gpu_device_count;
+    cap.gpu_offload_active = gpu.offload_active;
+    cap.gpu_offload_allocation_observed = gpu.allocation_observed;
+    cap.gpu_offload_execution_observed = gpu.execution_observed;
+    cap.gpu_offload_bytes = gpu.offload_bytes;
+    cap.gpu_offload_layers = gpu.offload_layers;
+    cap.gpu_offload_layers_known = gpu.offload_layers_known;
+    cap.model_architecture = model_architecture;
+    cap.model_mtp_layers = model_mtp_layers;
+#if MCA_WITH_LLAMA_CPP
+    cap.dynamic_backend_loading = true;
+    cap.kv_cache_quantization = true;
+    cap.draft_mtp_compiled = true;
+#else
+    cap.dynamic_backend_loading = false;
+    cap.kv_cache_quantization = false;
+    cap.draft_mtp_compiled = false;
+#endif
+    return cap;
+}
+
+CacheReuseStatsSnapshot make_cache_reuse_stats_snapshot(
+        bool valid, bool hit, int reused_tokens,
+        long long hits, long long misses,
+        const std::string &reason, const std::string &strategy,
+        bool checkpoint_valid, size_t checkpoint_tokens, size_t checkpoint_bytes,
+        size_t turn_checkpoints, size_t turn_checkpoint_bytes,
+        long long turn_checkpoint_hits, long long turn_checkpoint_misses,
+        bool model_hybrid, bool model_recurrent) {
+    CacheReuseStatsSnapshot cr;
+    cr.valid = valid;
+    cr.hit = hit;
+    cr.reused_tokens = reused_tokens;
+    cr.hits = hits;
+    cr.misses = misses;
+    cr.reason = reason;
+    cr.strategy = strategy;
+    cr.checkpoint_valid = checkpoint_valid;
+    cr.checkpoint_tokens = checkpoint_tokens;
+    cr.checkpoint_bytes = checkpoint_bytes;
+    cr.turn_checkpoints = turn_checkpoints;
+    cr.turn_checkpoint_bytes = turn_checkpoint_bytes;
+    cr.turn_checkpoint_hits = turn_checkpoint_hits;
+    cr.turn_checkpoint_misses = turn_checkpoint_misses;
+    cr.model_hybrid = model_hybrid;
+    cr.model_recurrent = model_recurrent;
+    return cr;
+}
+
+PersistentPrefixCacheStatsSnapshot make_persistent_prefix_stats_snapshot(
+        bool attempted, bool hit, bool saved, int tokens,
+        const std::string &reason) {
+    PersistentPrefixCacheStatsSnapshot pp;
+    pp.attempted = attempted;
+    pp.hit = hit;
+    pp.saved = saved;
+    pp.tokens = tokens;
+    pp.reason = reason;
+    return pp;
+}
+
+SpeculativeStatsSnapshot make_speculative_stats_snapshot(
+        bool requested, bool context_ready, bool active_for_request,
+        long long drafted_tokens, long long accepted_tokens, long long steps,
+        const std::string &reason) {
+    SpeculativeStatsSnapshot spec;
+    spec.requested = requested;
+    spec.context_ready = context_ready;
+    spec.active_for_request = active_for_request;
+    spec.drafted_tokens = drafted_tokens;
+    spec.accepted_tokens = accepted_tokens;
+    spec.steps = steps;
+    spec.reason = reason;
+    return spec;
+}
+
 } // namespace llm
 } // namespace mca

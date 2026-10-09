@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "mca/llm/llama_gpu_evaluator.hpp"
+
 namespace mca {
 namespace llm {
 
@@ -213,6 +215,40 @@ std::string format_runtime_config_json(const RuntimeConfig &config);
 std::string format_backend_devices_json();
 std::string format_gpu_execution_evidence_json(const GpuExecutionEvidenceSnapshot &evidence);
 std::string format_llm_stats_json(const LlmStatsSnapshot &snapshot);
+
+GpuStatsSnapshot make_gpu_stats_snapshot(
+        const GpuEvidenceState &s,
+        size_t gpu_device_count,
+        bool auto_fallback_applied,
+        const std::string &auto_fallback_reason);
+
+SamplingStatsSnapshot make_sampling_stats_snapshot(
+        float temp, int top_k, float top_p, float min_p,
+        float rep_pen, float pres_pen, float freq_pen, int rep_last_n,
+        bool jinja, bool thinking, bool reasoning_end);
+
+BackendCapabilitiesSnapshot make_capabilities_snapshot(
+        const GpuStatsSnapshot &gpu,
+        const std::string &model_architecture,
+        int model_mtp_layers);
+
+CacheReuseStatsSnapshot make_cache_reuse_stats_snapshot(
+        bool valid, bool hit, int reused_tokens,
+        long long hits, long long misses,
+        const std::string &reason, const std::string &strategy,
+        bool checkpoint_valid, size_t checkpoint_tokens, size_t checkpoint_bytes,
+        size_t turn_checkpoints, size_t turn_checkpoint_bytes,
+        long long turn_checkpoint_hits, long long turn_checkpoint_misses,
+        bool model_hybrid, bool model_recurrent);
+
+PersistentPrefixCacheStatsSnapshot make_persistent_prefix_stats_snapshot(
+        bool attempted, bool hit, bool saved, int tokens,
+        const std::string &reason);
+
+SpeculativeStatsSnapshot make_speculative_stats_snapshot(
+        bool requested, bool context_ready, bool active_for_request,
+        long long drafted_tokens, long long accepted_tokens, long long steps,
+        const std::string &reason);
 
 /**
  * Facade class encapsulating metric collection and diagnostic JSON construction.

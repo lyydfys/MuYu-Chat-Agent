@@ -19,6 +19,7 @@ bool parse_runtime_config(const std::string &text,
                           const RuntimeConfig &defaults,
                           RuntimeConfig &config,
                           std::string &error);
+bool runtime_config_equal_load_bound(const RuntimeConfig &a, const RuntimeConfig &b);
 
 ggml_type cache_type_from_name(const std::string &name);
 llama_split_mode split_mode_from_name(const std::string &name);

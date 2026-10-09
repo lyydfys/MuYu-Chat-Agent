@@ -387,5 +387,25 @@ bool model_supports_requested_mtp(
     return lowercase_trimmed_ascii(architecture) == "step35";
 }
 
+bool runtime_config_equal_load_bound(const RuntimeConfig &a, const RuntimeConfig &b) {
+    return a.n_ctx == b.n_ctx &&
+           a.n_batch == b.n_batch &&
+           a.n_ubatch == b.n_ubatch &&
+           a.n_gpu_layers == b.n_gpu_layers &&
+           a.main_gpu == b.main_gpu &&
+           a.split_mode == b.split_mode &&
+           a.n_cpu_moe == b.n_cpu_moe &&
+           a.cache_type_k == b.cache_type_k &&
+           a.cache_type_v == b.cache_type_v &&
+           a.flash_attn == b.flash_attn &&
+           a.perf == b.perf &&
+           a.n_parallel == b.n_parallel &&
+           a.spec_type == b.spec_type &&
+           a.spec_draft_n_max == b.spec_draft_n_max &&
+           a.mmap == b.mmap &&
+           a.mlock == b.mlock;
+}
+
 } // namespace llm
 } // namespace mca
+
