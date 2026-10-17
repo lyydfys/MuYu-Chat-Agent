@@ -52,8 +52,9 @@ class ImageExecutionOwnerTest {
             RequestState.Failed,
             supervisor.callbackRouter.terminalRecord("img-fail")?.finalState
         )
-        // Note: the bounded terminal record currently carries the state only; the failure string /
-        // rich ErrorEnvelope retention is the registered GAP-03 (R8) item, not asserted here.
+        val record = supervisor.callbackRouter.terminalRecord("img-fail")
+        assertNotNull("failed image operations must retain a typed terminal error", record?.terminalError)
+        assertNotNull(record?.terminalError?.code)
     }
 
     @Test

@@ -6,10 +6,10 @@ import java.math.BigDecimal
 import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.Base64
-import com.muyuchat.core.engine.compareUtf8Unsigned
-import com.muyuchat.core.engine.isNativeChineseHanCodePoint
-import com.muyuchat.core.engine.SAFE_ASCII_PROMPT_PUNCTUATION
-import com.muyuchat.core.engine.isSafeAsciiDiffusionPromptCodePoint
+import com.muyuchat.core.engine.contract.compareUtf8Unsigned
+import com.muyuchat.core.engine.contract.isNativeChineseHanCodePoint
+import com.muyuchat.core.engine.contract.SAFE_ASCII_PROMPT_PUNCTUATION
+import com.muyuchat.core.engine.contract.isSafeAsciiDiffusionPromptCodePoint
 
 object ImageGenerationApiContract {
     fun parseRequest(rawBody: String): ImageGenerationApiRequest {

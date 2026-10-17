@@ -39,7 +39,7 @@ internal class ChatLocalApiProviderPortAdapter(
     private val store: UiStateStore,
     private val cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
     private val localApiPayloadPortProvider: () -> LocalApiPayloadPort,
-    override val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade? = null,
+    override val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade,
 ) : ChatLocalApiProviderPort {
     override val uiState: StateFlow<MainUiState>
         get() = store.state
@@ -326,6 +326,7 @@ internal class ChatImagePromptBridgePortAdapter(
     private val verifiedOfflineTranslationBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?,
     private val sendChatImageRequestRef: (String, String, LocalImageGenerationOptions?, PromptEnvelope?, String?) -> Unit,
     private val negativePromptSupportedRef: (MainUiState) -> Boolean,
+    private val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade,
 ) : ChatImagePromptBridgePort {
 
     override fun currentState(): MainUiState = store.state.value
@@ -391,9 +392,7 @@ internal class ChatImagePromptBridgePortAdapter(
     override fun streamChatLocal(
         request: ChatRequest,
         executionContext: LocalChatExecutionContext
-    ): Flow<GenerateEvent> =
-        LocalApiRuntime.streamChat(request, executionContext)
-            ?: engine.streamChat(request, executionContext)
+    ): Flow<GenerateEvent> = chatExecutionFacade.streamChat(request, executionContext)
 
     override suspend fun translateOffline(request: OfflinePromptTranslationRequest): OfflinePromptTranslationResolution =
         offlinePromptTranslationServiceProvider().translate(verifiedOfflineTranslationBundleRef(), request)
@@ -447,7 +446,7 @@ internal class ChatStopGenerationPortAdapter(
     private val cancelGenerationJobRef: () -> UiGenerationCancellation,
     private val flushPendingAssistantOutputRef: () -> Unit,
     private val persistConversationMutationRef: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Unit,
-    private val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade? = null,
+    private val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade,
 ) : ChatStopGenerationPort {
 
     override fun currentState(): MainUiState = store.state.value
@@ -482,14 +481,8 @@ internal class ChatStopGenerationPortAdapter(
         engine.activeGenerationStopToken()?.requestId
 
     override suspend fun requestRuntimeStop() {
-        // E06: the user-facing stop shares the single chat entry (supervisor cancellation
-        // bookkeeping + the engine's existing unconditional stop inside the execution body).
-        val facade = chatExecutionFacade
-        if (facade != null) {
-            facade.stopGeneration()
-        } else {
-            engine.stopGeneration()
-        }
+        // E06: the user-facing stop shares the single chat entry.
+        chatExecutionFacade.stopGeneration()
     }
 
     override fun runtimeLifecycle(): AgentEngineLifecycle =

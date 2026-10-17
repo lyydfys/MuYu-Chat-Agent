@@ -11,10 +11,14 @@ namespace mca {
 namespace runtime {
 
 /**
- * Process-level runtime host.
+ * DSO-local runtime host.
  *
- * Exclusively owns process-level initialization, monotonic runtime epoch tracking,
- * runtime health status, and global shutdown sequencing.
+ * Owns backend-local initialization, monotonic epoch tracking, health status, and
+ * shutdown sequencing for the shared object that links this implementation.
+ * instance() is deliberately not a cross-DSO process singleton: mca_native,
+ * mca_mnn_native, mca_qnn_native, and mca_sd_native each own independent state.
+ * The Kotlin RuntimeSupervisor is the authoritative process-level epoch authority;
+ * native callers must not use this object as implicit cross-library coordination.
  */
 class ProcessRuntimeHost {
 public:

@@ -392,7 +392,7 @@ class LoadAuthorization internal constructor(
     val resolvedLoadDigest: String,
     val committedExecutionDigest: String,
     internal val coordinatorNonce: String
-)
+) : EngineLoadAuthorizationHandle
 
 /**
  * Opaque, coordinator-issued authorization for one exact HOT_EXECUTION value set.
@@ -405,7 +405,7 @@ class HotOverrideAuthorization internal constructor(
     val fields: Set<String>,
     val overrideDigest: String,
     internal val coordinatorNonce: String
-)
+) : EngineHotOverrideAuthorizationHandle
 
 data class PendingLoadTransaction(
     val profile: ModelExecutionProfile,

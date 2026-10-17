@@ -1,5 +1,7 @@
 package com.muyuchat.core.engine
 
+import com.muyuchat.core.engine.contract.ErrorEnvelope
+
 data class RuntimeStats(
     val loaded: Boolean = false,
     val modelPath: String? = null,
@@ -225,6 +227,12 @@ sealed interface GenerateEvent {
         val stats: RuntimeStats,
         val code: String? = null,
         val changedFields: Set<String> = emptySet(),
-        val action: String? = null
+        val action: String? = null,
+        /**
+         * Optional typed form of this failure. The legacy [message], [code], [changedFields] and
+         * [action] fields remain authoritative for existing producers and consumers; the execution
+         * owner fills in a typed envelope when an older producer leaves this null.
+         */
+        val errorEnvelope: ErrorEnvelope? = null
     ) : GenerateEvent
 }

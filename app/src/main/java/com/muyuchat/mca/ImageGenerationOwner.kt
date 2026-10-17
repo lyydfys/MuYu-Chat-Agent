@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.app.Application
 import android.util.Log
 import com.muyuchat.core.engine.EngineLifecycleLease
+import com.muyuchat.mca.presentation.LocalApiImageOperationBinding
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -16,12 +17,147 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 
 
+/** Local API 只能通过唯一 owner 进入生图；busy 由操作适配层映射为 409。 */
+internal class LocalApiImageOperationBusyException : IllegalStateException(
+    "Another UI or Local API image request is already running."
+)
+
+/**
+ * ImageGenerationOwner 内部的 Local API 操作生命周期闸门。
+ *
+ * 这里不持有第二套生图 owner：它只把 owner 已注入的宿主能力按 Local API 请求顺序串起来，
+ * 保证租约、取消所有权、活动模型身份和 worker release barrier 始终成对。
+ */
+internal class LocalApiImageOperationGate(
+    private val hasActiveUiImageJob: () -> Boolean,
+    private val tryAcquireLease: (String) -> LocalImageGenerationCoordinator.Lease?,
+    private val releaseLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
+    private val cancelWorker: (String) -> Boolean,
+    private val awaitWorkerRelease: suspend () -> Unit,
+    private val setActiveModelId: (String?) -> Unit,
+    private val finishUiOwnership: () -> Unit
+) {
+    private val lock = Any()
+    private var activeOwnership: LocalApiImageGenerationOwnership? = null
+    private var workerCancellationOwnership: LocalApiImageGenerationOwnership? = null
+
+    suspend fun <T> run(
+        requestId: String,
+        block: suspend (LocalApiImageOperationBinding) -> T
+    ): T {
+        if (hasActiveUiImageJob()) throw LocalApiImageOperationBusyException()
+        val requestJob = requireNotNull(currentCoroutineContext()[Job]) {
+            "Local API image generation requires a request coroutine."
+        }
+        val lease = tryAcquireLease(requestId) ?: throw LocalApiImageOperationBusyException()
+        val ownership = LocalApiImageGenerationOwnership(
+            requestId = requestId,
+            requestJob = requestJob
+        )
+        var ownershipRegistered = false
+        try {
+            synchronized(lock) {
+                check(activeOwnership == null) {
+                    "Another Local API image request already owns cancellation."
+                }
+                activeOwnership = ownership
+                ownershipRegistered = true
+            }
+            currentCoroutineContext().ensureActive()
+            return block(
+                object : LocalApiImageOperationBinding {
+                    override fun bindModel(modelId: String) = setActiveModelId(modelId)
+                    override fun isCancellationRequested(): Boolean = requestJob.isCancelled
+                }
+            )
+        } catch (cancelled: CancellationException) {
+            cancelOwnedWorker(ownership)
+            throw cancelled
+        } finally {
+            withContext(NonCancellable) {
+                // The same native-memory release proof as the UI path must precede the next
+                // lease owner, even when this request failed or was cancelled.
+                runCatching { awaitWorkerRelease() }
+                if (ownershipRegistered) {
+                    synchronized(lock) {
+                        if (workerCancellationOwnership === ownership) workerCancellationOwnership = null
+                    }
+                    check(unregisterOwnership(ownership)) {
+                        "Local API image cancellation ownership changed before request completion."
+                    }
+                    setActiveModelId(null)
+                    finishUiOwnership()
+                }
+                check(releaseLease(lease)) {
+                    "Local API image generation lease was replaced before request completion."
+                }
+            }
+        }
+    }
+
+    fun cancelActive(reason: String): Boolean = synchronized(lock) {
+        val ownership = activeOwnership ?: return@synchronized false
+        if (workerCancellationOwnership !== ownership) {
+            cancelWorker(ownership.requestId)
+            workerCancellationOwnership = ownership
+        }
+        ownership.requestJob.cancel(CancellationException(reason))
+        true
+    }
+
+    private fun cancelOwnedWorker(ownership: LocalApiImageGenerationOwnership): Boolean =
+        synchronized(lock) {
+            if (activeOwnership !== ownership) return@synchronized false
+            if (workerCancellationOwnership === ownership) return@synchronized true
+            cancelWorker(ownership.requestId)
+            workerCancellationOwnership = ownership
+            true
+        }
+
+    private fun unregisterOwnership(ownership: LocalApiImageGenerationOwnership): Boolean =
+        synchronized(lock) {
+            if (activeOwnership !== ownership) {
+                false
+            } else {
+                activeOwnership = null
+                true
+            }
+        }
+}
+
 /**
  * C2/C0-a：生图唯一执行 owner。submit 保留原 MainViewModel.enqueueImageGeneration 的准入、租约与完成接线骨架；
  * 执行/提交/释放相位（T2B20/R7-C9）逐字平移至 ImageGenerationOwnerExecution.kt。
  * 逐字等价口径：仅 VM 私有成员经 host 显式访问；两处单参调用的默认记录参数改为调用点显式传当前状态值。
  */
 internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
+    private val localApiImageOperations = LocalApiImageOperationGate(
+        hasActiveUiImageJob = { host.imageGenerationJob?.isActive == true },
+        tryAcquireLease = host::tryAcquireObservedImageGenerationLease,
+        releaseLease = host::releaseObservedImageGenerationLease,
+        cancelWorker = host.localImageWorkerClient::cancel,
+        awaitWorkerRelease = host.localImageWorkerClient::awaitOwnedWorkerRelease,
+        setActiveModelId = { host.activeLocalApiImageModelId = it },
+        finishUiOwnership = {
+            synchronized(host.localImageLoraLifecycleLock) {
+                host.updateUiState {
+                    it.copy(
+                        activeLocalImageLoraIds = emptySet(),
+                        activeLocalImageTextualInversionIds = emptySet()
+                    )
+                }
+            }
+        }
+    )
+
+    suspend fun <T> runLocalApiImageOperation(
+        requestId: String,
+        block: suspend (LocalApiImageOperationBinding) -> T
+    ): T = localApiImageOperations.run(requestId, block)
+
+    fun cancelActiveLocalApiImageGeneration(reason: String): Boolean =
+        localApiImageOperations.cancelActive(reason)
+
     fun submit(
         prompt: String,
         inputDraft: LocalImageInputDraft,

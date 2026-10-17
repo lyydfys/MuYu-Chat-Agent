@@ -8,9 +8,15 @@ import org.junit.Test
 
 class LocalApiImageCancellationContractTest {
     @Test
-    fun `authenticated image cancellation owns the request job worker and lease`() {
+    fun `authenticated image cancellation owns the request job worker and lease through ImageGenerationOwner`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
+        val api = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"),
+            "internal suspend fun generateLocalApiImageOperations("
+        )
+        val owner = sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
+        val operationRun = functionBody(owner, "suspend fun <T> run(")
+        val cancelActive = functionBody(owner, "fun cancelActive(")
         // P3 step 2 moved the stop-provider assignment to ChatLocalApiProviderOperations; the
         // ordering contract is unchanged -- it is read where it now lives.
         val installSource = sourceFile("app/src/main/java/com/muyuchat/mca/ChatLocalApiProviderOperations.kt")
@@ -21,28 +27,40 @@ class LocalApiImageCancellationContractTest {
         val startServer = functionBody(coordinator, "fun startApiServer(")
         val stopServer = functionBody(coordinator, "fun stopApiServer()")
 
-        val register = api.indexOf("registerLocalApiImageGenerationOwnership(ownership)")
+        val ownerEntry = api.indexOf("port.runLocalApiImageOperation(requestId)")
         val cancellationCheck = api.indexOf("currentCoroutineContext().ensureActive()")
         val worker = api.indexOf("localImageWorkerClient.generate(")
-        val workerCancel = api.indexOf("cancelOwnedLocalApiImageWorker(ownership)")
-        val unregister = api.indexOf("unregisterLocalApiImageGenerationOwnership(ownership)")
-        val release = api.indexOf("releaseObservedImageGenerationLease(generationLease)")
+        val ownerAdmission = operationRun.indexOf("tryAcquireLease(requestId)")
+        val ownership = operationRun.indexOf("activeOwnership = ownership")
+        val workerCancel = operationRun.indexOf("cancelOwnedWorker(ownership)")
+        val releaseBarrier = operationRun.indexOf("awaitWorkerRelease()")
+        val unregister = operationRun.indexOf("unregisterOwnership(ownership)")
+        val clearModel = operationRun.indexOf("setActiveModelId(null)")
+        val release = operationRun.indexOf("releaseLease(lease)")
 
         assertTrue(stopProvider.indexOf("cancelActiveLocalApiImageGeneration(") >= 0)
         assertTrue(
             stopProvider.indexOf("cancelActiveLocalApiImageGeneration(") <
-                stopProvider.indexOf("engine.stopGeneration()")
+                stopProvider.indexOf("port.chatExecutionFacade.stopGeneration()")
         )
-        assertTrue(register >= 0)
-        assertTrue(cancellationCheck > register)
+        assertTrue(ownerEntry >= 0)
+        assertTrue(cancellationCheck > ownerEntry)
         assertTrue(worker > cancellationCheck)
-        assertTrue(workerCancel > worker)
-        assertTrue(unregister > workerCancel)
-        assertTrue(release > unregister)
-        assertEquals(1, Regex("releaseObservedImageGenerationLease\\(generationLease\\)")
-            .findAll(api).count())
-        assertTrue(source.contains("synchronized(localApiImageGenerationLifecycleLock)"))
-        assertTrue(source.contains("ownership.requestJob.cancel(CancellationException(reason))"))
+        assertTrue(ownerAdmission >= 0 && ownership > ownerAdmission)
+        assertTrue(workerCancel >= 0)
+        assertTrue(releaseBarrier > workerCancel)
+        assertTrue(unregister > releaseBarrier)
+        assertTrue(clearModel > unregister)
+        assertTrue(release > clearModel)
+        assertTrue(cancelActive.contains("cancelWorker(ownership.requestId)"))
+        assertTrue(cancelActive.contains("ownership.requestJob.cancel("))
+        assertFalse(api.contains("registerLocalApiImageGenerationOwnership"))
+        assertFalse(api.contains("unregisterLocalApiImageGenerationOwnership"))
+        assertFalse(api.contains("cancelOwnedLocalApiImageWorker"))
+        assertFalse(api.contains("tryAcquireObservedImageGenerationLease"))
+        assertFalse(api.contains("releaseObservedImageGenerationLease"))
+        assertTrue(source.contains("imageGenerationOwner.cancelActiveLocalApiImageGeneration(reason)"))
+        assertFalse(source.contains("activeLocalApiImageGenerationOwnership"))
         assertTrue(startServer.contains("cancelActiveLocalApiImageGeneration("))
         assertTrue(stopServer.contains("cancelActiveLocalApiImageGeneration("))
         assertFalse(api.contains("deviceProfile"))

@@ -1,6 +1,6 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.contract.ChatRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -314,7 +314,7 @@ import java.util.UUID
         val loaded = LocalApiRuntime.loadedModelJsonProvider().toJsonObject() ?: JSONObject()
         val modelId = loaded.optString("id")
         val catalogEntry = currentCatalogEntry(modelId)
-        val nativeStats = LocalApiRuntime.engine?.nativeStatsJson().toJsonObject()
+        val nativeStats = (LocalApiRuntime.nativeStatsObject() ?: org.json.JSONObject())
         val records = listOfNotNull(loaded, nativeStats, catalogEntry)
         val runtime = records.firstNotNullOfOrNull { it.runtimeToken().takeIf(String::isNotBlank) }.orEmpty()
         val displayName = listOf(

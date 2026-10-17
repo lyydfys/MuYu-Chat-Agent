@@ -1,8 +1,13 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.LocalChatExecutionContext
-import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.contract.GenerateEvent
+import com.muyuchat.core.engine.contract.GenerateEventPhase
+import com.muyuchat.core.engine.contract.GenerateEventPersist
+import com.muyuchat.core.engine.contract.GenerateEventChunk
+import com.muyuchat.core.engine.contract.GenerateEventDone
+import com.muyuchat.core.engine.contract.GenerateEventError
+import com.muyuchat.core.engine.contract.LocalChatExecutionContext
+import com.muyuchat.core.engine.contract.RuntimeStats
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -45,7 +50,7 @@ import java.util.UUID
         val text = StringBuilder()
         val reasoning = StringBuilder()
         var finalStats: RuntimeStats? = null
-        var generationError: GenerateEvent.Error? = null
+        var generationError: GenerateEventError? = null
         var generationSequence: Long? = null
         val sequenceBefore = LocalApiRuntime.generationSequence()
         fun capture(event: GenerateEvent) {
@@ -55,15 +60,15 @@ import java.util.UUID
                 }
             generationSequence?.let { LocalApiRuntime.recordGenerationSequence(responseId, it) }
             when (event) {
-                is GenerateEvent.Phase -> finalStats = event.stats
-                is GenerateEvent.Persist -> Unit
-                is GenerateEvent.Chunk -> {
+                is GenerateEventPhase -> finalStats = event.stats
+                is GenerateEventPersist -> Unit
+                is GenerateEventChunk -> {
                     finalStats = event.stats
                     if (event.text.isNotEmpty()) text.append(event.text)
                     reasoning.append(event.reasoning)
                 }
-                is GenerateEvent.Done -> finalStats = event.stats
-                is GenerateEvent.Error -> generationError = event
+                is GenerateEventDone -> finalStats = event.stats
+                is GenerateEventError -> generationError = event
             }
         }
         fun sendEvent(type: String, payload: JSONObject) {
@@ -114,7 +119,7 @@ import java.util.UUID
                     if (terminalCaptured) return@collect
                     capture(event)
                     when (event) {
-                        is GenerateEvent.Chunk -> {
+                        is GenerateEventChunk -> {
                             if (event.text.isNotEmpty()) {
                                 sendEvent(
                                     "response.output_text.delta",
@@ -122,10 +127,10 @@ import java.util.UUID
                                 )
                             }
                         }
-                        is GenerateEvent.Phase,
-                        is GenerateEvent.Persist -> Unit
-                        is GenerateEvent.Done,
-                        is GenerateEvent.Error -> terminalCaptured = true
+                        is GenerateEventPhase,
+                        is GenerateEventPersist -> Unit
+                        is GenerateEventDone,
+                        is GenerateEventError -> terminalCaptured = true
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -145,7 +150,7 @@ import java.util.UUID
             } catch (error: IOException) {
                 throw error
             } catch (error: Throwable) {
-                generationError = GenerateEvent.Error(
+                generationError = GenerateEventError(
                     message = error.message ?: "Local API generation failed.",
                     stats = finalStats ?: RuntimeStats(),
                     code = "generation_failed"
@@ -223,7 +228,7 @@ import java.util.UUID
         val text = StringBuilder()
         val reasoning = StringBuilder()
         var finalStats: RuntimeStats? = null
-        var generationError: GenerateEvent.Error? = null
+        var generationError: GenerateEventError? = null
         var generationSequence: Long? = null
         val sequenceBefore = LocalApiRuntime.generationSequence()
         withChatClientDisconnectCancellation(socket, responseId) {
@@ -236,18 +241,18 @@ import java.util.UUID
                     }
                 generationSequence?.let { LocalApiRuntime.recordGenerationSequence(responseId, it) }
                 when (event) {
-                    is GenerateEvent.Phase -> finalStats = event.stats
-                    is GenerateEvent.Persist -> Unit
-                    is GenerateEvent.Chunk -> {
+                    is GenerateEventPhase -> finalStats = event.stats
+                    is GenerateEventPersist -> Unit
+                    is GenerateEventChunk -> {
                         finalStats = event.stats
                         text.append(event.text)
                         reasoning.append(event.reasoning)
                     }
-                    is GenerateEvent.Done -> {
+                    is GenerateEventDone -> {
                         finalStats = event.stats
                         terminalCaptured = true
                     }
-                    is GenerateEvent.Error -> {
+                    is GenerateEventError -> {
                         generationError = event
                         terminalCaptured = true
                     }

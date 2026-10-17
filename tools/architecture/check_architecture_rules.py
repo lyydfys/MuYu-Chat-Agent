@@ -3,9 +3,9 @@
 check_architecture_rules.py
 
 Static architecture enforcement gate for MCA S-grade refactor:
-1. Domain Android import = 0: core:engine/**/contract/*.kt must not import android.* or androidx.*
-   -- SCOPE: the contract subpackage only.  A pass does NOT mean :core:engine is Android-free;
-      the module is still an Android library and still depends on :core:native.
+1. Domain Android import = 0: :core:inference-contract sources must not import android.* or androidx.*
+   -- SCOPE: the pure inference-contract module only.  A pass does NOT mean :core:engine is
+      Android-free; the implementation module remains Android/native backed.
 2. Feature boundary: feature modules must not directly depend on :core:native or :core:sd-native
 3. C++ contract purity: mca/contract/*.hpp must not include jni.h or platform UI headers
 4. File LOC limits: enforces hard ceilings on contract and catalog files
@@ -26,7 +26,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-CONTRACT_KOTLIN_DIR = REPO_ROOT / "core" / "engine" / "src" / "main" / "java" / "com" / "muyuchat" / "core" / "engine" / "contract"
+CONTRACT_KOTLIN_DIR = REPO_ROOT / "core" / "inference-contract" / "src" / "main" / "java" / "com" / "muyuchat" / "core" / "engine"
 CONTRACT_CPP_DIR = REPO_ROOT / "core" / "native" / "src" / "main" / "cpp" / "mca" / "contract"
 FEATURE_DIR = REPO_ROOT / "feature"
 
@@ -42,7 +42,7 @@ LOCAL_ONLY_PATHS = [
 
 def check_domain_android_imports(errors):
     """Rule 1: Domain Android import = 0."""
-    print("Checking Rule 1: Domain Android imports in core:engine contract...")
+    print("Checking Rule 1: Domain Android imports in :core:inference-contract...")
     if not CONTRACT_KOTLIN_DIR.is_dir():
         errors.append(f"Contract directory not found: {CONTRACT_KOTLIN_DIR}")
         return
@@ -205,7 +205,7 @@ def main():
     print("  Rule 8  UI imports                   : api/local/src/main and app/.../worker only")
     print("")
     print("NOT CHECKED -- a pass below says nothing about these:")
-    print("  * The rest of :core:engine outside the contract subpackage. That module is still an")
+    print("  * The :core:engine implementation module. That module is still an")
     print("    Android library and still depends on :core:native; Rule 1 does not make it Android-free.")
     print("  * Any other module, any dependency edge not listed in Rule 2, and any file outside the")
     print("    directories named above.")

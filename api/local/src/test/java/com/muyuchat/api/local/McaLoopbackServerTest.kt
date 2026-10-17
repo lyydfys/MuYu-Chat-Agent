@@ -3007,7 +3007,6 @@ class McaLoopbackServerTest {
     }
 
     private fun resetLocalApiRuntimeForTests() {
-        LocalApiRuntime.engine = null
         LocalApiRuntime.nativeStatsJsonProvider = null
         LocalApiRuntime.streamChatProvider = null
         LocalApiRuntime.streamChatWithContextProvider = null

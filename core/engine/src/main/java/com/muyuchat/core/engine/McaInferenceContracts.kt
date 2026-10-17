@@ -5,28 +5,19 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
-data class LocalChatExecutionContext(
-    val requestId: String = UUID.randomUUID().toString(),
-    val loadAuthorization: LoadAuthorization? = null,
-    /** Kept for source compatibility; a Boolean alone no longer grants trust. */
-    val allowTrustedHotOverride: Boolean = false,
-    val hotOverrideAuthorization: HotOverrideAuthorization? = null,
-    val pendingProfileDisposition: PendingProfileDisposition = PendingProfileDisposition.COMMIT_ON_VISIBLE_SUCCESS,
-    val lifecycleLease: EngineLifecycleLease? = null,
-    /** Deterministic internal transforms such as prompt translation must not receive wall-clock text. */
-    val includeDeviceClockContext: Boolean = true,
-    /**
-     * Optional request-scoped observer for privacy-reviewed local-vision preparation diagnostics.
-     * The engine isolates observer failures from inference and gives this sink its own JSON copy so
-     * callers cannot mutate the existing debug diagnostic or another request's evidence.
-     */
-    val visionDiagnosticSink: ((String, JSONObject) -> Unit)? = null
-)
-
 data class RuntimeHealthSnapshot(
     val runtimeStats: RuntimeStats,
     val workerSessionLost: Boolean
 )
+
+internal val LocalChatExecutionContext.engineLoadAuthorization: LoadAuthorization?
+    get() = loadAuthorization as? LoadAuthorization
+
+internal val LocalChatExecutionContext.engineHotOverrideAuthorization: HotOverrideAuthorization?
+    get() = hotOverrideAuthorization as? HotOverrideAuthorization
+
+internal val LocalChatExecutionContext.engineLifecycleLease: EngineLifecycleLease?
+    get() = lifecycleLease as? EngineLifecycleLease
 
 /** Opaque identity for exactly one request while it owns the native runner. */
 class GenerationStopToken internal constructor(
@@ -225,29 +216,19 @@ internal fun nativeGpuOffloadSupported(
 class EngineLifecycleLease internal constructor(
     internal val service: McaInferenceService,
     internal val ownerToken: Any,
-    val leaseId: String = UUID.randomUUID().toString()
-) {
+    override val leaseId: String = UUID.randomUUID().toString()
+) : EngineLifecycleLeaseHandle {
     @Volatile
     internal var active: Boolean = true
     internal var deferredAuthorization: LoadAuthorization? = null
     internal var releasing: Boolean = false
 
     /** Idempotent; release is safe from candidate cleanup/finally blocks. */
-    suspend fun release() {
+    override suspend fun release() {
         service.releaseExclusiveLifecycleLease(this)
     }
 }
 
-enum class PendingProfileDisposition {
-    /** Formal user/apply transaction: commit the exact active candidate before Done. */
-    COMMIT_ON_VISIBLE_SUCCESS,
-
-    /** Keep the exact candidate active under an exclusive lease for an external correctness gate. */
-    DEFER_TO_LEASE_HOLDER,
-
-    /** Formal candidate evaluation: run under the candidate, then restore the locked rollback target. */
-    ROLLBACK_AFTER_REQUEST
-}
 
 
 internal const val PERSISTENT_PREFIX_CACHE_FORMAT = "mca-prefix-cache-v1"

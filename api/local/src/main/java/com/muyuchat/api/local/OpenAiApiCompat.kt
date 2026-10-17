@@ -1,15 +1,15 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatMessage
-import com.muyuchat.core.engine.ChatImageAttachment
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.ReasoningMode
-import com.muyuchat.core.engine.Role
+import com.muyuchat.core.engine.contract.ChatMessage
+import com.muyuchat.core.engine.contract.ChatImageAttachment
+import com.muyuchat.core.engine.contract.ChatRequest
+import com.muyuchat.core.engine.contract.GenerationParams
+import com.muyuchat.core.engine.contract.ReasoningMode
+import com.muyuchat.core.engine.contract.Role
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import com.muyuchat.core.engine.toStringList
+import com.muyuchat.core.engine.contract.toStringList
 
 internal sealed interface OpenAiChatParseResult {
     data class Success(val request: ChatRequest) : OpenAiChatParseResult

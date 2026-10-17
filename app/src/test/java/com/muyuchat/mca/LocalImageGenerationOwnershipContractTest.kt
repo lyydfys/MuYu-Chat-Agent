@@ -108,28 +108,42 @@ class LocalImageGenerationOwnershipContractTest {
     }
 
     @Test
-    fun `the UI and the Local API acquire the same lease`() {
-        // The Local API image adapter moved to its own file, so the ownership contract is now spread
-        // over two sources: the lease helper is still acquired from MainViewModel, while the busy
-        // wording and the typed 409 error live with the adapter. Both are read here, which keeps the
-        // assertions checking the same contract rather than the same file.
-        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationContracts.kt")
-        val acquisitions = Regex("tryAcquireObservedImageGenerationLease\\(").findAll(viewModel).count()
+    fun `the UI and the Local API acquire the same owner lease`() {
+        val mainViewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val owner = sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
+        val operations = sourceFile(
+            "app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"
+        )
 
         assertTrue(
-            "expected several callers to share the acquisition helper, found $acquisitions",
-            acquisitions >= 4
+            "the UI admission must acquire the shared lease through the owner host",
+            owner.contains("host.tryAcquireObservedImageGenerationLease(jobId)")
         )
         assertTrue(
-            "the Local API path must acquire the shared lease",
-            viewModel.contains("Another UI or Local API image request is already running.")
+            "the Local API owner gate must use the same lease helper",
+            owner.contains("tryAcquireLease = host::tryAcquireObservedImageGenerationLease")
+        )
+        assertTrue(
+            "the Local API operation must enter the owner",
+            operations.contains("port.runLocalApiImageOperation(requestId)")
+        )
+        assertFalse(
+            "the protocol operation must not acquire a lease directly",
+            operations.contains("tryAcquireObservedImageGenerationLease")
         )
         assertTrue(
             "contention must surface as a typed busy error with a 409 status",
-            viewModel.contains("code = \"image_generation_busy\"") &&
-                viewModel.contains("httpStatus = 409")
+            operations.contains("code = \"image_generation_busy\"") &&
+                operations.contains("httpStatus = 409")
+        )
+        assertFalse(
+            "MainViewModel must not retain a second Local API ownership registry",
+            mainViewModel.contains("activeLocalApiImageGenerationOwnership")
+        )
+        assertFalse(
+            "MainViewModel must not register or cancel Local API worker ownership",
+            mainViewModel.contains("registerLocalApiImageGenerationOwnership") ||
+                mainViewModel.contains("cancelOwnedLocalApiImageWorker")
         )
     }
 

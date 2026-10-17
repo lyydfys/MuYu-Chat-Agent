@@ -578,7 +578,7 @@ class LocalImagePromptCancellationContractTest {
 
     /** v4-①：位置无关——按标记定位承载文件（VM 类声明处）。 */
     private fun mainViewModelSource(): String =
-        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
+        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads internal constructor(")
 
     private fun chatImageWorkflowCoordinatorSource(): String = sourceFile("ChatImageWorkflowCoordinator.kt")
 

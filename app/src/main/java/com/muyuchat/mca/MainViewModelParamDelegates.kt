@@ -16,7 +16,7 @@ fun MainViewModel.updateParams(params: GenerationParams) {
     persistModelGenerationParams(state, scopedParams)
     val updatedAssistants = updatedAssistantsWithParams(state.assistants, state.selectedAssistantId, scopedParams)
     val hasLoadedModel = uiStateStore.current.loadedModelId != null
-    val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, engine.activeExecutionProfile())
+    val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, runtimeAssembly.activeExecutionProfile())
     uiStateStore.update { state ->
         state.copy(
             params = scopedParams,

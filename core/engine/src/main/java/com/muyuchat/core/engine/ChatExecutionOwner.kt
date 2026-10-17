@@ -1,5 +1,7 @@
 package com.muyuchat.core.engine
 
+import com.muyuchat.core.engine.contract.ErrorCategory
+import com.muyuchat.core.engine.contract.ErrorEnvelope
 import com.muyuchat.core.engine.contract.RequestIdentity
 import com.muyuchat.core.engine.contract.RequestState
 import com.muyuchat.core.engine.runtime.EventConsumer
@@ -70,6 +72,9 @@ class ChatExecutionOwner(
                 "Runtime supervisor is shut down; chat request ${context.requestId} was rejected."
             )
         val identity = entry.identity
+        // Admission may carry an explicit trace; legacy contexts only supply requestId, which is
+        // still a stable correlation key for the terminal error.
+        val correlationTraceId = identity.traceId.trim().ifBlank { context.requestId }
         var lastEvent: GenerateEvent? = null
         var advancedToRunning = false
         return body.stream(request, context)
@@ -82,7 +87,7 @@ class ChatExecutionOwner(
                 emit(event)
             }
             .onCompletion { cause ->
-                settleAttempt(identity, cause, lastEvent)
+                settleAttempt(identity, cause, lastEvent, correlationTraceId)
             }
     }
 
@@ -119,13 +124,18 @@ class ChatExecutionOwner(
         }
     }
 
-    private fun settleAttempt(identity: RequestIdentity, cause: Throwable?, lastEvent: GenerateEvent?) {
+    private fun settleAttempt(
+        identity: RequestIdentity,
+        cause: Throwable?,
+        lastEvent: GenerateEvent?,
+        correlationTraceId: String
+    ) {
+        val errorEvent = lastEvent as? GenerateEvent.Error
         val terminal = when {
             cause is CancellationException -> RequestState.Cancelled
             cause != null -> RequestState.Failed
-            lastEvent is GenerateEvent.Error && lastEvent.code == CANCELLATION_CODE ->
-                RequestState.Cancelled
-            lastEvent is GenerateEvent.Error -> RequestState.Failed
+            errorEvent?.isCancellation() == true -> RequestState.Cancelled
+            errorEvent != null -> RequestState.Failed
             else -> RequestState.Succeeded
         }
         if (terminal == RequestState.Cancelled) {
@@ -135,17 +145,83 @@ class ChatExecutionOwner(
             // produced no event (or was still Preparing) must still settle along a legal path.
             advanceToRunning(identity)
         }
-        val error = if (terminal == RequestState.Failed) {
-            cause?.let { NativeErrorTranslator.fromThrowable(it) }
-        } else {
-            null
+
+        val typedEventError = errorEvent?.errorEnvelope?.let { error ->
+            NativeErrorTranslator.attachContext(error, identity, correlationTraceId)
         }
-        supervisor.settleRequest(identity, terminal, error)
+        val translatedEventError = errorEvent?.let { event ->
+            NativeErrorTranslator.fromChatError(
+                message = event.message,
+                code = event.code,
+                identity = identity,
+                traceId = correlationTraceId
+            )
+        }
+        val error = when (terminal) {
+            RequestState.Failed -> typedEventError
+                ?: cause?.let { failure ->
+                    NativeErrorTranslator.fromThrowable(
+                        failure,
+                        identity = identity,
+                        traceId = correlationTraceId
+                    )
+                }
+                ?: translatedEventError
+            RequestState.Cancelled -> typedEventError?.takeIf { it.category == ErrorCategory.Cancel }
+                ?: translatedEventError?.takeIf { it.category == ErrorCategory.Cancel }
+                ?: NativeErrorTranslator.cancelled(
+                    identity = identity,
+                    reason = (cause as? CancellationException)?.message
+                        ?: errorEvent?.message
+                        ?: "Request cancelled by its owner.",
+                    traceId = correlationTraceId
+                )
+            else -> null
+        }
+        settleWithError(identity, terminal, error)
+    }
+
+    /**
+     * Settles the registry and publishes the same typed envelope into the bounded terminal record
+     * before releasing the attempt resources. Publishing before cleanup is what keeps the real error
+     * queryable from both `terminalOutcome` and `snapshot` after the live entry is evicted.
+     */
+    private fun settleWithError(
+        identity: RequestIdentity,
+        terminalState: RequestState,
+        error: ErrorEnvelope?
+    ) {
+        val settled = registry.settle(identity, terminalState, error)
+        try {
+            if (settled != null) {
+                supervisor.callbackRouter.recordOutcome(
+                    identity = identity,
+                    finalState = terminalState,
+                    terminalError = error
+                )
+            }
+        } finally {
+            supervisor.releaseRequestResources(identity)
+        }
+    }
+
+    private fun GenerateEvent.Error.isCancellation(): Boolean {
+        val normalizedCode = code?.trim()?.uppercase()
+        return errorEnvelope?.category == ErrorCategory.Cancel ||
+            (normalizedCode != null && normalizedCode in CANCELLATION_CODES)
     }
 
     private companion object {
         /** Stable cancellation code the engine emits for a client-requested stop. */
         const val CANCELLATION_CODE = "REQUEST_CANCELLED"
+
+        val CANCELLATION_CODES = setOf(
+            CANCELLATION_CODE,
+            "CANCELLED",
+            "CANCELED",
+            "CNC_USER_CANCELLED",
+            "CNC_ALREADY_CANCELLED"
+        )
 
         /** Attempt route for the bounded terminal record; the caller keeps the event stream. */
         val TERMINAL_ROUTE_CONSUMER = EventConsumer { }

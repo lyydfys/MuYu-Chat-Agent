@@ -3,8 +3,7 @@ package com.muyuchat.mca.presentation
 import com.muyuchat.api.local.ImageGenerationContractException
 import com.muyuchat.api.local.ImageGenerationProviderException
 import com.muyuchat.mca.ImageGenerationBatchLineage
-import com.muyuchat.mca.LocalApiImageGenerationOwnership
-import com.muyuchat.mca.LocalImageGenerationCoordinator
+import com.muyuchat.mca.LocalApiImageOperationGate
 import com.muyuchat.mca.LocalImageGenerationOptions
 import com.muyuchat.mca.LocalImageInputDraft
 import com.muyuchat.mca.LocalImageLoraRecord
@@ -131,10 +130,7 @@ class LocalApiImageGenerationOperationsTest {
             assertEquals("", port.worker.lastOptions!!.negativePrompt)
             assertEquals(1, port.worker.releaseAwaitCount)
 
-            // ---- admission ownership is fully unwound, even on the success path
-            assertEquals(1, port.registerCount)
-            assertEquals(1, port.unregisterCount)
-            assertNull(port.activeOwnership)
+            // ---- owner admission is fully unwound, even on the success path
             assertNull(port.activeLocalApiImageModelId)
             assertNull(port.activeLeaseRequestId)
             assertEquals(1, port.releaseCount)
@@ -282,11 +278,9 @@ class LocalApiImageGenerationOperationsTest {
                 "The isolated local image worker exited before producing a result.",
                 error.message
             )
-            // The failure path still unwinds the lease and the cancellation ownership.
-            assertEquals(1, port.registerCount)
-            assertEquals(1, port.unregisterCount)
-            assertNull(port.activeOwnership)
+            // The failure path still unwinds the owner lease and worker barrier.
             assertNull(port.activeLeaseRequestId)
+            assertEquals(1, port.releaseCount)
             assertEquals(1, port.worker.releaseAwaitCount)
         } finally {
             fixture.close()
@@ -316,7 +310,6 @@ class LocalApiImageGenerationOperationsTest {
             assertEquals("所选 LoRA 已删除或不可用：adapter-9", error.message)
             // Rejected before admission: no lease, no worker dispatch.
             assertEquals(0, port.worker.generateCount)
-            assertEquals(0, port.registerCount)
             assertEquals(0, port.leaseAttempts)
         } finally {
             fixture.close()
@@ -486,7 +479,8 @@ class LocalApiImageGenerationOperationsTest {
             assertEquals(409, error.httpStatus)
             assertEquals("Another UI or Local API image request is already running.", error.message)
             assertEquals(0, port.worker.generateCount)
-            assertEquals(0, port.registerCount)
+            assertEquals(1, port.leaseAttempts)
+            assertNull(port.activeLeaseRequestId)
         } finally {
             fixture.close()
         }
@@ -709,8 +703,8 @@ class LocalApiImageGenerationOperationsTest {
         }
     }
 
-    private class FakePort(model: LocalImageModelRecord) : LocalApiImageGenerationPort {
-        private val coordinator = LocalImageGenerationCoordinator()
+    private class FakePort(model: LocalImageModelRecord) : OwnerBackedLocalApiImageGenerationPort {
+        private val coordinator = com.muyuchat.mca.LocalImageGenerationCoordinator()
         // The catalog the explicit-model branch resolves against, plus the selection the fallback
         // branch would use: both must be real, or every request 404s for the wrong reason.
         private val mutableUiState = MutableStateFlow(
@@ -737,7 +731,7 @@ class LocalApiImageGenerationOperationsTest {
 
         override val localImageLoraLifecycleLock: Any = Any()
         override val localImageTextualInversionLifecycleLock: Any = Any()
-        override var activeLocalApiImageModelId: String? = null
+        var activeLocalApiImageModelId: String? = null
 
         val worker = RecordingWorkerGateway()
         override val localImageWorkerClient: LocalApiImageWorkerGateway get() = worker
@@ -751,47 +745,35 @@ class LocalApiImageGenerationOperationsTest {
         /** Non-null while a lease is still held -- the real release assertion. */
         val activeLeaseRequestId: String? get() = coordinator.activeRequestId()
 
-        override fun tryAcquireObservedImageGenerationLease(
-            requestId: String
-        ): LocalImageGenerationCoordinator.Lease? {
-            leaseAttempts += 1
-            if (!leaseGranted) return null
-            return coordinator.tryAcquire(requestId)
-        }
+        private val imageOperations = LocalApiImageOperationGate(
+            hasActiveUiImageJob = { false },
+            tryAcquireLease = { requestId ->
+                leaseAttempts += 1
+                if (!leaseGranted) null else coordinator.tryAcquire(requestId)
+            },
+            releaseLease = { lease ->
+                releaseCount += 1
+                coordinator.release(lease)
+            },
+            cancelWorker = { true },
+            awaitWorkerRelease = { worker.awaitOwnedWorkerRelease() },
+            setActiveModelId = { activeLocalApiImageModelId = it },
+            finishUiOwnership = {
+                synchronized(localImageLoraLifecycleLock) {
+                    mutableUiState.update {
+                        it.copy(
+                            activeLocalImageLoraIds = emptySet(),
+                            activeLocalImageTextualInversionIds = emptySet()
+                        )
+                    }
+                }
+            }
+        )
 
-        override fun releaseObservedImageGenerationLease(
-            lease: LocalImageGenerationCoordinator.Lease
-        ): Boolean {
-            releaseCount += 1
-            return coordinator.release(lease)
-        }
-
-        var registerCount = 0
-        var unregisterCount = 0
-        var activeOwnership: LocalApiImageGenerationOwnership? = null
-
-        override fun registerLocalApiImageGenerationOwnership(
-            ownership: LocalApiImageGenerationOwnership
-        ) {
-            registerCount += 1
-            activeOwnership = ownership
-        }
-
-        override fun unregisterLocalApiImageGenerationOwnership(
-            ownership: LocalApiImageGenerationOwnership
-        ): Boolean {
-            unregisterCount += 1
-            if (activeOwnership !== ownership) return false
-            activeOwnership = null
-            return true
-        }
-
-        override fun cancelOwnedLocalApiImageWorker(
-            ownership: LocalApiImageGenerationOwnership
-        ): Boolean {
-            activeOwnership = null
-            return true
-        }
+        override suspend fun <T> runLocalApiImageOperation(
+            requestId: String,
+            block: suspend (LocalApiImageOperationBinding) -> T
+        ): T = imageOperations.run(requestId, block)
 
         var loraResolutionFailure: Exception? = null
 

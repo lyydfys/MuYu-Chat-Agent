@@ -47,7 +47,7 @@ class BootstrapLoadIsolationContractTest {
     fun mainRunsNewBootstrapProofBeforeFormalLoadAndNeverRunsTheCanaryInProcess() {
         // R3-S24 + v4-①: the load chain lives wherever its marker lives; located by content,
         // no path literals. Same assertions.
-        val source = SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
+        val source = SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads internal constructor(")
         val loadModel = SourceTextFixtures.sourceOf("internal suspend fun CoroutineScope.runLoadModelBody(")
             .substringAfter("internal suspend fun CoroutineScope.runLoadModelBody(")
         val worker = loadModel.indexOf(

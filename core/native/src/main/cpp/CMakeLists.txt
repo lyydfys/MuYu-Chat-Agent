@@ -91,7 +91,18 @@ add_library(mca_runtime_lifecycle STATIC
         mca/callback/callback_router.cpp)
 target_include_directories(mca_runtime_lifecycle PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract mca_jni_boundary)
+target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract)
+# Runtime lifecycle state is DSO-local. ProcessRuntimeHost::instance() is not a
+# process-wide authority shared between mca_native, mca_mnn_native, mca_qnn_native,
+# and mca_sd_native; the Kotlin RuntimeSupervisor owns the authoritative epoch and
+# native state below this boundary is backend-local. Hidden visibility prevents
+# ELF symbol interposition from silently merging these instances across DSOs.
+# The runtime layer must not depend on JNI headers or conversion helpers; only the
+# concrete JNI-bearing SHARED targets link mca_jni_boundary.
+set_target_properties(mca_runtime_lifecycle PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET hidden)
 
 # mca_native sources.
 #
@@ -188,15 +199,12 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_ultrafix_handler.cpp
         mca/qnn/qnn_inpaint_blend.cpp
         mca/qnn/qnn_contract_parser.cpp
-        # qnn_context_binary_cache.cpp is deliberately NOT compiled: its header is included only
-        # by itself and its own test, while the symbols it defines (ScopedReadOnlyMmap,
-        # read_binary_file, select_qnn_system_interface, append_graph_names,
-        # qnn_context_load_failure_message, inspect_qnn_context_binary_metadata) are duplicated
-        # verbatim in qnn_system_symbol_loader.{hpp,cpp} -- which is the pair production actually
-        # includes (qnn_executable_graph.cpp, qnn_native_bridge.cpp).  Linking both translation
-        # units put several strong definitions of the same symbol in mca_qnn_runtime, so which
-        # body won depended on link order.  The file is kept on disk, uncompiled, until its
-        # remaining unique content is either folded into qnn_system_symbol_loader or deleted.
+        # qnn_context_binary_cache.cpp has an explicit test-support/non-production
+        # disposition below. Production owns these symbols in
+        # qnn_system_symbol_loader.{hpp,cpp}, which qnn_executable_graph.cpp and
+        # qnn_native_bridge.cpp include. Linking the cache TU here would reintroduce
+        # several strong duplicate definitions into mca_qnn_runtime and make behavior
+        # depend on link order.
         mca/qnn/qnn_tensor_quantizer.cpp
         mca/qnn/qnn_graph_executor_helper.cpp
         mca/qnn/qnn_bundle_manifest.cpp
@@ -303,10 +311,22 @@ target_sources(mca_mnn_native PRIVATE
         mca/mnn/mnn_prompt_weighting.cpp
         mca/mnn/mnn_backend_predicates.cpp
         mca/mnn/mnn_chat_session.cpp
+        # JNI entries are split by lifecycle vs generation; beginCompletion has
+        # a declared business-owner source instead of living in a JNI TU.
+        mca/mnn/mnn_chat_jni_prelude.hpp
+        mca/mnn/mnn_chat_completion.hpp
+        mca/mnn/mnn_chat_completion.cpp
+        mca/mnn/mnn_chat_lifecycle_entries.cpp
         mca/mnn/mnn_chat_entries.cpp
         mca/mnn/mnn_diffusion_state.cpp
+        # Diffusion request/execution and tokenizer helpers have explicit owner
+        # TUs; each remaining bridge/JNI TU stays below 700 physical lines.
+        mca/mnn/mnn_diffusion_jni_prelude.hpp
+        mca/mnn/mnn_diffusion_generate_request.hpp
         mca/mnn/mnn_diffusion_generate.cpp
+        mca/mnn/mnn_diffusion_generate_entries.cpp
         mca/mnn/mnn_diffusion_tokenize.cpp
+        mca/mnn/mnn_diffusion_tokenize_entries.cpp
         mca/mnn/mnn_clip_encode.cpp
         mca/mnn/mnn_sd15_direct.cpp)
 # T01 patch 1 (at T02's request, PLAN 1.4 "断开残缺委托/去重"): the eight entries
@@ -443,6 +463,45 @@ else()
             MCA_WITH_QNN_SDK_HEADERS=0
             MCA_QNN_SDK_ROOT_CONFIGURED=$<BOOL:${MCA_QNN_SDK_ROOT}>)
 endif()
+
+# --- Explicit non-production QNN context-cache compatibility unit -----------
+# This historical cache implementation is retained only for focused host/source
+# compatibility tests. It is an OBJECT target, EXCLUDE_FROM_ALL, never linked
+# into mca_qnn_runtime or a shipped DSO, and hidden so its duplicate strong
+# symbols cannot be preempted into production. Production metadata/mmap/dlopen
+# behavior is owned by qnn_system_symbol_loader.{hpp,cpp}.
+add_library(mca_qnn_context_binary_cache_test_support OBJECT EXCLUDE_FROM_ALL
+        mca/qnn/qnn_context_binary_cache.cpp)
+target_include_directories(mca_qnn_context_binary_cache_test_support PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}")
+if(MCA_QNN_INCLUDE_DIR)
+    target_include_directories(mca_qnn_context_binary_cache_test_support PRIVATE
+            "${MCA_QNN_INCLUDE_DIR}"
+            "${MCA_QNN_INCLUDE_DIR}/QNN")
+    target_compile_definitions(mca_qnn_context_binary_cache_test_support PRIVATE
+            MCA_WITH_QNN_SDK_HEADERS=1
+            MCA_QNN_SDK_ROOT_CONFIGURED=1)
+else()
+    target_compile_definitions(mca_qnn_context_binary_cache_test_support PRIVATE
+            MCA_WITH_QNN_SDK_HEADERS=0
+            MCA_QNN_SDK_ROOT_CONFIGURED=0)
+endif()
+set_target_properties(mca_qnn_context_binary_cache_test_support PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET hidden)
+
+# --- Non-production translation reference disposition -----------------------
+# translation/** contained an unwired CrispASR/M2M100 reference implementation:
+# no CMake target, JNI entry, production caller, or packaged
+# libmca_translation_native.so consumed those TUs, and m2m100_translate.cpp
+# included a repository-missing core/beam_decode.h. The current production
+# offline translator is the llama.cpp Hy-MT2 worker path in libmca_native.so;
+# the Kotlin CRISP_ASR_M2M100 adapter is explicitly unavailable. The dead,
+# non-compiling reference C++ was removed rather than turned into a fake target;
+# LICENSE.CrispASR-MIT.txt is retained for provenance. Reintroducing M2M100
+# requires a real isolated adapter, JNI/ABI contract, complete dependencies, and
+# a shipping target in the same reviewed change.
 
 target_compile_definitions(mca_native PRIVATE
         GGML_SYSTEM_ARCH=${GGML_SYSTEM_ARCH}

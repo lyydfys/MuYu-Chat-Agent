@@ -29,7 +29,7 @@ class FacadeTerminalCleanupTest {
     @Test
     fun `a stream failure releases the request resources and keeps a queryable outcome`() {
         val supervisor = newSupervisor()
-        val facade = ChatExecutionFacade(supervisor)
+        val facade = ChatExecutionFacade.admissionOnly(supervisor)
         val identity = facade.dispatchChat(ChatCommand(prompt = "prompt", requestId = "sf-chat-1")) { }
         assertTrue(supervisor.requestRegistry.transitionState(identity, RequestState.Preparing))
         assertTrue(supervisor.requestRegistry.transitionState(identity, RequestState.Running))
@@ -58,51 +58,25 @@ class FacadeTerminalCleanupTest {
     }
 
     @Test
-    fun `an image stream failure releases the request resources and keeps a queryable outcome`() {
-        val supervisor = newSupervisor()
-        val facade = ImageGenerationFacade(supervisor)
-        val identity = facade.dispatchImage(
-            ImageCommand(prompt = "prompt", targetOutputPath = "/tmp/sf-image.png", requestId = "sf-img-1")
-        ) { }
-        assertTrue(supervisor.requestRegistry.transitionState(identity, RequestState.Preparing))
-        assertTrue(supervisor.requestRegistry.transitionState(identity, RequestState.Running))
-
-        assertTrue(facade.settleStreamFailure(identity, "sse overflow"))
-
-        assertEquals(0, supervisor.cancellationController.activeCount())
-        assertEquals(0, supervisor.requestRegistry.count())
-        assertFalse(facade.isImageActive("sf-img-1"))
-        val outcome = facade.terminalOutcome("sf-img-1")
-        assertNotNull(outcome)
-        assertEquals(RequestState.Failed, outcome!!.finalState)
-    }
-
-    @Test
     fun `shutdown after a dispatch leaves no cancel handle route or live entry`() {
         val supervisor = newSupervisor()
-        val chat = ChatExecutionFacade(supervisor)
-        val image = ImageGenerationFacade(supervisor)
+        val chat = ChatExecutionFacade.admissionOnly(supervisor)
 
         chat.dispatchChat(ChatCommand(prompt = "prompt", requestId = "sd-chat-1")) { }
-        image.dispatchImage(
-            ImageCommand(prompt = "prompt", targetOutputPath = "/tmp/sd-image.png", requestId = "sd-img-1")
-        ) { }
-        assertEquals("admission must have reserved both requests", 2, supervisor.cancellationController.activeCount())
+        assertEquals("admission must have reserved the request", 1, supervisor.cancellationController.activeCount())
 
         supervisor.shutdownProcess()
 
         assertEquals("shutdown must release every cancel handle", 0, supervisor.cancellationController.activeCount())
         assertEquals("shutdown must clear every live entry", 0, supervisor.requestRegistry.count())
         assertFalse(chat.isChatActive("sd-chat-1"))
-        assertFalse(image.isImageActive("sd-img-1"))
         assertNull("no routed outcome may survive shutdown", chat.terminalOutcome("sd-chat-1"))
-        assertNull("no routed outcome may survive shutdown", image.terminalOutcome("sd-img-1"))
     }
 
     @Test
     fun `a dispatch after shutdown is rejected without leaving any reservation`() {
         val supervisor = newSupervisor()
-        val facade = ChatExecutionFacade(supervisor)
+        val facade = ChatExecutionFacade.admissionOnly(supervisor)
         supervisor.shutdownProcess()
 
         val failure = runCatching {
@@ -121,7 +95,7 @@ class FacadeTerminalCleanupTest {
         val iterations = 300
         repeat(iterations) { index ->
             val supervisor = newSupervisor()
-            val facade = ChatExecutionFacade(supervisor)
+            val facade = ChatExecutionFacade.admissionOnly(supervisor)
             val barrier = CyclicBarrier(2)
             val requestId = "facade-race-$index"
 

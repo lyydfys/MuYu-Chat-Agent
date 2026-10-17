@@ -702,6 +702,7 @@ class FinalGateTests(unittest.TestCase):
         ratings = gate.derive_rating_statuses(
             {
                 "architecture_rules": gate.PASSED,
+                "source_level_s_c": gate.PASSED,
                 "release_integrity": gate.PASSED,
             },
             policy,

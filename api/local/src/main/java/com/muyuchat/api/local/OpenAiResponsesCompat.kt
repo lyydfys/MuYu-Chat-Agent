@@ -1,7 +1,7 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.contract.ChatRequest
+import com.muyuchat.core.engine.contract.GenerationParams
 import org.json.JSONArray
 import org.json.JSONObject
 

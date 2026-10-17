@@ -130,7 +130,7 @@ internal fun atomicReplaceUtf8(target: File, content: String) {
 
 internal data class LocalChatSmokeGlobalSnapshot(
     private val stageSink: ((String, JSONObject) -> Unit)?,
-    private val engine: McaInferenceService?,
+    private val nativeStatsJsonProvider: (() -> String)?,
     private val streamChatProvider: ((ChatRequest) -> Flow<GenerateEvent>)?,
     private val streamChatWithContextProvider: ((ChatRequest, LocalChatExecutionContext) -> Flow<GenerateEvent>)?,
     private val stopGenerationProvider: (suspend () -> Unit)?,
@@ -157,7 +157,7 @@ internal data class LocalChatSmokeGlobalSnapshot(
         LocalApiRuntime.deviceProfileJsonProvider = deviceProfileJsonProvider
         LocalApiRuntime.agentRecommendationJsonProvider = agentRecommendationJsonProvider
         LocalApiRuntime.benchmarkJsonProvider = benchmarkJsonProvider
-        LocalApiRuntime.engine = engine
+        LocalApiRuntime.nativeStatsJsonProvider = nativeStatsJsonProvider
         LocalChatRunnerDebug.stageSink = stageSink
     }
 
@@ -168,7 +168,7 @@ internal data class LocalChatSmokeGlobalSnapshot(
     companion object {
         fun capture(): LocalChatSmokeGlobalSnapshot = LocalChatSmokeGlobalSnapshot(
             stageSink = LocalChatRunnerDebug.stageSink,
-            engine = LocalApiRuntime.engine,
+            nativeStatsJsonProvider = LocalApiRuntime.nativeStatsJsonProvider,
             streamChatProvider = LocalApiRuntime.streamChatProvider,
             streamChatWithContextProvider = LocalApiRuntime.streamChatWithContextProvider,
             stopGenerationProvider = LocalApiRuntime.stopGenerationProvider,
@@ -941,7 +941,7 @@ open class LocalChatSmokeActivity : Activity() {
             // session. Bind both loopback callbacks to this smoke's engine so the
             // direct and API legs exercise the same loaded native model. The
             // captured global values are restored in finally below.
-            LocalApiRuntime.engine = activeEngine
+            LocalApiRuntime.nativeStatsJsonProvider = { activeEngine.nativeStatsJson() }
             LocalApiRuntime.streamChatWithContextProvider = { request, context -> activeEngine.streamChat(request, context) }
             LocalApiRuntime.streamChatProvider = { request -> activeEngine.streamChat(request) }
             LocalApiRuntime.stopGenerationProvider = { activeEngine.stopGeneration() }

@@ -1,10 +1,18 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import android.graphics.BitmapFactory
+import android.util.Base64
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.EngineLifecycleLease
+import com.muyuchat.mca.presentation.LocalApiImageBounds
+import com.muyuchat.mca.presentation.LocalApiImageLoraGateway
+import com.muyuchat.mca.presentation.LocalApiImageOperationBinding
+import com.muyuchat.mca.presentation.LocalApiImageWorkerGateway
+import com.muyuchat.mca.presentation.OwnerBackedLocalApiImageGenerationPort
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
 import java.io.File
 import com.muyuchat.core.engine.ChatMessage
@@ -65,6 +73,82 @@ internal class LocalGeneratedImageWorkerGatewayAdapter(
         requestId = requestId,
         batchLineage = batchLineage
     )
+}
+
+/**
+ * Local API 生图的生产端口：所有执行都进入 ImageGenerationOwner，协议操作只消费 owner 的
+ * 唯一租约/取消/清理生命周期。这里不暴露任何 tryAcquire/register/cancel 回调。
+ */
+internal class LocalApiImageGenerationOwnerPortAdapter(
+    private val store: UiStateStore,
+    private val imageGenerationOwner: ImageGenerationOwner,
+    override val localImageLoraLifecycleLock: Any,
+    override val localImageTextualInversionLifecycleLock: Any,
+    override val localImageWorkerClient: LocalApiImageWorkerGateway,
+    override val localImageLoraStore: LocalApiImageLoraGateway,
+    private val resolveCurrentLocalImageLorasRef1: (List<Pair<String, Double>>) -> List<LocalImagePreparedLora>,
+    private val resolveCurrentLocalImageLorasRef2: (List<Pair<String, Double>>, List<LocalImageLoraRecord>) -> List<LocalImagePreparedLora>,
+    private val resolveCurrentLocalImageTextualInversionIdsRef: (List<String>) -> List<String>,
+    private val prepareLocalImagePromptExecutionRef: suspend (LocalImageModelRecord, String, LocalImageGenerationOptions, LocalImagePromptExecution?) -> LocalImagePromptExecution,
+    private val prepareLocalImageRuntimeMemoryRef: suspend () -> EngineLifecycleLease?,
+    private val executionWithQnnVerificationEvidenceRef: (LocalImageModelRecord, LocalImageResult, LocalImageGenerationOptions, String, String, QnnImageEvidenceEntryPoint) -> String
+) : OwnerBackedLocalApiImageGenerationPort {
+    override val uiState: StateFlow<MainUiState> get() = store.state
+
+    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        store.update(transform)
+    }
+
+    override fun selectedLocalImageModel(): LocalImageModelRecord? =
+        store.state.value.selectedLocalImageModel()
+
+    override suspend fun <T> runLocalApiImageOperation(
+        requestId: String,
+        block: suspend (LocalApiImageOperationBinding) -> T
+    ): T = imageGenerationOwner.runLocalApiImageOperation(requestId, block)
+
+    override fun resolveCurrentLocalImageLoras(
+        selections: List<Pair<String, Double>>
+    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasRef1(selections)
+
+    override fun resolveCurrentLocalImageLoras(
+        selections: List<Pair<String, Double>>,
+        records: List<LocalImageLoraRecord>
+    ): List<LocalImagePreparedLora> = resolveCurrentLocalImageLorasRef2(selections, records)
+
+    override fun resolveCurrentLocalImageTextualInversionIds(ids: List<String>): List<String> =
+        resolveCurrentLocalImageTextualInversionIdsRef(ids)
+
+    override suspend fun prepareLocalImagePromptExecution(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        captured: LocalImagePromptExecution?
+    ): LocalImagePromptExecution =
+        prepareLocalImagePromptExecutionRef(model, prompt, options, captured)
+
+    override suspend fun prepareLocalImageRuntimeMemory(): EngineLifecycleLease? =
+        prepareLocalImageRuntimeMemoryRef()
+
+    override fun executionWithQnnVerificationEvidence(
+        model: LocalImageModelRecord,
+        result: LocalImageResult,
+        options: LocalImageGenerationOptions,
+        requestId: String,
+        attemptId: String,
+        entryPoint: QnnImageEvidenceEntryPoint
+    ): String = executionWithQnnVerificationEvidenceRef(
+        model, result, options, requestId, attemptId, entryPoint
+    )
+
+    override fun decodeImageBounds(bytes: ByteArray): LocalApiImageBounds {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        return LocalApiImageBounds(bounds.outWidth, bounds.outHeight)
+    }
+
+    override fun encodeBase64NoWrap(bytes: ByteArray): String =
+        Base64.encodeToString(bytes, Base64.NO_WRAP)
 }
 
 /** R3-S30：本地生图资产生成端口具名化（worker 代际经 holder；两助手经顶层 For）。 */
@@ -168,6 +252,12 @@ internal class ImageGenerationHostAdapter(
         get() = runtimeAdmission.activeImageGenerationModelId
         set(value) {
             runtimeAdmission.activeImageGenerationModelId = value
+        }
+
+    override var activeLocalApiImageModelId: String?
+        get() = runtimeAdmission.activeLocalApiImageModelId
+        set(value) {
+            runtimeAdmission.activeLocalApiImageModelId = value
         }
 
     override val localImageTextualInversionLifecycleLock: Any

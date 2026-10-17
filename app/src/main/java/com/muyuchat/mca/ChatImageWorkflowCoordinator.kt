@@ -4,7 +4,8 @@ import android.app.Application
 import android.net.Uri
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.McaInferenceService
-import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
+import com.muyuchat.mca.composition.MainRuntimeAssembly
+import com.muyuchat.mca.presentation.OwnerBackedLocalApiImageGenerationPort
 import com.muyuchat.mca.presentation.generateLocalApiImageOperations
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.sync.Mutex
@@ -23,16 +24,56 @@ internal class ChatImageWorkflowCoordinator(
     private val imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
     private val chatImageRetryPort: ChatImageRetryPort,
     private val showStatus: (String?) -> Unit,
-    private val tryAcquireObservedImageGenerationLease: (String) -> LocalImageGenerationCoordinator.Lease?,
-    private val releaseObservedImageGenerationLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
     private val offlinePromptTranslationService: () -> OfflinePromptTranslationService,
     private val runtimeProfileStore: ModelRuntimeProfileStore,
     private val engine: McaInferenceService,
-    private val selectCloudImageModel: (String) -> Unit,
-    private val registerLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Unit,
-    private val unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
-    private val cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
+    private val selectCloudImageModel: (String) -> Unit
 ) {
+    /**
+     * Compatibility constructor for the existing composition root. Local API ownership callbacks
+     * are intentionally ignored: the port now enters [ImageGenerationOwner] directly.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    internal constructor(
+        application: Application,
+        scope: CoroutineScope,
+        store: UiStateStore,
+        container: com.muyuchat.mca.composition.McaAppContainer,
+        imageAssetWriteMutex: Mutex,
+        imageLibraryMutationMutex: Mutex,
+        imageLibraryBackup: ImageLibraryBackup,
+        chatSessionStore: ChatSessionStore,
+        imageGenerationOwner: ImageGenerationOwner,
+        imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
+        chatImageRetryPort: ChatImageRetryPort,
+        showStatus: (String?) -> Unit,
+        tryAcquireObservedImageGenerationLease: (String) -> LocalImageGenerationCoordinator.Lease?,
+        releaseObservedImageGenerationLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
+        offlinePromptTranslationService: () -> OfflinePromptTranslationService,
+        runtimeProfileStore: ModelRuntimeProfileStore,
+        engine: McaInferenceService,
+        selectCloudImageModel: (String) -> Unit,
+        registerLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Unit,
+        unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
+        cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
+    ) : this(
+        application = application,
+        scope = scope,
+        store = store,
+        container = container,
+        imageAssetWriteMutex = imageAssetWriteMutex,
+        imageLibraryMutationMutex = imageLibraryMutationMutex,
+        imageLibraryBackup = imageLibraryBackup,
+        chatSessionStore = chatSessionStore,
+        imageGenerationOwner = imageGenerationOwner,
+        imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
+        chatImageRetryPort = chatImageRetryPort,
+        showStatus = showStatus,
+        offlinePromptTranslationService = offlinePromptTranslationService,
+        runtimeProfileStore = runtimeProfileStore,
+        engine = engine,
+        selectCloudImageModel = selectCloudImageModel
+    )
     val imageAssetCreationPort: ImageAssetCreationPort =
         container.createImageAssetCreationPort(store, application, imageGenerationOwner)
 
@@ -209,23 +250,33 @@ internal class ChatImageWorkflowCoordinator(
     fun updateGenerationImageGrantReleaseDefer(defer: Boolean) =
         updateGenerationImageGrantReleaseDeferInto(store, defer)
 
-    val localApiImageGenerationPort: LocalApiImageGenerationPort =
-        container.createLocalApiImageGenerationPort(
+    val localApiImageGenerationPort: OwnerBackedLocalApiImageGenerationPort =
+        LocalApiImageGenerationOwnerPortAdapter(
             store = store,
-            getActiveLocalApiImageModelIdRef = { container.runtimeAdmission.activeLocalApiImageModelId },
-            setActiveLocalApiImageModelIdRef = { container.runtimeAdmission.activeLocalApiImageModelId = it },
-            tryAcquireObservedImageGenerationLeaseRef = tryAcquireObservedImageGenerationLease,
-            releaseObservedImageGenerationLeaseRef = releaseObservedImageGenerationLease,
-            registerLocalApiImageGenerationOwnershipRef = registerLocalApiImageGenerationOwnership,
-            unregisterLocalApiImageGenerationOwnershipRef = unregisterLocalApiImageGenerationOwnership,
-            cancelOwnedLocalApiImageWorkerRef = cancelOwnedLocalApiImageWorker,
+            imageGenerationOwner = imageGenerationOwner,
+            localImageLoraLifecycleLock = container.localImageLoraLifecycleLock,
+            localImageTextualInversionLifecycleLock = container.localImageTextualInversionLifecycleLock,
+            localImageWorkerClient = LocalApiImageWorkerGatewayAdapter { container.localImageWorkerClient },
+            localImageLoraStore = LocalApiImageLoraGatewayAdapter { container.localImageLoraStore },
             resolveCurrentLocalImageLorasRef1 = { resolveCurrentLocalImageLorasFor(it, store.current.localImageLoras) },
-            resolveCurrentLocalImageLorasRef2 = { s, r -> resolveCurrentLocalImageLorasFor(s, r) },
-            resolveCurrentLocalImageTextualInversionIdsRef = { resolveCurrentLocalImageTextualInversionIdsFor(it, store.current.localImageTextualInversions) },
-            prepareLocalImagePromptExecutionRef = { m, p, o, c -> prepareLocalImagePromptExecution(imagePromptTranslationPort, m, p, o, c) },
-            prepareLocalImageRuntimeMemoryRef = { prepareLocalImageRuntimeMemoryFor(store, container.runtimeAdmission, runtimeProfileStore, engine) },
-            executionWithQnnVerificationEvidenceRef = { m, r, o, req, att, ent ->
-                executionWithQnnVerificationEvidenceFor(application, m, r, o, req, att, ent)
+            resolveCurrentLocalImageLorasRef2 = { selections, records ->
+                resolveCurrentLocalImageLorasFor(selections, records)
+            },
+            resolveCurrentLocalImageTextualInversionIdsRef = {
+                resolveCurrentLocalImageTextualInversionIdsFor(it, store.current.localImageTextualInversions)
+            },
+            prepareLocalImagePromptExecutionRef = { model, prompt, options, captured ->
+                prepareLocalImagePromptExecution(imagePromptTranslationPort, model, prompt, options, captured)
+            },
+            prepareLocalImageRuntimeMemoryRef = {
+                prepareLocalImageRuntimeMemoryFor(
+                    store, container.runtimeAdmission, runtimeProfileStore, engine
+                )
+            },
+            executionWithQnnVerificationEvidenceRef = { model, result, options, requestId, attemptId, entryPoint ->
+                executionWithQnnVerificationEvidenceFor(
+                    application, model, result, options, requestId, attemptId, entryPoint
+                )
             },
         )
 
@@ -236,3 +287,41 @@ internal class ChatImageWorkflowCoordinator(
             port = localApiImageGenerationPort
         )
 }
+
+/**
+ * MainViewModel-facing factory overload. The compatibility callbacks required by the old
+ * composition signature are not ownership paths anymore: Local API image execution enters the
+ * injected [ImageGenerationOwner] through its owner-backed port.
+ */
+internal fun MainRuntimeAssembly.createChatImageWorkflowCoordinator(
+    store: UiStateStore,
+    imageAssetWriteMutex: Mutex,
+    imageLibraryMutationMutex: Mutex,
+    imageLibraryBackup: ImageLibraryBackup,
+    chatSessionStore: ChatSessionStore,
+    imageGenerationOwner: ImageGenerationOwner,
+    imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
+    chatImageRetryPort: ChatImageRetryPort,
+    showStatus: (String?) -> Unit,
+    offlinePromptTranslationService: () -> OfflinePromptTranslationService,
+    runtimeProfileStore: ModelRuntimeProfileStore,
+    selectCloudImageModel: (String) -> Unit
+): ChatImageWorkflowCoordinator = createChatImageWorkflowCoordinator(
+    store = store,
+    imageAssetWriteMutex = imageAssetWriteMutex,
+    imageLibraryMutationMutex = imageLibraryMutationMutex,
+    imageLibraryBackup = imageLibraryBackup,
+    chatSessionStore = chatSessionStore,
+    imageGenerationOwner = imageGenerationOwner,
+    imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
+    chatImageRetryPort = chatImageRetryPort,
+    showStatus = showStatus,
+    tryAcquireObservedImageGenerationLease = { null },
+    releaseObservedImageGenerationLease = { false },
+    offlinePromptTranslationService = offlinePromptTranslationService,
+    runtimeProfileStore = runtimeProfileStore,
+    selectCloudImageModel = selectCloudImageModel,
+    registerLocalApiImageGenerationOwnership = {},
+    unregisterLocalApiImageGenerationOwnership = { false },
+    cancelOwnedLocalApiImageWorker = { false }
+)

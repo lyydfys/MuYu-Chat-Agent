@@ -177,7 +177,6 @@ class LocalApiRuntimeBindingsSnapshotTest {
             // the caller installed rather than guessing at engine defaults.
             assertNotNull(bindings.generationParamsProvider())
             assertNull(bindings.controlPlane)
-            assertNull("no engine was attached in this test", bindings.engine)
         }
     }
 }

@@ -18,7 +18,8 @@ class ChatLocalApiProviderOperationsTest {
     fun installKeepsTheEpochGuardAndLifecycleMirroring() {
         val body = functionBody(installSource(), "internal fun installChatLocalApiProviders(")
 
-        assertTrue(body.contains("LocalApiRuntime.engine = engine"))
+        assertTrue(body.contains("LocalApiRuntime.nativeStatsJsonProvider = { engine.nativeStatsJson() }"))
+        assertFalse(body.contains("LocalApiRuntime.engine ="))
         assertTrue(body.contains("LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->"))
         assertTrue(body.contains("?.substringBefore('-')"))
         assertTrue(body.contains("chatRuns.matches(uiLifecycleRunId)"))
@@ -33,7 +34,7 @@ class ChatLocalApiProviderOperationsTest {
         assertTrue(body.contains("port.cancelActiveLocalApiImageGeneration("))
         assertTrue(
             body.indexOf("port.cancelActiveLocalApiImageGeneration(") <
-                body.indexOf("engine.stopGeneration()")
+                body.indexOf("port.chatExecutionFacade.stopGeneration()")
         )
     }
 
@@ -42,8 +43,7 @@ class ChatLocalApiProviderOperationsTest {
         val body = functionBody(installSource(), "internal fun installChatLocalApiProviders(")
 
         assertTrue(body.contains("LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->"))
-        assertTrue(body.contains("engine.activeGenerationStopToken()"))
-        assertTrue(body.contains("engine.stopGenerationIfActive(token)"))
+        assertTrue(body.contains("port.chatExecutionFacade.stopGenerationIfActive(requestId)"))
         assertTrue(body.contains("LocalApiRuntime.loadedModelJsonProvider = { port.loadedModelJson() }"))
     }
 

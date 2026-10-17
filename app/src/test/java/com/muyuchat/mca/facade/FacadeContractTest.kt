@@ -1,10 +1,5 @@
 package com.muyuchat.mca.facade
 
-import com.muyuchat.core.engine.contract.RequestState
-import com.muyuchat.core.engine.contract.RuntimeEpoch
-import com.muyuchat.core.engine.runtime.BackendPort
-import com.muyuchat.core.engine.runtime.EnginePort
-import com.muyuchat.core.engine.runtime.HardwareProbeAdvisory
 import com.muyuchat.core.engine.runtime.RuntimeSupervisor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,29 +11,9 @@ import java.io.File
 class FacadeContractTest {
 
     @Test
-    fun testRuntimeFacadeLifecycleAndEpochMigration() {
-        val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        val facade = RuntimeFacade(supervisor)
-
-        assertEquals(RuntimeEpoch(1L), facade.currentEpoch)
-        assertTrue(facade.isHealthy)
-
-        val health = facade.evaluateHealth()
-        assertEquals(RuntimeEpoch(1L), health.epoch)
-        assertTrue(health.isHealthy)
-
-        val newEpoch = facade.advanceEpoch()
-        assertEquals(RuntimeEpoch(2L), newEpoch)
-        assertEquals(RuntimeEpoch(2L), facade.currentEpoch)
-
-        facade.shutdown()
-        assertFalse(facade.isHealthy)
-    }
-
-    @Test
     fun testChatExecutionFacadeCommandEquivalence() {
         val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        val chatFacade = ChatExecutionFacade(supervisor)
+        val chatFacade = ChatExecutionFacade.admissionOnly(supervisor)
 
         val cmd = ChatCommand(
             prompt = "Hello MCA enterprise refactor",
@@ -56,7 +31,6 @@ class FacadeContractTest {
         assertEquals(1L, identity.runtimeEpoch)
         assertTrue(chatFacade.isChatActive("req-chat-001"))
 
-        // Cancellation
         val cancelled = chatFacade.cancelChat("req-chat-001", "User stop")
         assertTrue(cancelled)
 
@@ -64,85 +38,120 @@ class FacadeContractTest {
     }
 
     @Test
-    fun testImageGenerationFacadeCommandEquivalence() {
-        val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        val imageFacade = ImageGenerationFacade(supervisor)
+    fun testProductionExecutionOwnerPathIsUnique() {
+        val sources = productionKotlinSources()
+        val container = sources.getValue(MCA_APP_CONTAINER)
+        val imageParts = sources.getValue(MCA_APP_CONTAINER_IMAGE_PARTS)
+        val mainViewModel = sources.getValue(MAIN_VIEW_MODEL)
+        val mainRuntimeAssembly = sources.getValue(MAIN_RUNTIME_ASSEMBLY)
 
-        val cmd = ImageCommand(
-            prompt = "A high-tech control room in neon glow",
-            targetOutputPath = "/tmp/test.png",
-            requestId = "req-img-001"
+        assertTrue(
+            "the production chat facade must receive the shared supervisor",
+            container.contains("supervisor = sharedRuntimeSupervisor")
+        )
+        assertTrue(
+            "the production chat facade must receive the real engine execution body",
+            container.contains("executionBody = com.muyuchat.mca.chatExecutionBodyFor(engine)")
+        )
+        assertTrue(
+            "the production image gate must be the real supervisor-backed owner",
+            container.contains("ImageExecutionOwner(sharedRuntimeSupervisor)")
+        )
+        assertTrue(
+            "the production worker client must use the process image gate",
+            container.contains("LocalImageWorkerClient(application, imageExecutionGate)")
+        )
+        assertTrue(
+            "the image-generation owner must have one container construction",
+            imageParts.contains("): ImageGenerationOwner = ImageGenerationOwner(")
+        )
+        assertTrue(
+            "the ViewModel must initialize the owner through the composition runtime assembly",
+            mainViewModel.contains("runtimeAssembly.initializeImageGenerationOwner(")
+        )
+        assertTrue(
+            "the runtime assembly must use the container-created image-generation owner",
+            mainRuntimeAssembly.contains("container.createImageGenerationOwner(")
         )
 
-        val identity = imageFacade.dispatchImage(cmd) { /* no-op */ }
-
-        assertNotNull(identity)
-        assertEquals("req-img-001", identity.requestId)
-        assertEquals(1L, identity.runtimeEpoch)
-        assertTrue(imageFacade.isImageActive("req-img-001"))
-
-        val cancelled = imageFacade.cancelImage("req-img-001")
-        assertTrue(cancelled)
-
-        supervisor.shutdownProcess()
-    }
-
-    @Test
-    fun testModelLifecycleFacadeRefusesToFakeALoad() {
-        val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        // Recording loader: reports the truth (nothing was loaded) and records whether the
-        // facade released the engine before failing. A fake backend that reported success here
-        // would re-introduce exactly the fake-ready defect this test exists to prevent.
-        val engine = RecordingNotReadyEngine("engine-1", "/models/never-loaded.bin")
-        val backend = RecordingBackend(backendKind = "GenericCpu", epoch = supervisor.currentEpoch, engine = engine)
-        supervisor.registerBackend("GenericCpu", backend)
-
-        val modelFacade = ModelLifecycleFacade(supervisor)
-
-        val tempModel = File.createTempFile("mca_test_model", ".bin")
-        try {
-            val failure = runCatching { modelFacade.loadModel("GenericCpu", tempModel.absolutePath) }
-                .exceptionOrNull()
-
-            assertTrue(
-                "an unwired skeleton must fail the load explicitly instead of reporting a fake ready engine",
-                failure is UnsupportedOperationException
+        val realOwners = mapOf(
+            "ChatExecutionFacade" to (CHAT_EXECUTION_FACADE to MCA_APP_CONTAINER),
+            "ImageExecutionOwner" to (IMAGE_EXECUTION_GATE to MCA_APP_CONTAINER),
+            "ImageGenerationOwner" to (IMAGE_GENERATION_OWNER to MCA_APP_CONTAINER_IMAGE_PARTS)
+        )
+        for ((type, locations) in realOwners) {
+            val (declarationFile, expectedConstructionFile) = locations
+            assertEquals(
+                "$type must have exactly one production construction site",
+                mapOf(expectedConstructionFile to 1),
+                constructionSites(sources, type, declarationFile)
             )
-            assertTrue("the failure must name the backend", failure!!.message!!.contains("GenericCpu"))
+        }
 
-            // Resource contract: the engine that could not become ready is closed and is NOT
-            // registered as a loaded model.
-            assertTrue("the unusable engine must be released", engine.closeCount == 1)
-            assertFalse(modelFacade.isModelLoaded(engine.engineId))
-            assertFalse(modelFacade.isModelLoaded("never-created"))
-            // Nothing was leaked into the facade, so unloading everything is a no-op that must not throw.
-            modelFacade.unloadAll()
-        } finally {
-            tempModel.delete()
-            supervisor.shutdownProcess()
+        val compositionSources = sources.filterKeys { it.startsWith("$PACKAGE_ROOT/composition/") }
+        assertEquals(
+            "the composition root must create exactly one shared runtime supervisor",
+            mapOf(MCA_APP_CONTAINER to 1),
+            constructionSites(compositionSources, "RuntimeSupervisor")
+        )
+
+        val removedOwners = listOf(
+            "ImageGenerationFacade",
+            "ModelLifecycleFacade",
+            "RuntimeFacade",
+            "LocalApiFacadeAdapter"
+        )
+        val allSource = sources.values.joinToString("\n")
+        for (removed in removedOwners) {
+            assertFalse(
+                "$removed must not remain as a production declaration",
+                Regex("""\b(?:class|interface|object)\s+${Regex.escape(removed)}\b""")
+                    .containsMatchIn(allSource)
+            )
+            assertTrue(
+                "$removed must not have a production construction site",
+                constructionSites(sources, removed).isEmpty()
+            )
         }
     }
 
-    private class RecordingNotReadyEngine(
-        override val engineId: String,
-        override val modelPath: String
-    ) : EnginePort {
-        var closeCount = 0
-        override val isReady: Boolean = false
-        override fun createSession(sessionId: String) = throw UnsupportedOperationException("not ready")
-        override fun unload() = Unit
-        override fun close() { closeCount++ }
+    private fun constructionSites(
+        sources: Map<String, String>,
+        type: String,
+        declarationFile: String? = null
+    ): Map<String, Int> {
+        val constructor = Regex("""\b${Regex.escape(type)}\s*\(""")
+        return sources
+            .filterKeys { it != declarationFile }
+            .mapValues { (_, source) -> constructor.findAll(source).count() }
+            .filterValues { it > 0 }
     }
 
-    private class RecordingBackend(
-        override val backendKind: String,
-        override val epoch: RuntimeEpoch,
-        private val engine: EnginePort
-    ) : BackendPort {
-        override val hardwareAdvisory = HardwareProbeAdvisory()
-        override val isInitialized = true
-        override fun createEngine(modelPath: String) = engine
-        override fun shutdown() = Unit
-        override fun close() = Unit
+    private fun productionKotlinSources(): Map<String, String> {
+        var directory = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        repeat(8) {
+            val sourceRoot = File(directory, "app/src/main/java")
+            if (sourceRoot.isDirectory) {
+                return sourceRoot.walkTopDown()
+                    .filter { it.isFile && it.extension == "kt" }
+                    .associate { file ->
+                        file.relativeTo(sourceRoot).invariantSeparatorsPath to file.readText(Charsets.UTF_8)
+                    }
+            }
+            directory = directory.parentFile
+                ?: error("app/src/main/java not found from ${System.getProperty("user.dir")}")
+        }
+        error("app/src/main/java not found from ${System.getProperty("user.dir")}")
+    }
+
+    private companion object {
+        const val PACKAGE_ROOT = "com/muyuchat/mca"
+        const val CHAT_EXECUTION_FACADE = "$PACKAGE_ROOT/facade/ChatExecutionFacade.kt"
+        const val IMAGE_EXECUTION_GATE = "$PACKAGE_ROOT/facade/ImageExecutionGate.kt"
+        const val IMAGE_GENERATION_OWNER = "$PACKAGE_ROOT/ImageGenerationOwner.kt"
+        const val MCA_APP_CONTAINER = "$PACKAGE_ROOT/composition/McaAppContainer.kt"
+        const val MCA_APP_CONTAINER_IMAGE_PARTS = "$PACKAGE_ROOT/composition/McaAppContainerImageParts.kt"
+        const val MAIN_VIEW_MODEL = "$PACKAGE_ROOT/MainViewModel.kt"
+        const val MAIN_RUNTIME_ASSEMBLY = "$PACKAGE_ROOT/composition/MainRuntimeAssembly.kt"
     }
 }

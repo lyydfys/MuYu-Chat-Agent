@@ -330,21 +330,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                 conversationContextRevision = frozenContextRevision
             ),
             executionContext
-        ) ?: engine.streamChat(
-            ChatRequest(
-                messages = localMessages,
-                params = activeRequestParams,
-                runtimeSystemContext = runtimeSystemContextForTurn,
-                persistentPrefixSystemPrompt = persistentLlamaPrefix,
-                persistentSessionId = frozenSession.id,
-                persistentRoleId = frozenAssistantId,
-                persistentRoleCardVersion = frozenRoleCardVersion,
-                persistentMemoryVersion = frozenMemoryRevision,
-                protectedMessageIds = localMessages.filter(ChatMessage::pinned).mapTo(hashSetOf()) { it.id },
-                conversationContextRevision = frozenContextRevision
-            ),
-            executionContext
-        )
+        ) ?: error("The single chat execution facade is not attached to LocalApiRuntime")
     }
     val runtimePhase = if (effectiveChatBackend == ChatBackend.LOCAL) {
         UiGenerationRuntimePhase.LOCAL_ACTIVE

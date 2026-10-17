@@ -1,9 +1,10 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.Role
-import com.muyuchat.core.engine.localContextWindowBudget
+import com.muyuchat.core.engine.contract.ChatRequest
+import com.muyuchat.core.engine.contract.GenerateEvent
+import com.muyuchat.core.engine.contract.GenerateEventError
+import com.muyuchat.core.engine.contract.Role
+import com.muyuchat.core.engine.contract.localContextWindowBudget
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -393,7 +394,7 @@ import java.net.Socket
             }
 
     internal fun generationErrorDetails(
-        error: GenerateEvent.Error,
+        error: GenerateEventError,
         requestId: String,
         generationSequence: Long?
     ): JSONObject = generationTraceJson(requestId, generationSequence).apply {
@@ -416,7 +417,7 @@ import java.net.Socket
     internal fun tokenOrNull(value: Int?): Any =
         value?.takeIf { it > 0 } ?: JSONObject.NULL
 
-    internal fun generationErrorStatus(error: GenerateEvent.Error): String {
+    internal fun generationErrorStatus(error: GenerateEventError): String {
         if (error.isContextLengthExceeded()) return "413 Payload Too Large"
         if (error.code in setOf(
                 "model_mismatch",
@@ -443,11 +444,11 @@ import java.net.Socket
         }
     }
 
-    internal fun generationErrorCode(error: GenerateEvent.Error): String =
+    internal fun generationErrorCode(error: GenerateEventError): String =
         if (error.isContextLengthExceeded()) CONTEXT_LENGTH_EXCEEDED_CODE
         else error.code ?: "generation_failed"
 
-    private fun GenerateEvent.Error.isContextLengthExceeded(): Boolean =
+    private fun GenerateEventError.isContextLengthExceeded(): Boolean =
         code.equals(CONTEXT_LENGTH_EXCEEDED_CODE, ignoreCase = true) ||
             message.isContextLengthExceededMessage()
 

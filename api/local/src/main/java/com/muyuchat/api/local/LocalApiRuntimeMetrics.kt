@@ -5,9 +5,9 @@ import org.json.JSONObject
 
 internal fun LocalApiRuntime.nativeStatsObject(): JSONObject? = runCatching {
         // Read the stats source from one captured set, like every other runtime call, so a stats
-        // request cannot pair the new owner's provider with the previous owner's engine.
+        // request cannot pair providers from different owner publications.
         val bindings = currentBindings()
-        bindings.nativeStatsJsonProvider?.invoke() ?: bindings.engine?.nativeStatsJson()
+        bindings.nativeStatsJsonProvider?.invoke() ?: "{}"
     }.getOrNull()?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
 
 internal fun LocalApiRuntime.nativeMetricsObject(): JSONObject {

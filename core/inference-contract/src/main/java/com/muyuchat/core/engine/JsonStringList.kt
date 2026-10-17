@@ -23,9 +23,11 @@ import org.json.JSONArray
  * the search path, and both are behaviour changes. The two real copies are unified; the third is
  * recorded here so the difference is visible rather than looking like an oversight.
  */
-public fun JSONArray.toStringList(): List<String> = buildList {
-    for (index in 0 until length()) {
-        val value = optString(index)
+public fun JSONArray.toStringList(): List<String> = collectJsonStringList(this)
+
+internal fun collectJsonStringList(array: JSONArray): List<String> = buildList {
+    for (index in 0 until array.length()) {
+        val value = array.optString(index)
         if (value.isNotBlank()) add(value)
     }
 }

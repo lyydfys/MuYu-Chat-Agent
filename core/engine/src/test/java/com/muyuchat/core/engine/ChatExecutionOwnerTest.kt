@@ -1,6 +1,11 @@
 package com.muyuchat.core.engine
 
+import com.muyuchat.core.engine.contract.ErrorCategory
+import com.muyuchat.core.engine.contract.ErrorEnvelope
+import com.muyuchat.core.engine.contract.ErrorPhase
 import com.muyuchat.core.engine.contract.RequestState
+import com.muyuchat.core.engine.contract.Retryability
+import com.muyuchat.core.engine.contract.error.StableErrorCode
 import com.muyuchat.core.engine.runtime.RuntimeSupervisor
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -88,6 +93,10 @@ class ChatExecutionOwnerTest {
         assertFalse(supervisor.requestRegistry.isActive("t-fail"))
         val record = supervisor.callbackRouter.terminalRecord("t-fail")
         assertEquals(RequestState.Failed, record?.finalState)
+        val terminalError = requireNotNull(record?.terminalError)
+        assertEquals(StableErrorCode.INT_UNEXPECTED_EXCEPTION, terminalError.code)
+        assertEquals("t-fail", terminalError.identity?.requestId)
+        assertEquals("t-fail", terminalError.traceId)
     }
 
     @Test
@@ -100,7 +109,54 @@ class ChatExecutionOwnerTest {
 
         owner.stream(request(), context("t-error")).collect { }
 
-        assertEquals(RequestState.Failed, supervisor.callbackRouter.terminalRecord("t-error")?.finalState)
+        val record = requireNotNull(supervisor.callbackRouter.terminalRecord("t-error"))
+        assertEquals(RequestState.Failed, record.finalState)
+        val terminalError = requireNotNull(record.terminalError)
+        assertEquals(StableErrorCode.NAT_EXECUTION_FAULT, terminalError.code)
+        assertEquals(ErrorCategory.Native, terminalError.category)
+        assertEquals("boom", terminalError.publicMessage)
+        assertEquals("t-error", terminalError.identity?.requestId)
+        assertEquals("t-error", terminalError.traceId)
+    }
+
+    @Test
+    fun typedErrorEventKeepsEnvelopeCodesIdentityAndTraceThroughCleanup() = runBlocking {
+        val supervisor = RuntimeSupervisor()
+        val eventEnvelope = ErrorEnvelope(
+            code = StableErrorCode.MDL_LOAD_FAILED,
+            category = ErrorCategory.Model,
+            phase = ErrorPhase.Load,
+            retryability = Retryability.RetryAfterRecovery,
+            userMessageKey = "error.model.load_failed",
+            publicMessage = "The model could not be loaded.",
+            causeChain = listOf("native graph rejected the bundle"),
+            nativeCode = 203,
+            httpCode = 503,
+            traceId = "trace-event-42"
+        )
+        val body = FakeChatBody {
+            flowOf(
+                GenerateEvent.Error(
+                    message = "The model could not be loaded.",
+                    stats = RuntimeStats(),
+                    code = StableErrorCode.MDL_LOAD_FAILED.name,
+                    errorEnvelope = eventEnvelope
+                )
+            )
+        }
+        val owner = ChatExecutionOwner(supervisor, body)
+
+        owner.stream(request(), context("t-typed-error")).collect { }
+
+        assertNull("terminal cleanup must evict the live registry entry", supervisor.requestRegistry.snapshot("t-typed-error"))
+        val record = requireNotNull(supervisor.callbackRouter.terminalRecord("t-typed-error"))
+        assertEquals(RequestState.Failed, record.finalState)
+        val terminalError = requireNotNull(record.terminalError)
+        assertEquals(record.identity, terminalError.identity)
+        assertEquals("trace-event-42", terminalError.traceId)
+        assertEquals(203, terminalError.nativeCode)
+        assertEquals(503, terminalError.httpCode)
+        assertEquals(eventEnvelope.copy(identity = record.identity), terminalError)
     }
 
     @Test
@@ -113,7 +169,11 @@ class ChatExecutionOwnerTest {
 
         owner.stream(request(), context("t-cancel-event")).collect { }
 
-        assertEquals(RequestState.Cancelled, supervisor.callbackRouter.terminalRecord("t-cancel-event")?.finalState)
+        val record = requireNotNull(supervisor.callbackRouter.terminalRecord("t-cancel-event"))
+        assertEquals(RequestState.Cancelled, record.finalState)
+        val terminalError = requireNotNull(record.terminalError)
+        assertEquals(ErrorCategory.Cancel, terminalError.category)
+        assertEquals(StableErrorCode.CNC_USER_CANCELLED, terminalError.code)
     }
 
     @Test
@@ -145,6 +205,10 @@ class ChatExecutionOwnerTest {
         assertEquals(
             RequestState.Cancelled,
             supervisor.callbackRouter.terminalRecord("t-collector-cancel")?.finalState
+        )
+        assertEquals(
+            ErrorCategory.Cancel,
+            supervisor.callbackRouter.terminalRecord("t-collector-cancel")?.terminalError?.category
         )
     }
 

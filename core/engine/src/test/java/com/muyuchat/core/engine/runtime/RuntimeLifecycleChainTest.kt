@@ -1,9 +1,14 @@
 package com.muyuchat.core.engine.runtime
 
 import com.muyuchat.core.engine.contract.CallbackEvent
+import com.muyuchat.core.engine.contract.ErrorCategory
+import com.muyuchat.core.engine.contract.ErrorEnvelope
+import com.muyuchat.core.engine.contract.ErrorPhase
 import com.muyuchat.core.engine.contract.RequestIdentity
 import com.muyuchat.core.engine.contract.RequestState
+import com.muyuchat.core.engine.contract.Retryability
 import com.muyuchat.core.engine.contract.RuntimeEpoch
+import com.muyuchat.core.engine.contract.error.StableErrorCode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -175,6 +180,44 @@ class RuntimeLifecycleChainTest {
 
         assertEquals(2, receivedEvents.size)
         assertTrue(router.droppedStaleCount() >= 4)
+    }
+
+    @Test
+    fun testCallbackRouterRetainsTypedErrorOnTheTerminalRecord() {
+        val router = CallbackRouter()
+        val identity = RequestIdentity(
+            requestId = "req-router-error",
+            attemptId = 3L,
+            runtimeEpoch = 2L,
+            sessionGeneration = 2L,
+            traceId = "trace-router-error"
+        )
+        val envelope = ErrorEnvelope(
+            code = StableErrorCode.NAT_EXECUTION_FAULT,
+            category = ErrorCategory.Native,
+            phase = ErrorPhase.Execute,
+            retryability = Retryability.SafeRetry,
+            userMessageKey = "error.native.execution_fault",
+            publicMessage = "Native execution failed.",
+            nativeCode = 204,
+            httpCode = 502
+        )
+        router.subscribe(identity) { }
+
+        assertTrue(
+            router.routeEvent(
+                CallbackEvent.error(identity, sequence = 0L, error = envelope, monotonicTimeMs = 1L),
+                currentRuntimeEpoch = 2L,
+                currentSessionGeneration = 2L
+            )
+        )
+
+        val record = requireNotNull(router.terminalRecord(identity))
+        assertEquals(RequestState.Failed, record.finalState)
+        assertEquals(
+            envelope.copy(identity = identity, traceId = identity.traceId),
+            record.terminalError
+        )
     }
 
     @Test

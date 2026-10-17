@@ -73,6 +73,22 @@ set_source_files_properties(
         TARGET_DIRECTORY stable-diffusion
         PROPERTIES COMPILE_OPTIONS "-O0")
 
+# Runtime lifecycle state for this DSO is intentionally backend-local.  The core
+# native CMake project compiles the same source pair into its own DSOs; a STATIC
+# singleton is never assumed to be unique across libraries or processes.  The
+# Kotlin RuntimeSupervisor remains the authoritative process epoch.  Hidden
+# visibility keeps ProcessRuntimeHost::instance() from being preempted by another
+# DSO that happens to export the same implementation symbol.
+add_library(mca_sd_runtime_backend_local STATIC
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp)
+target_include_directories(mca_sd_runtime_backend_local PRIVATE
+        ${MCA_IMAGE_EXECUTION_MATH_DIR})
+set_target_properties(mca_sd_runtime_backend_local PROPERTIES
+        POSITION_INDEPENDENT_CODE ON
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET hidden)
+
 add_library(mca_sd_native SHARED
         stable_diffusion_bridge.cpp
         sd_prompt_token_measure.cpp
@@ -106,8 +122,6 @@ add_library(mca_sd_native SHARED
         mca/sd/sd_preview_encoder.cpp
         mca/sd/sd_evidence_verifier.cpp
         mca/sd/sd_response_builder.cpp
-        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/process_runtime_host.cpp
-        ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/runtime/backend_runtime.cpp
         ${MCA_IMAGE_EXECUTION_MATH_DIR}/mca/common/logging.cpp)
 target_include_directories(mca_sd_native PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
@@ -120,4 +134,4 @@ if(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "arm64-v8a")
 elseif(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "x86_64")
     target_compile_definitions(mca_sd_native PRIVATE MCA_SD_X86_64=1)
 endif()
-target_link_libraries(mca_sd_native PRIVATE stable-diffusion android log)
+target_link_libraries(mca_sd_native PRIVATE mca_sd_runtime_backend_local stable-diffusion android log)

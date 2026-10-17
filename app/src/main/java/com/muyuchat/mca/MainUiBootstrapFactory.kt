@@ -9,7 +9,6 @@ import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatRuntime
-import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.mca.composition.McaAppContainer
 
 internal data class MainUiBootstrapResult(
@@ -23,7 +22,7 @@ internal object MainUiBootstrapFactory {
     fun create(
         application: Application,
         container: McaAppContainer,
-        engine: McaInferenceService,
+        isRuntimeAvailable: (LocalChatRuntime) -> Boolean,
         modelScopeClient: ModelScopeClient,
         agentLogger: AgentDecisionLogger,
         benchmarkHistoryLogger: BenchmarkHistoryLogger,
@@ -151,7 +150,7 @@ internal object MainUiBootstrapFactory {
                 ChatBackend.LOCAL
             },
             models = emptyList(),
-            mnnRuntimeAvailable = engine.isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
+            mnnRuntimeAvailable = isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
             recommendedRemoteModels = sortRecommendedModels(
                 modelScopeClient.userFacingRecommendedModels(),
                 initialDeviceProfile

@@ -36,7 +36,7 @@ class LocalImageProductClosureTest {
         assertTrue(ui.contains("requestId = child.requestId"))
         assertTrue(localAsset.contains("requestId = requestId"))
         assertFalse(localAsset.contains("requestId = \"ui-img-"))
-        assertTrue(api.contains("tryAcquireObservedImageGenerationLease(requestId)"))
+        assertTrue(api.contains("port.runLocalApiImageOperation(requestId)"))
         assertTrue(api.contains("requestId = requestId"))
     }
 
@@ -543,7 +543,7 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadT
         assertTrue(api.contains("code = \"unsupported_preview_transport\""))
         assertTrue(
             api.indexOf("if (request.preview != null)") <
-                api.indexOf("tryAcquireObservedImageGenerationLease(requestId)")
+                api.indexOf("port.runLocalApiImageOperation(requestId)")
         )
     }
 
@@ -652,6 +652,10 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadT
             "core/native/src/main/cpp/mca/mnn/mnn_diffusion_state.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize_entries.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate_entries.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_chat_entries.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_chat_lifecycle_entries.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_clip_encode.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_sd15_direct.cpp"
         ).joinToString("") { sourceFile(it) }

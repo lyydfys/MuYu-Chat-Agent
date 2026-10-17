@@ -168,6 +168,8 @@ class MnnPromptCacheNativeContractTest {
             // build_mnn_config, JNI entries) was relocated out of the monolith.
             "core/native/src/main/cpp/mca/mnn/mnn_chat_session.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_chat_entries.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_chat_lifecycle_entries.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_chat_completion.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_prompt_cache_manager.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_template_parser.cpp",
             "core/native/src/main/cpp/mca/mnn/mnn_stats_collector.cpp",

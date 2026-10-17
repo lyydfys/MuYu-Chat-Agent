@@ -87,7 +87,7 @@ class ManagedRuntimeReadinessRefreshGateTest {
     @Test
     fun `every manifest validating UI path publishes the refreshed catalog before continuing`() {
         // v4-①：读者位置无关——按标记定位承载文件，文件不再含路径字面量；断言语义不变。
-        val source = SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
+        val source = SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads internal constructor(")
         // R3-S24: the load chain moved to LoadModelOperations.kt; the load half is read where it
         // now lives（发布调用拼写随迁 publishChatCatalogSnapshot(readinessPort)），
         // verify/smoke halves stay on the ViewModel. Same ordering contract.

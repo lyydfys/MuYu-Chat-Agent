@@ -1161,6 +1161,41 @@ json run_mnn_sd15_interpreter_direct(
 }
 #endif
 
+#if MCA_WITH_MNN_DIFFUSION
+json run_unet_interpreter_smoke(const std::string& root, const std::string& backendMode) {
+    std::vector<UnetSmokeProfile> profiles;
+    const auto batches = mca::mnn::diffusionBatchCandidates(true);
+    profiles.reserve(batches.count);
+    for (size_t index = 0; index < batches.count; ++index) {
+        const int batch = batches.values[index];
+        profiles.push_back({
+                batch == 2 ? "defer-inside-batch2" : "defer-inside-batch1",
+                true,
+                false,
+                batch
+        });
+    }
+    json attempts = json::array();
+    json best = json::object();
+    for (const auto& profile : profiles) {
+        auto attempt = run_unet_interpreter_smoke_once(root, backendMode, profile);
+        attempts.push_back(attempt);
+        if (attempt.value("ok", false)) {
+            attempt["attempts"] = attempts;
+            return attempt;
+        }
+        // If every candidate fails, surface the final batch-1 compatibility
+        // attempt while retaining all earlier attempts for diagnosis.
+        best = attempt;
+    }
+    if (best.empty()) {
+        best = json({{"ok", false}, {"error", "UNet smoke did not run any profile."}});
+    }
+    best["attempts"] = attempts;
+    return best;
+}
+#endif
+
 }  // namespace diffusion_detail
 }  // namespace mnn
 }  // namespace mca

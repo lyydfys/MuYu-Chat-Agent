@@ -210,6 +210,8 @@ internal class McaAppContainer(internal val application: Application) {
 
     val modelStore = ModelStoreRepository(application)
 
+    val modelScopeClient = com.muyuchat.core.download.ModelScopeClient()
+
     val benchmarkHistoryLogger = BenchmarkHistoryLogger(application)
 
     val readinessRefreshGate = ManagedRuntimeReadinessRefreshGate()

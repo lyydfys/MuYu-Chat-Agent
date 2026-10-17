@@ -32,7 +32,7 @@ internal class MainCoordinatorHostAdapter(
     override val scope get() = vm.viewModelScope
     override val application get() = vm.getApplication<Application>()
     override val container get() = vm.container
-    override val engine get() = vm.engine
+    override val engine get() = vm.runtimeAssembly.engine
     override val initialChatSessions get() = vm.initialChatSessions
     override val chatContextComposer get() = vm.chatContextComposer
     override val tuningOwner get() = vm.tuningOwner

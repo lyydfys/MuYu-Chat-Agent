@@ -154,9 +154,9 @@ internal suspend fun McaInferenceService.preflightChatImpl(
         parameterCoordinator.preflight(
             identity = session.runtimeIdentity,
             requestParamsJson = request.params.toJson(),
-            trustedAuthorization = executionContext.loadAuthorization,
+            trustedAuthorization = executionContext.engineLoadAuthorization,
             allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
-            hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+            hotOverrideAuthorization = executionContext.engineHotOverrideAuthorization
         )
     }
 
@@ -182,11 +182,14 @@ internal fun McaInferenceService.deferPendingAuthorization(
     }
 
 internal suspend fun <T> McaInferenceService.withLifecycleLock(
-        lease: EngineLifecycleLease?,
+        lease: EngineLifecycleLeaseHandle?,
         block: suspend () -> T
     ): T {
         if (lease == null) return mutex.withLock { block() }
-        require(lease.service === this && lease.active && mutex.holdsLock(lease.ownerToken)) {
+        val engineLease = lease as? EngineLifecycleLease
+        require(engineLease != null && engineLease.service === this && engineLease.active &&
+            mutex.holdsLock(engineLease.ownerToken)
+        ) {
             "lifecycle lease is invalid, released, or belongs to another engine"
         }
         return block()

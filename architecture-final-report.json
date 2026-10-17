@@ -1,5 +1,5 @@
 {
-  "title": "MCA Enterprise S-Grade Architecture Audit Report (Corrected Baseline)",
+  "title": "MCA Enterprise S-Grade Architecture Audit Report (Evidence-Bound)",
   "working_tree": "E:\\MAC",
   "jdk_environment": {
     "version": "openjdk version \"21.0.12.1\" 2026-08-18 LTS",
@@ -10,38 +10,324 @@
   "overall_status": "IN_PROGRESS_NOT_S_GRADE",
   "blockers": [
     "release_integrity",
-    "fault_injection_matrix",
-    "bridge_line_budgets",
-    "device_and_reliability_evidence"
+    "runtime_evidence",
+    "runtime_evidence_contract",
+    "S-R",
+    "S-O"
+  ],
+  "required_gates": [
+    "canonical_apk",
+    "architecture_rules",
+    "source_level_s_c",
+    "release_integrity",
+    "runtime_evidence",
+    "runtime_evidence_contract",
+    "policy_test",
+    "local_only_guard",
+    "required_reports",
+    "preprocessor_balance",
+    "qnn_runtime_compiles",
+    "viewmodel_line_budget"
   ],
   "gate_results": {
+    "canonical_apk": "PASSED",
     "architecture_rules": "PASSED",
     "release_integrity": "FAILED",
-    "fault_injection_matrix": "MODEL_ONLY_UNVERIFIED",
+    "runtime_evidence": "FAILED",
+    "runtime_evidence_contract": "FAILED",
+    "fault_injection_matrix": "FAILED",
+    "device_and_reliability_evidence": "FAILED",
+    "policy_test": "PASSED",
     "local_only_guard": "PASSED",
     "required_reports": "PASSED",
+    "bridge_line_budgets": "WITHIN_BUDGET",
     "preprocessor_balance": "PASSED",
     "qnn_runtime_compiles": "PASSED",
-    "bridge_line_budgets": "FAILED",
     "viewmodel_line_budget": "PASSED",
-    "device_and_reliability_evidence": "UNVERIFIED"
+    "source_level_s_c": "PASSED"
+  },
+  "gate_reasons": {
+    "canonical_apk": "canonical APK bytes and SHA-256 resolved",
+    "architecture_rules": "Architecture Rules Gate exited 0",
+    "release_integrity": "Release Integrity Gate exited 1: === MCA S-Grade Release Integrity & Gate Verification ===\n--> [Gate] Canonical APK: E:\\MAC\\artifacts\\rc\\final\\MCA-v0.2.4-arm64-v8a.apk (181360536 bytes, SHA-256 298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514)\n--> [Gate] Architecture Rules Gate...\n    PASSED: Architecture Rules Gate\n--> [Gate] SBOM schema and pinned versions verified (60 packages)\n--> [Gate] 16 KB Page-Size Audit: APK-bound report verified against canonical APK SHA-256 (94 packaged binaries, 0 unaligned)\n    FAILED: APK-bound production fault report is malformed or incomplete: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json\n    runtime fault report file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json\n    Existing contract-model report is diagnostic only: scope=contract_model_only, production=0, device=0\n-------------------------------------------\nRELEASE INTEGRITY CHECKS FAILED",
+    "runtime_evidence": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+    "runtime_evidence_contract": "final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+    "fault_injection_matrix": "production fault evidence is governed only by runtime_evidence_verification",
+    "device_and_reliability_evidence": "device/UI/API/soak evidence is governed only by runtime_evidence_verification",
+    "policy_test": "policy test XML proves 5 tests with 0 failures, 0 errors, 0 skipped",
+    "local_only_guard": "AGENTS.md: excluded; app/src/test/java/com/muyuchat/mca/UniversalDeviceAdmissionPolicyTest.kt: excluded",
+    "required_reports": "all required release reports are present",
+    "bridge_line_budgets": "advisory only; all bridges within the directional threshold",
+    "preprocessor_balance": "Preprocessor Structural Balance exited 0",
+    "qnn_runtime_compiles": "QNN Runtime Modules Compile exited 0",
+    "viewmodel_line_budget": "MainViewModel.kt has 498 lines; hard limit is 600",
+    "source_level_s_c": "MainViewModel dependency budget, production owner boundaries, MNN JNI TU limits, typed error terminal chain, and native dependency direction all passed",
+    "release_artifact:signed": "runtime validator did not provide an APK signature check",
+    "release_artifact:reproducible": "reproducibility equal=true, at least two builds, and every SHA-256/byte count matches the canonical APK",
+    "release_artifact:provenance": "artifact report is APK-bound and PASS",
+    "S-C": "architecture rules, source-level boundaries, policy JUnit XML, and MainViewModel limit all passed",
+    "S-R": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+    "S-O": "S-O requires the release integrity gate to PASS"
+  },
+  "canonical_apk": {
+    "status": "PASSED",
+    "path": "E:\\MAC\\artifacts\\rc\\final\\MCA-v0.2.4-arm64-v8a.apk",
+    "bytes": 181360536,
+    "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "requested_expected_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "expected_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "reason": "canonical APK bytes and SHA-256 resolved"
+  },
+  "apksigner_discovery": {
+    "status": "AVAILABLE",
+    "tool": "E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat",
+    "sdk_root": "E:\\model\\android-sdk",
+    "source": "explicit",
+    "environment": {
+      "APKSIGNER": "E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat",
+      "ANDROID_HOME": "E:\\model\\android-sdk",
+      "ANDROID_SDK_ROOT": "E:\\model\\android-sdk"
+    },
+    "reason": "apksigner available for runtime verification: E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat"
+  },
+  "runtime_evidence_verification": {
+    "status": "FAILED",
+    "exit_code": null,
+    "command": null,
+    "expected_apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "process_environment": {},
+    "summary": null,
+    "raw": null,
+    "reason": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+    "evidence": {
+      "evidence_dir": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h",
+      "expected_soak_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json",
+      "expected_fault_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json",
+      "soak_report": null,
+      "fault_report": null,
+      "device_reports": [],
+      "missing": [
+        "soak-report.json",
+        "fault-report.json",
+        "device-*.json"
+      ]
+    },
+    "contract": {
+      "status": "FAILED",
+      "reason": "final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+      "failed_checks": [
+        "device.report_count",
+        "device.same_apk_sha256",
+        "device.unique_physical_arm64",
+        "fault.report",
+        "soak.report"
+      ],
+      "checks": {
+        "apk.canonical": {
+          "status": "PASSED",
+          "reason": "canonical APK SHA-256 and byte size are available",
+          "computed": {
+            "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+            "bytes": 181360536
+          }
+        },
+        "soak.report": {
+          "status": "FAILED",
+          "reason": "soak report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json",
+          "computed": {
+            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json"
+          }
+        },
+        "fault.report": {
+          "status": "FAILED",
+          "reason": "fault report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json",
+          "computed": {
+            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json"
+          }
+        },
+        "device.report_count": {
+          "status": "FAILED",
+          "reason": "at least 2 device-*.json reports are required",
+          "computed": {
+            "report_count": 0,
+            "paths": []
+          }
+        },
+        "device.unique_physical_arm64": {
+          "status": "FAILED",
+          "reason": "two unique physical ARM64 device reports with complete identity are required",
+          "computed": {
+            "serials": [],
+            "unique_serials": [],
+            "reports": []
+          }
+        },
+        "device.same_apk_sha256": {
+          "status": "FAILED",
+          "reason": "one or more device reports are not bound to the canonical APK SHA-256",
+          "computed": {
+            "canonical_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+            "reports": []
+          }
+        }
+      }
+    }
+  },
+  "policy_test": {
+    "path": "E:\\MAC\\app\\build\\test-results\\testDebugUnitTest\\TEST-com.muyuchat.mca.UniversalDeviceAdmissionPolicyTest.xml",
+    "status": "PASSED",
+    "reason": "policy test XML proves 5 tests with 0 failures, 0 errors, 0 skipped",
+    "tests": 5,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "testcases_observed": 5,
+    "time_seconds": 19.556,
+    "architecture_rules": {
+      "status": "PASSED",
+      "reason": "Architecture Rules Gate exited 0",
+      "role": "additional evidence only"
+    }
   },
   "universal_device_admission": "VERIFIED_COMPLIANT",
   "local_only_guard": "VERIFIED_ISOLATED",
+  "contract_model_evidence": {
+    "status": "ANNOTATION_ONLY",
+    "path": "E:\\MAC\\tools\\fault-injection\\fault_matrix_report.json",
+    "invoked": false,
+    "gate_impact": "NONE",
+    "counts_toward_production_verified": false,
+    "production_verified": false,
+    "reason": "model/contract evidence retained for review only; production fault evidence must come from runtime_evidence_verification",
+    "report_summary": {
+      "evidence_scope": "contract_model_only",
+      "evidence_status": "EXECUTED",
+      "total_scenarios": 22,
+      "contract_model_scenarios": 22,
+      "production_injection_scenarios": 0,
+      "device_verified_scenarios": 0,
+      "verified_scenarios": 0
+    }
+  },
+  "release_artifact_checks": {
+    "signed": {
+      "status": "UNVERIFIED",
+      "source": "runtime_evidence_verification.checks.apk.signature",
+      "tool": "E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat",
+      "reason": "runtime validator did not provide an APK signature check"
+    },
+    "reproducible": {
+      "status": "PASSED",
+      "path": "E:\\MAC\\artifacts\\rc\\final\\reproducibility-report.json",
+      "declared_status": "PASSED",
+      "apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "reason": "reproducibility equal=true, at least two builds, and every SHA-256/byte count matches the canonical APK",
+      "equal_required": true,
+      "minimum_builds": 2,
+      "equal": true,
+      "builds_observed": 2,
+      "expected_apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "expected_apk_bytes": 181360536,
+      "top_level_apk_bytes": 181360536,
+      "builds": [
+        {
+          "index": 0,
+          "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+          "bytes": 181360536,
+          "ok": true
+        },
+        {
+          "index": 1,
+          "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+          "bytes": 181360536,
+          "ok": true
+        }
+      ],
+      "candidates": [
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\reproducible-build-report.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\reproducibility-report.json",
+        "E:\\MAC\\artifacts\\rc\\final\\reproducible-build-report.json",
+        "E:\\MAC\\artifacts\\rc\\final\\reproducibility-report.json",
+        "E:\\MAC\\artifacts\\rc\\reproducible-build-report.json",
+        "E:\\MAC\\artifacts\\rc\\reproducibility-report.json",
+        "E:\\MAC\\build\\reproducible-build-report.json",
+        "E:\\MAC\\build\\reproducibility-report.json"
+      ]
+    },
+    "provenance": {
+      "status": "PASSED",
+      "path": "E:\\MAC\\artifacts\\rc\\final\\build-provenance.json",
+      "declared_status": "PASSED",
+      "apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "reason": "artifact report is APK-bound and PASS",
+      "candidates": [
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\build-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\release-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\build-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\release-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\provenance.json",
+        "E:\\MAC\\artifacts\\rc\\build-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\release-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\provenance.json",
+        "E:\\MAC\\build\\build-provenance.json",
+        "E:\\MAC\\build\\release-provenance.json",
+        "E:\\MAC\\build\\provenance.json"
+      ]
+    },
+    "canonical_apk": {
+      "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "bytes": 181360536
+    }
+  },
   "rating_evaluation": {
-    "S-C": "BLOCKED (11664 bridge lines; MainViewModel 501 lines)",
-    "S-R": "UNVERIFIED_REAL_FAULT_AND_SOAK_EVIDENCE",
-    "S-O": "UNVERIFIED_RELEASE_INTEGRITY"
+    "S-C": "PASSED",
+    "S-R": "FAILED_RUNTIME_EVIDENCE",
+    "S-O": "BLOCKED_RELEASE_INTEGRITY"
+  },
+  "rating_reasons": {
+    "S-C": "architecture rules, source-level boundaries, policy JUnit XML, and MainViewModel limit all passed",
+    "S-R": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
+    "S-O": "S-O requires the release integrity gate to PASS"
+  },
+  "source_level_s_c": {
+    "status": "PASSED",
+    "failures": [],
+    "details": {
+      "forbidden_main_viewmodel_dependencies": [],
+      "runtime_assembly_creates_engine": true,
+      "api_local_engine_references": [],
+      "api_local_core_engine_module_edge": false,
+      "unwired_facade_files_present": [
+        "app/src/main/java/com/muyuchat/mca/facade/ImageGenerationFacade.kt"
+      ],
+      "mnn_jni_translation_units": {
+        "mnn_chat_entries.cpp": 261,
+        "mnn_chat_lifecycle_entries.cpp": 179,
+        "mnn_diffusion_generate_entries.cpp": 155,
+        "mnn_diffusion_tokenize_entries.cpp": 412
+      },
+      "chat_execution_has_no_direct_engine_fallback": true,
+      "typed_terminal_error_chain": true,
+      "runtime_lifecycle_independent_of_jni": true,
+      "sd_runtime_backend_local": true
+    }
+  },
+  "bridge_line_budget": {
+    "advisory": true,
+    "limit": 1500,
+    "over_budget": {},
+    "status": "WITHIN_BUDGET"
   },
   "giant_bridges_debt": {
-    "qnn_native_bridge.cpp": 952,
-    "mnn_native_engine.cpp": 7725,
-    "native_engine.cpp": 1586,
-    "stable_diffusion_bridge.cpp": 1401,
-    "total_unmigrated_lines": 11664
+    "qnn_native_bridge.cpp": 502,
+    "mnn_native_engine.cpp": 133,
+    "native_engine.cpp": 690,
+    "stable_diffusion_bridge.cpp": 700,
+    "total_unmigrated_lines": 2025
   },
   "viewmodel_debt": {
-    "MainViewModel.kt": 501,
+    "MainViewModel.kt": 498,
     "target_lines": 600,
     "over_lines": 0
   }

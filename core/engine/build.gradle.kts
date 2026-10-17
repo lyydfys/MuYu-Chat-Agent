@@ -75,6 +75,7 @@ android {
 }
 
 dependencies {
+    api(project(":core:inference-contract"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:native"))
     implementation(project(":core:telemetry"))

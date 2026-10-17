@@ -180,7 +180,7 @@ internal class ChatWorkflowCoordinator(
                 }
             } else if (!isLocalVisionRunnerAvailable(viewModel.visionAttachmentPort)) {
                 store.update {
-                    it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { viewModel.engine.nativeStatsJson() }.getOrNull()))
+                    it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { viewModel.runtimeAssembly.nativeStatsJson() }.getOrNull()))
                 }
                 return
             }

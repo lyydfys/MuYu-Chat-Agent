@@ -16,7 +16,7 @@ import com.muyuchat.mca.QnnImageEvidenceEntryPoint
 import kotlinx.coroutines.flow.StateFlow
 
 /** Local API image generation contracts: worker/LoRA gateways, bounds and the
- *  host port. Moved verbatim out of LocalApiImageGenerationOperations.kt.
+ *  owner-backed execution port.
  */
 
 /**
@@ -51,51 +51,21 @@ internal interface LocalApiImageLoraGateway {
  */
 internal data class LocalApiImageBounds(val outWidth: Int, val outHeight: Int)
 
+/** Owner 在 Local API 请求进入执行区后，为该请求绑定当前模型身份。 */
+internal interface LocalApiImageOperationBinding {
+    fun bindModel(modelId: String)
+
+    fun isCancellationRequested(): Boolean
+}
+
 /**
- * `generateLocalApiImage` 在 `MainViewModel` 里触碰的全部宿主能力。
+ * Local API 协议操作需要读取的宿主能力。
  *
- * 端口面是照着函数体里出现的 **VM 成员访问**逐个列出来的，没有「捕获 VM」的兜底。按方向分组：
- *
- * ### 读快照（`_uiState.value`，6 处）
- * [uiState] 暴露只读的 `StateFlow`；`uiState.value` 与原 `_uiState.value` 读取时机完全一致。
- *
- * ### 发布变更（`_uiState.update { }`，3 处）
- * [updateUiState] 必须由宿主机委托给真正的 `MutableStateFlow.update`，以保留「读-改-写」的 CAS
- * 原子性。3 处调用中有 2 处位于 `synchronized` 块内，原子性与加锁范围不变。
- *
- * ### 独立快照查询
- * [selectedLocalImageModel] 对应原 `private fun MainUiState.selectedLocalImageModel()`：那是
- * `MainViewModel` 的私有扩展，跨包不可见，因此单独成为端口能力，而不是让函数体自己筛
- * `localImageModels`（那会改变默认模型的选择规则）。
- *
- * ### 锁与跨请求状态
- * [localImageLoraLifecycleLock]、[localImageTextualInversionLifecycleLock] 以对象身份暴露，
- * 因此 `synchronized(...)` 的**锁粒度与原有互斥关系不变**；[activeLocalApiImageModelId] 是
- * 跨请求可见的 `@Volatile` 字段，只是换了一处存放。
- *
- * ### 协作方
- * [localImageWorkerClient]、[localImageLoraStore] 是窄化的协作方面，不是原对象。
- *
- * ### 租约与取消归属
- * [tryAcquireObservedImageGenerationLease] / [releaseObservedImageGenerationLease] /
- * [registerLocalApiImageGenerationOwnership] / [unregisterLocalApiImageGenerationOwnership] /
- * [cancelOwnedLocalApiImageWorker] 保持原有的成对顺序与返回值语义（`check(...)` 依旧校验返回值）。
- *
- * ### 需要 VM 上下文的纯逻辑
- * [resolveCurrentLocalImageLoras]（含读取默认记录的 1 参重载）、
- * [resolveCurrentLocalImageTextualInversionIds]（1 参重载，内部读快照）、
- * [prepareLocalImagePromptExecution]、[executionWithQnnVerificationEvidence] 原本是 VM 私有成员，
- * 其中两个的默认实参本身就要读 `_uiState.value`，所以在端口上保留 1 参/2 参两个重载，语义不变。
- *
- * ### 协议响应编码缝合点
- * [decodeImageBounds] / [encodeBase64NoWrap] 是 `android.graphics.BitmapFactory` 与
- * `android.util.Base64` 的替身位。**生产实现必须就是原来那两行**：
- * `BitmapFactory.Options().apply { inJustDecodeBounds = true }` +
- * `BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)`，以及
- * `Base64.encodeToString(bytes, Base64.NO_WRAP)`。这样端上产出的 JSON 字节不变；而普通 JVM 单测
- * 里 Android stub 会抛 `RuntimeException("Stub!")`，没有这个缝合点就无法断言成功响应的 JSON。
+ * 租约、取消所有权、worker release barrier 与终态清理都不在这里：这些能力由唯一的
+ * [com.muyuchat.mca.ImageGenerationOwner] 通过 [OwnerBackedLocalApiImageGenerationPort]
+ * 统一持有。这里只保留协议解析、批量执行与响应编码真正需要的只读/纯协作面。
  */
-internal interface LocalApiImageGenerationPort {
+internal interface LocalApiImageGenerationBasePort {
     /** 读方向：原 `_uiState.value`。 */
     val uiState: StateFlow<MainUiState>
 
@@ -107,17 +77,9 @@ internal interface LocalApiImageGenerationPort {
 
     val localImageLoraLifecycleLock: Any
     val localImageTextualInversionLifecycleLock: Any
-    var activeLocalApiImageModelId: String?
 
     val localImageWorkerClient: LocalApiImageWorkerGateway
     val localImageLoraStore: LocalApiImageLoraGateway
-
-    fun tryAcquireObservedImageGenerationLease(requestId: String): LocalImageGenerationCoordinator.Lease?
-    fun releaseObservedImageGenerationLease(lease: LocalImageGenerationCoordinator.Lease): Boolean
-
-    fun registerLocalApiImageGenerationOwnership(ownership: LocalApiImageGenerationOwnership)
-    fun unregisterLocalApiImageGenerationOwnership(ownership: LocalApiImageGenerationOwnership): Boolean
-    fun cancelOwnedLocalApiImageWorker(ownership: LocalApiImageGenerationOwnership): Boolean
 
     fun resolveCurrentLocalImageLoras(
         selections: List<Pair<String, Double>>
@@ -161,3 +123,35 @@ internal interface LocalApiImageGenerationPort {
     /** 协议响应编码缝合点：等价于 `Base64.encodeToString(bytes, Base64.NO_WRAP)`。 */
     fun encodeBase64NoWrap(bytes: ByteArray): String
 }
+
+/**
+ * Local API 生图进入唯一 owner 的入口。
+ *
+ * [ImageGenerationOwner] 在执行 block 前完成活动 UI 任务冲突检查、共享租约、Local API
+ * cancellation ownership 注册与模型身份绑定；无论正常、异常还是取消，都在 worker release
+ * barrier 之后按身份释放所有权和租约。
+ */
+internal interface OwnerBackedLocalApiImageGenerationPort : LocalApiImageGenerationBasePort {
+    suspend fun <T> runLocalApiImageOperation(
+        requestId: String,
+        block: suspend (LocalApiImageOperationBinding) -> T
+    ): T
+}
+
+/**
+ * 过渡兼容接口：既有具名 adapter 仍按旧构造面装配，但生产 Local API 执行路径只使用
+ * [OwnerBackedLocalApiImageGenerationPort]，不会再调用这里的租约或取消回调。
+ */
+internal interface LegacyLocalApiImageGenerationPort : LocalApiImageGenerationBasePort {
+    var activeLocalApiImageModelId: String?
+
+    fun tryAcquireObservedImageGenerationLease(requestId: String): LocalImageGenerationCoordinator.Lease?
+    fun releaseObservedImageGenerationLease(lease: LocalImageGenerationCoordinator.Lease): Boolean
+
+    fun registerLocalApiImageGenerationOwnership(ownership: LocalApiImageGenerationOwnership)
+    fun unregisterLocalApiImageGenerationOwnership(ownership: LocalApiImageGenerationOwnership): Boolean
+    fun cancelOwnedLocalApiImageWorker(ownership: LocalApiImageGenerationOwnership): Boolean
+}
+
+/** 兼容旧 adapter 的源码名称；新的操作函数不接受这个接口。 */
+internal typealias LocalApiImageGenerationPort = LegacyLocalApiImageGenerationPort

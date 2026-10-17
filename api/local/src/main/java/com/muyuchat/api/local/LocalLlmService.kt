@@ -1,10 +1,15 @@
-﻿package com.muyuchat.api.local
+package com.muyuchat.api.local
 
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.core.engine.contract.GenerateEvent
+import com.muyuchat.core.engine.contract.GenerateEventPhase
+import com.muyuchat.core.engine.contract.GenerateEventPersist
+import com.muyuchat.core.engine.contract.GenerateEventChunk
+import com.muyuchat.core.engine.contract.GenerateEventDone
+import com.muyuchat.core.engine.contract.GenerateEventError
+import com.muyuchat.core.engine.contract.LocalChatExecutionContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -121,11 +126,11 @@ class LocalLlmService : Service() {
                             LocalApiRuntime.recordGenerationSequence(requestId, it)
                         }
                         when (event) {
-                            is GenerateEvent.Phase -> Unit
-                            is GenerateEvent.Persist -> Unit
-                            is GenerateEvent.Chunk -> callback.onChunk(sessionId, event.text)
-                            is GenerateEvent.Done -> callback.onDone(sessionId)
-                            is GenerateEvent.Error -> callback.onError(sessionId, event.message)
+                            is GenerateEventPhase -> Unit
+                            is GenerateEventPersist -> Unit
+                            is GenerateEventChunk -> callback.onChunk(sessionId, event.text)
+                            is GenerateEventDone -> callback.onDone(sessionId)
+                            is GenerateEventError -> callback.onError(sessionId, event.message)
                         }
                     }
                 }.onFailure { callback.onError(sessionId, it.message ?: "AIDL chat failed.") }

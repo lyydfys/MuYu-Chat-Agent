@@ -11,15 +11,14 @@ import com.muyuchat.core.engine.runtime.TerminalDeliveryRecord
  * [RequestSnapshot] shape keeps the existing "query the state of a request" contract answering after
  * cleanup instead of returning null, without making the live registry index retain finished work.
  *
- * The projection is deliberately lossy in one field: [TerminalDeliveryRecord] carries no error
- * envelope, so `terminalError` is null. That matches the behaviour before cleanup existed -- the
- * settlement paths that reach here never passed an error envelope either.
+ * The terminal record retains the typed error envelope that settled the attempt, so the snapshot
+ * projection keeps the real failure observable after cleanup instead of unconditionally nulling it.
  */
 internal fun TerminalDeliveryRecord.toRequestSnapshot(): RequestSnapshot = RequestSnapshot(
     identity = identity,
     state = finalState,
     terminal = true,
-    terminalError = null,
+    terminalError = terminalError,
     registeredAtEpoch = identity.runtimeEpoch,
     registeredAtGeneration = identity.sessionGeneration
 )

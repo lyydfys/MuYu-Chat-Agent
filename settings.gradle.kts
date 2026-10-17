@@ -19,6 +19,7 @@ rootProject.name = "MuYuChatAgent"
 include(":app")
 include(":core:native")
 include(":core:sd-native")
+include(":core:inference-contract")
 include(":core:engine")
 include(":core:modelstore")
 include(":core:download")

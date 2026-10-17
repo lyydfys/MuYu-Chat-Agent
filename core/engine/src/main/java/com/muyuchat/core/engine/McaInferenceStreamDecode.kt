@@ -334,7 +334,7 @@ internal suspend fun McaInferenceService.runDecodeSamplingLoop(
                     } else if (executionContext.pendingProfileDisposition ==
                         PendingProfileDisposition.DEFER_TO_LEASE_HOLDER
                     ) {
-                        val lease = executionContext.lifecycleLease
+                        val lease = executionContext.lifecycleLease as? EngineLifecycleLease
                             ?: error("deferred pending disposition requires an exclusive lifecycle lease")
                         // Keep the monitor operation out of this very large suspend
                         // state machine.  Kotlin's JVM coroutine transformer can

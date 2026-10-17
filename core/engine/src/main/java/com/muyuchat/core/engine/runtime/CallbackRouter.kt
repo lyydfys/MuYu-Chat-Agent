@@ -1,6 +1,7 @@
 package com.muyuchat.core.engine.runtime
 
 import com.muyuchat.core.engine.contract.CallbackEvent
+import com.muyuchat.core.engine.contract.ErrorEnvelope
 import com.muyuchat.core.engine.contract.ErrorPayload
 import com.muyuchat.core.engine.contract.RequestIdentity
 import com.muyuchat.core.engine.contract.RequestState
@@ -19,7 +20,9 @@ data class TerminalDeliveryRecord(
     val identity: RequestIdentity,
     val finalState: RequestState,
     val delivered: Boolean,
-    val failure: String? = null
+    val failure: String? = null,
+    /** Typed failure carried by an error terminal, if the terminal was an error event. */
+    val terminalError: ErrorEnvelope? = null
 )
 
 /**
@@ -217,12 +220,14 @@ class CallbackRouter {
                 return
             }
             route.publishedGeneration = routerGeneration
+            val existingError = terminalRecords[key]?.terminalError
             terminalRecords.put(
                 key,
                 TerminalDeliveryRecord(
                     identity = event.identity,
                     finalState = terminalStateOf(event),
-                    delivered = false
+                    delivered = false,
+                    terminalError = terminalErrorOf(event) ?: existingError
                 )
             )
             terminalArchive.add(key)
@@ -239,14 +244,15 @@ class CallbackRouter {
      */
     private fun completeTerminalRecord(route: RouteState, event: CallbackEvent, failure: Exception?) {
         val key = TerminalKey.of(event.identity)
-        val completed = TerminalDeliveryRecord(
-            identity = event.identity,
-            finalState = terminalStateOf(event),
-            delivered = failure == null,
-            failure = failure?.let { it.message ?: it::class.java.name }
-        )
         synchronized(recordLock) {
             val existing = terminalRecords[key]
+            val completed = TerminalDeliveryRecord(
+                identity = event.identity,
+                finalState = terminalStateOf(event),
+                delivered = failure == null,
+                failure = failure?.let { it.message ?: it::class.java.name },
+                terminalError = terminalErrorOf(event) ?: existing?.terminalError
+            )
             if (existing == null) {
                 if (route.publishedGeneration != routerGeneration) return
                 terminalRecords.put(key, completed)
@@ -272,19 +278,25 @@ class CallbackRouter {
     fun recordOutcome(
         identity: RequestIdentity,
         finalState: RequestState,
-        failure: String? = null
+        failure: String? = null,
+        terminalError: ErrorEnvelope? = null
     ): TerminalDeliveryRecord? {
         val key = TerminalKey.of(identity)
         synchronized(recordLock) {
             terminalRecords[key]?.let { existing ->
-                if (existing.identity.sameAttemptAs(identity)) return existing
+                if (!existing.identity.sameAttemptAs(identity)) return null
+                if (terminalError == null) return existing
+                val enriched = existing.copy(terminalError = terminalError)
+                terminalRecords.put(key, enriched)
+                return enriched
             }
             if (routes[identity.requestId]?.identity?.sameAttemptAs(identity) != true) return null
             val record = TerminalDeliveryRecord(
                 identity = identity,
                 finalState = finalState,
                 delivered = false,
-                failure = failure
+                failure = failure,
+                terminalError = terminalError
             )
             terminalRecords.put(key, record)
             terminalArchive.add(key)
@@ -373,6 +385,11 @@ class CallbackRouter {
             is ErrorPayload -> RequestState.Failed
             else -> RequestState.Failed
         }
+    }
+
+    private fun terminalErrorOf(event: CallbackEvent): ErrorEnvelope? {
+        val error = (event.payload as? ErrorPayload)?.error ?: return null
+        return NativeErrorTranslator.attachContext(error, event.identity, event.identity.traceId)
     }
 
     private companion object {

@@ -1,10 +1,9 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.McaInferenceService
-import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.core.engine.contract.GenerationParams
+import com.muyuchat.core.engine.contract.ChatRequest
+import com.muyuchat.core.engine.contract.GenerateEvent
+import com.muyuchat.core.engine.contract.LocalChatExecutionContext
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONObject
 
@@ -39,7 +38,6 @@ object LocalApiRuntime {
      */
     fun releaseOwner(token: Any): Boolean = synchronized(ownerLock) {
         if (ownerToken !== token) return@synchronized false
-        engine = null
         nativeStatsJsonProvider = null
         streamChatProvider = null
         streamChatWithContextProvider = null
@@ -70,10 +68,7 @@ object LocalApiRuntime {
     }
 
     @Volatile
-    var engine: McaInferenceService? = null
-
-    @Volatile
-    internal var nativeStatsJsonProvider: (() -> String)? = null
+    var nativeStatsJsonProvider: (() -> String)? = null
 
     @Volatile
     var streamChatProvider: ((ChatRequest) -> Flow<GenerateEvent>)? = null
@@ -153,7 +148,6 @@ object LocalApiRuntime {
      * publishes one complete set, and a call captures it once and uses only that value.
      */
     class LocalApiBindings internal constructor(
-        val engine: McaInferenceService?,
         val nativeStatsJsonProvider: (() -> String)?,
         val streamChatProvider: ((ChatRequest) -> Flow<GenerateEvent>)?,
         val streamChatWithContextProvider:
@@ -178,7 +172,6 @@ object LocalApiRuntime {
 
     /** Reads the current field values as one set. Not atomic by itself; see [publishBindings]. */
     private fun snapshotBindings(): LocalApiBindings = LocalApiBindings(
-        engine = engine,
         nativeStatsJsonProvider = nativeStatsJsonProvider,
         streamChatProvider = streamChatProvider,
         streamChatWithContextProvider = streamChatWithContextProvider,
@@ -247,29 +240,19 @@ object LocalApiRuntime {
         val bindings = currentBindings()
         return bindings.streamChatWithContextProvider?.invoke(request, tracedContext)
             ?: bindings.streamChatProvider?.invoke(request)
-            ?: bindings.engine?.streamChat(request, tracedContext)
     }
 
     suspend fun stopGeneration() {
         val bindings = currentBindings()
         val stop = bindings.stopGenerationProvider
-        if (stop != null) {
-            stop()
-        } else {
-            bindings.engine?.stopGeneration()
-        }
+        stop?.invoke()
     }
 
     suspend fun stopGenerationIfRequestActive(requestId: String): Boolean {
         if (requestId.isBlank()) return false
         val bindings = currentBindings()
         val conditional = bindings.stopGenerationIfRequestActiveProvider
-        if (conditional != null) return conditional(requestId)
-        val attached = bindings.engine ?: return false
-        val token = attached.activeGenerationStopToken()
-            ?.takeIf { it.requestId == requestId }
-            ?: return false
-        return attached.stopGenerationIfActive(token)
+        return conditional?.invoke(requestId) ?: false
     }
 
     fun preflight(request: LocalApiPreflightRequest): LocalApiPreflightResult {

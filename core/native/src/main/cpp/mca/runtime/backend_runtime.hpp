@@ -20,6 +20,10 @@ enum class BackendKind : uint8_t {
 
 /**
  * Backend runtime managing device handles, library version, and allocator state.
+ *
+ * Epoch comparison is scoped to this DSO's ProcessRuntimeHost. A BackendRuntime
+ * object, its owner, and its epoch source must stay within one loaded shared
+ * object; no process-wide uniqueness is implied across JNI DSOs.
  */
 class BackendRuntime {
 public:

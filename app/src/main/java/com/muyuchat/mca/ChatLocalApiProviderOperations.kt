@@ -30,7 +30,7 @@ internal interface ChatLocalApiProviderPort {
      * The single chat execution facade (E06). Null keeps the historical direct-engine routing for
      * focused tests that assemble the port without the runtime supervisor.
      */
-    val chatExecutionFacade: ChatExecutionFacade?
+    val chatExecutionFacade: ChatExecutionFacade
     // R3/S26: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
     val uiState: StateFlow<MainUiState>
     fun updateUiState(transform: (MainUiState) -> MainUiState)
@@ -46,7 +46,7 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
     val engine = port.engine
     val chatRuns = port.chatRuns
     val uiState = port.uiState
-    LocalApiRuntime.engine = engine
+    LocalApiRuntime.nativeStatsJsonProvider = { engine.nativeStatsJson() }
     LocalApiRuntime.streamChatWithContextProvider = { request, executionContext ->
         val uiRequestId = executionContext.requestId.takeIf { it.startsWith("ui-") }
         // UI requests encode the epoch that created them. Capturing the
@@ -71,8 +71,7 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
         } else {
             request
         }
-        val routedStream = port.chatExecutionFacade?.streamChat(effectiveRequest, executionContext)
-            ?: engine.streamChat(effectiveRequest, executionContext)
+        val routedStream = port.chatExecutionFacade.streamChat(effectiveRequest, executionContext)
         routedStream
             .onStart {
                 if (ownsUiLifecycle()) {
@@ -95,22 +94,10 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
     }
     LocalApiRuntime.stopGenerationProvider = {
         port.cancelActiveLocalApiImageGeneration("Local API generation was stopped by the client.")
-        val facade = port.chatExecutionFacade
-        if (facade != null) {
-            facade.stopGeneration()
-        } else {
-            engine.stopGeneration()
-        }
+        port.chatExecutionFacade.stopGeneration()
     }
     LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
-        val token = engine.activeGenerationStopToken()
-            ?.takeIf { it.requestId == requestId }
-        val facade = port.chatExecutionFacade
-        if (facade != null) {
-            facade.stopGenerationIfActive(requestId)
-        } else {
-            engine.stopGenerationIfActive(token)
-        }
+        port.chatExecutionFacade.stopGenerationIfActive(requestId)
     }
     LocalApiRuntime.loadedModelJsonProvider = { port.loadedModelJson() }
 }

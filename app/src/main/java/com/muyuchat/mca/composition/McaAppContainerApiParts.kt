@@ -242,6 +242,7 @@ internal fun McaAppContainer.createChatImagePromptBridgePort(
             verifiedOfflineTranslationBundleRef = verifiedOfflineTranslationBundleRef,
             sendChatImageRequestRef = sendChatImageRequestRef,
             negativePromptSupportedRef = negativePromptSupportedRef,
+            chatExecutionFacade = chatExecutionFacadeFor(engine),
         )
 
 internal fun McaAppContainer.createLocalApiImageGenerationPortImpl(

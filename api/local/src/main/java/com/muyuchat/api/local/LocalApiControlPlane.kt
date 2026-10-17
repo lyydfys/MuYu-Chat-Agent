@@ -1,6 +1,6 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.contract.ChatRequest
 
 /**
  * Narrow bridge between the Local API and the app-owned runtime coordinator.

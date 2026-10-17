@@ -2,26 +2,13 @@ package com.muyuchat.mca.worker
 
 import androidx.work.Data
 import androidx.work.ListenableWorker
-import com.muyuchat.core.engine.contract.CallbackEvent
 import com.muyuchat.core.engine.contract.ErrorCategory
 import com.muyuchat.core.engine.contract.ErrorEnvelope
 import com.muyuchat.core.engine.contract.ErrorPhase
 import com.muyuchat.core.engine.contract.RequestIdentity
-import com.muyuchat.core.engine.contract.RequestState
 import com.muyuchat.core.engine.contract.Retryability
 import com.muyuchat.core.engine.contract.error.StableErrorCode
-import com.muyuchat.core.engine.runtime.RuntimeSupervisor
-import com.muyuchat.mca.adapter.LocalApiFacadeAdapter
-import com.muyuchat.mca.adapter.LocalApiResponse
-import com.muyuchat.mca.facade.ChatExecutionFacade
-import com.muyuchat.mca.facade.ImageGenerationFacade
-import com.muyuchat.mca.facade.ModelLifecycleFacade
-import com.muyuchat.mca.facade.RuntimeFacade
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -145,91 +132,5 @@ class WorkerBoundaryTest {
         )
         val failResult = WorkerResultSink.emitFailure(identity, permanentError, currentAttempt = 1, maxRetries = 3)
         assertTrue(failResult is ListenableWorker.Result.Failure)
-    }
-
-    @Test
-    fun `LocalApiFacadeAdapter terminates unauthenticated requests before facade`() {
-        val supervisor = RuntimeSupervisor()
-        val chatFacade = ChatExecutionFacade(supervisor)
-        val imageFacade = ImageGenerationFacade(supervisor)
-        val runtimeFacade = RuntimeFacade(supervisor)
-
-        val adapter = LocalApiFacadeAdapter(
-            chatFacade = chatFacade,
-            imageFacade = imageFacade,
-            runtimeFacade = runtimeFacade,
-            expectedApiKey = "super-secret-key-999"
-        )
-
-        // No auth header
-        val respNoAuth = adapter.handleChatCompletion(
-            bodyJson = """{"prompt":"hello"}""",
-            authHeader = null
-        )
-        assertTrue(respNoAuth is LocalApiResponse.Error)
-        assertEquals(401, (respNoAuth as LocalApiResponse.Error).httpStatus)
-
-        // Wrong token
-        val respWrongAuth = adapter.handleChatCompletion(
-            bodyJson = """{"prompt":"hello"}""",
-            authHeader = "Bearer invalid-token"
-        )
-        assertTrue(respWrongAuth is LocalApiResponse.Error)
-        assertEquals(403, (respWrongAuth as LocalApiResponse.Error).httpStatus)
-
-        // No chat requests should have been registered with the supervisor
-        assertEquals(0, supervisor.requestRegistry.count())
-    }
-
-    @Test
-    fun `LocalApiFacadeAdapter dispatches authenticated chat and streams events`() = runBlocking {
-        val supervisor = RuntimeSupervisor()
-        val chatFacade = ChatExecutionFacade(supervisor)
-        val imageFacade = ImageGenerationFacade(supervisor)
-        val runtimeFacade = RuntimeFacade(supervisor)
-
-        val adapter = LocalApiFacadeAdapter(
-            chatFacade = chatFacade,
-            imageFacade = imageFacade,
-            runtimeFacade = runtimeFacade,
-            expectedApiKey = "super-secret-key-999"
-        )
-
-        val validJson = """
-            {
-                "prompt": "Hello MCA Enterprise",
-                "temperature": 0.7,
-                "max_tokens": 100,
-                "idempotency_key": "chat-idemp-1"
-            }
-        """.trimIndent()
-
-        val resp = adapter.handleChatCompletion(
-            bodyJson = validJson,
-            authHeader = "Bearer super-secret-key-999"
-        )
-
-        assertTrue(resp is LocalApiResponse.SseStream)
-        val sseStream = resp as LocalApiResponse.SseStream
-        assertEquals("req-chat-idemp-1", sseStream.requestId)
-        assertTrue(supervisor.requestRegistry.isActive("req-chat-idemp-1"))
-
-        // Simulate backend emitting tokens and terminal
-        val identity = supervisor.requestRegistry.getEntry("req-chat-idemp-1")!!.identity
-        supervisor.callbackRouter.routeEvent(
-            event = CallbackEvent.token(identity, sequence = 1L, text = "Hello", tokenIndex = 0L),
-            currentRuntimeEpoch = supervisor.currentEpoch.value,
-            currentSessionGeneration = identity.sessionGeneration
-        )
-        supervisor.callbackRouter.routeEvent(
-            event = CallbackEvent.terminal(identity, sequence = 2L, finalState = RequestState.Succeeded),
-            currentRuntimeEpoch = supervisor.currentEpoch.value,
-            currentSessionGeneration = identity.sessionGeneration
-        )
-
-        val frames = sseStream.frames.take(2).toList()
-        assertEquals(2, frames.size)
-        assertEquals("token", frames[0].event)
-        assertEquals("done", frames[1].event)
     }
 }

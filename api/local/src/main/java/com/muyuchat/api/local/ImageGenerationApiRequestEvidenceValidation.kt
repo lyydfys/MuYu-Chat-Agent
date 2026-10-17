@@ -1,7 +1,7 @@
 package com.muyuchat.api.local
 
 import com.muyuchat.api.local.ImageGenerationApiResponseEvidenceValidation.rejectPrivateInputPaths
-import com.muyuchat.core.engine.compareUtf8Unsigned
+import com.muyuchat.core.engine.contract.compareUtf8Unsigned
 import org.json.JSONArray
 import org.json.JSONObject
 

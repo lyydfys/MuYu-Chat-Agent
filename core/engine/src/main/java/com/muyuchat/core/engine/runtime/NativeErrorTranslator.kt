@@ -3,7 +3,9 @@ package com.muyuchat.core.engine.runtime
 import com.muyuchat.core.engine.contract.ErrorCategory
 import com.muyuchat.core.engine.contract.ErrorEnvelope
 import com.muyuchat.core.engine.contract.ErrorPhase
+import com.muyuchat.core.engine.contract.RequestIdentity
 import com.muyuchat.core.engine.contract.Retryability
+import com.muyuchat.core.engine.contract.error.ErrorCatalogRegistry
 import com.muyuchat.core.engine.contract.error.StableErrorCode
 
 /**
@@ -16,12 +18,14 @@ object NativeErrorTranslator {
         nativeCode: Int,
         phase: ErrorPhase = ErrorPhase.Execute,
         detailMessage: String? = null,
-        cause: Throwable? = null
+        cause: Throwable? = null,
+        identity: RequestIdentity? = null,
+        traceId: String = identity?.traceId.orEmpty()
     ): ErrorEnvelope {
         val safeDetail = detailMessage?.take(512) ?: (cause?.message ?: "Native error code: $nativeCode")
         val chain = listOf(safeDetail)
 
-        return when (nativeCode) {
+        val envelope = when (nativeCode) {
             0 -> ErrorEnvelope(
                 code = StableErrorCode.INT_CORRUPTED_STATE,
                 category = ErrorCategory.Internal,
@@ -184,12 +188,18 @@ object NativeErrorTranslator {
                 nativeCode = nativeCode
             )
         }
+        return attachContext(envelope, identity, traceId)
     }
 
-    fun fromThrowable(throwable: Throwable, phase: ErrorPhase = ErrorPhase.Execute): ErrorEnvelope {
+    fun fromThrowable(
+        throwable: Throwable,
+        phase: ErrorPhase = ErrorPhase.Execute,
+        identity: RequestIdentity? = null,
+        traceId: String = identity?.traceId.orEmpty()
+    ): ErrorEnvelope {
         val msg = throwable.message ?: throwable.javaClass.simpleName
         val chain = listOf(msg)
-        return when {
+        val envelope = when {
             throwable is java.io.FileNotFoundException -> ErrorEnvelope(
                 code = StableErrorCode.MDL_NOT_FOUND,
                 category = ErrorCategory.Model,
@@ -227,5 +237,193 @@ object NativeErrorTranslator {
                 causeChain = chain
             )
         }
+        return attachContext(envelope, identity, traceId)
     }
+
+    /**
+     * Translates the legacy `GenerateEvent.Error` message/code pair into the same typed envelope the
+     * newer event field can carry. Known stable codes use the shared catalog; the historical
+     * cancellation string `REQUEST_CANCELLED` maps to [StableErrorCode.CNC_USER_CANCELLED].
+     */
+    fun fromChatError(
+        message: String,
+        code: String?,
+        identity: RequestIdentity? = null,
+        phase: ErrorPhase? = null,
+        traceId: String = identity?.traceId.orEmpty()
+    ): ErrorEnvelope {
+        val publicMessage = message.trim().take(512).ifBlank { "Chat execution failed." }
+        val normalizedCode = code?.trim()?.takeIf { it.isNotEmpty() }
+        val codeText = normalizedCode.orEmpty()
+        val stableCode = normalizedCode?.let { raw ->
+            StableErrorCode.entries.firstOrNull { candidate -> candidate.name.equals(raw, ignoreCase = true) }
+        }
+        val numericCode = normalizedCode?.toIntOrNull()
+        val envelope = when {
+            stableCode != null -> catalogEnvelope(
+                code = stableCode,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            numericCode != null -> translate(
+                nativeCode = numericCode,
+                phase = phase ?: ErrorPhase.Execute,
+                detailMessage = publicMessage
+            )
+            normalizedCode.isCancellationCode() -> catalogEnvelope(
+                code = StableErrorCode.CNC_USER_CANCELLED,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            normalizedCode.isNativeFailureCode() -> catalogEnvelope(
+                code = StableErrorCode.NAT_EXECUTION_FAULT,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            codeText.contains("OOM", ignoreCase = true) ||
+                codeText.contains("OUT_OF_MEMORY", ignoreCase = true) -> catalogEnvelope(
+                code = StableErrorCode.RT_OUT_OF_MEMORY,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            codeText.contains("TIMEOUT", ignoreCase = true) -> catalogEnvelope(
+                code = StableErrorCode.TIM_EXECUTION_TIMEOUT,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            codeText.startsWith("HTTP", ignoreCase = true) -> httpEnvelope(
+                code = codeText,
+                publicMessage = publicMessage,
+                phase = phase
+            )
+            codeText.contains("MODEL", ignoreCase = true) &&
+                codeText.contains("NOT_FOUND", ignoreCase = true) -> catalogEnvelope(
+                code = StableErrorCode.MDL_NOT_FOUND,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            codeText.contains("MODEL", ignoreCase = true) &&
+                codeText.contains("LOAD", ignoreCase = true) -> catalogEnvelope(
+                code = StableErrorCode.MDL_LOAD_FAILED,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            codeText.contains("NET", ignoreCase = true) -> catalogEnvelope(
+                code = StableErrorCode.NET_CONNECT_FAILED,
+                publicMessage = publicMessage,
+                phase = phase,
+                causeChain = listOf(publicMessage)
+            )
+            else -> ErrorEnvelope(
+                code = StableErrorCode.INT_UNEXPECTED_EXCEPTION,
+                category = ErrorCategory.Internal,
+                phase = phase ?: ErrorPhase.Execute,
+                retryability = Retryability.Never,
+                userMessageKey = "error.internal.unexpected",
+                publicMessage = publicMessage,
+                causeChain = buildList {
+                    add(publicMessage)
+                    normalizedCode?.let { add("sourceCode=$it") }
+                }
+            )
+        }
+        return attachContext(envelope, identity, traceId)
+    }
+
+    /** Builds the terminal envelope used when the owner settles a cancelled execution. */
+    fun cancelled(
+        identity: RequestIdentity? = null,
+        reason: String = "Request was cancelled.",
+        traceId: String = identity?.traceId.orEmpty()
+    ): ErrorEnvelope = attachContext(
+        catalogEnvelope(
+            code = StableErrorCode.CNC_USER_CANCELLED,
+            publicMessage = "Request was cancelled.",
+            phase = ErrorPhase.Execute,
+            causeChain = listOf(reason.trim().take(512).ifBlank { "Request was cancelled." }),
+            userMessageKey = "error.request.cancelled"
+        ),
+        identity,
+        traceId
+    )
+
+    /**
+     * Binds an already typed event failure to the admitted request attempt. The explicit trace ID
+     * on the event wins; otherwise the admitted identity/context trace is used. A null trace remains
+     * null-equivalent (empty) for source compatibility with callers that do not use tracing.
+     */
+    fun attachContext(
+        error: ErrorEnvelope,
+        identity: RequestIdentity?,
+        traceId: String = identity?.traceId.orEmpty()
+    ): ErrorEnvelope {
+        val resolvedIdentity = identity ?: error.identity
+        val resolvedTrace = sequenceOf(error.traceId, traceId, resolvedIdentity?.traceId)
+            .map { it.orEmpty().trim() }
+            .firstOrNull { it.isNotEmpty() }
+            .orEmpty()
+        if (resolvedIdentity == error.identity && resolvedTrace == error.traceId) return error
+        return error.copy(identity = resolvedIdentity, traceId = resolvedTrace)
+    }
+
+    private fun catalogEnvelope(
+        code: StableErrorCode,
+        publicMessage: String,
+        phase: ErrorPhase?,
+        causeChain: List<String>,
+        userMessageKey: String? = null
+    ): ErrorEnvelope {
+        val catalog = ErrorCatalogRegistry.get(code)
+        return ErrorEnvelope(
+            code = code,
+            category = catalog.category,
+            phase = phase ?: catalog.phase,
+            retryability = catalog.retryability,
+            userMessageKey = userMessageKey ?: catalog.userMessageKey,
+            publicMessage = publicMessage,
+            causeChain = causeChain
+        )
+    }
+
+    private fun httpEnvelope(code: String, publicMessage: String, phase: ErrorPhase?): ErrorEnvelope {
+        val httpCode = HTTP_CODE_PATTERN.matchEntire(code)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val stableCode = when (httpCode) {
+            401 -> StableErrorCode.AUTH_INVALID_KEY
+            403 -> StableErrorCode.AUTH_FORBIDDEN
+            429 -> StableErrorCode.REQ_REJECTED
+            else -> StableErrorCode.NET_PROTOCOL_ERROR
+        }
+        val catalog = ErrorCatalogRegistry.get(stableCode)
+        return ErrorEnvelope(
+            code = stableCode,
+            category = catalog.category,
+            phase = phase ?: catalog.phase,
+            retryability = catalog.retryability,
+            userMessageKey = catalog.userMessageKey,
+            publicMessage = publicMessage,
+            causeChain = listOf(publicMessage),
+            httpCode = httpCode
+        )
+    }
+
+    private fun String?.isCancellationCode(): Boolean {
+        val value = this?.uppercase().orEmpty()
+        return value == "REQUEST_CANCELLED" || value == "CANCELLED" || value == "CANCELED" ||
+            value.contains("USER_CANCEL")
+    }
+
+    private fun String?.isNativeFailureCode(): Boolean {
+        val value = this?.uppercase().orEmpty()
+        return value == "NATIVE_FAILURE" || value == "NATIVE_ERROR" ||
+            value == "NATIVE_EXECUTION_FAILURE"
+    }
+
+    private val HTTP_CODE_PATTERN = Regex("""HTTP[_-]?([1-5]\d{2})""", RegexOption.IGNORE_CASE)
 }

@@ -112,7 +112,7 @@ internal fun McaInferenceService.streamChatImpl(
                     emit(GenerateEvent.Error(message, errorStats))
                     return@lifecycle
                 }
-                val suppliedLoadAuthorization = executionContext.loadAuthorization
+                val suppliedLoadAuthorization = executionContext.engineLoadAuthorization
                 if (suppliedLoadAuthorization != null &&
                     parameterCoordinator.isAuthorizedPendingActive(suppliedLoadAuthorization)
                 ) {
@@ -124,9 +124,9 @@ internal fun McaInferenceService.streamChatImpl(
                 var preflight = parameterCoordinator.preflight(
                     identity = session.runtimeIdentity,
                     requestParamsJson = requestWithRuntimeContext.params.toJson(),
-                    trustedAuthorization = executionContext.loadAuthorization,
+                    trustedAuthorization = executionContext.engineLoadAuthorization,
                     allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
-                    hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                    hotOverrideAuthorization = executionContext.engineHotOverrideAuthorization
                 )
                 if (preflight is CompletionPreflight.Rejected &&
                     preflight.code == "model_reload_required_authorized"
@@ -134,7 +134,7 @@ internal fun McaInferenceService.streamChatImpl(
                     val decision = parameterCoordinator.decideMismatchRecovery(
                         requestId = executionContext.requestId,
                         identity = session.runtimeIdentity,
-                        trustedAuthorization = executionContext.loadAuthorization
+                        trustedAuthorization = executionContext.engineLoadAuthorization
                     )
                     val reloadError = when (decision) {
                         is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
@@ -167,15 +167,15 @@ internal fun McaInferenceService.streamChatImpl(
                     preflight = parameterCoordinator.preflight(
                         identity = reloadedSession.runtimeIdentity,
                         requestParamsJson = requestWithRuntimeContext.params.toJson(),
-                        trustedAuthorization = executionContext.loadAuthorization,
+                        trustedAuthorization = executionContext.engineLoadAuthorization,
                         allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
-                        hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                        hotOverrideAuthorization = executionContext.engineHotOverrideAuthorization
                     )
                 }
                 when (preflight) {
                     is CompletionPreflight.Ready -> {
                         preparedParameters = preflight
-                        val staged = executionContext.loadAuthorization
+                        val staged = executionContext.engineLoadAuthorization
                             ?.let(parameterCoordinator::authorizedPendingFor)
                             ?.takeIf { transaction ->
                                 transaction.profile.desiredSignature.digest == preflight.signatures.desired.digest &&
@@ -277,7 +277,7 @@ internal fun McaInferenceService.streamChatImpl(
                     val decision = parameterCoordinator.decideMismatchRecovery(
                         requestId = executionContext.requestId,
                         identity = session.runtimeIdentity,
-                        trustedAuthorization = executionContext.loadAuthorization
+                        trustedAuthorization = executionContext.engineLoadAuthorization
                     )
                     val reloadError = when (decision) {
                         is MismatchRecoveryDecision.ReloadAuthorizedPending -> {
@@ -306,9 +306,9 @@ internal fun McaInferenceService.streamChatImpl(
                             parameterCoordinator.preflight(
                                 identity = it.runtimeIdentity,
                                 requestParamsJson = activeRequest.params.toJson(),
-                                trustedAuthorization = executionContext.loadAuthorization,
+                                trustedAuthorization = executionContext.engineLoadAuthorization,
                                 allowTrustedHotOverride = executionContext.allowTrustedHotOverride,
-                                hotOverrideAuthorization = executionContext.hotOverrideAuthorization
+                                hotOverrideAuthorization = executionContext.engineHotOverrideAuthorization
                             )
                         }
                         if (retryPreflight is CompletionPreflight.Ready) {

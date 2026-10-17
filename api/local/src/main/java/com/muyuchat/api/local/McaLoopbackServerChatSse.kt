@@ -1,10 +1,15 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.GenerateEvent
-import com.muyuchat.core.engine.GenerationParams
-import com.muyuchat.core.engine.LocalChatExecutionContext
-import com.muyuchat.core.engine.RuntimeStats
+import com.muyuchat.core.engine.contract.ChatRequest
+import com.muyuchat.core.engine.contract.GenerateEvent
+import com.muyuchat.core.engine.contract.GenerateEventPhase
+import com.muyuchat.core.engine.contract.GenerateEventPersist
+import com.muyuchat.core.engine.contract.GenerateEventChunk
+import com.muyuchat.core.engine.contract.GenerateEventDone
+import com.muyuchat.core.engine.contract.GenerateEventError
+import com.muyuchat.core.engine.contract.GenerationParams
+import com.muyuchat.core.engine.contract.LocalChatExecutionContext
+import com.muyuchat.core.engine.contract.RuntimeStats
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -105,9 +110,9 @@ import java.util.UUID
                     captureGenerationSequence()
                     synchronized(output) {
                         when (event) {
-                            is GenerateEvent.Phase -> finalStats = event.stats
-                            is GenerateEvent.Persist -> Unit
-                            is GenerateEvent.Chunk -> {
+                            is GenerateEventPhase -> finalStats = event.stats
+                            is GenerateEventPersist -> Unit
+                            is GenerateEventChunk -> {
                                 finalStats = event.stats
                                 if (event.reasoning.isNotEmpty()) {
                                     output.write(
@@ -119,11 +124,11 @@ import java.util.UUID
                                     output.write("data: ${event.text.toSseJson(requestId, created, generationSequence)}\n\n")
                                 }
                             }
-                            is GenerateEvent.Done -> {
+                            is GenerateEventDone -> {
                                 finalStats = event.stats
                                 writeTerminalFrame()
                             }
-                            is GenerateEvent.Error -> {
+                            is GenerateEventError -> {
                                 output.write(
                                     "data: ${errorJson(
                                         generationErrorCode(event),
@@ -188,7 +193,7 @@ import java.util.UUID
         val created = System.currentTimeMillis() / 1000
         val builder = StringBuilder()
         val reasoningBuilder = StringBuilder()
-        var generationError: GenerateEvent.Error? = null
+        var generationError: GenerateEventError? = null
         var finalStats: RuntimeStats? = null
         var generationSequence: Long? = null
         withChatClientDisconnectCancellation(socket, requestId) {
@@ -201,18 +206,18 @@ import java.util.UUID
                     }
                 generationSequence?.let { LocalApiRuntime.recordGenerationSequence(requestId, it) }
                 when (event) {
-                    is GenerateEvent.Phase -> finalStats = event.stats
-                    is GenerateEvent.Persist -> Unit
-                    is GenerateEvent.Chunk -> {
+                    is GenerateEventPhase -> finalStats = event.stats
+                    is GenerateEventPersist -> Unit
+                    is GenerateEventChunk -> {
                         finalStats = event.stats
                         if (event.text.isNotEmpty()) builder.append(event.text)
                         if (event.reasoning.isNotEmpty()) reasoningBuilder.append(event.reasoning)
                     }
-                    is GenerateEvent.Done -> {
+                    is GenerateEventDone -> {
                         finalStats = event.stats
                         terminalCaptured = true
                     }
-                    is GenerateEvent.Error -> {
+                    is GenerateEventError -> {
                         generationError = event
                         terminalCaptured = true
                     }

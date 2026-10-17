@@ -1,6 +1,6 @@
 package com.muyuchat.api.local
 
-import com.muyuchat.core.engine.compareUtf8Unsigned
+import com.muyuchat.core.engine.contract.compareUtf8Unsigned
 import java.math.BigDecimal
 import java.security.MessageDigest
 import java.util.Base64

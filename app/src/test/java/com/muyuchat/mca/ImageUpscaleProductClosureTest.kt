@@ -224,8 +224,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         assertTrue(startupReconciliation.contains(
             "reconcileImageAssetDirectory(imageAssetDirectory, initialImages)"
         ))
-        assertTrue(localApiGeneration.contains("tryAcquireObservedImageGenerationLease(requestId)"))
-        assertTrue(localApiGeneration.contains("releaseObservedImageGenerationLease(generationLease)"))
+        assertTrue(localApiGeneration.contains("port.runLocalApiImageOperation(requestId)"))
+        assertTrue(leaseSource.contains("releaseLease(lease)"))
         assertTrue(observedAcquire.indexOf("updateGenerationImageGrantReleaseDeferInto(store, true)") <
             observedAcquire.indexOf("coordinator.tryAcquire(requestId)"))
         assertTrue(observedRelease.contains("coordinator.activeRequestId() != null"))

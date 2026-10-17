@@ -51,15 +51,11 @@ data class ChatCommand(
  * 4. **LocalApiFacadeAdapter** remains test-only; it is not part of the production chat path.
  */
 class ChatExecutionFacade(
-    val supervisor: RuntimeSupervisor = RuntimeSupervisor(),
-    executionBody: ChatExecutionBody? = null
+    val supervisor: RuntimeSupervisor,
+    executionBody: ChatExecutionBody
 ) {
-    /**
-     * The single chat execution owner. Attached by the production composition (the container builds
-     * one facade per engine); null only in tests that pin the admission boundary alone.
-     */
-    private val owner: ChatExecutionOwner? =
-        executionBody?.let { body -> ChatExecutionOwner(supervisor, body) }
+    /** The single chat execution owner for this supervisor. */
+    private val owner: ChatExecutionOwner = ChatExecutionOwner(supervisor, executionBody)
 
     private val registry: RequestRegistry = supervisor.requestRegistry
     private val cancellation: RequestCancellationController = supervisor.cancellationController
@@ -94,15 +90,15 @@ class ChatExecutionFacade(
      * engine's event flow (see the class KDoc). Throws [IllegalStateException] on a concrete
      * runtime conflict (runtime shut down, or the id already live).
      */
-    fun streamChat(request: ChatRequest, context: LocalChatExecutionContext): Flow<GenerateEvent>? =
-        owner?.stream(request, context)
+    fun streamChat(request: ChatRequest, context: LocalChatExecutionContext): Flow<GenerateEvent> =
+        owner.stream(request, context)
 
     /**
      * Stops the current generation through the shared owner: supervisor cancellation bookkeeping
      * plus the engine's existing unconditional stop.
      */
     suspend fun stopGeneration() {
-        owner?.stopGeneration()
+        owner.stopGeneration()
     }
 
     /**
@@ -110,7 +106,7 @@ class ChatExecutionFacade(
      * so Local API responses stay unchanged.
      */
     suspend fun stopGenerationIfActive(requestId: String): Boolean =
-        owner?.stopGenerationIfActive(requestId) ?: false
+        owner.stopGenerationIfActive(requestId) ?: false
 
     /**
      * Requests cancellation for the currently tracked attempt of [requestId] (client-facing
@@ -174,4 +170,23 @@ class ChatExecutionFacade(
         cancellation.requestCancellation(identity, reason)
         return supervisor.settleRequest(identity, RequestState.Failed)
     }
+
+    companion object {
+        /** Admission/cancellation-only fixture for contract tests; it cannot stream chat. */
+        internal fun admissionOnly(supervisor: RuntimeSupervisor = RuntimeSupervisor()): ChatExecutionFacade =
+            ChatExecutionFacade(
+                supervisor,
+                object : ChatExecutionBody {
+                    override fun stream(
+                        request: ChatRequest,
+                        context: LocalChatExecutionContext
+                    ): Flow<GenerateEvent> = kotlinx.coroutines.flow.emptyFlow()
+
+                    override suspend fun stopGeneration() = Unit
+
+                    override suspend fun stopGenerationIfActive(requestId: String): Boolean = false
+                }
+            )
+    }
+
 }

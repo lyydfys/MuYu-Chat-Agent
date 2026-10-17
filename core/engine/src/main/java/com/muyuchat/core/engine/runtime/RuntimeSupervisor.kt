@@ -135,7 +135,7 @@ class RuntimeSupervisor(initialEpoch: Long = 1L) : RuntimePort {
             "State $terminalState is not a valid terminal state."
         }
         val settled = requestRegistry.settle(identity, terminalState, error) != null
-        releaseRequestResources(identity, terminalState)
+        releaseRequestResources(identity, terminalState, error)
         return settled
     }
 
@@ -146,9 +146,19 @@ class RuntimeSupervisor(initialEpoch: Long = 1L) : RuntimePort {
      * [finalState] publishes the bounded outcome record when the attempt still owns a route; pass
      * null when the outcome was already delivered as a terminal event.
      */
-    fun releaseRequestResources(identity: RequestIdentity, finalState: RequestState? = null): Boolean {
+    fun releaseRequestResources(
+        identity: RequestIdentity,
+        finalState: RequestState? = null,
+        terminalError: ErrorEnvelope? = null
+    ): Boolean {
         cancellationController.unregisterRequest(identity)
-        if (finalState != null) callbackRouter.recordOutcome(identity, finalState)
+        if (finalState != null) {
+            callbackRouter.recordOutcome(
+                identity = identity,
+                finalState = finalState,
+                terminalError = terminalError
+            )
+        }
         callbackRouter.unsubscribe(identity)
         return requestRegistry.evictTerminal(identity) != null
     }

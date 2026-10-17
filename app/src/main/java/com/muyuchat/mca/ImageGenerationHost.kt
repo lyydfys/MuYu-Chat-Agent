@@ -38,6 +38,8 @@ internal interface ImageGenerationHost {
 
     var activeImageGenerationModelId: String?
 
+    var activeLocalApiImageModelId: String?
+
     val localImageTextualInversionLifecycleLock: Any
 
     val localImageLoraLifecycleLock: Any

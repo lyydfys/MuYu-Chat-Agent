@@ -1669,6 +1669,129 @@ def all_artifact_checks_passed(artifact_checks: Mapping[str, Any]) -> bool:
     )
 
 
+def evaluate_source_level_sc(repo_root: Path) -> tuple[bool, list[str], dict[str, Any]]:
+    """Check the source-level invariants that a green architecture script alone cannot prove."""
+    failures: list[str] = []
+    details: dict[str, Any] = {}
+
+    main_vm = repo_root / "app/src/main/java/com/muyuchat/mca/MainViewModel.kt"
+    vm_text = main_vm.read_text(encoding="utf-8") if main_vm.is_file() else ""
+    forbidden_vm = {
+        "concrete_engine_type": "McaInferenceService",
+        "blocking_startup": "runBlocking(",
+    }
+    found = [name for name, needle in forbidden_vm.items() if needle in vm_text]
+    if re.search(r"(?<![A-Za-z0-9_])ImageGenerationOwner\s*\(", vm_text):
+        found.append("direct_image_owner_construction")
+    details["forbidden_main_viewmodel_dependencies"] = found
+    if found:
+        failures.append("MainViewModel retains: " + ", ".join(found))
+
+    assembly = repo_root / "app/src/main/java/com/muyuchat/mca/composition/MainRuntimeAssembly.kt"
+    assembly_text = assembly.read_text(encoding="utf-8") if assembly.is_file() else ""
+    details["runtime_assembly_creates_engine"] = "container.createInferenceService(" in assembly_text
+    if not details["runtime_assembly_creates_engine"]:
+        failures.append("MainRuntimeAssembly is missing the single application engine construction")
+
+    api_root = repo_root / "api/local/src/main"
+    api_engine_refs = [
+        str(path.relative_to(repo_root))
+        for path in api_root.rglob("*.kt")
+        if "McaInferenceService" in path.read_text(encoding="utf-8")
+    ] if api_root.is_dir() else ["api/local/src/main missing"]
+    details["api_local_engine_references"] = api_engine_refs
+    if api_engine_refs:
+        failures.append("api:local still directly references McaInferenceService")
+
+    api_build = repo_root / "api/local/build.gradle.kts"
+    api_build_text = api_build.read_text(encoding="utf-8") if api_build.is_file() else ""
+    api_engine_module_edge = 'project(":core:engine")' in api_build_text
+    details["api_local_core_engine_module_edge"] = api_engine_module_edge
+    if api_engine_module_edge:
+        failures.append("api:local still depends on the full :core:engine module")
+
+    skeleton_facades = [
+        "app/src/main/java/com/muyuchat/mca/facade/ImageGenerationFacade.kt",
+        "app/src/main/java/com/muyuchat/mca/facade/ModelLifecycleFacade.kt",
+        "app/src/main/java/com/muyuchat/mca/facade/RuntimeFacade.kt",
+        "app/src/main/java/com/muyuchat/mca/adapter/LocalApiFacadeAdapter.kt",
+    ]
+    present_facades = [path for path in skeleton_facades if (repo_root / path).exists()]
+    details["unwired_facade_files_present"] = present_facades
+    # ImageGenerationFacade.kt may remain as a data-only contract, but it must not declare a facade class.
+    image_contract = repo_root / skeleton_facades[0]
+    if image_contract.exists() and "class ImageGenerationFacade" in image_contract.read_text(encoding="utf-8"):
+        failures.append("ImageGenerationFacade remains an unwired production facade")
+    for path in skeleton_facades[1:]:
+        if (repo_root / path).exists():
+            failures.append(f"unwired facade file remains: {path}")
+
+    mnn_root = repo_root / "core/native/src/main/cpp/mca/mnn"
+    jni_tus: dict[str, int] = {}
+    if mnn_root.is_dir():
+        for path in sorted(mnn_root.glob("*.cpp")):
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "JNIEXPORT" in text or "Java_com_muyuchat" in text:
+                jni_tus[path.name] = count_lines(path)
+    over = {name: lines for name, lines in jni_tus.items() if lines > 700}
+    details["mnn_jni_translation_units"] = jni_tus
+    if not jni_tus:
+        failures.append("no MNN JNI translation units were found")
+    if over:
+        failures.append("MNN JNI translation units over 700 lines: " + ", ".join(f"{k}={v}" for k, v in over.items()))
+
+    error_types = repo_root / "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatProgressTypes.kt"
+    callback_router = repo_root / "core/engine/src/main/java/com/muyuchat/core/engine/runtime/CallbackRouter.kt"
+    read_model = repo_root / "app/src/main/java/com/muyuchat/mca/facade/FacadeOutcomeReadModel.kt"
+    facade_source = repo_root / "app/src/main/java/com/muyuchat/mca/facade/ChatExecutionFacade.kt"
+    local_provider = repo_root / "app/src/main/java/com/muyuchat/mca/ChatLocalApiProviderOperations.kt"
+    execution_adapter = repo_root / "app/src/main/java/com/muyuchat/mca/ChatExecutionPortAdapters.kt"
+    execution_operations = repo_root / "app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt"
+    facade_text = facade_source.read_text(encoding="utf-8") if facade_source.is_file() else ""
+    provider_text = local_provider.read_text(encoding="utf-8") if local_provider.is_file() else ""
+    adapter_text = execution_adapter.read_text(encoding="utf-8") if execution_adapter.is_file() else ""
+    operations_text = execution_operations.read_text(encoding="utf-8") if execution_operations.is_file() else ""
+    no_chat_fallback = (
+        "ChatExecutionBody?" not in facade_text
+        and "owner?.stream" not in facade_text
+        and "?: engine.streamChat" not in provider_text
+        and "?: engine.streamChat" not in adapter_text
+        and "?: engine.streamChat" not in operations_text
+    )
+    details["chat_execution_has_no_direct_engine_fallback"] = no_chat_fallback
+    if not no_chat_fallback:
+        failures.append("chat execution still permits nullable/direct-engine fallback outside the facade")
+
+    typed_error_ok = (
+        error_types.is_file()
+        and "errorEnvelope: ErrorEnvelope?" in error_types.read_text(encoding="utf-8")
+        and callback_router.is_file()
+        and "terminalError: ErrorEnvelope?" in callback_router.read_text(encoding="utf-8")
+        and read_model.is_file()
+        and "terminalError = terminalError" in read_model.read_text(encoding="utf-8")
+    )
+    details["typed_terminal_error_chain"] = typed_error_ok
+    if not typed_error_ok:
+        failures.append("typed ErrorEnvelope is not carried through event, router, and read model")
+
+    native_cmake = repo_root / "core/native/src/main/cpp/CMakeLists.txt"
+    cmake_text = native_cmake.read_text(encoding="utf-8") if native_cmake.is_file() else ""
+    match = re.search(r"target_link_libraries\(mca_runtime_lifecycle([^)]*)\)", cmake_text, re.S)
+    lifecycle_links = match.group(1) if match else ""
+    no_reverse_jni = bool(match) and "mca_jni_boundary" not in lifecycle_links
+    sd_cmake = repo_root / "core/sd-native/src/main/cpp/CMakeLists.txt"
+    sd_text = sd_cmake.read_text(encoding="utf-8") if sd_cmake.is_file() else ""
+    backend_local = "mca_sd_runtime_backend_local" in sd_text
+    details["runtime_lifecycle_independent_of_jni"] = no_reverse_jni
+    details["sd_runtime_backend_local"] = backend_local
+    if not no_reverse_jni:
+        failures.append("mca_runtime_lifecycle still links mca_jni_boundary")
+    if not backend_local:
+        failures.append("sd-native does not isolate runtime backend-local TUs")
+
+    return not failures, failures, details
+
+
 def derive_rating_statuses(
     gate_results: Mapping[str, str],
     policy_test: Mapping[str, Any],
@@ -1679,6 +1802,7 @@ def derive_rating_statuses(
 ) -> Dict[str, Any]:
     s_c_passed = (
         gate_results.get("architecture_rules") == PASSED
+        and gate_results.get("source_level_s_c") == PASSED
         and policy_test.get("status") == PASSED
         and viewmodel_budget_passed
     )
@@ -1691,12 +1815,11 @@ def derive_rating_statuses(
 
     if s_c_passed:
         s_c = PASSED
-        s_c_reason = "architecture rules, policy JUnit XML, and MainViewModel limit all passed"
+        s_c_reason = "architecture rules, source-level boundaries, policy JUnit XML, and MainViewModel limit all passed"
     else:
         s_c = "BLOCKED"
         s_c_reason = (
-            "S-C requires architecture rules PASS, policy test XML PASS, and the "
-            "MainViewModel line limit; bridge line budget remains advisory"
+            "S-C requires architecture rules PASS, source-level boundary checks PASS, policy test XML PASS, and the MainViewModel line limit; bridge line budget remains advisory"
         )
 
     if s_r_passed:
@@ -2053,6 +2176,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         f"(Hard Cap: {VIEWMODEL_LINE_LIMIT})"
     )
 
+    source_level_ok, source_level_failures, source_level_details = evaluate_source_level_sc(repo_root)
+    results["source_level_s_c"] = PASSED if source_level_ok else FAILED
+    gate_reasons["source_level_s_c"] = (
+        "MainViewModel dependency budget, production owner boundaries, MNN JNI TU limits, typed error terminal chain, and native dependency direction all passed"
+        if source_level_ok
+        else "source-level S-C failures: " + "; ".join(source_level_failures)
+    )
+    print("--> [Final Gate] Source-Level S-C Invariants: " + ("PASSED" if source_level_ok else "FAILED"))
+    for failure in source_level_failures:
+        print("    " + failure)
+
     release_apk = Path(str(canonical_apk["path"]))
     artifact_checks = evaluate_release_artifact_checks(
         repo_root,
@@ -2083,6 +2217,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     required_gates = [
         "canonical_apk",
         "architecture_rules",
+        "source_level_s_c",
         "release_integrity",
         "runtime_evidence",
         "runtime_evidence_contract",
@@ -2163,6 +2298,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "release_artifact_checks": artifact_checks,
         "rating_evaluation": ratings["statuses"],
         "rating_reasons": ratings["reasons"],
+        "source_level_s_c": {
+            "status": results["source_level_s_c"],
+            "failures": source_level_failures,
+            "details": source_level_details,
+        },
         "bridge_line_budget": {
             "advisory": True,
             "limit": BRIDGE_LINE_LIMIT,

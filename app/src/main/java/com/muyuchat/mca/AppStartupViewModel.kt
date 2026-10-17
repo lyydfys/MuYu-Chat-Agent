@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.muyuchat.mca.composition.McaAppContainer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -71,7 +72,20 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                 // Retain the instance even if the Activity is closed during construction;
                 // finally clears its ViewModelStore and cancels any owned work.
                 withContext(Dispatchers.IO) {
-                    prepared = MainViewModel(app, deferStartup = true, skipInitialModelDiscovery = skipModelDiscovery)
+                    val container = McaAppContainer(app)
+                    val migration = ModelIdentityReferenceMigration(app)
+                    val migrated = migration.migratePendingReferences()
+                    val installationScopeId = container.runtimeProfileStore.installationScopeId()
+                    prepared = MainViewModel(
+                        app,
+                        deferStartup = true,
+                        skipInitialModelDiscovery = skipModelDiscovery,
+                        injectedStartupContext = MainViewModelStartupContext(
+                            container = container,
+                            installationScopeId = installationScopeId,
+                            modelIdentityReferencesMigrated = migrated
+                        )
+                    )
                 }
                 val main = requireNotNull(prepared)
                 ViewModelProvider(children, object : ViewModelProvider.Factory {

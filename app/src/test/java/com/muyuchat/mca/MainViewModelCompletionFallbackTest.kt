@@ -277,8 +277,8 @@ class MainViewModelCompletionFallbackTest {
     fun clearChatInvokesLifecycleClosureAfterStopAndCancel() {
         val body = functionBody(mainViewModelSource(), "fun clearChat()")
         val cancel = body.indexOf("cancelGenerationJob()")
-        val stop = body.indexOf("engine.stopGeneration()")
-        val close = body.indexOf("afterClearChatGenerationStopped(engine.stats.value)")
+        val stop = body.indexOf("runtimeAssembly.stopGenerationAndReadStats()")
+        val close = body.indexOf("afterClearChatGenerationStopped(stoppedStats)")
 
         assertTrue(cancel >= 0)
         assertTrue(stop > cancel)
@@ -609,7 +609,7 @@ class MainViewModelCompletionFallbackTest {
 
     /** v4-①：位置无关——按标记定位承载文件（VM 类声明处），读者不再含路径字面量。 */
     private fun mainViewModelSource(): String =
-        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads constructor(")
+        SourceTextFixtures.sourceOf("class MainViewModel @JvmOverloads internal constructor(")
 
     /** R3/C3-S24: the load vertical (runLoadModelBody etc.)；v4-① 标记定位。 */
     private fun loadModelOperationsSource(): String =

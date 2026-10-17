@@ -1,8 +1,5 @@
 package com.muyuchat.mca.request
 
-import com.muyuchat.core.engine.contract.CallbackEvent
-import com.muyuchat.core.engine.contract.RequestState
-import com.muyuchat.core.engine.runtime.RuntimeSupervisor
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.GenerationForegroundLease
 import com.muyuchat.mca.GenerationForegroundLeaseRegistry
@@ -10,17 +7,7 @@ import com.muyuchat.mca.ImageWorkerStrategy
 import com.muyuchat.mca.LocalImageTaskMode
 import com.muyuchat.mca.ParentDirectorySyncer
 import com.muyuchat.mca.SdxlTwoPhaseRequestLease
-import com.muyuchat.mca.adapter.LocalApiFacadeAdapter
-import com.muyuchat.mca.adapter.LocalApiResponse
-import com.muyuchat.mca.adapter.SseStreamOutcome
-import com.muyuchat.mca.adapter.SseStreamOverflowException
-import com.muyuchat.mca.facade.ChatExecutionFacade
-import com.muyuchat.mca.facade.ImageGenerationFacade
-import com.muyuchat.mca.facade.RuntimeFacade
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.take
-import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -32,151 +19,15 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Request-risk protection for the wired production owners (plan §6 F2): the Local API SSE boundary,
- * the foreground lease registry and chat run ownership.
- *
- * These cases call the real production classes, and each was written to fail against the previous
- * implementation (silently ignored `trySend` results with an unbounded-claim buffer).
+ * Request-risk protection for the wired production owners (plan §6 F2): foreground lease ownership
+ * and chat run ownership.
  */
 class RequestRiskContractTest {
-
-    private class SseHarness(capacity: Int) {
-        val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        val chatFacade = ChatExecutionFacade(supervisor)
-        val imageFacade = ImageGenerationFacade(supervisor)
-        val adapter = LocalApiFacadeAdapter(
-            chatFacade = chatFacade,
-            imageFacade = imageFacade,
-            runtimeFacade = RuntimeFacade(supervisor),
-            expectedApiKey = null,
-            sseBufferCapacity = capacity
-        )
-
-        fun dispatch(idempotencyKey: String): LocalApiResponse.SseStream {
-            val response = adapter.handleChatCompletion(
-                bodyJson = """{"prompt":"hello streaming","idempotency_key":"$idempotencyKey"}""",
-                authHeader = null
-            )
-            return response as LocalApiResponse.SseStream
-        }
-
-        fun routeTokens(requestId: String, count: Int, firstSequence: Int = 1) {
-            val identity = requireNotNull(supervisor.requestRegistry.getEntry(requestId)) {
-                "request $requestId must be registered before events are routed"
-            }.identity
-            for (offset in 0 until count) {
-                val sequence = (firstSequence + offset).toLong()
-                supervisor.callbackRouter.routeEvent(
-                    CallbackEvent.token(identity, sequence, "token-$sequence", sequence),
-                    currentRuntimeEpoch = supervisor.currentEpoch.value,
-                    currentSessionGeneration = identity.sessionGeneration
-                )
-            }
-        }
-
-        fun routeTerminal(requestId: String, sequence: Long) {
-            val identity = requireNotNull(supervisor.requestRegistry.getEntry(requestId)) {
-                "request $requestId must be registered before events are routed"
-            }.identity
-            supervisor.callbackRouter.routeEvent(
-                CallbackEvent.terminal(identity, sequence, RequestState.Succeeded),
-                currentRuntimeEpoch = supervisor.currentEpoch.value,
-                currentSessionGeneration = identity.sessionGeneration
-            )
-        }
-    }
-
-    @Test
-    fun boundedSseBufferRefusesOverflowExplicitlyInsteadOfDroppingFrames() = runBlocking {
-        val harness = SseHarness(capacity = 4)
-        val response = harness.dispatch("sse-overflow")
-        harness.routeTokens(response.requestId, count = 10)
-
-        val outcome = requireNotNull(harness.adapter.sseOutcome(response.requestId)) {
-            "an overflowed stream must have a queryable outcome"
-        }
-        assertTrue("expected an overflow outcome but was $outcome", outcome is SseStreamOutcome.Overflowed)
-        val overflowed = outcome as SseStreamOutcome.Overflowed
-        assertFalse("a token frame was refused, not the terminal", overflowed.droppedTerminal)
-        assertEquals(5L, overflowed.droppedSequence)
-        assertEquals(4, overflowed.deliveredFrames)
-
-        assertFalse(
-            "a request whose stream overflowed must not linger as active",
-            harness.chatFacade.isChatActive(response.requestId)
-        )
-        val snapshot = requireNotNull(harness.chatFacade.snapshot(response.requestId))
-        assertTrue(snapshot.terminal)
-        assertEquals(RequestState.Failed, snapshot.state)
-
-        val frames = mutableListOf<String>()
-        val failure = runCatching { response.frames.collect { frames.add(it.event.orEmpty()) } }.exceptionOrNull()
-        assertEquals("every accepted frame must still be delivered", 4, frames.size)
-        assertTrue("expected an explicit overflow failure but was $failure", failure is SseStreamOverflowException)
-        val overflowFailure = failure as SseStreamOverflowException
-        assertEquals(5L, overflowFailure.droppedSequence)
-        assertFalse(overflowFailure.droppedTerminal)
-    }
-
-    @Test
-    fun refusedTerminalFrameIsReportedAndNeverSilentlyLost() = runBlocking {
-        val harness = SseHarness(capacity = 2)
-        val response = harness.dispatch("sse-terminal-refused")
-        harness.routeTokens(response.requestId, count = 2)
-        harness.routeTerminal(response.requestId, sequence = 3L)
-
-        val overflowed = requireNotNull(harness.adapter.sseOutcome(response.requestId)) as SseStreamOutcome.Overflowed
-        assertTrue("a refused terminal must be reported as such", overflowed.droppedTerminal)
-        assertEquals(3L, overflowed.droppedSequence)
-        assertFalse(harness.chatFacade.isChatActive(response.requestId))
-        assertTrue(requireNotNull(harness.chatFacade.snapshot(response.requestId)).terminal)
-
-        val failure = runCatching { response.frames.collect { } }.exceptionOrNull()
-        assertTrue(failure is SseStreamOverflowException)
-        assertTrue("the failure must say the terminal was refused", (failure as SseStreamOverflowException).droppedTerminal)
-    }
-
-    @Test
-    fun completedStreamRecordsItsTerminalAndDoesNotCancelTheRequest() = runBlocking {
-        val harness = SseHarness(capacity = 4)
-        val response = harness.dispatch("sse-completed")
-        harness.routeTokens(response.requestId, count = 2)
-        harness.routeTerminal(response.requestId, sequence = 3L)
-
-        val frames = mutableListOf<String>()
-        response.frames.collect { frames.add(it.event.orEmpty()) }
-        assertEquals(listOf("token", "token", "done"), frames)
-
-        val outcome = requireNotNull(harness.adapter.sseOutcome(response.requestId))
-        assertTrue("expected a completed outcome but was $outcome", outcome is SseStreamOutcome.Completed)
-        assertEquals("done", (outcome as SseStreamOutcome.Completed).terminalEvent)
-        assertNull(
-            "a fully delivered stream must not be reported as a client disconnect",
-            harness.supervisor.cancellationController.getCancellationReason(response.requestId)
-        )
-    }
-
-    @Test
-    fun clientDisconnectCancelsTheRequestAndIsQueryable() = runBlocking {
-        val harness = SseHarness(capacity = 4)
-        val response = harness.dispatch("sse-disconnect")
-        harness.routeTokens(response.requestId, count = 1)
-
-        response.frames.take(1).collect { }
-
-        val outcome = requireNotNull(harness.adapter.sseOutcome(response.requestId))
-        assertTrue("expected a disconnected outcome but was $outcome", outcome is SseStreamOutcome.Disconnected)
-        assertEquals(
-            "Client connection closed",
-            harness.supervisor.cancellationController.getCancellationReason(response.requestId)
-        )
-    }
 
     @Test
     fun foregroundLeaseIsReleasedOnAnotherThreadAndDuplicateReleaseIsInert() {

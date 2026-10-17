@@ -22,7 +22,7 @@ android {
 }
 
 dependencies {
-    implementation(project(":core:engine"))
+    implementation(project(":core:inference-contract"))
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     testImplementation(libs.json)
