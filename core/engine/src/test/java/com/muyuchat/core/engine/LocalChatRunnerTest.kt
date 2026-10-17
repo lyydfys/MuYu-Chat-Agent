@@ -249,9 +249,7 @@ class LocalChatRunnerTest {
 
     @Test
     fun geniexLlamaRuntimeUsesTheSafeSelectorWithoutReplacingAcceleratedChoices() {
-        val source = sourceFile(
-            "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt"
-        )
+        val source = runnerSources()
         val factoryBody = source.substringAfter("fun defaultLocalChatRunner(")
             .substringBefore("fun defaultLocalChatRunners(")
 
@@ -384,6 +382,11 @@ class LocalChatRunnerTest {
             return 0
         }
     }
+
+    private fun runnerSources(): String = listOf(
+        "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt",
+        "core/engine/src/main/java/com/muyuchat/core/engine/LocalRunnerShells.kt"
+    ).joinToString("\n") { sourceFile(it) }
 
     private fun sourceFile(relativePath: String): String {
         var directory = java.io.File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

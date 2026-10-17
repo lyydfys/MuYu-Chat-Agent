@@ -1,0 +1,1484 @@
+{
+  "kind": "REPAIR_REFERENCE_SOURCE_LEDGER",
+  "created_at": "2026-10-09T21:22:26.937105+08:00",
+  "workspace": "E:/MAC",
+  "head": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+  "status": "PLANNING_ONLY_NO_BUSINESS_CODE_REPAIR_NO_BUILD_OR_DEVICE_PASS",
+  "reference_commits": {
+    "current_head": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+    "before_last_native_extraction": "76348a5b55baa49052c5a02674c29baf4307d5a6",
+    "before_last_vm_extraction": "02fc01810a5fb4fb5fbda2e61f1f20dd47351d01",
+    "preserve_metric_regression_fix": "aa0f9bf1c70a199ef952cdc657a223c331329479",
+    "before_first_physical_extraction": "b6f8e0cd3bd762cb78f1c4c1ad5a336711a91866"
+  },
+  "sources": [
+    {
+      "feature": "MNN_CHAT_DIFFUSION",
+      "reference_commit": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+      "reference_path": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "reference_blob_id": "9fb7b57cd5fd3450f21f58e32aca542d0dbc2b1c",
+      "reference_sha256": "1b07024686ae26176eddfecea7a9cdb04ee355b3acb176e5417d5756e819d15d",
+      "reference_line_count": 7613,
+      "reference_anchor_lines": {
+        "Llm::createLLM": [
+          5330
+        ],
+        "beginCompletion": [
+          214,
+          4916,
+          4920,
+          4955,
+          5411,
+          5430,
+          5664,
+          5676,
+          5899
+        ],
+        "generateNextChunk": [
+          4980,
+          5620,
+          5688,
+          5815,
+          5820,
+          5830,
+          5851
+        ],
+        "run_mnn_sd15_interpreter_direct": [
+          4061,
+          7309
+        ],
+        "MnnSanaSession": [
+          7269
+        ],
+        "scheduler.step(guided": [
+          4607
+        ]
+      },
+      "reference_jni_names": [
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_beginCompletion",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_generateNextChunk",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getPrefillProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isGenerationRunning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_loadModel",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStop",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_unloadModel",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_cancel",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSd15PromptEmbeddings",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptConditioning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_generate",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getProgress",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_inspectBundle",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_measurePromptTokens",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_resetImageCancellation",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIds",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsWithConfig"
+      ],
+      "current_path": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "current_sha256": "403b75cbb8f57c6105f8239901172ddbb1b78b76ef88b08ed17acb217185f815",
+      "current_line_count": 1472,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "GGUF_CHAT_MTP",
+      "reference_commit": "76348a5b55baa49052c5a02674c29baf4307d5a6",
+      "reference_path": "core/native/src/main/cpp/native_engine.cpp",
+      "reference_blob_id": "da6e0dc05585e1556cc82409845822d8ee76eae8",
+      "reference_sha256": "2ee84d74287c742e5a8b7a26c92f120f9830e8c32ee8a5d076d4488246bf31e2",
+      "reference_line_count": 3125,
+      "reference_anchor_lines": {
+        "g_speculative": [
+          621,
+          622,
+          1033,
+          1162,
+          1501,
+          1756,
+          1769,
+          1770,
+          1771,
+          1772,
+          1773,
+          1774,
+          1775,
+          1776,
+          1777,
+          1778,
+          1780,
+          1792,
+          1811,
+          1864,
+          1873,
+          1904,
+          1972,
+          2708,
+          2735,
+          2784,
+          2920
+        ],
+        "common_speculative_process": [
+          1162,
+          1163,
+          1904,
+          1905
+        ],
+        "generateNextChunk": [
+          2891,
+          3081
+        ]
+      },
+      "reference_jni_names": [
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletion",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_beginCompletionWithPrefixCache",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_generateNextChunk",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPersistProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getPrefillProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_initBackends",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_invalidateTextContext",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_loadModel",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStop",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_requestStopIfActive",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_resetPrefillProgress",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_shutdown",
+        "Java_com_muyuchat_core_nativebridge_NativeLlamaBridge_unloadModel"
+      ],
+      "current_path": "core/native/src/main/cpp/native_engine.cpp",
+      "current_sha256": "e7b0e9a6dc99098e8677f66b87fb289ee91d24233e382e02d41b20ca55325781",
+      "current_line_count": 1481,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "QNN_CHAT_IMAGE",
+      "reference_commit": "76348a5b55baa49052c5a02674c29baf4307d5a6",
+      "reference_path": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "reference_blob_id": "28c1896104864e69997d7bce3418c16782a3e0ef",
+      "reference_sha256": "ffd9194432a157cd70e2b6b481ad85dc4df63e981cf0ad855a691bb4d9114418",
+      "reference_line_count": 11892,
+      "reference_anchor_lines": {
+        "g_qnn_context_execution_mutex": [
+          99,
+          8340,
+          11709,
+          11732,
+          11857
+        ],
+        "qnn_semantic_generate_json": [
+          7854,
+          11344,
+          11752
+        ],
+        "generate": [
+          7854,
+          11344,
+          11752
+        ]
+      },
+      "reference_jni_names": [
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_cancelImageGeneration",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_getImageGenerationProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectBundle",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectContextMetadata",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_inspectRuntime",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImagePipelineProbe",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImageSemanticGenerate",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runImageSmoke",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlEncoderPhase",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlUnetPhase",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runSdxlVaePhase",
+        "Java_com_muyuchat_core_nativebridge_NativeQnnBridge_runVisionSmoke"
+      ],
+      "current_path": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "current_sha256": "0554d965e8019ab4d09a27ec600ae2a02af802b1711e9e0201073d9f6488888f",
+      "current_line_count": 990,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "SDCPP_IMAGE",
+      "reference_commit": "76348a5b55baa49052c5a02674c29baf4307d5a6",
+      "reference_path": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "reference_blob_id": "847f59a5eea1aab86d9a0dd83542398ac264a5f3",
+      "reference_sha256": "7e7dcb042e3c6d0a3b8191856e60d2137c9962e621f6d2af6a1ea0e65ee1388e",
+      "reference_line_count": 2718,
+      "reference_anchor_lines": {
+        "generate_impl": [
+          673,
+          2582
+        ],
+        "nativeEffective": [
+          2439,
+          2530
+        ]
+      },
+      "reference_jni_names": [
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_cancel",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_generate",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getNativeConfig",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getProgress",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_getSystemInfo",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_measurePromptTokens",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_shutdown",
+        "Java_com_muyuchat_core_sdnative_NativeStableDiffusionBridge_upscale"
+      ],
+      "current_path": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "current_sha256": "f877de7153028b3d53cd2b1e4f9247349d94bb89e0938c9d4bd7069b1fe43a55",
+      "current_line_count": 1472,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "APP_VM_BEFORE_LAST_EXTRACTION",
+      "reference_commit": "02fc01810a5fb4fb5fbda2e61f1f20dd47351d01",
+      "reference_path": "app/src/main/java/com/muyuchat/mca/MainViewModel.kt",
+      "reference_blob_id": "b9eed706ef8723d41c89fab1b1ee80c8e4293f10",
+      "reference_sha256": "51e50a06b0a832777b31d32cf211f98a1c61bdc76f036e2e504e194f8dfee813",
+      "reference_line_count": 1929,
+      "reference_anchor_lines": {
+        "fun ": [
+          145,
+          146,
+          147,
+          148,
+          149,
+          150,
+          290,
+          305,
+          309,
+          347,
+          352,
+          357,
+          361,
+          398,
+          401,
+          404,
+          407,
+          489,
+          501,
+          512,
+          525,
+          528,
+          539,
+          551,
+          560,
+          587,
+          590,
+          662,
+          666,
+          682,
+          695,
+          729,
+          735,
+          738,
+          741,
+          744,
+          753,
+          755,
+          757,
+          759,
+          763,
+          766,
+          769,
+          774,
+          783,
+          791,
+          794,
+          797,
+          800,
+          803,
+          806,
+          809,
+          812,
+          815,
+          826,
+          827,
+          828,
+          829,
+          831,
+          837,
+          849,
+          852,
+          855,
+          862,
+          864,
+          867,
+          870,
+          871,
+          872,
+          873,
+          875,
+          878,
+          881,
+          884,
+          888,
+          891,
+          895,
+          899,
+          919,
+          922,
+          924,
+          927,
+          968,
+          971,
+          985,
+          988,
+          992,
+          997,
+          999,
+          1004,
+          1009,
+          1015,
+          1017,
+          1019,
+          1021,
+          1023,
+          1047,
+          1053,
+          1056,
+          1058,
+          1061,
+          1062,
+          1063,
+          1064,
+          1065,
+          1066,
+          1067,
+          1069,
+          1071,
+          1074,
+          1080,
+          1086,
+          1089,
+          1092,
+          1098,
+          1101,
+          1104,
+          1107,
+          1117,
+          1120,
+          1121,
+          1122,
+          1123,
+          1124,
+          1125,
+          1126,
+          1127,
+          1128,
+          1129,
+          1130,
+          1131,
+          1132,
+          1133,
+          1134,
+          1135,
+          1136,
+          1137,
+          1138,
+          1139,
+          1140,
+          1141,
+          1142,
+          1145,
+          1149,
+          1152,
+          1156,
+          1157,
+          1159,
+          1161,
+          1162,
+          1164,
+          1165,
+          1166,
+          1167,
+          1168,
+          1171,
+          1172,
+          1173,
+          1174,
+          1175,
+          1176,
+          1179,
+          1182,
+          1187,
+          1188,
+          1189,
+          1190,
+          1191,
+          1192,
+          1194,
+          1196,
+          1203,
+          1206,
+          1209,
+          1212,
+          1215,
+          1218,
+          1221,
+          1224,
+          1227,
+          1231,
+          1235,
+          1248,
+          1266,
+          1269,
+          1272,
+          1275,
+          1278,
+          1281,
+          1284,
+          1289,
+          1293,
+          1296,
+          1350,
+          1363,
+          1367,
+          1370,
+          1373,
+          1393,
+          1446,
+          1450,
+          1454,
+          1466,
+          1469,
+          1473,
+          1487,
+          1490,
+          1493,
+          1506,
+          1509,
+          1512,
+          1518,
+          1531,
+          1558,
+          1560,
+          1561,
+          1564,
+          1567,
+          1570,
+          1574,
+          1575,
+          1576,
+          1577,
+          1578,
+          1579,
+          1580,
+          1581,
+          1583,
+          1584,
+          1585,
+          1586,
+          1587,
+          1588,
+          1589,
+          1590,
+          1591,
+          1592,
+          1593,
+          1594,
+          1596,
+          1615,
+          1634,
+          1647,
+          1652,
+          1658,
+          1666,
+          1669,
+          1672,
+          1677,
+          1686,
+          1689,
+          1692,
+          1777,
+          1781,
+          1783,
+          1786,
+          1817,
+          1823,
+          1829,
+          1839,
+          1846,
+          1849,
+          1853,
+          1859,
+          1864,
+          1867,
+          1877,
+          1880,
+          1883,
+          1886,
+          1889,
+          1892,
+          1895,
+          1897,
+          1902,
+          1905,
+          1908,
+          1918,
+          1923,
+          1925
+        ],
+        "sendPreparedMessage": [
+          1196,
+          1200
+        ]
+      },
+      "reference_jni_names": [],
+      "current_path": "app/src/main/java/com/muyuchat/mca/MainViewModel.kt",
+      "current_sha256": "f39125d85669982fe42da65fff47b76db04e7c105ce0e2c3af943b6192c67288",
+      "current_line_count": 511,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "APP_VM_EARLIER_REFERENCE",
+      "reference_commit": "b6f8e0cd3bd762cb78f1c4c1ad5a336711a91866",
+      "reference_path": "app/src/main/java/com/muyuchat/mca/MainViewModel.kt",
+      "reference_blob_id": "f0a84e528f7dccb3ff28b804ec754abff94fbcee",
+      "reference_sha256": "0af4c1811fc6f2bd04e1296dccf6c8083e24c1815c7fc8a0474676db38137edc",
+      "reference_line_count": 2760,
+      "reference_anchor_lines": {
+        "fun ": [
+          139,
+          140,
+          141,
+          142,
+          143,
+          144,
+          284,
+          299,
+          303,
+          340,
+          345,
+          350,
+          354,
+          391,
+          394,
+          397,
+          400,
+          471,
+          483,
+          494,
+          507,
+          510,
+          521,
+          533,
+          542,
+          553,
+          556,
+          609,
+          610,
+          611,
+          612,
+          613,
+          614,
+          616,
+          618,
+          620,
+          623,
+          628,
+          630,
+          632,
+          634,
+          635,
+          648,
+          656,
+          658,
+          660,
+          662,
+          663,
+          664,
+          666,
+          668,
+          669,
+          670,
+          672,
+          673,
+          675,
+          676,
+          678,
+          680,
+          681,
+          686,
+          693,
+          695,
+          697,
+          727,
+          731,
+          747,
+          760,
+          794,
+          800,
+          803,
+          806,
+          809,
+          818,
+          820,
+          822,
+          824,
+          828,
+          831,
+          834,
+          839,
+          848,
+          856,
+          859,
+          862,
+          865,
+          868,
+          871,
+          874,
+          877,
+          880,
+          891,
+          892,
+          893,
+          894,
+          896,
+          902,
+          942,
+          945,
+          948,
+          955,
+          957,
+          960,
+          963,
+          964,
+          965,
+          966,
+          968,
+          971,
+          974,
+          977,
+          981,
+          984,
+          988,
+          992,
+          1012,
+          1015,
+          1017,
+          1020,
+          1061,
+          1064,
+          1078,
+          1081,
+          1085,
+          1090,
+          1092,
+          1097,
+          1102,
+          1108,
+          1110,
+          1112,
+          1114,
+          1116,
+          1140,
+          1146,
+          1149,
+          1151,
+          1154,
+          1155,
+          1156,
+          1157,
+          1158,
+          1159,
+          1160,
+          1162,
+          1164,
+          1167,
+          1173,
+          1179,
+          1182,
+          1185,
+          1232,
+          1289,
+          1292,
+          1295,
+          1305,
+          1308,
+          1309,
+          1310,
+          1311,
+          1312,
+          1313,
+          1314,
+          1315,
+          1316,
+          1317,
+          1318,
+          1319,
+          1320,
+          1321,
+          1322,
+          1323,
+          1324,
+          1325,
+          1326,
+          1327,
+          1328,
+          1329,
+          1330,
+          1333,
+          1365,
+          1368,
+          1372,
+          1373,
+          1375,
+          1377,
+          1378,
+          1380,
+          1381,
+          1382,
+          1383,
+          1384,
+          1387,
+          1388,
+          1389,
+          1390,
+          1391,
+          1392,
+          1395,
+          1398,
+          1403,
+          1404,
+          1405,
+          1406,
+          1407,
+          1408,
+          1410,
+          1440,
+          1454,
+          1736,
+          1739,
+          1742,
+          1745,
+          1748,
+          1751,
+          1754,
+          1757,
+          1760,
+          1764,
+          1768,
+          1787,
+          1790,
+          1793,
+          1796,
+          1799,
+          1802,
+          1805,
+          1810,
+          1814,
+          1817,
+          1871,
+          1882,
+          1896,
+          1899,
+          1902,
+          1955,
+          1959,
+          1963,
+          1975,
+          1978,
+          1982,
+          1996,
+          1999,
+          2002,
+          2015,
+          2050,
+          2059,
+          2089,
+          2102,
+          2129,
+          2224,
+          2225,
+          2228,
+          2231,
+          2234,
+          2238,
+          2239,
+          2240,
+          2241,
+          2242,
+          2243,
+          2244,
+          2245,
+          2247,
+          2248,
+          2249,
+          2250,
+          2251,
+          2252,
+          2253,
+          2254,
+          2255,
+          2256,
+          2257,
+          2258,
+          2260,
+          2279,
+          2298,
+          2311,
+          2326,
+          2341,
+          2347,
+          2421,
+          2432,
+          2450,
+          2465,
+          2471,
+          2479,
+          2491,
+          2616,
+          2620,
+          2622,
+          2625,
+          2656,
+          2662,
+          2672,
+          2679,
+          2682,
+          2686,
+          2692,
+          2697,
+          2700,
+          2710,
+          2713,
+          2716,
+          2719,
+          2722,
+          2725,
+          2728,
+          2733,
+          2736,
+          2739,
+          2749,
+          2754,
+          2756
+        ]
+      },
+      "reference_jni_names": [],
+      "current_path": "app/src/main/java/com/muyuchat/mca/MainViewModel.kt",
+      "current_sha256": "f39125d85669982fe42da65fff47b76db04e7c105ce0e2c3af943b6192c67288",
+      "current_line_count": 511,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "MNN_JNI_CHAT_DECLARATIONS",
+      "reference_commit": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+      "reference_path": "core/native/src/main/java/com/muyuchat/core/nativebridge/NativeMnnBridge.kt",
+      "reference_blob_id": "069ab028559a25c1b7690f1eb993f44b069dae8d",
+      "reference_sha256": "68627a4f99a1bf07960223ebc281768ca0f996261f7f17b2e362dc88db600b3f",
+      "reference_line_count": 31,
+      "reference_anchor_lines": {
+        "external fun": [
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30
+        ]
+      },
+      "reference_jni_names": [],
+      "current_path": "core/native/src/main/java/com/muyuchat/core/nativebridge/NativeMnnBridge.kt",
+      "current_sha256": "68627a4f99a1bf07960223ebc281768ca0f996261f7f17b2e362dc88db600b3f",
+      "current_line_count": 31,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    },
+    {
+      "feature": "MNN_JNI_IMAGE_DECLARATIONS",
+      "reference_commit": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+      "reference_path": "core/native/src/main/java/com/muyuchat/core/nativebridge/NativeMnnDiffusionBridge.kt",
+      "reference_blob_id": "62a03395d68830a7d73abd0ee63447dd53e12861",
+      "reference_sha256": "6978a12897392b91849f2aa89d791816573c933c8354191b7be834da9242e222",
+      "reference_line_count": 128,
+      "reference_anchor_lines": {
+        "external fun": [
+          16,
+          17,
+          18,
+          19,
+          27,
+          34,
+          47,
+          61,
+          79,
+          90,
+          107,
+          120,
+          125,
+          126,
+          127
+        ]
+      },
+      "reference_jni_names": [],
+      "current_path": "core/native/src/main/java/com/muyuchat/core/nativebridge/NativeMnnDiffusionBridge.kt",
+      "current_sha256": "6978a12897392b91849f2aa89d791816573c933c8354191b7be834da9242e222",
+      "current_line_count": 128,
+      "baseline_validation_status": "SOURCE_INSPECTED_CANDIDATE_NOT_BUILD_OR_DEVICE_VERIFIED",
+      "behavior_diff_status": "REQUIRES_FUNCTION_AND_TRANSITIVE_HELPER_REVIEW"
+    }
+  ],
+  "current_related_source_hashes": [
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/facade/ChatExecutionFacade.kt",
+      "sha256": "9edd4e848bf5bf1e5496b356980db83636061183bbff5d558e285b68fec1d7bc"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/facade/ImageGenerationFacade.kt",
+      "sha256": "818a3f2a39cd383a9b839224ba4b76c844adf33164ebad75f0377bf285a7cead"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/facade/ModelLifecycleFacade.kt",
+      "sha256": "a5d0aec420eb2a7a88c18a0572b134ec652dd48df4cf7474ddbea03cb30f54fd"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/facade/RuntimeFacade.kt",
+      "sha256": "f50380a478d99126799b407d59cebd30a1ea7e6b38738905caf48a774e9c1a55"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/BackendRuntimeOwner.kt",
+      "sha256": "639bc95a904a46be91b74855d06f63623d0be1dbbaba599761ec01cee577a774"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/CallbackRouter.kt",
+      "sha256": "a48925beeaf9c857114fef124ba293fbe3b546c8688fd4880b611b29868d5405"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/EngineSessionOwner.kt",
+      "sha256": "e9e4182685f511dc1f4b03ac5a2f56ec9f7831703a48799b937e5899f71b2a0d"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/NativeErrorTranslator.kt",
+      "sha256": "27c6f8870fdf55249246a7076b7b867f3c3da72355b5ab748ea500d17deabe36"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/RequestCancellationController.kt",
+      "sha256": "6a37188637272961259138759ff51102c806c97bcf3ebee15a4c66bdf6cd8753"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/RequestRegistry.kt",
+      "sha256": "aeea89c7b33c200d8788d4bf291ecf14625d6aea4d1adf9c248d65e79a816163"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/RuntimeContracts.kt",
+      "sha256": "dee9c5d42aa48d0bce8fda6c96ea4bc3dd577c702f2c9b0ba3c6ffa7adb3b9a3"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/RuntimeSupervisor.kt",
+      "sha256": "b1d02c59c0e1f63445e0cd2f6c760e827417fd95078e547406e7e6c508ea3093"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_backend_owner.cpp",
+      "sha256": "06fe08ef141c0e312dd75e4bc383f2ddfeebfe58ed311e000b7562069d5c9a6c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_backend_owner.hpp",
+      "sha256": "d55f7f0d57a3ee817feb62ceab29dff201e6916f3cc632ab35aac48075ba628c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_bundle_config.cpp",
+      "sha256": "2e1ef5d526e74273ce0f1b0ed80b8eb842fe7dccc6a956be54056d99b4fa8dbb"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_bundle_config.hpp",
+      "sha256": "4e91166be70d5d44604789cb994f179149c3ff37f6394a1bc6cf98bd9de51957"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_clip_tokenizer.cpp",
+      "sha256": "d69a3cff6bb4f3c3b48b95eada2acfc7bbecf9a3ba2f13c6a7c12d9bff7f1349"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_clip_tokenizer.hpp",
+      "sha256": "ed4b97b272c2fac771f22d1825767182725cf9b7a0eeebbd9504c43339e35355"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_clip_weighting.cpp",
+      "sha256": "7b6259046a9e6de38a4a7a5bbdf2a78ab2bfcc293714825768d4b16ab2f4000e"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_clip_weighting.hpp",
+      "sha256": "54b4c5066c8145e0bfa404a32390978fcac89fe872e29d120efb49fc1d3f408c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_contracts.hpp",
+      "sha256": "6726aac65105cb3e47cdf0c512f21433f8c856e6a4c881e8ca87bb18ba60e9b3"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_debug_trace.cpp",
+      "sha256": "c1c59b247501a24b806c29b63f4869ff8a123f02345e4e31573c61f1ea94cd88"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_debug_trace.hpp",
+      "sha256": "84ef0f6fde6d077c7afba43b29340e464e520143444cd6b55d444cbd04557f4a"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_assets.cpp",
+      "sha256": "a0e259a40af2839e15fdcab9454590d1dfdad97455081bc0907c3361eb91bb33"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_assets.hpp",
+      "sha256": "ff7b6b5470e0326c0820a454692c554510ad4dc62c6c2a3ae411d39747ee10bb"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_pipeline.cpp",
+      "sha256": "df7741a0fb4b48b20bab46ee3bc8403c5f0f66257bea3cff82f65b7c5317fc91"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_pipeline.hpp",
+      "sha256": "66b955adf100e27e7d4fd815e3c61f1e9c13dc4a3d9ebc5f140137c3921c4bc3"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_engine.cpp",
+      "sha256": "385847ef3482a022a39ace73849b5c71e2bd20875acc563b8e408e97ada90d9c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_engine.hpp",
+      "sha256": "7de4fcc51dcbc099244a492bc84a6e2433b4c9218f3951b988e283501b39209c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_file_utils.cpp",
+      "sha256": "38a7201bcd518045d3a6c148c2dc11746c583b62e517b2d017d96cf5ce46e57e"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_file_utils.hpp",
+      "sha256": "2521e723350b2b48c55ddcdf3caabbbed1b6279e8fcd4ce0381f2bf7d07a8028"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_pndm_scheduler.cpp",
+      "sha256": "ea4fd5f6d3264094ac0889c2c49d2738dd53c174586970ce8273c0c3252fa919"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_pndm_scheduler.hpp",
+      "sha256": "2f12d4efa66549b5689c6576bdfe0aa9cf331f42ec3fd288db588149c8e7d964"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_prompt_cache_manager.cpp",
+      "sha256": "22da094f27e4a2509db129abed8f1ac73937f8de51b2f90e15afdd84be98f22c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_prompt_cache_manager.hpp",
+      "sha256": "ad628020fffa5de2251c183bf1650aabfb1d5089eb60b2c2e41d5129b8ad9225"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_prompt_weighting.cpp",
+      "sha256": "432b1c20c7dc225bda64e0d74059a45fb90ea3a53b9c6c342d5f4a5b91bcf4b7"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_prompt_weighting.hpp",
+      "sha256": "469aae9aefd75048cb39c41af3e694bd6e76e7ff9444df14a7451781de243dc6"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_protocol_parser.cpp",
+      "sha256": "f2ec958421317e9bf5a742b3827089cb2e2f17a8eaea49132d6bd76a367e9255"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_protocol_parser.hpp",
+      "sha256": "bcf3640eabf1cf8ca39dff6e055ce3bc9587380b6fd4244c2195e7540af1de81"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_qnn_prompt_payload.cpp",
+      "sha256": "c3301f5c0eb6e1afbce10ebd1268beb322aa7a457b689ea3ec6cc13a2a4ad77e"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_qnn_prompt_payload.hpp",
+      "sha256": "e98cb0482186cfe7d10c4e2e101dd8ac61fc7e3135672d188d4fab4d02acc886"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_request.cpp",
+      "sha256": "41dba053e9c8938503ba918c2842e801e72191a7061dd51ee1a668c74c033366"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_request.hpp",
+      "sha256": "00e92fc4e1b0f9e4c40b53a4e8fe9f58f5d7185902e21d53364f3dc8409e0f14"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_runtime_loader.cpp",
+      "sha256": "463baa949613d694566ff79cdd4eedd1b2c5dbc21c21c1803ed151acc09c94d9"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_runtime_loader.hpp",
+      "sha256": "0e96a18d9560c3f90b57f3d7a606fc2e35ea97a768c60c0435b4d2305bb1187a"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_sampling_strategy.cpp",
+      "sha256": "c331db90c2e18c65bac8fbd97280f446eb71aa40895c0c6e7be369eac4a0343c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_sampling_strategy.hpp",
+      "sha256": "73320a1135d42c4418a1ae01f2e65f2f20d641358be944988948163b0bdbd1b3"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_sdxl_pipeline.cpp",
+      "sha256": "b1a89fbec7b758e64a9e79f8646ec7710fcaf1dcc21a1cef04393d07c76757be"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_sdxl_pipeline.hpp",
+      "sha256": "0f2c534019c71436a96894df095b672f9271b07094434ac28f574af668878e29"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_session.cpp",
+      "sha256": "0062869e217260bbd631602ae7b0e81c733fef801609caafb74f2ddb49f6f6f5"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_session.hpp",
+      "sha256": "4706a14d8a91b44f6e1e4b6cbbe5108c4177f2e71f7c95fa4ce27d8508bdc1e1"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_session_manager.cpp",
+      "sha256": "de0a8e981f3cd2e60fcdac947cec9952c3513ad827ca89e1ce42bd0b21553261"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_session_manager.hpp",
+      "sha256": "d47d506ad5849800095db7d59d51bb13456f123fd3e73c1d2d79d4c73c85188b"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_stats_collector.cpp",
+      "sha256": "8e017800a8dfd25bb64e8873b34670e7305eb03d2b9f6522f547e28e7b3769e1"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_stats_collector.hpp",
+      "sha256": "e69de4b82eb960728d633cba47b51b39be48eb452c88845dc4b1b4519d73a9de"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_stream_router.cpp",
+      "sha256": "7cbb97664cfc9654f80e825ff27111dfa719952ab089c6a1d0ccbe7d8910e73c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_stream_router.hpp",
+      "sha256": "31e3842d991023dec6b9102fb99b2e00bdef9d93bf80756034933866105bf194"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_template_parser.cpp",
+      "sha256": "61c42c7e0dc389a72404b02d5ff60ec839d7435c85deb8b053c44c5fd41bb497"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_template_parser.hpp",
+      "sha256": "1a5fe3f0b5e8f045ea4d99951f0e68ea53e648560f025786c45ef89bc4530b56"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_tensor_copy.cpp",
+      "sha256": "cc1075fcb5b38b9e37e087fe8058740ae72a6bb4e312345f453f1c1d4ea8eecf"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_tensor_copy.hpp",
+      "sha256": "60d7dcc08d67c02ec9010f4531074cefa0b6039b621a6d37711b65f2e2be28f5"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_tensor_ops.cpp",
+      "sha256": "21f63475f6c27dff58ebc2098273169e10dce68472c945eac928ca177a5e011f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_tensor_ops.hpp",
+      "sha256": "de38c77fd19394f593efc745e0f02b1ec1c0fcbb640dc0cbaeac72a977218434"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_token_boundary_guard.cpp",
+      "sha256": "990bdd3219dfaac6e51653b3a50c3352ff131446dce7fcbe3bfa9288467981f0"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_token_boundary_guard.hpp",
+      "sha256": "0d49c123272faa58bc02ce4568f0731493ceea65b5e3c83417c0901e1d721e2c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_token_emitter.cpp",
+      "sha256": "647630c582972c32cb2ba5d0ec508d16420a2e47d112a72e3b60790dc3cac893"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_token_emitter.hpp",
+      "sha256": "ae02540f6dd6d0f829f4a5bfb67cb4c244d17268dd8fc91a8b29c4cdc4c6f7d3"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_unet_smoke.cpp",
+      "sha256": "741cb7f2854c1148162d3efe8855c9a47abd0554113f3a04371f7b0c4c94d9fa"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_unet_smoke.hpp",
+      "sha256": "7afa385cd2f6ca785052767ac5a61413002ab8ebd91c167d72dcc0e696298fbc"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_vae_image_writer.cpp",
+      "sha256": "9784afc7f960a8e66e50c4024fc60c6ab2dd2f2acfa76bbc41db98aaefea8752"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_vae_image_writer.hpp",
+      "sha256": "2687e07e44d8a4d544134d09ca04c322bae02ca283c37ea9de7dee77176b36b2"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_vision_adapter.cpp",
+      "sha256": "c995cd915d2a9617c24dfedf276ae49bdd5fadb29834d6abcb457bd43860993f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/mnn/mnn_vision_adapter.hpp",
+      "sha256": "8f3da86a1bea91d43f87bbbbb8033e561cfb24dfdd5b79b7ab1944f15de4044a"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_backend_owner.cpp",
+      "sha256": "c60faa87b64ece30bc1e6e25354ade79ab4d0688d60ed0b9329f2e451801a65d"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_backend_owner.hpp",
+      "sha256": "42160ab1c18de1e3e1e885ccf6e604a2c895fe397664d4cb8d5eb9ca2d8da6b4"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_bundle_files.cpp",
+      "sha256": "ebb218e489336e453640d5b6e09ab49af1b9a336719759ed6d7eaf20aef62eea"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_bundle_files.hpp",
+      "sha256": "7b150f57bd3bd2a329217db4ed16d0f7a48f497ff35f67a729be13dd542b1932"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_bundle_manifest.cpp",
+      "sha256": "11aa73cc6ec95e43ab0aa4c3a088966156d39efff9c62f94f81ec2021904ff88"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_bundle_manifest.hpp",
+      "sha256": "4503d4497b82e3e15f3f4f32e6c98d6bf61fb9281558ed387876054879051882"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_capability_probe.cpp",
+      "sha256": "67b8d92e1a820bbf6da7db94be4b96cd8bf8039bbd62024ff7faa40170b420a6"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_capability_probe.hpp",
+      "sha256": "8106284958208dc1d1400098dd5896d7b2abbdcedc7b69bf23a4b900dad1c683"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_conditioning_pipeline.cpp",
+      "sha256": "504ec8b8baaa1e921d636aef8eef992ec96b3e5d656fece3f6cf2c95834e3f5d"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_conditioning_pipeline.hpp",
+      "sha256": "b243532ff956bbfb26ad9c3d027de7630429cbeabced6cc33dd63e36a9e60310"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_context_binary_cache.cpp",
+      "sha256": "ea9d2428176209013739e351b4cc4df806711b777a555aba72852bce4357dc30"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_context_binary_cache.hpp",
+      "sha256": "4a41b6e83a2b652c6af4d9cf8645e2cedc4a100e11dacdbb7e9afdf97f15e49f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_contract_parser.cpp",
+      "sha256": "a32e5ae9339c162229e95ec41fa499193e30252b5402fe575eb0a25f2ae3bc65"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_contract_parser.hpp",
+      "sha256": "24703048b02608b196bc2f51fd018865e551a62d34d59d38ed97e02514456b73"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_device_support.cpp",
+      "sha256": "758ac5caf1707f9fe32ffca56e88f0c87c988152076b9709cf72fc5697552691"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_device_support.hpp",
+      "sha256": "a8c9b5a8d282757102a4bdc36a6393197201ca11d543da1725e586b97c6b8912"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_engine.cpp",
+      "sha256": "b28e3a8fe8994fc145ec1ff155f4eb75d74adead8b403d950396cde34b0541c3"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_engine.hpp",
+      "sha256": "58fda9337f6a5c0eb519057f3c326155e5d61dfea4cef0023da44030aa7ce7c9"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.cpp",
+      "sha256": "3085a60681e13669ac9c620f9564ded78bd699aaf5fda743be29c37eb423d8c1"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.hpp",
+      "sha256": "6e15bf30587a28d94b4f7c1963e06f3b42f581db90d88ca1ad46fea19aac4d1b"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_graph_executor_helper.cpp",
+      "sha256": "ec6396f6ab7b5b10156c8c5a934e0c7813b16201e08c2b80ca9b35b51393849e"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_graph_executor_helper.hpp",
+      "sha256": "ee5e61b1906288a433188e6cb3f2b045de95ff3d3e6b95a5b633b07d3af5107b"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_htp_controller.cpp",
+      "sha256": "1a675ec7239868a55da6d7a57a04d6236bd424ceed11e813c8429a1f903825a6"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_htp_controller.hpp",
+      "sha256": "7d665c70f7367b883557e852f2b427aedad9f2837f9b3af54d29772b1c3325e2"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_image_writer.cpp",
+      "sha256": "b9791208c8a2e13750f3d1f8c73d2bf1bb9305c13a9b6021fcea6c5f8a6cf9a2"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_image_writer.hpp",
+      "sha256": "5a86d724c7ea860f947ba1a998eaad497429e1959d9273843ffbc6a1670e4b67"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_inpaint_blend.cpp",
+      "sha256": "10d394b8176e560d2c75f2d39b7474e8c61cd9b244cae65916d16f72df1a855f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_inpaint_blend.hpp",
+      "sha256": "dab54445d1ad68f3323f74361ac79198176ec7ce4ea5c74485458af0f02801d4"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_model_execution_pipeline.cpp",
+      "sha256": "0610471f35406a9aae8a0a08ad8a706f0c8b0341e0703142b4b18377f0afafa8"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_model_execution_pipeline.hpp",
+      "sha256": "c45e2cf84c042fb86516250d6a289d33e2761bac53a78f99ccffe833b5127ebd"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_preview_manager.cpp",
+      "sha256": "a6c874468516789eaf02c233c40b17d75aee61dbe8fd40c38294d6ec967b2469"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_preview_manager.hpp",
+      "sha256": "c6dca1660769c7e81d2e32ca6423e10c55add18b7e883aaff92eed5306f443da"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_request.cpp",
+      "sha256": "dd3b4bc8abe0d9d0d4ee96c806bde40cb8789c06388599e08fbe4cf419b345ea"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_request.hpp",
+      "sha256": "017855af120e8ae0e1cc35e2802fd2f316e2a912ad1ff0e7ac2a36287f6a19d0"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_runtime_loader.cpp",
+      "sha256": "4f742650380ae694a2907b88fcd02ea0a7e847142ebb92cc461d0d52dc7dc363"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_runtime_loader.hpp",
+      "sha256": "d6b3bb258b9e44fbe1a5734f7a8ee850d0a57871685576666f5a41416d071402"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_contracts.hpp",
+      "sha256": "8b5ad02576dff5ff7824d98b2952dc76d79aa7751769a85729e09c4c5e6f404d"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_decoder_phase.hpp",
+      "sha256": "ad7a834e3f2210b0f40d5b275f600ec400eac2a3a3978df6102c5704fa875f19"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_encoder_phase.hpp",
+      "sha256": "cac3f9f3264f88cbd05d8432e81a141af18cd2c30dfefcb75cd9464e6aaaff24"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_phase_support.cpp",
+      "sha256": "b33283b96e274902507dcdee20b4387635e8a385dbf8867baa93d6040edfd35c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_phase_support.hpp",
+      "sha256": "e49145f6861624426285c4db3d6aa7ea4ba2842af5deee529cf9488960e13f16"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp",
+      "sha256": "0115b5d6791ee20e11305d5f317e6aaf5fc715dace9ed86c6047bed9daaa90ca"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_tiler.hpp",
+      "sha256": "b9e3def7ecec3ac9848bb444159d41447e4f6176c55077f4425fa2db8644b327"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+      "sha256": "07dd1cbbbb6df0f9db76e9461250d9b23eb09f0e928c0b5c311025add8b1d04f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.hpp",
+      "sha256": "57eb26afbd983fa1b6ba0b328d46de819caa22bd0dba4e082f40fc7eabf37347"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_session.cpp",
+      "sha256": "ab5262381898c45849a771230a6c5365ee797b00bf00daa6a0c71176ea76cd0f"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_session.hpp",
+      "sha256": "80a928dc3c038d618ce144d6ce3796fff39d06d91ac6269df7eb4b666b788459"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_shared_preview_publisher.hpp",
+      "sha256": "3b6101deaeedce0e63c2370b3202f6a67b86526771c2e6ca1ebccb138279398c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_system_symbol_loader.cpp",
+      "sha256": "4e413f1f089e2455223d4665267db41c75ec77b06f3e6e045a9380b3fcee8ce9"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_system_symbol_loader.hpp",
+      "sha256": "09f3889906a47075689076eea855a3421efe6e33943f2ef528aff5132805e04a"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_codec.cpp",
+      "sha256": "f0561b1d884980a681da4b052ff7da2446401a838f5ba2b2d9677054e6935dd0"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_codec.hpp",
+      "sha256": "a17b3a8f04e95580a6c2f423436506420cc5430e79afbcab744d379810c06855"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_inspect.cpp",
+      "sha256": "c608001c9332a11cb55881b67e9bc858e047c69dadb96e0a87cd2c07570c3653"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_inspect.hpp",
+      "sha256": "f54304d154bed70fc8d4f23548596c526af7a62015f9afcadebf14ff2883d31e"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_memory.cpp",
+      "sha256": "a1f50292d31597fa752a0c52697cacf10035f89efe459971873783264c4ae994"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_memory.hpp",
+      "sha256": "1be68fece8e2c36af3b2cf80677cba2c564d8d77ff6db6261a9a62539ea1b3a2"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_quantizer.cpp",
+      "sha256": "ce9079cb67598f7032992637ea49dd2e19f36d47e58baa60e7d49385abc33b75"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_tensor_quantizer.hpp",
+      "sha256": "af57a993cbb1ede54ca74e5f606535d05199d233ad4204747e440fe84235c40c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_ultrafix_handler.cpp",
+      "sha256": "788365921ba6dc165d971a8eb66a117f2a9b0f52fd390da5127e3c9ea74aca64"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_ultrafix_handler.hpp",
+      "sha256": "ecf1d9f75370e9c6d9fdef6fff4465d348e1bf92895dfb7d4df4754c41d64eb6"
+    }
+  ],
+  "notes": [
+    "Commit references are not whole-project known-good baseline claims.",
+    "The current dirty working tree must be preserved; reference source restoration is function-level and dependency-aware.",
+    "A/B execution must pin toolchain, vendor patches, model/package hashes and parameters."
+  ],
+  "jni_name_inventory_note": "Source symbol-name inventory only; executable verification must match complete JVM descriptors, dynamic exports or RegisterNatives, packaged ABI and actual native invocation."
+}

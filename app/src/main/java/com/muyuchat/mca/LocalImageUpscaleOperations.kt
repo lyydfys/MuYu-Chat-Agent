@@ -85,7 +85,7 @@ internal suspend fun runLocalImageUpscale(
     onProgress: (LocalImageProgress) -> Unit = {}
 ): LocalImageResult {
     val appContext = port.appContext
-    val bridge = port.bridge
+    val bridge by lazy(LazyThreadSafetyMode.SYNCHRONIZED) { port.bridge }
     val cancellationRequested = port.cancellationRequested
     return withContext(Dispatchers.IO) {
         if (port.activeRuntime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {

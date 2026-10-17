@@ -169,7 +169,7 @@ class ModelScopeClientTest {
     fun includesDefaultRecommendedModels() {
         val recommendations = client.recommendedModels()
 
-        assertEquals(50, recommendations.size)
+        assertEquals(52, recommendations.size)
         assertEquals(ModelScopeRecommendedGroup.LIGHT_CHAT, recommendations[0].group)
         val qwen35ExperimentalMnn = recommendations.first { it.id == "qwen35_08b_uncensored_mnn" }
         assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
@@ -256,6 +256,7 @@ class ModelScopeClientTest {
             listOf(
                 "qwen3_vl_4b_qairt_w4a16",
                 "qwen3_4b_2507_qairt_w4a16",
+                "qwen3_06b_qairt_w4a16",
                 "qwen3_8b_qairt_w4a16",
                 "qwen25_vl_7b_qairt_w4a16"
             ),
@@ -760,7 +761,7 @@ class ModelScopeClientTest {
         val userFacingChat = client.userFacingRecommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.CHAT }
 
-        assertEquals(21, userFacingChat.size)
+        assertEquals(23, userFacingChat.size)
         val cpuChat = userFacingChat.filter {
             it.computeBackend != RecommendedComputeBackend.NPU &&
                 it.chatRuntime != RecommendedChatRuntime.GENIEX_QAIRT
@@ -769,8 +770,8 @@ class ModelScopeClientTest {
             it.computeBackend == RecommendedComputeBackend.NPU ||
                 it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT
         }
-        assertEquals(14, cpuChat.size)
-        assertEquals(7, npuChat.size)
+        assertEquals(15, cpuChat.size)
+        assertEquals(8, npuChat.size)
         assertTrue(cpuChat.all { it.status == RecommendedModelStatus.EXPERIMENTAL })
         assertEquals(
             setOf(
@@ -1220,7 +1221,7 @@ class ModelScopeClientTest {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(41, recommendations.size)
+        assertEquals(43, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
@@ -1239,8 +1240,8 @@ class ModelScopeClientTest {
         val gpuImage = recommendations.filter { it.section == RecommendedModelSection.GPU_IMAGE }
         val npuImage = recommendations.filter { it.section == RecommendedModelSection.NPU_IMAGE }
 
-        assertEquals(14, cpuChat.size)
-        assertEquals(7, npuChat.size)
+        assertEquals(15, cpuChat.size)
+        assertEquals(8, npuChat.size)
         assertEquals(8, cpuImage.size)
         assertEquals(1, gpuImage.size)
         assertEquals(11, npuImage.size)
@@ -1252,11 +1253,12 @@ class ModelScopeClientTest {
 
         assertEquals(
             listOf(
-                "qwen35_08b_uncensored_mnn",
+                "qwen35_08b_mnn36",
                 "qwen35_2b_abliterated_gguf",
                 "gemma4_e2b_uncensored_gguf",
                 "gemma4_e2b_litertlm_cpu",
-                "gemma4_e2b_litertlm_gpu"
+                "gemma4_e2b_litertlm_gpu",
+                "qwen35_08b_uncensored_mnn"
             ),
             cpuChatIds(ModelScopeRecommendedGroup.LIGHT_CHAT)
         )
@@ -1283,6 +1285,7 @@ class ModelScopeClientTest {
             listOf(
                 "qwen3_vl_4b_qairt_w4a16",
                 "qwen3_4b_2507_qairt_w4a16",
+                "qwen3_06b_qairt_w4a16",
                 "qwen3_8b_qairt_w4a16",
                 "qwen25_vl_7b_qairt_w4a16",
                 "gemma4_e2b_litertlm_npu",

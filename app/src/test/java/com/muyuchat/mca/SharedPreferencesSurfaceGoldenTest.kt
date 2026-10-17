@@ -36,7 +36,7 @@ class SharedPreferencesSurfaceGoldenTest {
         val golden = goldenFile()
 
         if (!golden.exists()) {
-            golden.parentFile.mkdirs()
+            golden.parentFile!!.mkdirs()
             golden.writeText(goldenText(actual))
             throw AssertionError(
                 "Preference golden was missing and has been generated at $GOLDEN_PATH. " +

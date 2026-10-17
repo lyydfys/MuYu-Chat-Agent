@@ -64,7 +64,7 @@ class ImageUpscaleProductClosureTest {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + // P9/S2: ChatUiItemModels.kt 承接原 ChatScreen.kt 的条目模型与小助手（多源拼接随迁）。
-sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt") + // P9/S30: 授权/触发器簇移出 ChatScreen.kt，拼接表随迁。
+sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetPreviewOverlay.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt") + // P9/S30: 授权/触发器簇移出 ChatScreen.kt，拼接表随迁。
 sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenerationSupport.kt")
         // The upscale body moved to ImageUpscaleOwner.kt, which owns the job and the lifecycle lock.
         // It takes the scope as a parameter now, so the signature below is the owner's.
@@ -72,11 +72,14 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageUpscaleOwner.kt"),
             "fun upscaleImageAsset(imageId: String, targetScale: Int, scope: CoroutineScope)"
         )
-        // R3/C2: the admission body moved to ImageGenerationOwner.kt; the assertions are unchanged
-        // -- read where the body now lives.
+        // R3/C2 + T2B20/R7-C9: the admission shell stays in ImageGenerationOwner.kt; the launch body
+        // moved verbatim to ImageGenerationOwnerExecution.kt. The assertions are unchanged.
         val enqueueGeneration = functionBody(
             sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
             "fun submit("
+        ) + functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwnerExecution.kt"),
+            "fun runImageGenerationExecution("
         )
         val localApiGeneration = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         // R3/C3-S17: the preview publisher moved verbatim to LocalImagePreviewOperations.kt; the

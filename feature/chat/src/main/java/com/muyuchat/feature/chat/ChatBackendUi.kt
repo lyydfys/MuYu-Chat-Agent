@@ -102,7 +102,12 @@ fun chatBackendOptionsFor(
 ): List<ChatBackendOption> = when (family) {
     ChatBackendFamily.MNN -> listOf(
         ChatBackendOption("cpu", "CPU", "MNN CPU"),
-        ChatBackendOption("opencl", "GPU / OpenCL", "MNN OpenCL GPU")
+        ChatBackendOption(
+            id = "opencl",
+            label = "GPU / OpenCL（实验）",
+            detail = "MNN OpenCL GPU（实验通道）",
+            availabilityNote = "部分机型/驱动可能极慢或输出异常；请改选 CPU 后重新生成。CPU 是默认稳定通道。"
+        )
     )
 
     ChatBackendFamily.LLAMA_CPP -> listOf(

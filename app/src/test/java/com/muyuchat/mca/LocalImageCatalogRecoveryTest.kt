@@ -111,7 +111,7 @@ class LocalImageCatalogRecoveryTest {
     @Test fun deletingParentBundleDoesNotRemoveAnotherNestedModel() {
         val root = temp.newFolder("shared-bundle")
         val primary = File(root, "dit.mnn").apply { writeText("graph") }
-        val nested = File(root, "child/unet.bin").apply { parentFile.mkdirs(); writeText("child") }
+        val nested = File(root, "child/unet.bin").apply { parentFile!!.mkdirs(); writeText("child") }
         val target = imageRecord("parent", primary, 1)
         val child = imageRecord("child", nested, 2)
 
@@ -130,16 +130,72 @@ class LocalImageCatalogRecoveryTest {
         assertEquals("", result.verificationMessage)
     }
 
+    @Test fun exactValidCopyReplacesInvalidBindingWithoutLosingCatalogIdentityOrFiles() {
+        val old = boundImageCopy("old-owner", "invalid-copy", valid = false, createdAt = 1)
+        val imported = boundImageCopy("new-import", "valid-copy", valid = true, createdAt = 2)
+        assertEquals(old.contentFingerprint, imported.contentFingerprint)
+
+        val merged = normalizeLocalImageModelRecords(listOf(old, imported), old.id).single()
+
+        assertEquals(old.id, merged.id)
+        assertEquals(imported.path, merged.path)
+        assertTrue(merged.matchesCatalogId(imported.id))
+        assertEquals(setOf(old.path, imported.path), merged.allPhysicalCopies().map { it.path }.toSet())
+        assertTrue(File(old.path).isFile)
+        assertTrue(File(imported.path).isFile)
+        val reloaded = normalizeLocalImageModelRecords(listOf(merged), old.id).single()
+        assertEquals(merged.id, reloaded.id)
+        assertEquals(merged.path, reloaded.path)
+        assertEquals(merged.contentFingerprint, reloaded.contentFingerprint)
+        assertTrue(reloaded.matchesCatalogId(imported.id))
+        assertEquals(merged.allPhysicalCopies().map { it.path }.toSet(),
+            reloaded.allPhysicalCopies().map { it.path }.toSet())
+    }
+
+    @Test fun healthySelectedCopyRemainsPrimaryWhenAnExactCopyIsImported() {
+        val selected = boundImageCopy("selected", "selected-copy", valid = true, createdAt = 1)
+        val imported = boundImageCopy("new", "new-copy", valid = true, createdAt = 2)
+        assertEquals(selected.path,
+            normalizeLocalImageModelRecords(listOf(selected, imported), selected.id).single().path)
+    }
+
+    @Test fun invalidCopiesRemainVisibleWithoutAcquiringAValidBinding() {
+        val first = boundImageCopy("first", "first-invalid", valid = false, createdAt = 1)
+        val second = boundImageCopy("second", "second-invalid", valid = false, createdAt = 2)
+        val merged = normalizeLocalImageModelRecords(listOf(first, second), first.id).single()
+        assertEquals(first.path, merged.path)
+        assertEquals(first.contentFingerprint, merged.contentFingerprint)
+        merged.allPhysicalCopies().forEach {
+            val manifest = JSONObject(File(requireNotNull(it.bundleRoot), "manifest.json").readText())
+            assertEquals("0".repeat(64), manifest.getJSONObject("executionProfile").getString("modelFingerprint"))
+        }
+    }
+
+    private fun boundImageCopy(id: String, directory: String, valid: Boolean, createdAt: Long): LocalImageModelRecord {
+        val root = temp.newFolder(directory)
+        val primary = File(root, "dit.mnn").apply { writeText("identical graph bytes") }
+        val manifest = JSONObject().put("schema", "mca.image_engine.bundle.v1")
+            .put("runtime", "MNN_DIFFUSION")
+            .put("executionProfile", JSONObject().put("schemaVersion", 1).put("modelFingerprint", "0".repeat(64)))
+        val manifestFile = File(root, "manifest.json").apply { writeText(manifest.toString()) }
+        val record = imageRecord(id, primary, createdAt).copy(createdAt = createdAt).withObservedContent()
+        if (valid) {
+            manifest.getJSONObject("executionProfile").put("modelFingerprint", record.contentFingerprint)
+            manifestFile.writeText(manifest.toString())
+        }
+        return record.withObservedContent()
+    }
+
     private fun imageRecord(id: String, file: File, updatedAt: Long) = LocalImageModelRecord(
         id = id,
-        displayName = file.parentFile.name,
+        displayName = file.parentFile!!.name,
         path = file.absolutePath,
         fileName = file.name,
         sizeBytes = file.length(),
         sha256 = "a".repeat(64),
         runtime = LocalImageRuntime.MNN_DIFFUSION,
         family = LocalImageModelFamily.QWEN_IMAGE,
-        bundleRoot = file.parentFile.absolutePath,
+        bundleRoot = file.parentFile!!.absolutePath,
         updatedAt = updatedAt
     )
 }

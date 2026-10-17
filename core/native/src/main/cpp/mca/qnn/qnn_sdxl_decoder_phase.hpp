@@ -122,7 +122,7 @@ inline std::string execute_sdxl_vae_phase(
         return "{\"ok\":false,\"executionStage\":\"generation_busy\",\"message\":\"Another QNN image phase is active in this process.\"}";
     }
     generation.record_stage(::mca::qnn::ImageStage::ContextLock, kQnnImageContextLock);
-    std::unique_lock<std::timed_mutex> execution_lock(g_qnn_context_execution_mutex, std::defer_lock);
+    std::unique_lock<std::timed_mutex> execution_lock(::mca::qnn::g_qnn_context_execution_mutex, std::defer_lock);
     while (!execution_lock.try_lock_for(std::chrono::milliseconds(50))) {
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
     }

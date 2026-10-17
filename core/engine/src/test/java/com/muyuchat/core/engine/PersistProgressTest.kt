@@ -16,13 +16,16 @@ class PersistProgressTest {
 
     @Test
     fun persistEventCarriesStageAndByteCounts() {
-        val event = GenerateEvent.Persist(
+        // Declared as the sealed supertype so the `is` discrimination below can actually fail
+        // (typing it as GenerateEvent.Persist made the assertion always true).
+        val event: GenerateEvent = GenerateEvent.Persist(
             PersistProgress(PersistStage.WRITING, 2L * 1024 * 1024, 8L * 1024 * 1024)
         )
-        assertTrue(event is GenerateEvent.Persist)
-        assertEquals(PersistStage.WRITING, event.progress.stage)
-        assertEquals(2L * 1024 * 1024, event.progress.writtenBytes)
-        assertEquals(8L * 1024 * 1024, event.progress.totalBytes)
-        assertTrue(event.progress.isActive)
+        assertTrue("persist events must be reported as GenerateEvent.Persist", event is GenerateEvent.Persist)
+        val persist = event as GenerateEvent.Persist
+        assertEquals(PersistStage.WRITING, persist.progress.stage)
+        assertEquals(2L * 1024 * 1024, persist.progress.writtenBytes)
+        assertEquals(8L * 1024 * 1024, persist.progress.totalBytes)
+        assertTrue(persist.progress.isActive)
     }
 }

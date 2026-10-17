@@ -133,8 +133,12 @@ public:
             MNN::Transformer::Llm* llm,
             MnnRequestLifecyclePolicy* lifecycle = nullptr);
     static size_t effective_kv_history(const MNN::Transformer::Llm* llm);
+    // is_stop()/tokenizer_decode() are non-const members of the pinned MNN Llm
+    // (transformers/llm/engine/include/llm/llm.hpp:198-199), so the transcript
+    // reader takes a mutable handle. effective_kv_history above only reads
+    // getContext() and stays const.
     static std::string assistant_text(
-            const MNN::Transformer::Llm* llm,
+            MNN::Transformer::Llm* llm,
             const MnnPromptCacheRuntimeState& cache,
             const std::vector<std::string>& active_stop_markers);
     static void trim_protocol_suffix_from_live_history(
@@ -202,7 +206,7 @@ inline size_t mnn_effective_kv_history(const MNN::Transformer::Llm* llm) {
 }
 
 inline std::string mnn_prompt_cache_assistant_text(
-        const MNN::Transformer::Llm* llm,
+        MNN::Transformer::Llm* llm,
         const MnnPromptCacheRuntimeState& cache,
         const std::vector<std::string>& active_stop_markers) {
     return MnnPromptCacheManager::assistant_text(llm, cache, active_stop_markers);

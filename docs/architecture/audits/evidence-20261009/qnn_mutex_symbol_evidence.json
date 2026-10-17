@@ -1,0 +1,90 @@
+{
+  "timestamp": "2026-10-09T21:12:08.199577+08:00",
+  "scope": "Actual bridge object references compared with an object including the actual definition header; full project linking was not run",
+  "checks": [
+    {
+      "source": "E:\\MAC\\core\\native\\src\\main\\cpp\\qnn_native_bridge.cpp",
+      "sha256": "0554d965e8019ab4d09a27ec600ae2a02af802b1711e9e0201073d9f6488888f",
+      "compile_exit_code": 0,
+      "symbols": [
+        "                 U g_qnn_context_execution_mutex"
+      ],
+      "diagnostics": "",
+      "arguments": [
+        "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
+        "--target=aarch64-none-linux-android26",
+        "--sysroot=D:/model/android-sdk/ndk/29.0.13113456/toolchains/llvm/prebuilt/windows-x86_64/sysroot",
+        "-DMCA_QNN_SDK_ROOT_CONFIGURED=1",
+        "-DMCA_WITH_QNN_SDK_HEADERS=1",
+        "-DMCA_WITH_TOKENIZERS_CPP=0",
+        "-Dmca_qnn_native_EXPORTS",
+        "-IE:/MAC/core/native/src/main/cpp/../../../../../third_party/stable-diffusion.cpp/thirdparty",
+        "-IE:/MAC/core/native/src/main/cpp/../../../../../third_party/llama.cpp/vendor",
+        "-IE:/tools/qairt-sdk/2.45.0.260326/include",
+        "-IE:/tools/qairt-sdk/2.45.0.260326/include/QNN",
+        "-IE:/MAC/core/native/src/main/cpp",
+        "-g",
+        "-DANDROID",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-funwind-tables",
+        "-fstack-protector-strong",
+        "-no-canonical-prefixes",
+        "-D_FORTIFY_SOURCE=2",
+        "-Wformat",
+        "-Werror=format-security",
+        "-O3",
+        "-DNDEBUG",
+        "-fPIC",
+        "-std=gnu++17",
+        "-O0",
+        "-c",
+        "E:\\MAC\\core\\native\\src\\main\\cpp\\qnn_native_bridge.cpp",
+        "-o",
+        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_native_bridge.audit.o"
+      ]
+    },
+    {
+      "source": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
+      "sha256": "085d91b6584d6da1e638e169a2d421deb24caa6995c32fca5f05cce2d0f95c86",
+      "compile_exit_code": 0,
+      "symbols": [
+        "0000000000000000 B mca::qnn::g_qnn_context_execution_mutex"
+      ],
+      "diagnostics": "",
+      "arguments": [
+        "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
+        "--target=aarch64-none-linux-android26",
+        "--sysroot=D:/model/android-sdk/ndk/29.0.13113456/toolchains/llvm/prebuilt/windows-x86_64/sysroot",
+        "-DMCA_QNN_SDK_ROOT_CONFIGURED=1",
+        "-DMCA_WITH_QNN_SDK_HEADERS=1",
+        "-DMCA_WITH_TOKENIZERS_CPP=0",
+        "-Dmca_qnn_native_EXPORTS",
+        "-IE:/MAC/core/native/src/main/cpp/../../../../../third_party/stable-diffusion.cpp/thirdparty",
+        "-IE:/MAC/core/native/src/main/cpp/../../../../../third_party/llama.cpp/vendor",
+        "-IE:/tools/qairt-sdk/2.45.0.260326/include",
+        "-IE:/tools/qairt-sdk/2.45.0.260326/include/QNN",
+        "-IE:/MAC/core/native/src/main/cpp",
+        "-g",
+        "-DANDROID",
+        "-fdata-sections",
+        "-ffunction-sections",
+        "-funwind-tables",
+        "-fstack-protector-strong",
+        "-no-canonical-prefixes",
+        "-D_FORTIFY_SOURCE=2",
+        "-Wformat",
+        "-Werror=format-security",
+        "-O3",
+        "-DNDEBUG",
+        "-fPIC",
+        "-std=gnu++17",
+        "-O0",
+        "-c",
+        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
+        "-o",
+        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.audit.o"
+      ]
+    }
+  ]
+}

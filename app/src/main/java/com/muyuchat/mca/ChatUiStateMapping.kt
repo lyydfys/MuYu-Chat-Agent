@@ -200,121 +200,8 @@ internal fun buildChatUiState(
                         state.localChatReadinessLabel()
                     },
                     messages = state.messages,
-                    history = state.chatSessions.map { session ->
-                        val presentation = sessionPresentations[session.id]
-                        ChatHistoryItem(
-                            id = session.id,
-                            title = session.title,
-                            displayName = presentation?.name ?: session.title,
-                            summary = presentation?.summary.orEmpty(),
-                            assistantId = presentation?.assistantId,
-                            updatedAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
-                                .format(java.util.Date(session.updatedAt)),
-                            updatedAtMillis = session.updatedAt,
-                            messageCount = session.messages.size,
-                            pinned = session.pinned,
-                            selected = session.id == state.activeChatSessionId,
-                            mixedAssistantHistory = session.mixedAssistantHistory
-                        )
-                    },
-                    localModels = buildList {
-                        addAll(
-                            state.cloudModels
-                                .filter { it.kind == CloudModelKind.CHAT && it.configured }
-                                .sortedByDescending { it.updatedAt }
-                                .map { model ->
-                                ChatModelChoice(
-                                    id = MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + model.id,
-                                    displayName = model.displayName.ifBlank { model.modelName },
-                                    quant = "云端推理",
-                                    loaded = state.selectedChatBackend == ChatBackend.CLOUD && model.id == state.selectedCloudChatModelId,
-                                    subtitle = model.apiFormat.label,
-                                    cloud = true
-                                )
-                            }
-                        )
-                        addAll(
-                            state.models
-                                .sortedWith(
-                                    compareByDescending<com.muyuchat.core.modelstore.ModelManifest> {
-                                        if (it.id == state.loadedModelId) 1 else 0
-                                    }
-                                        .thenByDescending { it.lastLoadedAt ?: it.createdAt }
-                                )
-                                .map { model ->
-                                    val backendFamily = chatBackendFamilyForRuntime(model.runtime.storageValue)
-                                    val modelIsLoaded = state.isLocalChatModelLoaded(model.id)
-                                    val acceleration = state.deviceProfile?.accelerationProfile
-                                    val npuAvailable: Boolean? = when (backendFamily) {
-                                        // LiteRT Qualcomm assets are staged on
-                                        // first NPU load, so the generic QNN
-                                        // inspector may still be looking at
-                                        // GenieX's APK runtime here.  Treat an
-                                        // exact packaged V73/V75/V79/V81
-                                        // transport as actionable and let the
-                                        // LiteRT native load perform the final
-                                        // graph compatibility check.
-                                        ChatBackendFamily.LITERT_LM,
-                                        ChatBackendFamily.QAIRT -> npuAvailabilityForChatBackend(
-                                            family = backendFamily,
-                                            chipsetCode = acceleration?.chipsetCode,
-                                            qnnRuntimeUsableForSmoke = acceleration?.qnnRuntime?.usableForSmoke,
-                                            packagedLiteRtTransportAvailable =
-                                                backendFamily == ChatBackendFamily.LITERT_LM &&
-                                                    LiteRtQualcommRuntimeStager.variantForSocModel(
-                                                        acceleration?.chipsetCode
-                                                    ) != null
-                                        )
-                                        else -> null
-                                    }
-                                    val backendOptions = chatBackendOptionsFor(
-                                        family = backendFamily,
-                                        npuAvailable = npuAvailable,
-                                        gpuAvailable = if (
-                                            backendFamily == ChatBackendFamily.LLAMA_CPP && modelIsLoaded
-                                        ) {
-                                            state.stats.gpuOffloadSupported
-                                        } else {
-                                            null
-                                        }
-                                    )
-                                    val selectedBackend = selectedChatBackendId(
-                                        family = backendFamily,
-                                        params = if (modelIsLoaded) {
-                                            state.params
-                                        } else {
-                                            generationParamsForChatModel(model.id)
-                                        },
-                                        stats = if (model.id == state.loadedModelId) state.stats else com.muyuchat.core.engine.RuntimeStats()
-                                    )
-                                    val customGpuLayers = if (backendFamily == ChatBackendFamily.LLAMA_CPP) {
-                                        LlamaAdvancedParams.parse(
-                                            if (modelIsLoaded) state.params.advancedJson
-                                            else generationParamsForChatModel(model.id).advancedJson
-                                        ).params?.nGpuLayers?.takeIf { it >= 0 }
-                                    } else {
-                                        null
-                                    }
-                                    ChatModelChoice(
-                                        id = model.id,
-                                        displayName = model.displayName,
-                                        quant = model.quant,
-                                        sizeBytes = model.sizeBytes,
-                                        loaded = modelIsLoaded,
-                                        subtitle = listOfNotNull(
-                                            model.runtime.label,
-                                            state.localChatReadinessLabel().takeIf {
-                                                state.selectedChatBackend == ChatBackend.LOCAL &&
-                                                    model.id == state.loadedModelId
-                                            }
-                                        ).joinToString(" · "),
-                                        backendOptions = backendOptions,
-                                        selectedBackendId = selectedBackend,
-                                        customGpuLayers = customGpuLayers
-                                    )
-                                }
-                        )
-                    },
+                    history = buildChatHistoryItems(state, sessionPresentations, timestampLocale),
+                    localModels = buildLocalChatModelChoices(state, generationParamsForChatModel),
                     imageModels = buildList {
                         addAll(
                             state.localImageModels
@@ -404,90 +291,13 @@ internal fun buildChatUiState(
                             }
                         )
                     },
-                    existingImageModelIds = existingImageModelChoiceIds(
-                        localModelIds = state.localImageModels.map { model -> model.id },
-                        cloudImageModelIds = state.cloudModels
-                            .asSequence()
-                            .filter { model -> model.kind == CloudModelKind.IMAGE }
-                            .map { model -> model.id }
-                            .asIterable()
-                    ),
-                    assistants = state.assistants.map { assistant ->
-                        val assistantParams = GenerationParams.fromJson(assistant.paramsJson, state.params)
-                        AssistantUiItem(
-                            id = assistant.id,
-                            name = assistant.name,
-                            avatar = assistant.avatar,
-                            tag = assistant.tag,
-                            systemPrompt = assistant.systemPrompt,
-                            modelSummary = when (assistant.defaultModelMode) {
-                                "local" -> state.models.firstOrNull { it.id == assistant.defaultModelId }?.displayName ?: "指定本地模型"
-                                "cloud" -> state.cloudModels.firstOrNull {
-                                    it.id == assistant.defaultModelId && it.kind == CloudModelKind.CHAT
-                                }?.modelName ?: "指定云端模型"
-                                else -> "跟随当前模型"
-                            },
-                            defaultModelMode = assistant.defaultModelMode,
-                            defaultModelId = assistant.defaultModelId,
-                            temperature = assistantParams.temperature,
-                            topP = assistantParams.topP,
-                            nPredict = assistantParams.nPredict,
-                            reasoningMode = assistantParams.reasoningMode,
-                            memoryEnabled = assistant.memoryEnabled,
-                            memorySummaryInterval = assistant.memorySummaryInterval,
-                            characterCardImported = !assistant.characterCardJson.isNullOrBlank(),
-                            webSearchEnabled = assistant.webSearchEnabled,
-                            fileContextEnabled = assistant.fileContextEnabled,
-                            selected = assistant.id == state.selectedAssistantId,
-                            exportJson = assistant.toJson().toString(2),
-                            topK = assistantParams.topK,
-                            minP = assistantParams.minP,
-                            repeatPenalty = assistantParams.repeatPenalty,
-                            presencePenalty = assistantParams.presencePenalty,
-                            frequencyPenalty = assistantParams.frequencyPenalty,
-                            stopWords = assistantParams.stopWords
-                        )
-                    },
-                    worldBooks = state.worldBooks
-                        .filter { book ->
-                            when (book.scope) {
-                                WorldBookScope.GLOBAL -> true
-                                WorldBookScope.ASSISTANT -> book.assistantId == state.selectedAssistantId
-                                WorldBookScope.CHAT -> book.chatSessionId == state.activeChatSessionId
-                            }
-                        }
-                        .map { book ->
-                            WorldBookUiItem(
-                                id = book.id,
-                                name = book.name,
-                                entryCount = book.entries.size,
-                                scopeLabel = when (book.scope) {
-                                    WorldBookScope.GLOBAL -> "全局"
-                                    WorldBookScope.ASSISTANT -> "当前角色"
-                                    WorldBookScope.CHAT -> "当前对话"
-                                },
-                                enabled = book.enabled,
-                                constantEntryCount = book.entries.count { it.enabled && it.constant },
-                                keywordEntryCount = book.entries.count { it.enabled && !it.constant }
-                            )
-                        },
-                    knowledgeBases = state.knowledgeBases.map { knowledgeBase ->
-                        KnowledgeBaseUiItem(
-                            id = knowledgeBase.id,
-                            name = knowledgeBase.name,
-                            description = knowledgeBase.description,
-                            selected = knowledgeBase.id in state.selectedKnowledgeBaseIds,
-                            indexStateLabel = when (knowledgeBase.indexState) {
-                                KnowledgeIndexState.LEXICAL_READY -> "本地检索已就绪"
-                                KnowledgeIndexState.EMBEDDING_PENDING -> "等待向量索引"
-                                KnowledgeIndexState.EMBEDDING_READY -> "向量索引已就绪"
-                                KnowledgeIndexState.REINDEX_REQUIRED -> "需要重建索引"
-                                KnowledgeIndexState.FAILED -> "索引失败"
-                            },
-                            documentCount = state.knowledgeDocumentCounts[knowledgeBase.id] ?: 0,
-                            importing = knowledgeBase.id in state.knowledgeBaseImportingIds
-                        )
-                    },
+                    existingImageModelIds = existingImageModelIdsFor(state),
+                    // B45/S2: selector rows are gated on preparedImageUi; until every local row is
+                    // prepared, an empty dropdown must read as loading, never as "暂无本地生图模型".
+                    imageModelsLoading = state.localImageModels.any { model -> preparedImageUi[model.path] == null },
+                    assistants = buildAssistantUiItems(state),
+                    worldBooks = buildWorldBookUiItems(state),
+                    knowledgeBases = buildKnowledgeBaseUiItems(state),
                     statusMessage = state.statusMessage,
                     selectedAssistantId = state.selectedAssistantId,
                     generationHistoryInputUris = generationHistoryInputUris,
@@ -562,53 +372,15 @@ internal fun buildChatUiState(
                             canRecreate = sourceGeneration?.canRecreate() == true
                         )
                     },
-                    imageLibraryBackup = ImageLibraryBackupUiState(
-                        running = state.imageLibraryBackup.running,
-                        importing = state.imageLibraryBackup.importing,
-                        done = state.imageLibraryBackup.done,
-                        total = state.imageLibraryBackup.total,
-                        message = state.imageLibraryBackup.message,
-                        failed = state.imageLibraryBackup.failed
-                    ),
-                    imageLoras = state.localImageLoras.map { adapter ->
-                        ImageLoraUiItem(
-                            id = adapter.id,
-                            name = adapter.name,
-                            sizeText = formatAssetBytes(adapter.sizeBytes),
-                            sha256 = adapter.sha256,
-                            inUse = adapter.id in state.activeLocalImageLoraIds,
-                            isQwenImage21ViggleV021 =
-                                QwenImage21TurboSchedule.isOfficialV021Sha256(adapter.sha256)
-                        )
-                    },
+                    imageLibraryBackup = imageLibraryBackupUiState(state),
+                    imageLoras = buildImageLoraUiItems(state),
                     imageLoraImporting = state.localImageLoraImporting,
                     imageLoraMessage = state.localImageLoraMessage,
-                    imageTextualInversions = state.localImageTextualInversions.map { artifact ->
-                        ImageTextualInversionUiItem(
-                            id = artifact.id,
-                            name = artifact.name,
-                            trigger = artifact.trigger,
-                            format = artifact.format.wireName,
-                            sizeText = formatAssetBytes(artifact.sizeBytes),
-                            sha256 = artifact.sha256,
-                            inUse = artifact.id in state.activeLocalImageTextualInversionIds ||
-                                artifact.id in state.deletingLocalImageTextualInversionIds
-                        )
-                    },
+                    imageTextualInversions = buildImageTextualInversionUiItems(state),
                     imageTextualInversionImporting = state.localImageTextualInversionLoading ||
                         state.localImageTextualInversionImporting,
                     imageTextualInversionMessage = state.localImageTextualInversionMessage,
-                    imageUpscalers = state.localImageUpscalers.map { upscaler ->
-                        ImageUpscalerUiItem(
-                            id = upscaler.id,
-                            name = upscaler.name,
-                            sizeText = formatAssetBytes(upscaler.sizeBytes),
-                            sha256 = upscaler.sha256,
-                            selected = upscaler.id == state.selectedLocalImageUpscalerId,
-                            inUse = upscaler.id == state.activeLocalImageUpscalerId,
-                            deleting = upscaler.id == state.localImageUpscalerDeletingId
-                        )
-                    },
+                    imageUpscalers = buildImageUpscalerUiItems(state),
                     selectedImageUpscalerId = state.selectedLocalImageUpscalerId,
                     imageUpscalerImporting = state.localImageUpscalerImporting,
                     imageUpscalerMessage = state.localImageUpscalerMessage,
@@ -628,59 +400,8 @@ internal fun buildChatUiState(
                         )
                     },
                     deferGenerationImageGrantRelease = state.deferGenerationImageGrantRelease,
-                    files = state.files.map { file ->
-                        FileAssetUiItem(
-                            id = file.id,
-                            name = file.name,
-                            mimeType = file.mimeType,
-                            preview = file.preview,
-                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
-                                .format(java.util.Date(file.createdAt)),
-                            sizeText = formatAssetBytes(file.sizeBytes),
-                            truncated = file.truncated
-                        )
-                    },
-                    imageJobs = state.imageJobs.map { job ->
-                        ImageGenerationUiJob(
-                            id = job.id,
-                            prompt = job.prompt,
-                            statusLabel = job.status.label,
-                            modelId = job.modelId,
-                            modelName = job.modelName,
-                            modelIsCloud = job.backend == ImageBackend.CLOUD,
-                            chatSessionId = job.spec?.chatSessionId,
-                            chatMessageId = job.spec?.chatMessageId,
-                            imageAssetId = job.imageAssetId,
-                            imageAssetIds = job.imageAssetIds,
-                            completedProgressCount = job.completedProgressCount,
-                            expectedOutputCount = job.spec?.options?.batchCount ?: 1,
-                            previewUriString = job.previewUriString,
-                            previewMode = job.previewMode,
-                            previewStep = job.previewStep,
-                            previewRevision = job.previewRevision,
-                            previewWidth = job.previewWidth,
-                            previewHeight = job.previewHeight,
-                            failed = job.status.failed,
-                            terminal = job.status.terminal,
-                            message = job.message,
-                            translationPreview = job.spec?.promptExecution
-                                ?.takeIf { execution ->
-                                    execution.method in setOf(
-                                        LocalImagePromptTransformationMethod.LOCAL_LLM_ZH_TO_EN,
-                                        LocalImagePromptTransformationMethod.OFFLINE_HY_MT2_ZH_TO_EN
-                                    )
-                                }
-                                ?.let { execution ->
-                                    if (execution.originalPrompt.containsHanScript()) {
-                                        execution.effectivePrompt
-                                    } else {
-                                        execution.effectiveNegativePrompt
-                                    }
-                                },
-                            startedAtMillis = job.startedAtMillis,
-                            startedAtElapsedMs = job.startedAtElapsedMs
-                        )
-                    },
+                    files = buildFileAssetUiItems(state, timestampLocale),
+                    imageJobs = buildImageGenerationUiJobs(state),
                     activeConversationId = state.activeChatSessionId,
                     conversationReadOnly = activeChatSession?.let { session ->
                         session.mixedAssistantHistory || session.assistantId == null ||
@@ -697,35 +418,9 @@ internal fun buildChatUiState(
                     contextCompressionThresholdPercent = state.contextCompressionThresholdPercent,
                     contextCompressionPending = state.contextCompressionPending,
                     contextSummaryModelSelection = state.contextSummaryModelSelection,
-                    contextSummaryModels = buildList {
-                        add(ContextSummaryModelOption("current", "当前聊天模型"))
-                        add(ContextSummaryModelOption("deterministic", "规则整理"))
-                        add(ContextSummaryModelOption("local", "已加载的本地模型"))
-                        state.cloudModels.filter { it.kind == CloudModelKind.CHAT && it.configured }.forEach { model ->
-                            add(ContextSummaryModelOption("cloud:${model.id}", "云端 · ${model.displayName}"))
-                        }
-                    },
-                    contextSummaryHistory = state.chatSessions
-                        .firstOrNull { it.id == state.activeChatSessionId }
-                        ?.contextSummaries.orEmpty().map { summary ->
-                            ContextSummaryUiItem(
-                                version = summary.version,
-                                source = summary.source,
-                                text = summary.text,
-                                sourceMessageIds = summary.sourceMessageIds,
-                                active = summary.active,
-                                createdAt = summary.createdAt,
-                                coverageLimited = summary.structuredSummary.coverageLimited,
-                                evidenceCount = summary.structuredSummary.evidence.size,
-                                omittedExcerptCount = summary.structuredSummary.omittedExcerptCount,
-                                omittedCharacterCount = summary.structuredSummary.omittedCharacterCount,
-                                modelIdentity = summary.summaryModelIdentity,
-                                diagnostic = summary.summaryDiagnostic
-                            )
-                        },
-                    canUndoContextSummary = state.chatSessions
-                        .firstOrNull { it.id == state.activeChatSessionId }
-                        ?.contextSummaries?.any { it.active } == true,
+                    contextSummaryModels = buildContextSummaryModelOptions(state),
+                    contextSummaryHistory = buildContextSummaryHistoryItems(state),
+                    canUndoContextSummary = canUndoContextSummaryFor(state),
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
                     } else {

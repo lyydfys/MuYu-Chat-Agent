@@ -23,7 +23,7 @@ class RecommendationCatalogTest {
         val catalog = catalogFor("SM8550")
 
         assertCpuCatalog(catalog)
-        assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertEquals(expectedNpuChatIds("SM8550"), catalog.npuChat.map { it.id })
         assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
@@ -33,7 +33,7 @@ class RecommendationCatalogTest {
         val catalog = catalogFor("SM8750")
 
         assertCpuCatalog(catalog)
-        assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertEquals(expectedNpuChatIds("SM8750"), catalog.npuChat.map { it.id })
         assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
@@ -61,7 +61,7 @@ class RecommendationCatalogTest {
         val catalog = catalogFor("SM8850")
 
         assertCpuCatalog(catalog)
-        assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+        assertEquals(expectedNpuChatIds("SM8850"), catalog.npuChat.map { it.id })
         assertQwenImage21GpuCatalog(catalog)
         assertNpuImageCatalog(catalog)
     }
@@ -72,7 +72,7 @@ class RecommendationCatalogTest {
             val catalog = catalogFor(chipset)
 
             assertCpuCatalog(catalog)
-            assertEquals(expectedIds(RecommendedModelSection.NPU_CHAT), catalog.npuChat.map { it.id })
+            assertEquals(expectedNpuChatIds(chipset), catalog.npuChat.map { it.id })
             assertQwenImage21GpuCatalog(catalog)
             assertNpuImageCatalog(catalog)
         }
@@ -300,7 +300,7 @@ class RecommendationCatalogTest {
         val catalog = catalogFor("SM8750")
 
         assertEquals(
-            listOf("qwen35_08b_uncensored_mnn"),
+            listOf("qwen35_08b_mnn36"),
             collapsedRecommendationModels(catalog.lightChat).map { it.id }
         )
         assertEquals(
@@ -443,18 +443,33 @@ class RecommendationCatalogTest {
             deviceTotalRamBytes = totalRamBytes
         )
 
-    private fun expectedIds(section: RecommendedModelSection): List<String> =
-        recommendations.filter { it.section == section }
-            .filterNot { section == RecommendedModelSection.NPU_CHAT && it.chatRuntime == com.muyuchat.core.download.RecommendedChatRuntime.LITERT_LM }
-            .sortedWith(compareBy({ it.priority }, { it.id }))
-            .map { it.id }
+    /**
+     * NPU chat cards rank by device fit before priority (see RecommendationCatalog):
+     * a universal ALL_DEVICES package outranks cross-vendor/unknown matches, while an exact
+     * chipset match or a Snapdragon-family vendor match outranks the universal package.
+     * qwen3_06b_qairt_w4a16 is the only ALL_DEVICES NPU chat package; the four QAIRT
+     * family packages declare the SM8750/SM8850 family.
+     */
+    private fun expectedNpuChatIds(chipsetCode: String): List<String> {
+        val qairtFamily = listOf(
+            "qwen3_vl_4b_qairt_w4a16",
+            "qwen3_4b_2507_qairt_w4a16",
+            "qwen3_8b_qairt_w4a16",
+            "qwen25_vl_7b_qairt_w4a16"
+        )
+        val universalLightweight = "qwen3_06b_qairt_w4a16"
+        return when (chipsetCode) {
+            "SM8550", "SM8750", "SM8850" -> qairtFamily + universalLightweight
+            else -> listOf(universalLightweight) + qairtFamily
+        }
+    }
 
     private fun assertCpuCatalog(catalog: RecommendationCatalog) {
-        assertEquals(5, catalog.lightChat.size)
+        assertEquals(6, catalog.lightChat.size)
         assertEquals(4, catalog.mainChat.size)
         assertEquals(5, catalog.qualityChat.size)
-        assertEquals(14, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
-        assertEquals(4, catalog.npuChat.size)
+        assertEquals(15, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
+        assertEquals(5, catalog.npuChat.size)
         assertEquals(
             listOf(
                 "gemma4_e2b_litertlm_npu",
@@ -465,11 +480,12 @@ class RecommendationCatalogTest {
         )
         assertEquals(
             listOf(
-                "qwen35_08b_uncensored_mnn",
+                "qwen35_08b_mnn36",
                 "qwen35_2b_abliterated_gguf",
                 "gemma4_e2b_uncensored_gguf",
                 "gemma4_e2b_litertlm_cpu",
-                "gemma4_e2b_litertlm_gpu"
+                "gemma4_e2b_litertlm_gpu",
+                "qwen35_08b_uncensored_mnn"
             ),
             catalog.lightChat.map { it.id }
         )
@@ -492,15 +508,11 @@ class RecommendationCatalogTest {
             ),
             catalog.qualityChat.map { it.id }
         )
-        assertEquals(
-            listOf(
-                "qwen3_vl_4b_qairt_w4a16",
-                "qwen3_4b_2507_qairt_w4a16",
-                "qwen3_8b_qairt_w4a16",
-                "qwen25_vl_7b_qairt_w4a16"
-            ),
-            catalog.npuChat.map { it.id }
-        )
+        // npuChat order depends on device fit first: the declared SM8750/SM8850 family
+        // packages rank EXACT/VENDOR_GENERIC on Snapdragon devices, while the universal
+        // ALL_DEVICES lightweight package (qwen3_06b_qairt_w4a16) ranks UNIVERSAL. The exact
+        // id order is therefore asserted per device via expectedNpuChatIds(...) at each call
+        // site instead of once here.
 
         assertEquals(8, catalog.cpuImage.size)
         assertEquals(

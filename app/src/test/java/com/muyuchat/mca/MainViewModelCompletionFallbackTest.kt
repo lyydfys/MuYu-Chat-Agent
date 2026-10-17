@@ -598,8 +598,8 @@ class MainViewModelCompletionFallbackTest {
         // P3 step 1 moved the execution body to ChatExecutionOperations.runChatGeneration; the
         // wait and its ordering are unchanged -- they are read where they now live.
         val body = functionBody(chatExecutionOperationsSource(), "fun ChatGenerationExecutionPort.runChatGeneration(")
-        // The published-job handle moved behind ChatRunOwnership; the wait itself is unchanged.
-        val wait = body.indexOf("chatRuns.publishedJobUnless(foregroundRecoveryJob)")
+        // Wait only for the recovery job; waiting for the published generation would self-join.
+        val wait = body.indexOf("recoveryJobToAwait(foregroundRecoveryJob, selfJob)?.join()")
         val invalidate = body.indexOf("ensureLocalConversationContextInvalidated()")
 
         assertTrue(wait >= 0)
@@ -624,7 +624,7 @@ class MainViewModelCompletionFallbackTest {
         SourceTextFixtures.sourceOf("internal fun clearNativeRuntimeSessionStateFor(")
 
     /** R3/S18: the runtime engine-read seam that now hosts apiGenerationParams. */
-    private fun runtimeEngineReadsSource(): String {        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+    private fun runtimeEngineReadsSource(): String {        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -639,7 +639,7 @@ class MainViewModelCompletionFallbackTest {
 
     /** The owner that holds the streamed-output buffer and its generation-ownership guard. */
     private fun chatStreamAccumulatorSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -654,7 +654,7 @@ class MainViewModelCompletionFallbackTest {
 
     /** The owner that runs the chat generation execution body (P3 step 1). */
     private fun chatExecutionOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -669,7 +669,7 @@ class MainViewModelCompletionFallbackTest {
 
     /** The owner that installs the Local API chat providers (P3 step 2). */
     private fun localApiControlPlaneSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -683,7 +683,7 @@ class MainViewModelCompletionFallbackTest {
     }
 
     private fun chatLocalApiProviderSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -698,7 +698,7 @@ class MainViewModelCompletionFallbackTest {
 
     /** The owner that orchestrates the user-facing stop path. */
     private fun stopOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(
@@ -712,7 +712,7 @@ class MainViewModelCompletionFallbackTest {
     }
 
     private fun agentTuningOperationsSource(): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(

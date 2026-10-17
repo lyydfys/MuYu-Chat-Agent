@@ -1,0 +1,336 @@
+{
+  "timestamp": "2026-10-09T20:53:41.361608+08:00",
+  "head": "afcc9c0ae7309b13efdd0b9844751529b4f1aa41",
+  "inventory_files": 909,
+  "physical_lines": 284510,
+  "over_1500": 19,
+  "top_sources": [
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+      "lines": 3876,
+      "sha256": "07dd1cbbbb6df0f9db76e9461250d9b23eb09f0e928c0b5c311025add8b1d04f"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt",
+      "lines": 3473,
+      "sha256": "c9c61fefd287948509a9fe8b3966c11b0c92e803819b70bd32cddf53662c3151"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt",
+      "lines": 3146,
+      "sha256": "ff6c6db505baf9aa4a7d79589f9858c1e48783c5658f2ca31bc56e43e6e7f52d"
+    },
+    {
+      "path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogData.kt",
+      "lines": 3125,
+      "sha256": "4a322d56e7e15101b48d3d155b04e7885bcbb99ce392de8449f7416c23f57f11"
+    },
+    {
+      "path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/ModelHubScreen.kt",
+      "lines": 2995,
+      "sha256": "7364707b646de41501bda1eb12105737dcc6a0e03bd0cdded94178336370a0f0"
+    },
+    {
+      "path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt",
+      "lines": 2960,
+      "sha256": "5c8a2d2bdb926c9f2c3afe68975cb8e4f479faffae6f73ed8c6c3e065ccb2cfc"
+    },
+    {
+      "path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
+      "lines": 2661,
+      "sha256": "0419076c3dcfb900ba61c60899537aab0dc040afaaa1ff05e61745dfb1862eac"
+    },
+    {
+      "path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiEvidenceValidation.kt",
+      "lines": 2612,
+      "sha256": "ce210f6b6aab86c9b319ca4a2f13361fa8dbb4d52d0b68413a32fa5bcf74b027"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/LocalImagePromptLanguage.kt",
+      "lines": 2528,
+      "sha256": "0563fc3f54d1e7901035319ff9f1311272a9d94bdc8633c63e28fc4a27cbdfb8"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/CorePortAdapters.kt",
+      "lines": 2504,
+      "sha256": "2b7a8cae40d850a2ebf289816bb2b532ada6de565e78bd5705963353d858314a"
+    },
+    {
+      "path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreRepository.kt",
+      "lines": 2259,
+      "sha256": "4fe22f6c2c42629b46311e18488c54ad1316dd256e16c08efc05ab01c411bb30"
+    },
+    {
+      "path": "core/engine/src/main/java/com/muyuchat/core/engine/RuntimeParameters.kt",
+      "lines": 2123,
+      "sha256": "f53d17fd4bc0b44fda7619b1ff10b10dcaeb3679b41f5b48a3335a11647c5ece"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt",
+      "lines": 2116,
+      "sha256": "caa80d7e821594e1340a832064068271efe16e6dbd24fc82e573865b5d52f8e8"
+    },
+    {
+      "path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentScreen.kt",
+      "lines": 1855,
+      "sha256": "20eed4ed5204d6a96db9684838319ed39dc18a9bbd615b0d779402fab41ea8d6"
+    },
+    {
+      "path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImagesWorkspaceOverlay.kt",
+      "lines": 1770,
+      "sha256": "9bac5293aa0eab6a6fffa348a8556c7132c595569b681211d3632a4fe8184aef"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt",
+      "lines": 1714,
+      "sha256": "119f8d8a9c47f87ea7c12488f8de0ca364ab8c3ae31164eb3af0e00169e6032c"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.cpp",
+      "lines": 1714,
+      "sha256": "3085a60681e13669ac9c620f9564ded78bd699aaf5fda743be29c37eb423d8c1"
+    },
+    {
+      "path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageInputSupportScreens.kt",
+      "lines": 1632,
+      "sha256": "d4ef9411729417efd570408d9b5ecb5ce73310638f36b3e778154f7967dae3cb"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/composition/McaAppContainer.kt",
+      "lines": 1579,
+      "sha256": "e818c87ff4bf428729346cf44e938c6f7bb2904644bd3b0ae81fc07c98260f96"
+    },
+    {
+      "path": "core/native/src/main/cpp/native_engine.cpp",
+      "lines": 1481,
+      "sha256": "e7b0e9a6dc99098e8677f66b87fb289ee91d24233e382e02d41b20ca55325781"
+    },
+    {
+      "path": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "lines": 1472,
+      "sha256": "403b75cbb8f57c6105f8239901172ddbb1b78b76ef88b08ed17acb217185f815"
+    },
+    {
+      "path": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "lines": 1472,
+      "sha256": "f877de7153028b3d53cd2b1e4f9247349d94bb89e0938c9d4bd7069b1fe43a55"
+    },
+    {
+      "path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeTypes.kt",
+      "lines": 1464,
+      "sha256": "1464a42c21380efefc4c39d1930feeedab1df1592525cbca850af9467277e17d"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/LocalImageWorkerService.kt",
+      "lines": 1449,
+      "sha256": "f6f87ec9eab062ffbbae7d0ed1b15fbecbc2ecb45f6288eedd6b600c7f86b5a0"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileJson.kt",
+      "lines": 1406,
+      "sha256": "884f758dc128364137e181a72547aa2fe871827b8f74ab3740416af3e24706c1"
+    },
+    {
+      "path": "core/native/src/main/cpp/mca/qnn/qnn_model_execution_pipeline.cpp",
+      "lines": 1377,
+      "sha256": "0610471f35406a9aae8a0a08ad8a706f0c8b0341e0703142b4b18377f0afafa8"
+    },
+    {
+      "path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt",
+      "lines": 1365,
+      "sha256": "ff5f5612e829250f5bc251c3ddc2b68a93622d745c2a74b3c98c8e8ba98090cc"
+    },
+    {
+      "path": "core/native/src/main/cpp/image_execution_math.cpp",
+      "lines": 1316,
+      "sha256": "3ceca72fded2223d85e89566d0909a77c6c75c3a72b9f0df13bfaf175343c17a"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/ImageExecutionProfile.kt",
+      "lines": 1313,
+      "sha256": "887fdce16aefc05b2eeb6aafce8e960cf5f68c7c79958a0f5f9082248d4da8f4"
+    },
+    {
+      "path": "app/src/main/java/com/muyuchat/mca/LocalImageInputContract.kt",
+      "lines": 1313,
+      "sha256": "d5e67c3a73037a73fe72a3150cf0741f2b9c091f9e101c71eeec55607224616f"
+    }
+  ],
+  "text_pattern_counts_not_defect_counts": {
+    "runCatching": 1457,
+    "getOrNull_calls_including_collections": 566,
+    "catch_Throwable": 142,
+    "getOrDefault_calls": 194
+  },
+  "jni_comparison": [
+    {
+      "bridge": "core/native/src/main/cpp/mnn_native_engine.cpp",
+      "head_unique_exports": 28,
+      "current_unique_exports": 10,
+      "removed_from_bridge": [
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getPrefillProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isGenerationRunning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_cancel",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptConditioning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_inspectBundle",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_measurePromptTokens",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_resetImageCancellation",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIds",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsWithConfig"
+      ],
+      "missing_from_all_main_native_sources": [
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getPrefillProgressJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_initBackends",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isGenerationRunning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_requestStopIfActive",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_resetPrefillProgress",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_shutdown",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_cancel",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodePromptTokenIdsWithWeightsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_encodeSdxlPromptConditioning",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_getRuntimeStatsJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_inspectBundle",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_isRunnerReady",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_measurePromptTokens",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_resetImageCancellation",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_runUnetSmoke",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIds",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsFromJson",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnDiffusionBridge_tokenizePromptTokenIdsWithConfig"
+      ],
+      "added": [
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_getSessionStats",
+        "Java_com_muyuchat_core_nativebridge_NativeMnnBridge_isLoaded"
+      ]
+    },
+    {
+      "bridge": "core/native/src/main/cpp/native_engine.cpp",
+      "head_unique_exports": 14,
+      "current_unique_exports": 14,
+      "removed_from_bridge": [],
+      "missing_from_all_main_native_sources": [],
+      "added": []
+    },
+    {
+      "bridge": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "head_unique_exports": 14,
+      "current_unique_exports": 14,
+      "removed_from_bridge": [],
+      "missing_from_all_main_native_sources": [],
+      "added": []
+    },
+    {
+      "bridge": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
+      "head_unique_exports": 8,
+      "current_unique_exports": 8,
+      "removed_from_bridge": [],
+      "missing_from_all_main_native_sources": [],
+      "added": []
+    }
+  ],
+  "existing_test_results": [
+    {
+      "module": "app",
+      "suites": 256,
+      "tests": 2399,
+      "failures": 4,
+      "skipped": 8,
+      "first_timestamp": "2026-10-09T12:20:28.374Z",
+      "last_timestamp": "2026-10-09T12:21:42.045Z",
+      "failed_tests": [
+        {
+          "suite": "com.muyuchat.mca.LocalImageProductClosureTest",
+          "test": "QNN conditioning digest is derived from the bytes consumed by the graph",
+          "message": "java.lang.IllegalArgumentException: Missing source signature: bool resolve_qnn_conditioning_evidence(",
+          "xml": "app/build/test-results/testDebugUnitTest/TEST-com.muyuchat.mca.LocalImageProductClosureTest.xml"
+        },
+        {
+          "suite": "com.muyuchat.mca.LocalImageProductClosureTest",
+          "test": "shared external MNN evidence is artifact bound while legacy bundles stay discoverable",
+          "message": "java.lang.IllegalArgumentException: Missing source signature: bool resolve_qnn_conditioning_evidence(",
+          "xml": "app/build/test-results/testDebugUnitTest/TEST-com.muyuchat.mca.LocalImageProductClosureTest.xml"
+        },
+        {
+          "suite": "com.muyuchat.mca.QnnSharedLivePreviewContractTest",
+          "test": "preview reuses only vae after completed scheduler steps with cancellation boundaries",
+          "message": "java.lang.StringIndexOutOfBoundsException: Range [-1, -1) out of bounds for length 263076",
+          "xml": "app/build/test-results/testDebugUnitTest/TEST-com.muyuchat.mca.QnnSharedLivePreviewContractTest.xml"
+        },
+        {
+          "suite": "com.muyuchat.mca.QnnSharedLivePreviewContractTest",
+          "test": "preview publication is immutable atomic audited and absent from final metadata",
+          "message": "java.lang.AssertionError",
+          "xml": "app/build/test-results/testDebugUnitTest/TEST-com.muyuchat.mca.QnnSharedLivePreviewContractTest.xml"
+        }
+      ]
+    },
+    {
+      "module": "core/engine",
+      "suites": 51,
+      "tests": 435,
+      "failures": 0,
+      "skipped": 2,
+      "first_timestamp": "2026-10-08T16:52:24.394Z",
+      "last_timestamp": "2026-10-08T16:52:31.384Z",
+      "failed_tests": []
+    },
+    {
+      "module": "api/local",
+      "suites": 13,
+      "tests": 221,
+      "failures": 0,
+      "skipped": 0,
+      "first_timestamp": "2026-10-08T19:41:07.037Z",
+      "last_timestamp": "2026-10-08T19:41:10.021Z",
+      "failed_tests": []
+    },
+    {
+      "module": "feature/chat",
+      "suites": 34,
+      "tests": 273,
+      "failures": 0,
+      "skipped": 0,
+      "first_timestamp": "2026-10-08T19:41:20.920Z",
+      "last_timestamp": "2026-10-08T19:41:22.332Z",
+      "failed_tests": []
+    }
+  ],
+  "existing_lint_results": {
+    "modified": "2026-10-02T20:19:01.258042+08:00",
+    "issues": 126,
+    "severities": {
+      "Warning": 126
+    },
+    "ids": {
+      "ApplySharedPref": 1,
+      "ExifInterface": 6,
+      "InlinedApi": 8,
+      "UnusedAttribute": 1,
+      "AndroidGradlePluginVersion": 1,
+      "GradleDependency": 1,
+      "NewerVersionAvailable": 6,
+      "SwitchIntDef": 1,
+      "ChromeOsAbiSupport": 1,
+      "UnsafeDynamicallyLoadedCode": 1,
+      "ObsoleteSdkInt": 6,
+      "UnusedResources": 2,
+      "UsableSpace": 7,
+      "UseKtx": 76,
+      "UseTomlInstead": 7,
+      "SetTextI18n": 1
+    }
+  }
+}

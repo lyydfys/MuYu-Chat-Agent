@@ -538,6 +538,10 @@ internal fun ImagePromptBar(
                         when {
                             isGenerating -> onStop()
                             !translationBusy && !negativeTranslationBusy -> onSubmit()
+                            // 原项目经穷尽枚举分派（ChatScreen.kt:11451-11454）：
+                            // 只要不在生成中即走 SUBMIT -> onSubmit()，不因翻译忙标志而静默。
+                            // 此处补全兜底，保持与原项目一致的行为（避免标志卡 true 时点击完全无反应）。
+                            else -> onSubmit()
                         }
                     },
                     containerColor = when {

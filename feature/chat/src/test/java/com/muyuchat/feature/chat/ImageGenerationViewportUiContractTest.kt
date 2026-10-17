@@ -8,8 +8,20 @@ import java.io.File
 class ImageGenerationViewportUiContractTest {
     @Test
     fun `mask editor shares one viewport across image drawing overlay and positioned cursor`() {
+        // T2B21/T1-A: the mask editor / overlays moved to same-package files; the reader
+        // concatenates the shell and the new files so the assertions below keep reading the
+        // same text they pinned before. No assertion changed -- only the files the reads
+        // concatenate.
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationEditor.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskTools.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorChrome.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorDialogs.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskOverlays.kt"
         )
 
         assertTrue(source.contains("private enum class MaskEditorInteractionMode"))
@@ -25,8 +37,20 @@ class ImageGenerationViewportUiContractTest {
 
     @Test
     fun `viewport controls are save disabled and do not participate in mask dirty history`() {
+        // T2B21/T1-A: the mask editor / overlays moved to same-package files; the reader
+        // concatenates the shell and the new files so the assertions below keep reading the
+        // same text they pinned before. No assertion changed -- only the files the reads
+        // concatenate.
         val source = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationEditor.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskTools.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorChrome.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorDialogs.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskOverlays.kt"
         )
 
         assertTrue(source.contains("val dirty = maskState != emptyMaskState || activeStroke != null"))

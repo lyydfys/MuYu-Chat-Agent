@@ -15,6 +15,18 @@
 #include <sstream>
 #include <utility>
 
+// The tokenizer.json guard needs a non-throwing JSON parser. Production targets
+// put the vendored nlohmann root on the include path; host test invocations that
+// compile this TU without that -I (for example the QNN prompt-proof contract
+// test) fall back to the vendored path directly, matching mnn_native_engine.cpp.
+#if __has_include(<nlohmann/json.hpp>)
+#include <nlohmann/json.hpp>
+#elif __has_include("nlohmann/json.hpp")
+#include "nlohmann/json.hpp"
+#else
+#include "../../../../../third_party/llama.cpp/vendor/nlohmann/json.hpp"
+#endif
+
 #if MCA_WITH_TOKENIZERS_CPP
 #include <tokenizers_cpp.h>
 #endif
@@ -25,6 +37,39 @@ namespace {
 #if MCA_WITH_TOKENIZERS_CPP
 constexpr std::streamoff kMaxTokenizerJsonBytes = 64LL * 1024LL * 1024LL;
 #endif
+
+// Guard for the tokenizers-cpp backend: a fast structural pre-check that rejects
+// obviously broken assets before the Rust round trip.
+//
+// This is NOT the fix for the process abort. The pre-check only inspects the
+// outer JSON shape, so a blob such as {"model":{"type":"BPE"}} (valid type, no
+// vocab/merges) or {"model":{"type":"NOT_A_TOKENIZER"}} passes it and still
+// cannot build a tokenizer. The abort itself was removed in the vendored Rust
+// glue (third_party/tokenizers-cpp/rust/src/lib.rs): every fallible operation now
+// returns Result, the extern "C" entry points return a null handle plus a
+// readable reason (tokenizers_last_error()), and no unwrap/panic path remains.
+// The C++ factories return nullptr for that case, so the checks below fail with
+// the backend message instead of taking the process down.
+bool tokenizer_json_is_worth_parsing(const std::string& blob, std::string* error) {
+    if (error == nullptr) return false;
+    const auto parsed = nlohmann::json::parse(blob, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        *error = "Tokenizer JSON asset is not a valid JSON object.";
+        return false;
+    }
+    const auto model = parsed.find("model");
+    if (model == parsed.end() || !model->is_object()) {
+        *error = "Tokenizer JSON asset has no tokenizer model object.";
+        return false;
+    }
+    const auto type = model->find("type");
+    if (type == model->end() || !type->is_string() || type->get<std::string>().empty()) {
+        *error = "Tokenizer JSON asset has no tokenizer model type.";
+        return false;
+    }
+    return true;
+}
+
 constexpr float kRoundBracketMultiplier = 1.1f;
 constexpr float kSquareBracketMultiplier = 0.9f;
 constexpr float kWeightEqualityTolerance = 1.0e-6f;
@@ -975,6 +1020,7 @@ bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
 #if MCA_WITH_TOKENIZERS_CPP
     std::string tokenizer_json;
     if (!read_bounded_file(tokenizer_json_path, &tokenizer_json, error)) return false;
+    if (!tokenizer_json_is_worth_parsing(tokenizer_json, error)) return false;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer;
     try {
         tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_json);
@@ -986,7 +1032,12 @@ bool tokenize_clip_pair_from_json(const std::string& tokenizer_json_path,
         return false;
     }
     if (!tokenizer) {
-        *error = "Tokenizer JSON did not create a tokenizer instance.";
+        // The vendored glue refuses instead of panicking, so the backend reason is
+        // available and the caller can surface a recoverable error.
+        const std::string backend_error = tokenizers::LastError();
+        *error = backend_error.empty()
+                ? "Tokenizer JSON did not create a tokenizer instance."
+                : "Tokenizer JSON cannot build a tokenizer: " + backend_error;
         return false;
     }
     return (!include_negative ||
@@ -1016,6 +1067,7 @@ bool measure_clip_prompt_from_json(const std::string& tokenizer_json_path,
 #if MCA_WITH_TOKENIZERS_CPP
     std::string tokenizer_json;
     if (!read_bounded_file(tokenizer_json_path, &tokenizer_json, error)) return false;
+    if (!tokenizer_json_is_worth_parsing(tokenizer_json, error)) return false;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer;
     try {
         tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_json);
@@ -1027,7 +1079,12 @@ bool measure_clip_prompt_from_json(const std::string& tokenizer_json_path,
         return false;
     }
     if (!tokenizer) {
-        *error = "Tokenizer JSON did not create a tokenizer instance.";
+        // The vendored glue refuses instead of panicking, so the backend reason is
+        // available and the caller can surface a recoverable error.
+        const std::string backend_error = tokenizers::LastError();
+        *error = backend_error.empty()
+                ? "Tokenizer JSON did not create a tokenizer instance."
+                : "Tokenizer JSON cannot build a tokenizer: " + backend_error;
         return false;
     }
 
@@ -1080,6 +1137,7 @@ bool tokenize_clip_pair_with_textual_inversion_from_json(
 #if MCA_WITH_TOKENIZERS_CPP
     std::string tokenizer_json;
     if (!read_bounded_file(tokenizer_json_path, &tokenizer_json, error)) return false;
+    if (!tokenizer_json_is_worth_parsing(tokenizer_json, error)) return false;
     std::unique_ptr<tokenizers::Tokenizer> tokenizer;
     try {
         tokenizer = tokenizers::Tokenizer::FromBlobJSON(tokenizer_json);
@@ -1091,7 +1149,12 @@ bool tokenize_clip_pair_with_textual_inversion_from_json(
         return false;
     }
     if (!tokenizer) {
-        *error = "Tokenizer JSON did not create a tokenizer instance.";
+        // The vendored glue refuses instead of panicking, so the backend reason is
+        // available and the caller can surface a recoverable error.
+        const std::string backend_error = tokenizers::LastError();
+        *error = backend_error.empty()
+                ? "Tokenizer JSON did not create a tokenizer instance."
+                : "Tokenizer JSON cannot build a tokenizer: " + backend_error;
         return false;
     }
     if ((include_negative && !encode_conditioned_clip_sequence(

@@ -136,7 +136,7 @@ class ConversationMutationAtomicityContractTest {
     }
 
     private fun mainViewModelSource(): String {
-        val root = File(System.getProperty("user.dir"))
+        val root = File(requireNotNull(System.getProperty("user.dir")))
         val candidates = listOf(
             File(root, "src/main/java/com/muyuchat/mca/MainViewModel.kt"),
             File(root, "app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
@@ -146,7 +146,7 @@ class ConversationMutationAtomicityContractTest {
     }
 
     private fun chatSessionPersistenceSource(): String {
-        val root = File(System.getProperty("user.dir"))
+        val root = File(requireNotNull(System.getProperty("user.dir")))
         val candidates = listOf(
             File(root, "src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt"),
             File(root, "app/src/main/java/com/muyuchat/mca/ChatSessionPersistenceOperations.kt")

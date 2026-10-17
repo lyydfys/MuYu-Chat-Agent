@@ -27,6 +27,14 @@ fun releaseSigningProperty(name: String): String? =
 val releaseSigningEnabled = listOf("storeFile", "storePassword", "keyAlias", "keyPassword")
     .all { !releaseSigningProperty(it).isNullOrBlank() }
 
+// Keep native DWARF inside debug packages by default so on-device diagnostics
+// remain useful. The release wrapper passes false and consumes the external
+// debug-symbol archive produced by AGP instead.
+val keepNativeDebugSymbols = providers.gradleProperty("mca.keepNativeSymbols")
+    .orElse("true")
+    .get()
+    .equals("true", ignoreCase = true)
+
 val mcaAbiFilters = providers.gradleProperty("mca.abis")
     .orElse("arm64-v8a,x86_64")
     .get()
@@ -223,13 +231,19 @@ android {
 
     buildTypes {
         debug {
-            // Reuse the locally configured release signing key for on-device smoke builds.
-            if (releaseSigningEnabled) {
-                signingConfig = signingConfigs.getByName("release")
-            }
+            // Debug builds use the Android toolchain's dedicated debug key. Never
+            // reuse the release keystore for a testable artifact.
         }
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
             if (releaseSigningEnabled) {
                 signingConfig = signingConfigs.getByName("release")
             }
@@ -255,21 +269,23 @@ android {
             // AndroidX native graphics dependency. Some NDK strip toolchains cannot
             // strip them cleanly, and AGP would package them as-is anyway, so make
             // that choice explicit and keep debug builds quiet.
-            keepDebugSymbols += setOf(
-                "**/libmca_native.so",
-                "**/libmca_mnn_native.so",
-                "**/libmca_prompt_handoff.so",
-                "**/libmca_qnn_native.so",
-                "**/libmca_sd_native.so",
-                "**/libMNN.so",
-                "**/libQnn*.so",
-                "**/libggml*.so",
-                "**/libllama*.so",
-                "**/libmtmd*.so",
-                "**/libkleidiai.so",
-                "**/libomp.so",
-                "**/libandroidx.graphics.path.so"
-            )
+            if (keepNativeDebugSymbols) {
+                keepDebugSymbols += setOf(
+                    "**/libmca_native.so",
+                    "**/libmca_mnn_native.so",
+                    "**/libmca_prompt_handoff.so",
+                    "**/libmca_qnn_native.so",
+                    "**/libmca_sd_native.so",
+                    "**/libMNN.so",
+                    "**/libQnn*.so",
+                    "**/libggml*.so",
+                    "**/libllama*.so",
+                    "**/libmtmd*.so",
+                    "**/libkleidiai.so",
+                    "**/libomp.so",
+                    "**/libandroidx.graphics.path.so"
+                )
+            }
             pickFirsts += setOf(
                 "**/libggml.so",
                 "**/libggml-base.so",

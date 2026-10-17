@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -22,7 +23,12 @@ class UiStateStoreTest {
     @Test
     fun `ownerFlow is the same backing instance as state source`() {
         val store = UiStateStore(initial)
-        assertTrue(store.ownerFlow is MutableStateFlow)
+        // Widen to the read-only supertype first, so this is a real discrimination check: the exposed
+        // flow must still be the mutable backing flow, not a read-only projection. (Asserting
+        // `store.ownerFlow is MutableStateFlow` directly is a tautology -- the declared type is already
+        // MutableStateFlow -- and could never fail.)
+        val exposedAsReadOnly: StateFlow<*> = store.ownerFlow
+        assertTrue(exposedAsReadOnly is MutableStateFlow<*>)
         store.ownerFlow.value = initial.copy(statusMessage = "直写")
         assertEquals("直写", store.state.value.statusMessage)
     }

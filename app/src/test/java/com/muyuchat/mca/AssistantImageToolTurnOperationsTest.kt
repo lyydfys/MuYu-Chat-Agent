@@ -225,10 +225,10 @@ class AssistantImageToolTurnOperationsTest {
     }
 
     private fun optionsOf(port: FakePort): JSONObject =
-        JSONObject(requireNotNull(port.snapshotRequest).generationOptionsJson)
+        JSONObject(requireNotNull(requireNotNull(port.snapshotRequest).generationOptionsJson))
 
     private fun attachedOptionsOf(port: FakePort): JSONObject =
-        JSONObject(requireNotNull(port.attached).second.generationOptionsJson)
+        JSONObject(requireNotNull(requireNotNull(port.attached).second.generationOptionsJson))
 
     // ---- the early guards ---------------------------------------------------------------------
 

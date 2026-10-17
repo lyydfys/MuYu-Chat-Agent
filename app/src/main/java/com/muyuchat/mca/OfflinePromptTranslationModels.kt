@@ -244,6 +244,10 @@ internal data class OfflinePromptTranslationRequest(
  * A native adapter must construct this through [VerifiedOfflinePromptTranslationBundle.createResult].
  * The constructor enforces its request-bound character limit and rejects Han script or control data.
  */
+// The primary constructor is internal because the init block enforces the request-bound character
+// limit and rejects Han script or control data. The generated copy() must not widen that contract,
+// so it keeps the constructor's own visibility instead of becoming callable outside the module.
+@ConsistentCopyVisibility
 internal data class OfflinePromptTranslationResult internal constructor(
     val requestFingerprint: String,
     val bundleFingerprint: String,

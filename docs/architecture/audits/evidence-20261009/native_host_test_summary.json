@@ -1,0 +1,20 @@
+{
+  "timestamp": "2026-10-09T21:02:10.179383+08:00",
+  "declared_tests": 13,
+  "missing_executables": [
+    "mnn_sampler_numeric",
+    "mnn_prompt_history",
+    "mnn_stream_protocol_filter",
+    "mnn_visual_stream_queue",
+    "mnn_runtime_capability_policy",
+    "mnn_recurrent_cache",
+    "mca_qnn_context_binary_cache_unit_test",
+    "mca_qnn_graph_executor_helper_unit_test",
+    "mca_qnn_tensor_quantizer_unit_test"
+  ],
+  "executed_in_this_audit": [
+    "mnn_sampler_source_contract",
+    "mca_native_helper_unit_tests"
+  ],
+  "executed_result": "2/2 PASS, does not establish full native suite success"
+}

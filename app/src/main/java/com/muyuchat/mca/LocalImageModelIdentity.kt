@@ -159,9 +159,13 @@ internal fun normalizeLocalImageModelRecords(
     }.values.map { indexed ->
         val candidates = indexed.map { it.value }
         val stable = stableImageCatalogOwner(candidates, preferredId)
-        // Preserve the selected/imported primary while it is present; a surviving exact
-        // copy may take over only after that primary becomes missing/unreadable.
-        val active = stable.takeIf { it.configured } ?: candidates.firstOrNull { it.configured } ?: stable
+        // Keep a healthy selected copy. An invalid derived profile binding must
+        // not strand a newly imported exact copy with a valid binding: the
+        // binding itself is excluded from the content digest to avoid recursion.
+        val readable = candidates.filter { it.configured }
+        val bound = if (candidates.size > 1) readable.filter { it.hasConsistentImageProfileBinding() } else readable
+        val active = stable.takeIf { it in bound } ?: bound.firstOrNull()
+            ?: stable.takeIf { it.configured } ?: readable.firstOrNull() ?: stable
         val metadataOwner = stableImageCatalogOwner(candidates, null)
         active.copy(
             id = stable.id, displayName = metadataOwner.displayName, source = metadataOwner.source,
@@ -199,6 +203,27 @@ internal fun normalizeLocalImageModelRecords(
     return unique.map { record -> record.copy(
         aliases = record.aliases.filter { it.isNotBlank() && it !in currentIds }.distinct()
     ) }
+}
+
+/** Uses already observed bytes; this selects an exact copy and never rebinds a manifest. */
+private fun LocalImageModelRecord.hasConsistentImageProfileBinding(): Boolean {
+    if (!hasCompleteContentIdentity()) return true
+    val root = bundleRoot?.let(::File) ?: return true
+    val file = File(root, "manifest.json").takeIf(File::isFile) ?: return true
+    val manifest = runCatching { JSONObject(file.readText(Charsets.UTF_8)) }.getOrNull() ?: return false
+    val profile = manifest.optJSONObject("executionProfile") ?: return true
+    val declared = (profile.opt("modelFingerprint") as? String)?.trim()?.lowercase(Locale.ROOT)
+    if (declared.isNullOrBlank()) {
+        return listOf("schemaVersion", "profileId", "profileRevision", "modelFingerprint").none(profile::has)
+    }
+    val primary = runCatching { File(path).canonicalFile.relativeTo(root.canonicalFile).invariantSeparatorsPath }
+        .getOrNull()
+    val primarySha = componentSnapshots.firstOrNull { it.relativePath == primary }?.sha256
+    // Preserve both complete-bundle bindings and the supported historical scopes.
+    return declared == contentFingerprint.lowercase(Locale.ROOT) || declared.equals(primarySha, ignoreCase = true) ||
+        (profile.optString("variant") == ImageModelVariant.QWEN_IMAGE_21.name &&
+            profile.optJSONObject("provenance")?.optString("recommendationId") == "qwen_image_21_mnn_opencl" &&
+            isQwenImage21LegacyVaeProfileFingerprint(declared))
 }
 
 private fun stableImageCatalogOwner(candidates: List<LocalImageModelRecord>, preferredId: String?): LocalImageModelRecord =

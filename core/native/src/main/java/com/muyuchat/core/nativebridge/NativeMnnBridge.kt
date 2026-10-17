@@ -4,15 +4,33 @@ class NativeMnnBridge {
     companion object {
         const val LOAD_SIGNATURE_MISMATCH = -11
 
-        val loadError: Throwable? = runCatching {
+        /**
+         * Failure to load `libmca_mnn_native.so` itself. Only this condition means
+         * "the MNN bridge is not packaged in this APK".
+         */
+        private val libraryLoadError: Throwable? = runCatching {
             System.loadLibrary("mca_mnn_native")
         }.exceptionOrNull()
 
+        /**
+         * Linkage failure of the capability probe. A JNI entrypoint missing from
+         * an otherwise loadable library is a packaging/link defect, not "this APK
+         * has no MNN capability", so it is reported through [loadError] instead of
+         * being silently folded into `runnerReady == false`.
+         */
+        private val entryPointLoadError: Throwable? = libraryLoadError ?: runCatching {
+            NativeMnnBridge().isRunnerReady()
+        }.exceptionOrNull()
+
+        val loadError: Throwable?
+            get() = libraryLoadError ?: entryPointLoadError
+
         val isAvailable: Boolean
-            get() = loadError == null
+            get() = libraryLoadError == null
 
         val runnerReady: Boolean
-            get() = isAvailable && runCatching { NativeMnnBridge().isRunnerReady() }.getOrDefault(false)
+            get() = libraryLoadError == null && entryPointLoadError == null &&
+                runCatching { NativeMnnBridge().isRunnerReady() }.getOrDefault(false)
     }
 
     external fun isRunnerReady(): Boolean

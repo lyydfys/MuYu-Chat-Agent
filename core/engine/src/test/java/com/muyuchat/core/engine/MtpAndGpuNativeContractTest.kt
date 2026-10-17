@@ -71,7 +71,10 @@ class MtpAndGpuNativeContractTest {
         )
     }
 
-    private fun nativeSource(): String = sourceFile("core/native/src/main/cpp/native_engine.cpp")
+    private fun nativeSource(): String =
+        sourceFile("core/native/src/main/cpp/native_engine.cpp") +
+            sourceFile("core/native/src/main/cpp/native_engine_speculative.cpp") +
+            sourceFile("core/native/src/main/cpp/native_engine_stats_gpu.cpp")
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

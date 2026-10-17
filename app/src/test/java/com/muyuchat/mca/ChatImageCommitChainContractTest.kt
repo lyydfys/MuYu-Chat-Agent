@@ -41,8 +41,10 @@ class ChatImageCommitChainContractTest {
 
     @Test
     fun theViewModelNowDelegatesTheTransaction() {
-        // R3/C2: the admission body moved to ImageGenerationOwner.kt; read where it now lives.
-        val body = functionBody(sourceFile("ImageGenerationOwner.kt"), "fun submit(")
+        // R3/C2 + T2B20/R7-C9: the admission shell stays in ImageGenerationOwner.kt; the launch body
+        // (commit chain included) moved verbatim to ImageGenerationOwnerExecution.kt.
+        val body = functionBody(sourceFile("ImageGenerationOwner.kt"), "fun submit(") +
+            functionBody(sourceFile("ImageGenerationOwnerExecution.kt"), "fun runImageGenerationExecution(")
 
         assertTrue(body.contains("val commitError = commitImageLibraryTransaction("))
         assertFalse(body.contains("chatSessionStore.saveGeneratedImageResult(snapshot.sessions, generatedImages)"))
@@ -67,7 +69,7 @@ class ChatImageCommitChainContractTest {
     }
 
     private fun sourceFile(name: String): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(

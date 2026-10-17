@@ -75,7 +75,7 @@ size_t MnnPromptCacheManager::effective_kv_history() const {
 }
 
 std::string MnnPromptCacheManager::assistant_text(
-        const MNN::Transformer::Llm* llm,
+        MNN::Transformer::Llm* llm,
         const MnnPromptCacheRuntimeState& cache,
         const std::vector<std::string>& active_stop_markers) {
 #if MCA_MNN_PROMPT_CACHE_HAS_LLM

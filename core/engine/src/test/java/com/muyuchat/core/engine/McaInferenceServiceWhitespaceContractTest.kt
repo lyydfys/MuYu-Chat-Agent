@@ -9,7 +9,11 @@ import org.junit.Test
 class McaInferenceServiceWhitespaceContractTest {
     @Test
     fun generationLoopKeepsWhitespaceChunksAndOnlyRejectsEmptyChunks() {
-        val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt")
+        val source = sourceFiles(
+            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt",
+            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStreamChat.kt",
+            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStreamDecode.kt"
+        )
         assertTrue(source.contains("if (rawChunk.isEmpty()) continue"))
         assertTrue(source.contains("if (chunk.isEmpty()) {"))
         assertFalse(source.contains("if (rawChunk.isBlank()) continue"))
@@ -18,6 +22,9 @@ class McaInferenceServiceWhitespaceContractTest {
         assertTrue(source.contains("remaining.visible.isNotEmpty()"))
         assertTrue(source.contains("runner.invalidateConversationContext()"))
     }
+
+    private fun sourceFiles(vararg relativePaths: String): String =
+        relativePaths.joinToString("\n") { sourceFile(it) }
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

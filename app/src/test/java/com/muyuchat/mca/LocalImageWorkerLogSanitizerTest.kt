@@ -69,9 +69,21 @@ class LocalImageWorkerLogSanitizerTest {
         var root = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(6) {
             listOf(
-                File(root, "src/main/java/com/muyuchat/mca/LocalImageWorkerService.kt"),
-                File(root, "app/src/main/java/com/muyuchat/mca/LocalImageWorkerService.kt")
-            ).firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+                "src/main/java/com/muyuchat/mca/",
+                "app/src/main/java/com/muyuchat/mca/"
+            ).forEach { prefix ->
+                val files = listOf(
+                    "LocalImageWorkerService.kt",
+                    "LocalImageWorkerLogSanitizer.kt",
+                    "LocalImageWorkerExecution.kt",
+                    "LocalImageWorkerTerminal.kt",
+                    "LocalImageWorkerJournal.kt",
+                    "LocalImageWorkerRecovery.kt"
+                ).map { name -> File(root, prefix + name) }
+                if (files.all(File::isFile)) {
+                    return files.joinToString("\n") { file -> file.readText(Charsets.UTF_8) }
+                }
+            }
             root = root.parentFile ?: return@repeat
         }
         error("Unable to locate LocalImageWorkerService.kt")

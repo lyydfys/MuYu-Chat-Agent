@@ -8,7 +8,8 @@ import org.json.JSONObject
  * Pure JSON/URL parsing helpers for the ModelScope catalog client (P6/M1). These were private
  * member extensions of ModelScopeClient; they moved here as internal top-level helpers so the
  * catalog client keeps resolving them unqualified (same package) while one file owns the parsing
- * logic. Bodies are verbatim; only the declaration visibility of the stateless helpers widened.
+ * logic. The original extraction preserved the bodies. QAIRT chat selection also resolves the
+ * publisher's vendor variant before falling back to an unrelated target.
  * QairtReleaseAsset rides along because only these QNN asset selectors construct it.
  */
 
@@ -112,6 +113,14 @@ internal fun JSONObject.selectGenieXQairtAsset(preferredChipsets: List<String>):
     val chipsetOrder = preferredChipsets
         .map { it.trim() }
         .filter { it.isNotBlank() }
+        // Match the image selector's publisher alias handling. A generic
+        // target may be published only under its Galaxy variant; that asset
+        // should precede an unrelated deterministic fallback. This ranks
+        // packages only: unknown devices still reach the fallback below.
+        .flatMap { chipset ->
+            if (chipset.endsWith("-for-galaxy")) listOf(chipset)
+            else listOf(chipset, "$chipset-for-galaxy")
+        }
         .distinct()
     for (chipset in chipsetOrder) {
         val asset = chipsetAssets.optJSONObject(chipset)

@@ -166,9 +166,20 @@ class AppForegroundRecoveryContractTest {
             val launch = body.indexOf(launchSpelling)
             val completion = body.indexOf("executionJob.invokeOnCompletion")
             val release = body.indexOf(releaseSpelling)
+            val finallyIndex = body.indexOf("finally", launch)
             assertTrue(acquire >= 0 && acquire < launch)
-            assertTrue(completion > launch && release > completion)
-            assertTrue(body.substring(completion, release).contains("finally"))
+            // The acquire -> launch ordering is unchanged, and the release is still wired to the lease
+            // that was acquired (the call site moved into a shared lambda when the compensating
+            // completion handler was added, so the ordering assertions below are expressed in terms of
+            // the release INVOCATION rather than one fixed spelling position).
+            assertTrue(release >= 0)
+            // The coroutine body must still release the lease in its `finally` ...
+            assertTrue(finallyIndex > launch)
+            assertTrue(body.indexOf("releaseForegroundLease()", finallyIndex) > finallyIndex)
+            // ... and the compensating completion handler must cover the case where the launched body
+            // never ran at all (registered right after the launch, releasing the same lease).
+            assertTrue(completion > launch)
+            assertTrue(body.indexOf("releaseForegroundLease()", completion) > completion)
         }
     }
 

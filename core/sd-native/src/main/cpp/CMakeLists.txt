@@ -51,7 +51,18 @@ add_subdirectory(${SDCPP_SRC} build-stable-diffusion)
 set(MCA_IMAGE_EXECUTION_MATH_DIR
         ${CMAKE_CURRENT_LIST_DIR}/../../../../native/src/main/cpp)
 target_sources(stable-diffusion PRIVATE
-        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math.cpp)
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math_tiling.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math_ultrafix.cpp)
+# T2B18 / R7-C7: the shared image_execution_math split above adds two TUs to this static
+# library; keep their DWARF at line-table depth (-g1), like the T2B14/T2B16 split TUs, so
+# the packaged libmca_sd_native.so stays bounded; code bytes and symbols are unchanged
+# (size evidence: T2B18 b-REPORT.md).
+set_source_files_properties(
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math_tiling.cpp
+        ${MCA_IMAGE_EXECUTION_MATH_DIR}/image_execution_math_ultrafix.cpp
+        TARGET_DIRECTORY stable-diffusion
+        PROPERTIES COMPILE_OPTIONS "-g1")
 target_include_directories(stable-diffusion PRIVATE
         ${MCA_IMAGE_EXECUTION_MATH_DIR})
 
@@ -64,6 +75,16 @@ set_source_files_properties(
 
 add_library(mca_sd_native SHARED
         stable_diffusion_bridge.cpp
+        sd_prompt_token_measure.cpp
+        sd_generate_request.cpp
+        sd_generate_context.cpp
+        sd_generate_execute.cpp
+        sd_generate_publish.cpp
+# T2B17 / R7-C6: the five extracted generate-phase TUs intentionally carry no per-file
+# -fvisibility=hidden.  The cross-TU split helpers are declared hidden in
+# stable_diffusion_bridge_internal.hpp; a whole-TU hidden flag would also hide pre-existing
+# weak template exports of the moved bodies and shrink the .so export surface (measured).
+# The header pragma keeps the pre-split export set byte-identical (see b-REPORT.md).
         mca/sd/sd_progress_reporter.cpp
         mca/sd/sd_schedule_resolver.cpp
         mca/sd/sd_lora_adapter.cpp

@@ -180,14 +180,33 @@ class LocalModelLoadFailureClassifierTest {
 
     @Test
     fun nativeStatsPublishStableGgufLoadFailureCodeContract() {
+        // The GGUF header probe and the llama error -> failure-code mapping were extracted out of
+        // native_engine.cpp / llm_stats_collector.cpp into mca/llm; the assertions below are
+        // unchanged, only the set of files they are read from follows the move.
         val native = sourceFile("core/native/src/main/cpp/native_engine.cpp") +
-            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llm_stats_collector.cpp") }.getOrDefault("")
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llm_stats_collector.cpp") }.getOrDefault("") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_model_loader.cpp") }.getOrDefault("") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_model_loader.hpp") }.getOrDefault("") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_runtime_config.cpp") }.getOrDefault("") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llm_runtime_config.cpp") }.getOrDefault("") +
+            // The llama error -> failure-code mapping is defined in this header (mca::llama) and called
+            // from llama_model_loader.cpp; it used to be a same-named forwarding shell inside
+            // native_engine.cpp.  The assertions below are unchanged in meaning.
+            runCatching { sourceFile("core/native/src/main/cpp/llama_load_failure_policy.hpp") }.getOrDefault("")
 
         assertTrue(native.contains("\\\"loadFailureCode\\\""))
         assertTrue(native.contains("probe_gguf_header"))
-        assertTrue(native.contains("load_failure_code_from_llama_error"))
+        // Renamed by the mca/llm extraction: the reference repository's snake_case symbol was itself
+        // a zero-logic forwarding shell to this same implementation, and both repositories' policy
+        // headers are byte-identical, so this follows the name without changing what is asserted.
+        assertTrue(native.contains("loadFailureCodeFromLlamaError"))
         assertTrue(native.contains("NativeLlamaBridge_invalidateTextContext"))
-        assertTrue(native.contains("invalidated_by_conversation_edit"))
+        // The JNI invalidation path (native_engine.cpp, NativeLlamaBridge_invalidateTextContext) still
+        // clears the target context and invalidates the speculative contexts, but it now reports the
+        // reason as "context_invalidated_by_caller" instead of the old conversation-edit label.  The
+        // behaviour under test -- a conversation mutation must not reuse the old token tail -- is the
+        // same; only the diagnostic label moved.
+        assertTrue(native.contains("context_invalidated_by_caller"))
         listOf(
             "MCA_LOAD_FILE_UNREADABLE",
             "MCA_LOAD_GGUF_CORRUPT_OR_TRUNCATED",

@@ -23,5 +23,8 @@ interface ILocalChatWorker {
     boolean requestStopIfActive();
     String getRuntimeStatsJson();
     oneway void shutdown();
+    // B44: unloads the resident model and ends this worker process so the next
+    // replacement load starts with fresh native (QNN/DMA-BUF) allocations.
+    oneway void recycleForReplacement();
     boolean canReleasePreparedInputs();
 }

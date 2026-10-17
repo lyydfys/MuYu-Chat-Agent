@@ -182,7 +182,9 @@ try {
         -Name 'image_execution_math_test' `
         -Sources @(
             (Join-Path $nativeTests 'image_execution_math_test.cpp'),
-            (Join-Path $nativeMain 'image_execution_math.cpp')
+            (Join-Path $nativeMain 'image_execution_math.cpp'),
+            (Join-Path $nativeMain 'image_execution_math_tiling.cpp'),
+            (Join-Path $nativeMain 'image_execution_math_ultrafix.cpp')
         ) `
         -IncludeDirectories @($nativeMain)
     Run-HostTest -Name 'image_execution_math_test' -Executable $imageExecutionMath
@@ -193,7 +195,16 @@ try {
     Run-HostTest `
         -Name 'mnn_prompt_native_proof_contract_test' `
         -Executable $mnnPromptProof `
-        -Arguments @(Join-Path $nativeMain 'mnn_native_engine.cpp')
+        -Arguments @(
+            (Join-Path $nativeMain 'mnn_native_engine.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_sd15_direct.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_diffusion_tokenize.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_diffusion_generate.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_diffusion_state.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_clip_encode.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_qnn_prompt_payload.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_sdxl_pipeline.cpp')
+        )
 
     $mnnChatDebugTrace = Build-HostTest `
         -Name 'mnn_chat_debug_trace_source_contract_test' `
@@ -216,7 +227,10 @@ try {
     Run-HostTest `
         -Name 'mnn_diffusion_batch_source_contract_test' `
         -Executable $mnnDiffusionBatchSource `
-        -Arguments @(Join-Path $nativeMain 'mnn_native_engine.cpp')
+        -Arguments @(
+            (Join-Path $nativeMain 'mca\mnn\mnn_sd15_direct.cpp')
+            (Join-Path $nativeMain 'mca\mnn\mnn_diffusion_tokenize.cpp')
+        )
 
     $qnnPromptProof = Build-HostTest `
         -Name 'qnn_prompt_native_proof_contract_test' `

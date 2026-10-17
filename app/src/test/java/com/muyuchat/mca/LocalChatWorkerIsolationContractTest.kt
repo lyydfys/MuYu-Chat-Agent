@@ -29,10 +29,18 @@ class LocalChatWorkerIsolationContractTest {
         // The watchdog operation target/policy helpers moved to LocalChatWorkerSupport.kt during the
         // P7/S28 worker-support extraction. Reading both files keeps the same contract under test --
         // the assertions below are unchanged.
+        // T4/R7-C10: the watchdog/kill/recovery segment moved to LocalChatWorkerNativeCall.kt;
+        // the union reads the new owner too -- the assertions below are unchanged.
+        // R7-C11/T2B22-T3: the binding/failure/stats helpers moved out of RemoteLocalChatRunner.kt
+        // into their own files; the union below reads them too -- the assertions are unchanged.
         val service = sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerSupport.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerSupport.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalChatWorkerNativeCall.kt")
         val runners = sourceFile("app/src/main/java/com/muyuchat/mca/IsolatedLocalChatRunners.kt")
-        val client = sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunner.kt")
+        val client = sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunner.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerBinding.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerFailure.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/RemoteLocalChatRunnerStatsPayload.kt")
         val aidl = sourceFile("app/src/main/aidl/com/muyuchat/mca/ILocalChatWorker.aidl")
         val transport = sourceFile(
             "app/src/main/java/com/muyuchat/mca/LocalChatWorkerRequestTransport.kt"

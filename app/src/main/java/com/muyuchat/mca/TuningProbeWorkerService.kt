@@ -71,16 +71,16 @@ import org.json.JSONObject
  */
 class TuningProbeWorkerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val lock = Any()
-    private val handler = Handler(Looper.getMainLooper())
-    private val serviceEpoch = PROCESS_EPOCH.incrementAndGet()
-    private val processLifecycle = TuningProbeProcessLifecycle()
+    internal val lock = Any()
+    internal val handler = Handler(Looper.getMainLooper())
+    internal val serviceEpoch = PROCESS_EPOCH.incrementAndGet()
+    internal val processLifecycle = TuningProbeProcessLifecycle()
     private lateinit var modelStore: ModelStoreRepository
     private lateinit var profileStore: ModelRuntimeProfileStore
-    private var scheduledProcessExit: Runnable? = null
+    internal var scheduledProcessExit: Runnable? = null
 
     @Volatile
-    private var active: ActiveRequest? = null
+    internal var active: ActiveRequest? = null
 
     private val binder = object : ITuningProbeWorker.Stub() {
         override fun start(requestJson: String, callback: ITuningProbeWorkerCallback): Boolean {
@@ -204,21 +204,6 @@ class TuningProbeWorkerService : Service() {
             current.job?.cancel(CancellationException("Isolated tuning probe cancelled."))
             return true
         }
-    }
-
-    private fun beginBinderStart(): TuningProbeProcessLifecycle.StartToken? {
-        var staleExit: Runnable? = null
-        val token = synchronized(lock) {
-            processLifecycle.beginStart()?.also {
-                // Invalidate the Runnable while holding the same lock used by
-                // its kill decision. removeCallbacks() is only the best-effort
-                // queue cleanup after the logical cancellation is published.
-                staleExit = scheduledProcessExit
-                scheduledProcessExit = null
-            }
-        }
-        staleExit?.let(handler::removeCallbacks)
-        return token
     }
 
     override fun onCreate() {
@@ -632,118 +617,6 @@ class TuningProbeWorkerService : Service() {
         }
     }
 
-    private suspend fun runFixedCanary(
-        engine: McaInferenceService,
-        purpose: String,
-        prompt: String,
-        params: GenerationParams,
-        timeoutMs: Long
-    ): FixedCanaryRun {
-        val requestId = "tuning-$purpose-${UUID.randomUUID()}"
-        val before = JSONObject(engine.nativeStatsJson())
-        val beforeMemory = readMemoryPoint()
-        val output = StringBuilder()
-        var stats = RuntimeStats()
-        var errorMessage: String? = null
-        withTimeout(timeoutMs) {
-            engine.streamChat(
-                ChatRequest(
-                    messages = listOf(ChatMessage(Role.USER, prompt)),
-                    params = params
-                ),
-                LocalChatExecutionContext(requestId = requestId)
-            ).collect { event ->
-                when (event) {
-                    is GenerateEvent.Phase -> stats = event.stats
-                    is GenerateEvent.Persist -> Unit
-                    is GenerateEvent.Chunk -> {
-                        output.append(event.text)
-                        stats = event.stats
-                    }
-                    is GenerateEvent.Done -> stats = event.stats
-                    is GenerateEvent.Error -> {
-                        errorMessage = LocalDiagnosticRedactor.sanitize(event.message, listOf(prompt))
-                        stats = event.stats
-                    }
-                }
-            }
-        }
-        val nativeStatsJson = engine.nativeStatsJson()
-        val after = JSONObject(nativeStatsJson)
-        val afterMemory = readMemoryPoint(stats)
-        val safeNativeError = LocalDiagnosticRedactor.sanitize(stats.lastError, listOf(prompt))
-        return FixedCanaryRun(
-            purpose = purpose,
-            requestId = requestId,
-            sequenceBefore = before.optLong("generationSequence", -1L),
-            sequenceAfter = after.optLong("generationSequence", -1L),
-            output = output.toString(),
-            promptFingerprint = LocalDiagnosticRedactor.promptFingerprint(prompt),
-            error = errorMessage ?: safeNativeError.takeIf(String::isNotBlank),
-            stats = stats,
-            nativeStatsJson = nativeStatsJson,
-            beforeMemory = beforeMemory,
-            afterMemory = afterMemory
-        )
-    }
-
-    private fun FixedCanaryRun.toRepeatedObservation(
-        candidate: TuningExecutionProfile,
-        signatureMatched: Boolean
-    ): RepeatedCandidateCanaryObservation {
-        val correctness = error == null && MinimumTextCanaryPolicy.matches(output)
-        val safe = !stats.isLowMemory && !beforeMemory.lowMemory && !afterMemory.lowMemory
-        return RepeatedCandidateCanaryObservation(
-            requestId = requestId,
-            hardGate = CandidateHardGate(
-                correctnessPassed = correctness,
-                crashCount = 0,
-                anrCount = 0,
-                nativeFatalSignalCount = 0,
-                lowMemoryTriggered = !safe,
-                outputVisible = output.isNotBlank(),
-                templateValid = correctness,
-                safetyPassed = safe,
-                signaturesMatch = signatureMatched && candidate.identityHash.isNotBlank()
-            ),
-            sample = PerformanceSample(
-                ttftMs = stats.ttftMs.coerceAtLeast(0L),
-                decodeTps = stats.decodeTps.takeIf { it.isFinite() && it > 0.0 }
-                    ?: stats.e2eTps,
-                pssBytes = afterMemory.pssBytes,
-                rssBytes = afterMemory.rssBytes,
-                availableMemoryBytes = afterMemory.availableBytes
-            ),
-            nativeStatsJson = nativeStatsJson
-        )
-    }
-
-    private fun independentRunViolations(runs: List<FixedCanaryRun>): List<SpecializedCanaryViolation> {
-        val requestIds = runs.map { it.requestId }
-        val sequences = runs.map { it.sequenceAfter }
-        return buildList {
-            if (requestIds.any(String::isBlank) || requestIds.distinct().size != requestIds.size) {
-                add(
-                    SpecializedCanaryViolation(
-                        "request_ids_not_independent",
-                        "Every specialized canary must use a distinct non-blank request id."
-                    )
-                )
-            }
-            if (runs.any { it.sequenceAfter <= it.sequenceBefore } ||
-                sequences.distinct().size != sequences.size ||
-                sequences.zipWithNext().any { (left, right) -> right <= left }
-            ) {
-                add(
-                    SpecializedCanaryViolation(
-                        "native_sequences_not_independent",
-                        "Every specialized canary must advance a distinct native generation sequence."
-                    )
-                )
-            }
-        }
-    }
-
     private fun signatureEvidence(
         profile: ModelExecutionProfile,
         snapshot: ParameterSignatureSnapshot
@@ -760,242 +633,14 @@ class TuningProbeWorkerService : Service() {
         )
     }
 
-    private fun buildEvidenceJson(
-        request: TuningProbeWorkerProtocol.Request,
-        modelArtifactFingerprint: String,
-        planProbes: List<String>,
-        changedLoadFields: Set<String>,
-        signatureEvidence: SignatureEvidence,
-        runs: List<FixedCanaryRun>,
-        startMemory: ProbeMemoryPoint,
-        endMemory: ProbeMemoryPoint,
-        violations: List<SpecializedCanaryViolation>
-    ): JSONObject = JSONObject()
-        .put("requestId", request.requestId)
-        .put("probeKind", request.probeKind.name)
-        .put("transactionId", request.transactionId)
-        .put("identityKey", request.identityKey)
-        .put("profileId", request.profileId)
-        .put("modelArtifactFingerprint", modelArtifactFingerprint.takeIf { SHA256_HEX.matches(it) })
-        .put("probes", JSONArray(planProbes))
-        .put("changedLoadFields", JSONArray(changedLoadFields.sorted()))
-        .put("signatures", JSONObject()
-            .put("matched", signatureEvidence.matched)
-            .put("desired", signatureEvidence.desired)
-            .put("resolvedLoad", signatureEvidence.resolvedLoad)
-            .put("activeLoaded", signatureEvidence.activeLoaded)
-            .put("committedExecution", signatureEvidence.committedExecution)
-            .put("runtimeOverride", signatureEvidence.runtimeOverride)
-            .put("effectiveExecution", signatureEvidence.effectiveExecution)
-        )
-        .put("memory", JSONObject()
-            .put("start", startMemory.toJson())
-            .put("end", endMemory.toJson())
-        )
-        .put("runs", JSONArray().apply {
-            runs.forEach { run ->
-                val native = JSONObject(run.nativeStatsJson)
-                put(JSONObject()
-                    .put("purpose", run.purpose)
-                    .put("requestId", run.requestId)
-                    .put("promptFingerprint", run.promptFingerprint)
-                    .put("generationSequenceBefore", run.sequenceBefore)
-                    .put("generationSequenceAfter", run.sequenceAfter)
-                    .put("promptTokens", run.stats.promptTokens)
-                    .put("completionTokens", run.stats.completionTokens)
-                    .put("ttftMs", run.stats.ttftMs)
-                    .put("decodeTps", run.stats.decodeTps.takeIf(Double::isFinite))
-                    .put("nCtx", native.optInt("nCtx", run.stats.nCtx))
-                    .put("nBatch", native.opt("nBatch"))
-                    .put("nUbatch", native.opt("nUbatch"))
-                    .put("cacheTypeK", native.opt("cacheTypeK"))
-                    .put("cacheTypeV", native.opt("cacheTypeV"))
-                    .put("flashAttn", native.opt("flashAttn"))
-                    .put("contextShifts", native.opt("contextShifts"))
-                    .put("speculative", native.optJSONObject("speculative"))
-                    .put("error", LocalDiagnosticRedactor.sanitize(run.error))
-                    .put("memoryBefore", run.beforeMemory.toJson())
-                    .put("memoryAfter", run.afterMemory.toJson())
-                )
-            }
-        })
-        .put("violations", JSONArray().apply {
-            violations.forEach { violation ->
-                put(JSONObject().put("code", violation.code).put("message", violation.message))
-            }
-        })
-
-    private fun readMemoryPoint(stats: RuntimeStats? = null): ProbeMemoryPoint {
-        val manager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        val info = ActivityManager.MemoryInfo()
-        manager.getMemoryInfo(info)
-        val processPssBytes = Debug.getPss().coerceAtLeast(0L) * 1_024L
-        val statsPss = stats?.nativePssKb?.coerceAtLeast(0L)?.times(1_024L) ?: 0L
-        val statsRss = stats?.processRssKb?.coerceAtLeast(0L)?.times(1_024L) ?: 0L
-        return ProbeMemoryPoint(
-            availableBytes = info.availMem.coerceAtLeast(0L),
-            pssBytes = maxOf(processPssBytes, statsPss),
-            rssBytes = maxOf(processPssBytes, statsRss),
-            lowMemory = info.lowMemory || stats?.isLowMemory == true
-        )
-    }
-
-    private fun peakMemoryPoint(points: List<ProbeMemoryPoint>): ProbeMemoryPoint {
-        require(points.isNotEmpty())
-        return ProbeMemoryPoint(
-            availableBytes = points.map { it.availableBytes }.filter { it > 0L }.minOrNull() ?: 0L,
-            pssBytes = points.maxOf { it.pssBytes },
-            rssBytes = points.maxOf { it.rssBytes },
-            lowMemory = points.any { it.lowMemory }
-        )
-    }
-
-    private fun emit(activeRequest: ActiveRequest, startedAt: Long, stage: String, message: String) {
-        if (activeRequest.cancelRequested) throw CancellationException("Tuning probe cancelled.")
-        activeRequest.stage = stage
-        runCatching {
-            activeRequest.callback.onProgress(
-                TuningProbeWorkerProtocol.progress(
-                    requestId = activeRequest.request.requestId,
-                    stage = stage,
-                    message = message,
-                    elapsedMs = (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0L)
-                )
-            )
-        }.onFailure { cancelForDeadClient(activeRequest) }
-    }
-
-    private fun sendComplete(
-        callback: ITuningProbeWorkerCallback,
-        result: TuningProbeWorkerProtocol.Result
-    ): Boolean = runCatching {
-        callback.onComplete(TuningProbeWorkerProtocol.complete(result))
-    }.isSuccess
-
-    private fun sendError(
-        callback: ITuningProbeWorkerCallback,
-        requestId: String,
-        code: String,
-        message: String
-    ) {
-        runCatching { callback.onError(TuningProbeWorkerProtocol.error(requestId, code, message)) }
-    }
-
-    private fun cancelForDeadClient(activeRequest: ActiveRequest) {
-        if (synchronized(lock) { active === activeRequest }) {
-            activeRequest.cancelRequested = true
-            activeRequest.job?.cancel(CancellationException("Tuning probe client disconnected."))
-            scheduleProcessExit(PROCESS_EXIT_GRACE_MS)
-        }
-    }
-
-    private fun finish(activeRequest: ActiveRequest) {
-        synchronized(lock) {
-            if (active === activeRequest) {
-                active = null
-                check(processLifecycle.finishActive(activeRequest.startToken)) {
-                    "Process lifecycle lost the active tuning request."
-                }
-            }
-        }
-        unlinkDeathRecipient(activeRequest)
-    }
-
-    private fun unlinkDeathRecipient(activeRequest: ActiveRequest) {
-        activeRequest.deathRecipient?.let { recipient ->
-            runCatching { activeRequest.callback.asBinder().unlinkToDeath(recipient, 0) }
-        }
-    }
-
-    private fun scheduleProcessExit(delayMs: Long) {
-        val scheduledEpoch = serviceEpoch
-        lateinit var exitTask: Runnable
-        exitTask = Runnable {
-            synchronized(lock) {
-                val isCurrentTask = scheduledProcessExit === exitTask
-                if (isCurrentTask) scheduledProcessExit = null
-                if (isCurrentTask && processLifecycle.shouldExit(
-                        scheduledEpoch = scheduledEpoch,
-                        currentEpoch = PROCESS_EPOCH.get(),
-                        hasExternalActiveRequest = active != null
-                    )) {
-                    // Keep the check and kill atomic with start(), which uses
-                    // the same lock. A stale Runnable that lost removeCallbacks
-                    // never gets to reuse a newer task's exit authorization.
-                    Process.killProcess(Process.myPid())
-                }
-            }
-        }
-        synchronized(lock) {
-            if (processLifecycle.destroyed) return
-            scheduledProcessExit?.let(handler::removeCallbacks)
-            scheduledProcessExit = exitTask
-            handler.postDelayed(exitTask, delayMs)
-        }
-    }
-
-    private data class FixedCanaryRun(
-        val purpose: String,
-        val requestId: String,
-        val sequenceBefore: Long,
-        val sequenceAfter: Long,
-        val output: String,
-        val promptFingerprint: String,
-        val error: String?,
-        val stats: RuntimeStats,
-        val nativeStatsJson: String,
-        val beforeMemory: ProbeMemoryPoint,
-        val afterMemory: ProbeMemoryPoint
-    )
-
-    private data class SignatureEvidence(
-        val matched: Boolean,
-        val desired: String,
-        val resolvedLoad: String,
-        val activeLoaded: String?,
-        val committedExecution: String,
-        val runtimeOverride: String,
-        val effectiveExecution: String?
-    )
-
-    private data class ProbeMemoryPoint(
-        val availableBytes: Long,
-        val pssBytes: Long,
-        val rssBytes: Long,
-        val lowMemory: Boolean
-    ) {
-        fun toJson(): JSONObject = JSONObject()
-            .put("availableBytes", availableBytes)
-            .put("pssBytes", pssBytes)
-            .put("rssBytes", rssBytes)
-            .put("lowMemory", lowMemory)
-    }
-
-    private class ActiveRequest(
-        val request: TuningProbeWorkerProtocol.Request,
-        val callback: ITuningProbeWorkerCallback,
-        val startToken: TuningProbeProcessLifecycle.StartToken
-    ) {
-        var deathRecipient: IBinder.DeathRecipient? = null
-        var job: Job? = null
-
-        @Volatile
-        var stage: String = "request"
-
-        @Volatile
-        var cancelRequested: Boolean = false
-    }
-
     companion object {
-        private val PROCESS_EPOCH = AtomicLong(0L)
+        internal val PROCESS_EPOCH = AtomicLong(0L)
         private const val LOAD_TIMEOUT_MS = 120_000L
         private const val BOOTSTRAP_GENERATION_TIMEOUT_MS = 120_000L
         private const val GENERATION_TIMEOUT_MS = 90_000L
         private const val LONG_CONTEXT_TIMEOUT_MS = 150_000L
         private const val UNLOAD_TIMEOUT_MS = 30_000L
-        private const val PROCESS_EXIT_GRACE_MS = 750L
+        internal const val PROCESS_EXIT_GRACE_MS = 750L
         private const val MAX_ERROR_CHARS = 1_024
     }
 }
-
-private val SHA256_HEX = Regex("^[A-Fa-f0-9]{64}$")

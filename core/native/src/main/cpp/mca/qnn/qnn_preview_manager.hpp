@@ -57,6 +57,16 @@ extern std::mutex g_qnn_image_preview_publish_mutex;
 extern std::mutex g_qnn_image_preview_state_mutex;
 extern QnnImagePreviewProgress g_qnn_image_preview_progress;
 
+// Serialises real QNN context/graph execution across the whole process.  It is held for the entire
+// semantic SD1.5 generation and for each SDXL phase / smoke entry point, so HTP contexts, graph
+// execute and the shared preview VAE decode never run concurrently.  Waiters use
+// try_lock_for(50ms) loops that poll cancellation instead of blocking indefinitely.
+//
+// Declared extern here and defined exactly once in qnn_preview_manager.cpp.  Every user
+// (qnn_native_bridge.cpp, the SDXL encoder/decoder/unet phase headers, qnn_semantic_pipeline.cpp)
+// must reference this same symbol -- see the note in qnn_shared_preview_publisher.hpp.
+extern std::timed_mutex g_qnn_context_execution_mutex;
+
 long long monotonic_millis();
 long long monotonic_sequence_seed();
 

@@ -48,3 +48,24 @@ internal fun durableMoveWithinParent(
     check(!source.exists() && target.isFile) { "Durable move did not publish its target." }
     parentDirectorySyncer.sync(targetParent)
 }
+
+internal fun durableMoveFromChildDirectory(
+    source: File,
+    target: File,
+    move: (source: File, target: File) -> Unit,
+    parentDirectorySyncer: ParentDirectorySyncer = AndroidParentDirectorySyncer
+) {
+    val sourceParent = requireNotNull(source.canonicalFile.parentFile)
+    val targetParent = requireNotNull(target.canonicalFile.parentFile)
+    require(sourceParent.parentFile == targetParent &&
+        sourceParent.isDirectory && targetParent.isDirectory
+    ) {
+        "Durable staged move must publish from a direct child directory to its parent."
+    }
+    move(source, target)
+    check(!source.exists() && target.isFile) { "Durable staged move did not publish its target." }
+    // A cross-directory rename changes both directory entries. Persist the new
+    // destination before acknowledging removal from the staging directory.
+    parentDirectorySyncer.sync(targetParent)
+    parentDirectorySyncer.sync(sourceParent)
+}

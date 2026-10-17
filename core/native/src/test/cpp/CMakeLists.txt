@@ -141,7 +141,8 @@ target_compile_features(mca_mnn_diffusion_batch_source_contract_test PRIVATE cxx
 add_test(
     NAME mca_mnn_diffusion_batch_source_contract
     COMMAND mca_mnn_diffusion_batch_source_contract_test
-        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mnn_native_engine.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_sd15_direct.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize.cpp"
 )
 
 add_executable(
@@ -153,7 +154,8 @@ target_compile_features(mca_mnn_diffusion_backend_source_contract_test PRIVATE c
 add_test(
     NAME mca_mnn_diffusion_backend_source_contract
     COMMAND mca_mnn_diffusion_backend_source_contract_test
-        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mnn_native_engine.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_sd15_direct.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_backend_predicates.cpp"
 )
 
 add_executable(
@@ -226,7 +228,75 @@ add_test(
     NAME mca_native_generation_cache_contract
     COMMAND mca_native_generation_cache_contract_test
         "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/native_engine.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/native_engine_prefix_cache.cpp"
 )
+
+# P1-01 guard: drives the real mca/llm/llama_speculative_engine.cpp state machine against scripted
+# llama.cpp doubles (no GGUF model needed) and pins the native_engine.cpp session-owner borrow
+# protocol.  It deliberately does NOT link llama/common: fixtures/llama_test_doubles.cpp supplies
+# the llama.cpp symbols the production MTP translation unit references.
+# Added by T01 at T03's request (T01 owns this target graph; T03 owns the test source).
+add_executable(
+    mca_llama_speculative_owner_test
+    llama_speculative_owner_test.cpp
+    fixtures/llama_test_doubles.cpp
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/llm/llama_speculative_engine.cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/request/llama_request_parser.cpp"
+)
+target_compile_features(mca_llama_speculative_owner_test PRIVATE cxx_std_17)
+target_compile_definitions(mca_llama_speculative_owner_test PRIVATE MCA_WITH_LLAMA_CPP=1)
+target_include_directories(mca_llama_speculative_owner_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+    "${MCA_REPOSITORY_ROOT}/core/native/src/test/cpp"
+    "${MCA_LLAMA_SOURCE}/include"
+    "${MCA_LLAMA_SOURCE}/ggml/include"
+    "${MCA_LLAMA_SOURCE}/common"
+    "${MCA_LLAMA_SOURCE}/vendor")
+target_compile_options(mca_llama_speculative_owner_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(
+    NAME mca_llama_speculative_owner
+    COMMAND mca_llama_speculative_owner_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/native_engine.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/native_engine_speculative.cpp"
+)
+
+# T07 (test-trust) behavioural test: calls the real production
+# mca::mnn::format_mnn_stats_json and asserts the VALUE of the three debug keys,
+# plus a mutated negative control.  Registered by T01 at T07's request (T01 owns
+# this target graph; T07 owns the test source).  It compiles the production
+# translation unit directly so the assertion runs against real code rather than
+# a re-implementation.
+add_executable(
+    mnn_debug_trace_stats_json_behavior_test
+    mnn_debug_trace_stats_json_behavior_test.cpp
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_stats_collector.cpp")
+target_compile_features(mnn_debug_trace_stats_json_behavior_test PRIVATE cxx_std_17)
+target_include_directories(mnn_debug_trace_stats_json_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+    "${MCA_REPOSITORY_ROOT}/third_party/llama.cpp/vendor")
+target_compile_options(mnn_debug_trace_stats_json_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mnn_debug_trace_stats_json_behavior COMMAND mnn_debug_trace_stats_json_behavior_test)
+
+# T2 batch-1 (lane A) behavioural test: calls the real production
+# mca::mnn::mnn_sd15_unet_backend_unsupported predicate (relocated from the
+# monolith into mca/mnn/mnn_backend_predicates.cpp) and asserts its value
+# semantics plus negative controls.
+add_executable(
+    mnn_backend_predicates_behavior_test
+    mnn_backend_predicates_behavior_test.cpp
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_backend_predicates.cpp")
+target_compile_features(mnn_backend_predicates_behavior_test PRIVATE cxx_std_17)
+target_compile_definitions(mnn_backend_predicates_behavior_test PRIVATE MCA_WITH_MNN_DIFFUSION=1)
+target_include_directories(mnn_backend_predicates_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp")
+target_compile_options(mnn_backend_predicates_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mnn_backend_predicates_behavior COMMAND mnn_backend_predicates_behavior_test)
 
 add_executable(
     mca_persistent_prefix_cache_equivalence_test
@@ -262,3 +332,124 @@ target_compile_options(mca_native_lifecycle_chain_test PRIVATE
     "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
     "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
 add_test(NAME mca_native_lifecycle_chain COMMAND mca_native_lifecycle_chain_test)
+
+# ---------------------------------------------------------------------------
+# T01-E (review 4.3 / 5.1): wire the two SD source-contract tests that existed
+# but were registered in no CMakeLists, plus T07's behavioural prompt-cache test.
+#
+# IMPORTANT - read-set synthesis is a prerequisite, not a detail. These two SD
+# tests assert needles that are spread across the SD modules; with a single-file
+# read set most assertions are vacuous while the test still "passes". T07
+# synthesises the read set inside the tests (image_input: 6 modules,
+# execution_evidence: 9 modules) and keeps every require_absent anchored to the
+# bridge base file. The tests FAIL when a synthesised module is missing, which is
+# the anti-vacuity property we want.
+#
+# The execution-evidence test reads the pinned stable-diffusion.cpp submodule
+# directly, so its paths are recorded here as a version dependency: a submodule
+# bump must not silently turn those needles into no-ops.
+# ---------------------------------------------------------------------------
+
+add_executable(mca_sd_bridge_image_input_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/sd-native/src/test/cpp/stable_diffusion_bridge_image_input_contract_test.cpp")
+target_compile_features(mca_sd_bridge_image_input_contract_test PRIVATE cxx_std_17)
+target_compile_options(mca_sd_bridge_image_input_contract_test PRIVATE
+        "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
+        "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_sd_bridge_image_input_contract
+        COMMAND mca_sd_bridge_image_input_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp")
+
+add_executable(mca_sd_execution_evidence_contract_test
+        "${MCA_REPOSITORY_ROOT}/core/sd-native/src/test/cpp/stable_diffusion_execution_evidence_contract_test.cpp")
+target_compile_features(mca_sd_execution_evidence_contract_test PRIVATE cxx_std_17)
+target_compile_options(mca_sd_execution_evidence_contract_test PRIVATE
+        "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
+        "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_sd_execution_evidence_contract
+        COMMAND mca_sd_execution_evidence_contract_test
+        "${MCA_REPOSITORY_ROOT}/third_party/stable-diffusion.cpp/include/stable-diffusion.h"
+        "${MCA_REPOSITORY_ROOT}/third_party/stable-diffusion.cpp/src/conditioner.hpp"
+        "${MCA_REPOSITORY_ROOT}/third_party/stable-diffusion.cpp/src/stable-diffusion.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp"
+        "${MCA_REPOSITORY_ROOT}/third_party/stable-diffusion.cpp/src/vae.hpp")
+
+# T07's behavioural Tier A test for the MNN prompt cache. Built on the lightweight
+# entry (no add_subdirectory(MNN)): the four sources below are what it needs, and
+# mnn_template_parser.cpp is required because it defines mnn_chat_messages_prefix.
+# No SKIP_RETURN_CODE on purpose - this test must actually run.
+add_executable(mnn_prompt_cache_behavior_test
+        "${MCA_REPOSITORY_ROOT}/core/native/src/test/cpp/mnn_prompt_cache_behavior_test.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_prompt_cache_manager.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_stats_collector.cpp"
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp/mca/mnn/mnn_template_parser.cpp")
+target_compile_features(mnn_prompt_cache_behavior_test PRIVATE cxx_std_17)
+target_compile_options(mnn_prompt_cache_behavior_test PRIVATE
+        "$<$<CXX_COMPILER_ID:MSVC>:/UNDEBUG>"
+        "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+target_include_directories(mnn_prompt_cache_behavior_test PRIVATE
+        "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+        "${MCA_REPOSITORY_ROOT}/third_party/llama.cpp/vendor")
+add_test(NAME mnn_prompt_cache_behavior COMMAND mnn_prompt_cache_behavior_test)
+
+# E04 (pure migration, L1): behavioural test for mca/mnn/mnn_json_options.hpp.  The JSON
+# option helpers were moved verbatim out of mnn_native_engine.cpp; this compiles the real
+# production header and pins defaults/null/coercion/range/error-string/merge/advanced_json
+# behaviour, including degenerate negative controls.
+add_executable(
+    mca_mnn_json_options_behavior_test
+    mnn_json_options_behavior_test.cpp)
+target_compile_features(mca_mnn_json_options_behavior_test PRIVATE cxx_std_17)
+target_include_directories(mca_mnn_json_options_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+    "${MCA_REPOSITORY_ROOT}/third_party/llama.cpp/vendor")
+target_compile_options(mca_mnn_json_options_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_mnn_json_options_behavior COMMAND mca_mnn_json_options_behavior_test)
+# E08a (pure migration, L1): behavioural test for mca/mnn/mnn_numeric_convert.hpp.  The binary
+# read and half-precision conversion helpers were moved verbatim out of mnn_native_engine.cpp;
+# this compiles the real production header and pins exhaustive fp16/bf16 value contracts plus
+# temp-file round-trip behaviour for read_binary_bytes.
+add_executable(
+    mca_mnn_numeric_convert_behavior_test
+    mnn_numeric_convert_behavior_test.cpp)
+target_compile_features(mca_mnn_numeric_convert_behavior_test PRIVATE cxx_std_17)
+target_include_directories(mca_mnn_numeric_convert_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp")
+target_compile_options(mca_mnn_numeric_convert_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_mnn_numeric_convert_behavior COMMAND mca_mnn_numeric_convert_behavior_test)
+# E08c (pure migration, L1): behavioural test for mca/mnn/mnn_diffusion_asset_contract.hpp.  The
+# family predicates, the two failure payloads and the missing-component contract were moved
+# verbatim out of mnn_native_engine.cpp; this compiles the real production header and pins the
+# classification, exact JSON payloads and the temporary-directory missing-component contract.
+add_executable(
+    mca_mnn_diffusion_asset_contract_behavior_test
+    mnn_diffusion_asset_contract_behavior_test.cpp)
+target_compile_features(mca_mnn_diffusion_asset_contract_behavior_test PRIVATE cxx_std_17)
+target_include_directories(mca_mnn_diffusion_asset_contract_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+    "${MCA_REPOSITORY_ROOT}/third_party/llama.cpp/vendor")
+target_compile_options(mca_mnn_diffusion_asset_contract_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_mnn_diffusion_asset_contract_behavior
+         COMMAND mca_mnn_diffusion_asset_contract_behavior_test)
+
+# E08k: host behaviour test for the revived debug-trace state machine
+# (mnn_debug_trace.cpp). Compiles the real production header and pins the enable/truncation
+# contract (4096-byte raw/prompt caps, 64-token cap, start clamping, JSON id serialization).
+add_executable(
+    mca_mnn_debug_trace_behavior_test
+    mnn_debug_trace_behavior_test.cpp)
+target_compile_features(mca_mnn_debug_trace_behavior_test PRIVATE cxx_std_17)
+target_include_directories(mca_mnn_debug_trace_behavior_test PRIVATE
+    "${MCA_REPOSITORY_ROOT}/core/native/src/main/cpp"
+    "${MCA_REPOSITORY_ROOT}/third_party/llama.cpp/vendor")
+target_compile_options(mca_mnn_debug_trace_behavior_test PRIVATE
+    "$<$<CXX_COMPILER_ID:MSVC>:/utf-8>"
+    "$<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG>")
+add_test(NAME mca_mnn_debug_trace_behavior
+         COMMAND mca_mnn_debug_trace_behavior_test)

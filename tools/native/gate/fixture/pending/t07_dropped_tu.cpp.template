@@ -1,0 +1,16 @@
+// T07 gate fixture - the ORPHAN_TU defect template.
+//
+// The gate-sensitivity driver copies this file to
+// tools/native/gate/fixture/t07_dropped_tu.cpp for the ORPHAN_TU case only, and
+// deletes it afterwards.  It is never listed in any target_sources().
+//
+// It defines nothing that any other TU references and it is not a JNI entry
+// point, so:
+//   * the compiler never sees it,
+//   * the linker never misses it (-Wl,--no-undefined is satisfied),
+//   * no JNI export disappears.
+// The only gate that can detect this defect class is a comparison between the
+// .cpp files present on disk and the translation units the build system
+// actually configured (CMake File API codemodel-v2 / compile_commands.json).
+
+extern "C" int t07_orphan_only(void) { return 7; }

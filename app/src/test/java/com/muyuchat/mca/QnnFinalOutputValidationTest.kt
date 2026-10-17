@@ -399,7 +399,7 @@ class QnnFinalOutputValidationTest {
     fun `shared text topology resolves its declared custom context instead of exact legacy name`() =
         withRoot { root ->
             val declared = File(root, "graphs/custom_clip_context.bin").apply {
-                parentFile.mkdirs()
+                parentFile!!.mkdirs()
                 writeBytes(byteArrayOf(1, 2, 3))
             }
             val artifact = ImageGraphArtifactContract(relativePath = "graphs/custom_clip_context.bin")
@@ -414,7 +414,8 @@ class QnnFinalOutputValidationTest {
             )).canonicalFile)
 
             // P5/L8: this call site lives in the generate() body (generation-operations owner).
-            val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+            val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt") +
+                projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt")
             val strategy = provider.indexOf("ImageWorkerStrategy.SHARED_TEXT_UNET_VAE ->")
             val declaredResolver = provider.indexOf(
                 "qnnDeclaredTextEncoderContextPath(bundleRoot, profile.graph.textEncoder)",
@@ -426,7 +427,8 @@ class QnnFinalOutputValidationTest {
     @Test
     fun `qnn final result rechecks cancellation around completed progress before transfer`() {
         // P5/L8: the QNN final-result cancellation ordering lives in the generate() body.
-        val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+        val provider = projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt") +
+            projectSource("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt")
         val result = provider.indexOf("val result = LocalImageResult(")
         val preProgressGate = provider.indexOf("coroutineContext.ensureActive()", result)
         val preProgressFlag = provider.indexOf("if (cancellationRequested.get())", preProgressGate)

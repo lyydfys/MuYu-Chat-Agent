@@ -96,8 +96,13 @@ std::string function_body(const std::string &source, const std::string &signatur
 }  // namespace
 
 int main(int argc, char **argv) {
-    assert(argc == 2);
-    const std::string source = read_text(argv[1]);
+    assert(argc >= 2);
+    // T2B16: the native engine is split across translation units; read every supplied
+    // file and keep the original assertions over their concatenation (N0 + prefix cache).
+    std::string source;
+    for (int i = 1; i < argc; ++i) {
+        source += read_text(argv[i]);
+    }
 
     const std::string from_java = function_body(source, "std::string jstring_to_string(");
     require_contains(from_java, "GetStringChars(value, nullptr)");
@@ -116,6 +121,17 @@ int main(int argc, char **argv) {
             "llama_decode(g_context, g_batch)",
             "g_current_position += batch_size;",
             "return COMPLETION_STOPPED;");
+
+    // Regression guard (device A, 2026-10-16): a long conversation prompt must be decoded in
+    // n_batch-sized slices.  The refactored engine had lost the chunking loop, so a GGUF prompt
+    // longer than the llama_batch capacity aborted inside common_batch_add (SIGABRT).
+    require_contains(prefill, "if (g_n_batch <= 0 || !g_batch_ready)");
+    require_contains(prefill, "for (int offset = 0; offset < total; offset += g_n_batch)");
+    require_contains(prefill, "const int batch_size = std::min(total - offset, g_n_batch);");
+    require_before(
+            prefill,
+            "const int batch_size = std::min(total - offset, g_n_batch);",
+            "llama_decode(g_context, g_batch)");
 
     const std::string begin = function_body(
             source,
@@ -201,11 +217,14 @@ int main(int argc, char **argv) {
             "void save_completed_turn_checkpoint_locked(");
     require_contains(terminal, "!g_cached_token_chars.empty()");
     require_contains(terminal, "g_stop_requested.load(std::memory_order_acquire)");
+    // T2B16: the shell commit (afcc9c0a) made both chunk returns boundary-conditional; the
+    // previous needle text no longer exists in native_engine.cpp.  The sequence below pins the
+    // actual max-token return, including its nullptr-on-invalid-boundary branch.
     require_sequence(
             ordinary,
             "const bool output_boundary_valid = is_valid_utf8(g_cached_token_chars.c_str());",
             "ready_output = g_cached_token_chars;",
             "save_completed_turn_checkpoint_locked(GenerationStopReason::MAX_NEW_TOKENS);",
-            "return string_to_jstring(env, ready_output);");
+            "return output_boundary_valid ? string_to_jstring(env, ready_output) : nullptr;");
     return 0;
 }

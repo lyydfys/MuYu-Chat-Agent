@@ -47,6 +47,32 @@ bool exists_file(const std::string& path) {
     return access(path.c_str(), F_OK) == 0;
 }
 
+std::string json_escape(const std::string& value) {
+    std::ostringstream out;
+    for (char c : value) {
+        switch (c) {
+            case '\\': out << "\\\\"; break;
+            case '"': out << "\\\""; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    out << "\\u00";
+                    const char* hex = "0123456789abcdef";
+                    out << hex[(c >> 4) & 0x0f] << hex[c & 0x0f];
+                } else {
+                    out << c;
+                }
+        }
+    }
+    return out.str();
+}
+
+std::string quote(const std::string& value) {
+    return "\"" + json_escape(value) + "\"";
+}
+
 class ScopedDlHandle {
 public:
     explicit ScopedDlHandle(void* handle = nullptr) : handle_(handle) {}
@@ -550,6 +576,47 @@ QnnCapabilityProbe::CapabilityReport QnnCapabilityProbe::probe(
              report.is_admitted ? 1 : 0);
 
     return report;
+}
+
+std::string compile_capability_json() {
+    std::ostringstream out;
+    out << "{"
+        << "\"sdkRootConfigured\":" << (MCA_QNN_SDK_ROOT_CONFIGURED ? "true" : "false") << ","
+        << "\"sdkHeadersPresent\":" << (MCA_WITH_QNN_SDK_HEADERS ? "true" : "false") << ","
+        << "\"typedGraphBindingsCompiled\":" << (MCA_WITH_QNN_SDK_HEADERS ? "true" : "false")
+        << "}";
+    return out.str();
+}
+
+std::string runtime_probe_json(const RuntimeProbe& probe) {
+    std::ostringstream out;
+    out << "{"
+        << "\"ready\":" << (probe.system_present && probe.htp_present && probe.skel_present ? "true" : "false") << ","
+        << "\"loadable\":" << (probe.loadable ? "true" : "false") << ","
+        << "\"qnnSystemLibraryPresent\":" << (probe.system_present ? "true" : "false") << ","
+        << "\"qnnHtpLibraryPresent\":" << (probe.htp_present ? "true" : "false") << ","
+        << "\"htpSkelLibraryPresent\":" << (probe.skel_present ? "true" : "false") << ","
+        << "\"htpStubLibraryPresent\":" << (probe.stub_present ? "true" : "false") << ","
+        << "\"cdspRpcLibraryPresent\":" << (probe.rpc_present ? "true" : "false") << ","
+        << "\"cdspRpcLibraryLoadable\":" << (probe.rpc_loadable ? "true" : "false") << ","
+        << "\"qnnInterfacePresent\":" << (probe.qnn_interface_present ? "true" : "false") << ","
+        << "\"qnnSystemInterfacePresent\":" << (probe.qnn_system_interface_present ? "true" : "false") << ","
+        << "\"exactRoleBinding\":" << (probe.exact_role_binding ? "true" : "false") << ","
+        << "\"qnnSystemLibraryPath\":" << quote(probe.system_path) << ","
+        << "\"qnnHtpLibraryPath\":" << quote(probe.htp_path) << ","
+        << "\"htpSkelLibraryPath\":" << quote(probe.skel_path) << ","
+        << "\"htpStubLibraryPath\":" << quote(probe.stub_path) << ","
+        << "\"cdspRpcLibraryPath\":" << quote(probe.rpc_path) << ","
+        << "\"cdspRpcMessage\":" << quote(probe.rpc_message) << ","
+        << "\"adspLibraryPath\":" << quote(probe.adsp_library_path) << ","
+        << "\"hostRuntimeDirectory\":" << quote(probe.host_runtime_directory) << ","
+        << "\"runtimeDirectory\":" << quote(probe.runtime_directory) << ","
+        << "\"dspRuntimeDirectory\":" << quote(probe.dsp_runtime_directory) << ","
+        << "\"htpArchVersion\":" << probe.htp_arch_version << ","
+        << "\"compile\":" << compile_capability_json() << ","
+        << "\"message\":" << quote(probe.message)
+        << "}";
+    return out.str();
 }
 
 } // namespace qnn

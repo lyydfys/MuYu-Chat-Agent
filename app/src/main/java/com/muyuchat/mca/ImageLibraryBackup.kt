@@ -81,174 +81,6 @@ internal fun deleteOwnedTreeWithoutFollowingSymbolicLinks(root: File, candidate:
         !Files.exists(path, LinkOption.NOFOLLOW_LINKS)
     }.getOrDefault(false)
 
-internal class ImageLibraryBackupFormatException(message: String) : IOException(message)
-
-internal data class ImageLibraryBackupExportResult(
-    val exported: Int,
-    val skipped: Int
-)
-
-internal data class ImageLibraryBackupImportResult(
-    val imported: Int,
-    val duplicates: Int,
-    val failed: Int,
-    val missingModelIds: Set<String>
-)
-
-internal data class ImageLibraryBackupManifestItem(
-    val id: String,
-    val entryPath: String,
-    val extension: String,
-    val sha256: String,
-    val byteSize: Long,
-    val name: String,
-    val source: String,
-    val prompt: String,
-    val createdAt: Long,
-    val width: Int,
-    val height: Int,
-    val generationMetadataJson: String,
-    val generationModelId: String?,
-    val favorite: Boolean
-)
-
-internal data class ParsedImageLibraryBackupManifest(
-    val items: List<ImageLibraryBackupManifestItem>,
-    val invalidItems: Int,
-    val declaredEntryPaths: Set<String> = items.mapTo(linkedSetOf()) { it.entryPath }
-)
-
-internal object ImageLibraryBackupLimits {
-    const val MAX_MANIFEST_BYTES = 8 * 1024 * 1024
-    const val MAX_BACKUP_ITEMS = 512
-    const val MAX_IMAGE_BYTES = 96L * 1024L * 1024L
-    const val MAX_TOTAL_IMAGE_BYTES = 1024L * 1024L * 1024L
-    const val MAX_IMAGE_SIDE = 4_096
-    const val MAX_IMAGE_PIXELS = 16_777_216L
-    const val MAX_PROMPT_CHARS = 16_384
-    const val MAX_COMPRESSED_ARCHIVE_BYTES = MAX_TOTAL_IMAGE_BYTES + 16L * 1024L * 1024L
-    const val MAX_COMPRESSION_RATIO = 200L
-    const val MIN_RATIO_CHECK_BYTES = 4L * 1024L * 1024L
-    const val MIN_FREE_SPACE_RESERVE_BYTES = 64L * 1024L * 1024L
-}
-
-internal fun validateImageLibraryBackupCompressionBudget(
-    compressedBytes: Long,
-    uncompressedBytes: Long
-) {
-    if (compressedBytes < 0L || uncompressedBytes < 0L) {
-        throw ImageLibraryBackupFormatException("备份压缩大小无效")
-    }
-    if (compressedBytes > ImageLibraryBackupLimits.MAX_COMPRESSED_ARCHIVE_BYTES) {
-        throw ImageLibraryBackupFormatException("备份压缩文件超过大小限制")
-    }
-    if (uncompressedBytes >= ImageLibraryBackupLimits.MIN_RATIO_CHECK_BYTES) {
-        val ratioLimit = compressedBytes * ImageLibraryBackupLimits.MAX_COMPRESSION_RATIO
-        if (compressedBytes == 0L || uncompressedBytes > ratioLimit) {
-            throw ImageLibraryBackupFormatException("备份压缩比超过安全限制")
-        }
-    }
-}
-
-internal fun requiredImageLibraryImportSpaceBytes(expectedImageBytes: Long): Long {
-    require(expectedImageBytes in 0L..ImageLibraryBackupLimits.MAX_TOTAL_IMAGE_BYTES) {
-        "Expected image bytes are outside the backup import contract."
-    }
-    val reserve = maxOf(
-        ImageLibraryBackupLimits.MIN_FREE_SPACE_RESERVE_BYTES,
-        expectedImageBytes / 10L
-    )
-    return safeAddBackupBytes(expectedImageBytes, reserve)
-}
-
-internal fun validateImageLibraryImportSpaceBudget(expectedImageBytes: Long, usableBytes: Long) {
-    val requiredBytes = requiredImageLibraryImportSpaceBytes(expectedImageBytes)
-    if (usableBytes < requiredBytes) {
-        throw IOException("设备可用存储空间不足，无法安全恢复图片备份")
-    }
-}
-
-internal fun unreferencedRestoredImageFiles(
-    root: File,
-    referencedCanonicalPaths: Set<String>
-): List<File> {
-    val canonicalRoot = runCatching { root.canonicalFile }.getOrNull() ?: return emptyList()
-    return canonicalRoot.listFiles()
-        .orEmpty()
-        .asSequence()
-        .filter { file -> file.isFile && RESTORED_IMAGE_FILE_REGEX.matches(file.name) }
-        .mapNotNull { file -> runCatching { file.canonicalFile }.getOrNull() }
-        .filter { file ->
-            file.parentFile == canonicalRoot && file.path !in referencedCanonicalPaths
-        }
-        .toList()
-}
-
-internal class ImageLibraryBackupZipInput(input: InputStream) : Closeable {
-    private val compressedInput = BoundedCompressedBackupInputStream(
-        input = input,
-        maxBytes = ImageLibraryBackupLimits.MAX_COMPRESSED_ARCHIVE_BYTES
-    )
-    private val zip = ZipInputStream(BufferedInputStream(compressedInput))
-    private var uncompressedBytes = 0L
-
-    fun nextEntry(): ZipEntry? = zip.nextEntry.also {
-        validateImageLibraryBackupCompressionBudget(
-            compressedBytes = compressedInput.bytesRead,
-            uncompressedBytes = uncompressedBytes
-        )
-    }
-
-    fun read(buffer: ByteArray): Int {
-        val read = zip.read(buffer)
-        if (read > 0) {
-            uncompressedBytes = safeAddBackupBytes(uncompressedBytes, read.toLong())
-            validateImageLibraryBackupCompressionBudget(
-                compressedBytes = compressedInput.bytesRead,
-                uncompressedBytes = uncompressedBytes
-            )
-        }
-        return read
-    }
-
-    fun closeEntry() = zip.closeEntry()
-
-    override fun close() = zip.close()
-}
-
-private class BoundedCompressedBackupInputStream(
-    input: InputStream,
-    private val maxBytes: Long
-) : FilterInputStream(input) {
-    var bytesRead: Long = 0L
-        private set
-
-    override fun read(): Int {
-        val value = super.read()
-        if (value >= 0) recordRead(1L)
-        return value
-    }
-
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-        if (length == 0) return 0
-        val remainingWithSentinel = maxBytes - bytesRead + 1L
-        if (remainingWithSentinel <= 0L) {
-            throw ImageLibraryBackupFormatException("备份压缩文件超过大小限制")
-        }
-        val boundedLength = minOf(length.toLong(), remainingWithSentinel).toInt()
-        val read = super.read(buffer, offset, boundedLength)
-        if (read > 0) recordRead(read.toLong())
-        return read
-    }
-
-    private fun recordRead(count: Long) {
-        bytesRead = safeAddBackupBytes(bytesRead, count)
-        if (bytesRead > maxBytes) {
-            throw ImageLibraryBackupFormatException("备份压缩文件超过大小限制")
-        }
-    }
-}
-
 private data class ReadImageLibraryBackupManifest(
     val parsed: ParsedImageLibraryBackupManifest,
     val sha256: String
@@ -466,7 +298,7 @@ internal class ImageLibraryBackup(
                     if (item.finalFile.exists()) {
                         throw IOException("无法原子发布恢复图片：${item.finalFile.name}")
                     }
-                    durableMoveWithinParent(
+                    durableMoveFromChildDirectory(
                         source = item.stagedFile,
                         target = item.finalFile,
                         move = { staged, published ->
@@ -716,182 +548,6 @@ internal class ImageLibraryBackup(
     )
 }
 
-internal fun parseImageLibraryBackupManifest(json: JSONObject): ParsedImageLibraryBackupManifest {
-    if (json.optString("format") != FORMAT) {
-        throw ImageLibraryBackupFormatException("无法识别的图片库备份格式")
-    }
-    val version = json.requiredBackupLong("version")
-    if (version !in 1..VERSION.toLong()) {
-        throw ImageLibraryBackupFormatException("备份版本不受支持")
-    }
-    val itemsJson = json.optJSONArray("items")
-        ?: throw ImageLibraryBackupFormatException("备份清单缺少 items")
-    if (itemsJson.length() > MAX_BACKUP_ITEMS) {
-        throw ImageLibraryBackupFormatException("备份条目数量超过限制")
-    }
-    val items = mutableListOf<ImageLibraryBackupManifestItem>()
-    val declaredEntryPaths = linkedSetOf<String>()
-    var invalidItems = 0
-    for (index in 0 until itemsJson.length()) {
-        val raw = itemsJson.optJSONObject(index)
-        (raw?.opt("entryPath") as? String)
-            ?.takeIf { path ->
-                path.length <= MAX_ENTRY_PATH_CHARS &&
-                    IMAGE_ENTRY_REGEX.matches(path) &&
-                    runCatching { validateArchiveEntryName(path) }.isSuccess
-            }
-            ?.let(declaredEntryPaths::add)
-        val item = runCatching {
-            val itemJson = requireNotNull(raw)
-            val id = itemJson.requiredBackupString("id", MAX_ID_CHARS)
-            require(BACKUP_ID_REGEX.matches(id))
-            val entryPath = itemJson.requiredBackupString("entryPath", MAX_ENTRY_PATH_CHARS)
-            val match = IMAGE_ENTRY_REGEX.matchEntire(entryPath) ?: error("invalid entry path")
-            require(match.groupValues[1] == id)
-            val extension = match.groupValues[2]
-            val sha256 = itemJson.requiredBackupString("sha256", 64).lowercase()
-            require(SHA256_REGEX.matches(sha256))
-            val byteSize = itemJson.requiredBackupLong("byteSize")
-            require(byteSize in 1..MAX_IMAGE_BYTES)
-            val name = itemJson.requiredBackupString("name", MAX_NAME_CHARS)
-            val source = itemJson.requiredBackupString("source", MAX_SOURCE_CHARS)
-            val prompt = itemJson.requiredBackupString("prompt", MAX_PROMPT_CHARS, allowEmpty = true)
-            val createdAt = itemJson.requiredBackupLong("createdAt")
-            require(createdAt > 0L)
-            val width = itemJson.requiredBackupInt("width")
-            val height = itemJson.requiredBackupInt("height")
-            require(width in 1..MAX_IMAGE_SIDE && height in 1..MAX_IMAGE_SIDE)
-            require(width.toLong() * height.toLong() <= MAX_IMAGE_PIXELS)
-            val favorite = itemJson.requiredBackupBoolean("favorite")
-            val metadata = itemJson.optJSONObject("generationMetadata")
-                ?.toString()
-                ?.let(ImageGenerationHistoryMetadata::fromJsonOrNull)
-            ImageLibraryBackupManifestItem(
-                id = id,
-                entryPath = entryPath,
-                extension = extension,
-                sha256 = sha256,
-                byteSize = byteSize,
-                name = name,
-                source = source,
-                prompt = prompt,
-                createdAt = createdAt,
-                width = width,
-                height = height,
-                generationMetadataJson = metadata?.toPortableBackupJsonString().orEmpty(),
-                generationModelId = metadata?.modelId,
-                favorite = favorite
-            )
-        }.getOrNull()
-        if (item == null) invalidItems++ else items += item
-    }
-    return ParsedImageLibraryBackupManifest(
-        items = items,
-        invalidItems = invalidItems,
-        declaredEntryPaths = declaredEntryPaths
-    )
-}
-
-private fun ImageAssetRecord.toBackupManifestJson(
-    entryPath: String,
-    byteSize: Long,
-    sha256: String,
-    width: Int,
-    height: Int
-): JSONObject = JSONObject()
-    .put("id", id)
-    .put("entryPath", entryPath)
-    .put("sha256", sha256)
-    .put("byteSize", byteSize)
-    .put("name", name.ifBlank { "图片" }.backupBounded("name", MAX_NAME_CHARS))
-    .put("source", source.ifBlank { "restored" }.backupBounded("source", MAX_SOURCE_CHARS))
-    .put("prompt", prompt.backupBounded("prompt", MAX_PROMPT_CHARS))
-    .put("createdAt", createdAt)
-    .put("width", width)
-    .put("height", height)
-    .put("favorite", favorite)
-    .apply {
-        ImageGenerationHistoryMetadata.fromJsonOrNull(generationMetadataJson)
-            ?.toPortableBackupJsonString()
-            ?.let(::JSONObject)
-            ?.let { put("generationMetadata", it) }
-    }
-
-private fun validateArchiveEntryName(name: String) {
-    val safe = name.isNotBlank() &&
-        name.length <= MAX_ENTRY_PATH_CHARS &&
-        !name.startsWith('/') &&
-        !name.startsWith('\\') &&
-        '\\' !in name &&
-        ':' !in name &&
-        name.split('/').none { it == "." || it == ".." }
-    if (!safe) throw ImageLibraryBackupFormatException("备份包含不安全路径")
-}
-
-private suspend fun readBounded(input: ImageLibraryBackupZipInput, maxBytes: Int): ByteArray {
-    val output = java.io.ByteArrayOutputStream(minOf(maxBytes, 64 * 1024))
-    val buffer = ByteArray(COPY_BUFFER_BYTES)
-    var total = 0
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        val read = input.read(buffer)
-        if (read < 0) break
-        total += read
-        if (total > maxBytes) throw ImageLibraryBackupFormatException("备份清单过大")
-        output.write(buffer, 0, read)
-    }
-    return output.toByteArray()
-}
-
-private suspend fun discardBounded(input: ImageLibraryBackupZipInput, maxBytes: Long): Long {
-    val buffer = ByteArray(COPY_BUFFER_BYTES)
-    var total = 0L
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        val read = input.read(buffer)
-        if (read < 0) break
-        total = safeAddBackupBytes(total, read.toLong())
-        if (total > maxBytes) {
-            throw ImageLibraryBackupFormatException("备份图片超过单文件大小限制")
-        }
-    }
-    return total
-}
-
-private fun JSONObject.requiredBackupString(
-    name: String,
-    maxChars: Int,
-    allowEmpty: Boolean = false
-): String {
-    if (!has(name) || isNull(name) || get(name) !is String) error("$name must be a string")
-    val value = getString(name)
-    require(value.length <= maxChars)
-    if (!allowEmpty) require(value.isNotBlank())
-    require('\u0000' !in value)
-    return value
-}
-
-private fun JSONObject.requiredBackupLong(name: String): Long {
-    if (!has(name) || isNull(name) || get(name) !is Number) error("$name must be an integer")
-    val value = get(name) as Number
-    val doubleValue = value.toDouble()
-    require(doubleValue.isFinite() && doubleValue % 1.0 == 0.0)
-    val longValue = value.toLong()
-    require(longValue.toDouble() == doubleValue)
-    return longValue
-}
-
-private fun JSONObject.requiredBackupInt(name: String): Int {
-    val value = requiredBackupLong(name)
-    require(value in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong())
-    return value.toInt()
-}
-
-private fun JSONObject.requiredBackupBoolean(name: String): Boolean {
-    if (!has(name) || isNull(name) || get(name) !is Boolean) error("$name must be a boolean")
-    return getBoolean(name)
-}
-
 private fun ByteArray.toLowerHex(): String = joinToString(separator = "") { byte ->
     "%02x".format(byte.toInt() and 0xff)
 }
@@ -899,41 +555,20 @@ private fun ByteArray.toLowerHex(): String = joinToString(separator = "") { byte
 private fun ByteArray.sha256Hex(): String =
     MessageDigest.getInstance("SHA-256").digest(this).toLowerHex()
 
-private fun String.backupBounded(field: String, maxChars: Int): String {
-    if (length > maxChars) throw IOException("$field 超过备份长度限制")
-    return this
-}
-
-private fun safeAddBackupBytes(current: Long, next: Long): Long {
-    if (next < 0L || current > Long.MAX_VALUE - next) {
-        throw ImageLibraryBackupFormatException("备份大小字段无效")
-    }
-    return current + next
-}
-
 private const val MANIFEST_NAME = "manifest.json"
-private const val FORMAT = "mca-image-library-backup"
-private const val VERSION = 1
-private const val COPY_BUFFER_BYTES = 64 * 1024
+internal const val FORMAT = "mca-image-library-backup"
+internal const val VERSION = 1
+internal const val COPY_BUFFER_BYTES = 64 * 1024
 private const val MAX_MANIFEST_BYTES = ImageLibraryBackupLimits.MAX_MANIFEST_BYTES
-private const val MAX_BACKUP_ITEMS = ImageLibraryBackupLimits.MAX_BACKUP_ITEMS
-private const val MAX_IMAGE_BYTES = ImageLibraryBackupLimits.MAX_IMAGE_BYTES
+internal const val MAX_BACKUP_ITEMS = ImageLibraryBackupLimits.MAX_BACKUP_ITEMS
+internal const val MAX_IMAGE_BYTES = ImageLibraryBackupLimits.MAX_IMAGE_BYTES
 private const val MAX_TOTAL_IMAGE_BYTES = ImageLibraryBackupLimits.MAX_TOTAL_IMAGE_BYTES
-private const val MAX_IMAGE_SIDE = ImageLibraryBackupLimits.MAX_IMAGE_SIDE
-private const val MAX_IMAGE_PIXELS = ImageLibraryBackupLimits.MAX_IMAGE_PIXELS
-private const val MAX_ID_CHARS = 36
-private const val MAX_ENTRY_PATH_CHARS = 192
-private const val MAX_NAME_CHARS = 256
-private const val MAX_SOURCE_CHARS = 256
-private const val MAX_PROMPT_CHARS = ImageLibraryBackupLimits.MAX_PROMPT_CHARS
+internal const val MAX_IMAGE_SIDE = ImageLibraryBackupLimits.MAX_IMAGE_SIDE
+internal const val MAX_IMAGE_PIXELS = ImageLibraryBackupLimits.MAX_IMAGE_PIXELS
+internal const val MAX_ENTRY_PATH_CHARS = 192
+internal const val MAX_NAME_CHARS = 256
+internal const val MAX_SOURCE_CHARS = 256
+internal const val MAX_PROMPT_CHARS = ImageLibraryBackupLimits.MAX_PROMPT_CHARS
 private val ALLOWED_EXTENSIONS = setOf("png", "jpg", "jpeg", "webp", "heic", "heif")
-private val BACKUP_ID_REGEX =
-    Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-private val IMAGE_ENTRY_REGEX =
+internal val IMAGE_ENTRY_REGEX =
     Regex("images/([0-9a-fA-F-]{36})\\.(png|jpg|jpeg|webp|heic|heif)")
-private val SHA256_REGEX = Regex("[0-9a-f]{64}")
-private val RESTORED_IMAGE_FILE_REGEX = Regex(
-    "restored-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
-        "[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:-[0-9a-fA-F]{8})?\\." +
-        "(?:png|jpg|jpeg|webp|heic|heif)"
-)

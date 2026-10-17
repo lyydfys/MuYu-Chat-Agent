@@ -514,7 +514,7 @@ class ModelBundleInstallerTest {
             var downloads = 0
             val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
                 downloads++
-                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.parentFile!!.mkdirs(); final.parentFile!!.mkdirs()
                 temp.writeText(if (remote.repoId == "owner/first") "AAAA" else "BBBB")
                 check(temp.renameTo(final))
                 snapshot(remote, temp, final).also(progress)
@@ -543,7 +543,7 @@ class ModelBundleInstallerTest {
             var downloads = 0
             val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
                 downloads++
-                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.parentFile!!.mkdirs(); final.parentFile!!.mkdirs()
                 temp.writeText("GOOD")
                 check(temp.renameTo(final))
                 snapshot(remote, temp, final).also(progress)
@@ -567,7 +567,7 @@ class ModelBundleInstallerTest {
             var downloads = 0
             val installer = ModelBundleInstaller(BundleComponentDownloader { remote, temp, final, progress ->
                 downloads++
-                temp.parentFile.mkdirs(); final.parentFile.mkdirs()
+                temp.parentFile!!.mkdirs(); final.parentFile!!.mkdirs()
                 temp.writeText(if (remote.revision == "revision-A") "AAAA" else "BBBB")
                 check(temp.renameTo(final))
                 snapshot(remote, temp, final).also(progress)

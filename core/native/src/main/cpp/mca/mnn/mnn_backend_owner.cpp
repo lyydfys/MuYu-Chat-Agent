@@ -5,6 +5,18 @@
 namespace mca {
 namespace mnn {
 
+/**
+ * Marker written into MnnBackendOwner::backend_handle_ once the lifecycle reports a usable backend.
+ *
+ * \warning This class owns **lifecycle/transport state only**; it never creates a native MNN backend
+ * context.  No translation unit outside mca/mnn constructs an MnnBackendOwner, and the shipping
+ * inference path is mnn_native_engine.cpp.  The value below is therefore a sentinel, not a pointer
+ * to allocated memory: is_valid() stays meaningful, but the handle must never be dereferenced.
+ * Before this class is wired into the production path it has to allocate and own a real context,
+ * and only then may initialize() report a bound backend.
+ */
+static void* const kSkeletonBackendHandle = reinterpret_cast<void*>(0x4D4E4E01); // 'MNN' + 0x01
+
 MnnBackendOwner::MnnBackendOwner(
     MnnRuntimeConfig config,
     std::shared_ptr<MnnRuntimeLoader> loader
@@ -50,11 +62,16 @@ bool MnnBackendOwner::initialize(std::string* error_msg) {
         active_backend_type_ = config_.backend_type;
     }
 
-    // Allocate dummy / native handle marker for backend
-    backend_handle_ = reinterpret_cast<void*>(0x4D4E4E01); // 'MNN\x01'
+    // The handle is an explicit marker, not an allocation: this class tracks whether the backend may
+    // be used, it does not create a native MNN context.  The log line below says so -- an earlier
+    // revision reported a plain "Initialized MNN backend", which read as a completed native init
+    // from the log alone.
+    backend_handle_ = kSkeletonBackendHandle;
 
     MCA_LOGI("MnnBackendOwner",
-             "Initialized MNN backend [type=%d, threads=%d, precision=%d, epoch=%lld]",
+             "Backend marked available [type=%d, threads=%d, precision=%d, epoch=%lld] -- "
+             "lifecycle marker only, no native MNN backend context is bound "
+             "(production inference runs in mnn_native_engine.cpp)",
              static_cast<int>(active_backend_type_),
              thread_count_,
              static_cast<int>(config_.precision),
@@ -66,7 +83,7 @@ void MnnBackendOwner::release() noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     if (backend_handle_ != nullptr) {
         backend_handle_ = nullptr;
-        MCA_LOGI("MnnBackendOwner", "Destroyed MNN backend execution context");
+        MCA_LOGI("MnnBackendOwner", "Cleared MNN backend lifecycle marker (no native context was bound)");
     }
     BackendRuntime::release();
 }

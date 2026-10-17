@@ -4,6 +4,8 @@
 #include <android/log.h>
 #endif
 #include <exception>
+// Same pattern as the sibling llama_model_loader.cpp: the staging API lives in src/.
+#include "src/llama-ext.h"
 
 namespace mca {
 namespace llm {
@@ -44,7 +46,7 @@ void LlamaGpuEvaluator::read_execution_evidence(GpuEvidenceState &state) {
             state.snapshot_fn(state.opencl_execution_scope,
                               &state.opencl_kernel_submissions,
                               &state.opencl_kernel_completions) != 0;
-    state.gpu_offload_execution_observed = state.gpu_decode_succeeded &&
+    state.execution_observed = state.gpu_decode_succeeded &&
             state.opencl_execution_telemetry_available &&
             state.opencl_kernel_completions > 0;
 }

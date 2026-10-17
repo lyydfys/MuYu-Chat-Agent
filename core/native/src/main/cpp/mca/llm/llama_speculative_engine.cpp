@@ -4,6 +4,9 @@
 #include <string>
 
 #include "mca/request/llama_request_parser.hpp"
+#include <exception>
+#include <string>
+#include "sampling.h"
 
 namespace mca {
 namespace llm {
@@ -14,6 +17,12 @@ bool LlamaSpeculativeEngine::prepare_speculative_request(SpeculativeEnvironment 
     if (env.spec_done) *env.spec_done = false;
     if (env.spec_prompt_tokens) env.spec_prompt_tokens->clear();
     if (env.spec_draft_tokens) env.spec_draft_tokens->clear();
+
+    // A new request starts from a fresh engine: release the previous session engine before its
+    // replacement is created, and only ever borrow from here on.  Ownership is never moved through
+    // this environment, so no return/throw path below can leave the session without its owner.
+    if (env.speculative_owner != nullptr) env.speculative_owner->reset();
+    env.speculative = nullptr;
 
     if (!env.spec_requested || env.mtp_context == nullptr) {
         if (env.spec_request_active) *env.spec_request_active = false;
@@ -38,14 +47,39 @@ bool LlamaSpeculativeEngine::prepare_speculative_request(SpeculativeEnvironment 
         return false;
     }
 
-    common_params_speculative spec_params = common_speculative_default_params();
-    common_speculative_draft_params draft_params = common_speculative_draft_default_params();
-    draft_params.n_draft = env.spec_draft_n_max;
-    draft_params.ctx = env.mtp_context;
-    spec_params.drafts.push_back(draft_params);
-    spec_params.n_parallel = 1;
-    env.speculative = common_speculative_init(spec_params);
-    if (env.speculative == nullptr) {
+    // Mirrors qnn_native_bridge.cpp's prepare path (reference native_engine.cpp:3114-3125), which is
+    // the working formulation for the vendored llama.cpp: the params are default-constructed and the
+    // draft settings are written through `params.draft`, and common_speculative_init takes the
+    // sequence count as a second argument.  The previous formulation called
+    // common_speculative_default_params()/common_speculative_draft_default_params() and wrote
+    // `draft_params.n_draft`/`.ctx`, none of which exist in this llama.cpp revision.
+    common_params_speculative spec_params{};
+    spec_params.types = {COMMON_SPECULATIVE_TYPE_DRAFT_MTP};
+    spec_params.draft.n_max = env.spec_draft_n_max;
+    spec_params.draft.n_min = 0;
+    spec_params.draft.p_min = 0.0f;
+    spec_params.draft.backend_sampling = false;
+    spec_params.draft.ctx_tgt = env.context;
+    spec_params.draft.ctx_dft = env.mtp_context;
+    common_speculative_ptr created;
+    try {
+        created.reset(common_speculative_init(spec_params, 1));
+    } catch (const std::exception &e) {
+        if (env.last_error) {
+            *env.last_error = std::string("common_speculative_init(draft-mtp) failed: ") + e.what();
+        }
+        if (env.spec_request_active) *env.spec_request_active = false;
+        if (env.spec_request_reason) *env.spec_request_reason = "specification_init_failed";
+        return false;
+    } catch (...) {
+        if (env.last_error) {
+            *env.last_error = "common_speculative_init(draft-mtp) failed with an unknown native error.";
+        }
+        if (env.spec_request_active) *env.spec_request_active = false;
+        if (env.spec_request_reason) *env.spec_request_reason = "specification_init_failed";
+        return false;
+    }
+    if (created == nullptr) {
         if (env.last_error) {
             *env.last_error = "common_speculative_init returned null for draft-mtp.";
         }
@@ -53,6 +87,19 @@ bool LlamaSpeculativeEngine::prepare_speculative_request(SpeculativeEnvironment 
         if (env.spec_request_reason) *env.spec_request_reason = "speculative_init_failed";
         return false;
     }
+    if (env.speculative_owner == nullptr) {
+        // Without a session slot the engine cannot outlive this call, so fail loudly instead of
+        // handing out a borrow of an engine that is about to be destroyed.
+        if (env.last_error) {
+            *env.last_error = "draft-mtp initialization requires a session owner slot for the speculative engine.";
+        }
+        if (env.spec_request_active) *env.spec_request_active = false;
+        if (env.spec_request_reason) *env.spec_request_reason = "speculative_owner_missing";
+        return false;
+    }
+    // Publish the engine to the session owner first, then borrow the live engine for this request.
+    *env.speculative_owner = std::move(created);
+    env.speculative = env.speculative_owner->get();
     if (env.spec_request_active) *env.spec_request_active = true;
     if (env.spec_request_reason) *env.spec_request_reason = "active";
     return true;
@@ -123,7 +170,7 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
 
     if (env.spec_draft_tokens) env.spec_draft_tokens->clear();
     if (n_max > 0) {
-        auto &draft_params = common_speculative_get_draft_params(env.speculative.get(), 0);
+        auto &draft_params = common_speculative_get_draft_params(env.speculative, 0);
         draft_params = {
                 /* .drafting = */ true,
                 /* .n_max    = */ n_max,
@@ -132,7 +179,7 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
                 /* .prompt   = */ env.spec_prompt_tokens,
                 /* .result   = */ env.spec_draft_tokens,
         };
-        common_speculative_draft(env.speculative.get());
+        common_speculative_draft(env.speculative);
         if (env.trim_context && !env.trim_context(base, "MTP draft pre-advance")) {
             if (env.invalidate_speculative_contexts) {
                 env.invalidate_speculative_contexts("mtp_draft_rollback_failed");
@@ -174,7 +221,7 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
     }
     if (env.record_gpu_execution) env.record_gpu_execution();
 
-    if (!common_speculative_process(env.speculative.get(), *env.batch)) {
+    if (!common_speculative_process(env.speculative, *env.batch)) {
         if (env.last_error) {
             *env.last_error = "common_speculative_process failed during draft-mtp verification.";
         }
@@ -247,7 +294,7 @@ SpecStepResult LlamaSpeculativeEngine::speculative_step(SpeculativeEnvironment &
         }
     }
     const uint16_t accepted = (uint16_t) std::min(eog_index, sampled.size() - 1);
-    common_speculative_accept(env.speculative.get(), 0, accepted);
+    common_speculative_accept(env.speculative, 0, accepted);
     if (env.is_stopped && env.is_stopped()) {
         result.done = true;
         return result;

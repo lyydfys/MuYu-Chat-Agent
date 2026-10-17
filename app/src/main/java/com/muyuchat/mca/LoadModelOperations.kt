@@ -5,6 +5,7 @@ import android.util.Log
 import com.muyuchat.core.advisor.AgentAdvisor
 import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.core.engine.recycleIsolatedWorkerAfterUnload
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.feature.agent.AgentEngineLifecycle
@@ -255,63 +256,20 @@ internal suspend fun CoroutineScope.runLoadModelBody(
     val persistedProfile = recoveryPlan?.rollbackProfileId?.let {
         runtimeProfileStore.reconstructedProfile(it)
     } ?: persistedState?.activeExecutionProfile
-    val capabilities = tuningOwner.modelTuningCapabilities(model, identity, qairtAdmissionPassed)
-    val adaptive = tuningOwner.buildAdaptiveTuningRecommendation(model, identity, device, capabilities)
-    // A profile persisted before variant-aware LiteRT transport
-    // selection may contain the generic CPU default. Do not let that
-    // stale profile silently force a Qualcomm/GPU artifact onto CPU;
-    // retain it only when it agrees with the model-declared advisory
-    // backend (or when the user explicitly overrode backend).
-    val reusablePersistedProfile = persistedProfile?.takeIf { persisted ->
-        val preferred = capabilities.preferredBackend
-        preferred == null || "backend" in admission.runtimeUserOverrideFields ||
-            persisted.resolvedLoadBoundValues.value("backend")?.toString()
-                ?.trim()?.lowercase()?.replace('-', '_') == preferred
-    }
-    var bootstrapProfile = reusablePersistedProfile ?: adaptive.executionProfile.engineProfile
-    val persistedRevisions = runtimeProfileStore.profiles(identity.identityHash).map { it.revision }
-    if (admission.runtimeUserOverrideFields.isNotEmpty()) {
-        val requested = engine.resolveExecutionProfile(
-            identity = identity,
-            requestedParamsJson = params.toJson(),
-            profileId = "manual-load-${UUID.randomUUID().toString().replace("-", "").take(20)}",
-            revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
-        ).profile
-        bootstrapProfile = mergeUserRequestedIntoProfile(
-            base = bootstrapProfile,
-            requested = requested,
-            authoritativeFields = admission.runtimeUserOverrideFields
-        )
-    }
-    // Older persisted llama profiles left prompt batching at one thread
-    // while decode used the tuned worker count. Upgrade that implicit
-    // default once so GGUF prefill does not run effectively single-
-    // threaded. Explicit n_threads_batch selections are preserved.
-    bootstrapProfile = bootstrapProfile.migrateLegacyLlamaBatchThreads(
-        profileId = "${bootstrapProfile.profileId}-prefill-${UUID.randomUUID().toString().take(8)}",
-        revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
+    val profileResolution = resolveLoadModelProfileFor(
+        tuningOwner = tuningOwner,
+        model = model,
+        identity = identity,
+        qairtAdmissionPassed = qairtAdmissionPassed,
+        device = device,
+        admission = admission,
+        engine = engine,
+        runtimeProfileStore = runtimeProfileStore,
+        params = params,
+        persistedProfile = persistedProfile
     )
-    // Snapshots written before desired hot/behavior values were persisted
-    // cannot reproduce their original desired digest after normalization.
-    // Keep the effective settings, but write a complete successor after
-    // this formal native load rather than reusing the incomplete record.
-    val persistedBootstrapSnapshot = persistedProfile
-        ?.takeIf { it.profileId == bootstrapProfile.profileId }
-        ?.let { runtimeProfileStore.profile(it.profileId) }
-    if (persistedBootstrapSnapshot?.requiresDesiredExecutionSnapshotMigration() == true) {
-        bootstrapProfile = bootstrapProfile.copy(
-            profileId = "${bootstrapProfile.profileId}-snapshot-${UUID.randomUUID().toString().take(8)}",
-            revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
-        )
-    }
-    if (persistedProfile == null && runtimeProfileStore.profile(bootstrapProfile.profileId)
-            ?.recordState == PersistedProfileRecordState.REJECTED.name
-    ) {
-        bootstrapProfile = bootstrapProfile.copy(
-            profileId = "${bootstrapProfile.profileId}-retry-${UUID.randomUUID().toString().take(8)}",
-            revision = nextExecutionProfileRevision(bootstrapProfile.revision, persistedRevisions)
-        )
-    }
+    val bootstrapProfile = profileResolution.bootstrapProfile
+    val adaptive = profileResolution.adaptive
     val activeProfile = persistedState?.activeProfile
     val reusableBootstrapProof = activeProfile != null &&
         activeProfile.recordState == PersistedProfileRecordState.COMMITTED.name &&
@@ -398,6 +356,26 @@ internal suspend fun CoroutineScope.runLoadModelBody(
         }
     }
     val loadParams = model.loadParamsForExecutionProfile(bootstrapProfile)
+    // B44 (device A 2026-10-16): a replacement load of a *different* model must start in a
+    // fresh isolated worker process. A 4B QAIRT model loaded while the previous model stayed
+    // resident in the same worker pushed DMA-BUF past MIUI's guard (force-stop of the whole
+    // package), and MNN loads failed after a QAIRT model stayed resident. Re-selecting the
+    // already loaded model keeps the original idempotent fast path (MNN/Gemma) untouched.
+    if (engine.stats.value.loaded && store.current.loadedModelId != requestedModel.id) {
+        store.update { it.copy(modelLoadStage = "正在释放当前模型内存") }
+        engine.stopGeneration()
+        val unloadError = runCatching { engine.unloadModel() }.exceptionOrNull()
+        if (unloadError != null) {
+            failBeforeNativeReplacement("释放当前模型失败：${unloadError.message ?: "未知错误"}。")
+            return
+        }
+        nativeReplacementOccurred = true
+        val recycled = runCatching { engine.recycleIsolatedWorkerAfterUnload() }.getOrDefault(false)
+        if (!recycled) {
+            recoverAfterNativeReplacement("释放当前模型内存失败，请重试。")
+            return
+        }
+    }
     // LLAMA, MNN, and QAIRT keep the long-lived native handle in a worker process.
     // The load Result still owns concrete runtime failures and recovery decisions.
     store.update { it.copy(modelLoadStage = "正在加载模型，首次加载可能较慢") }
@@ -517,98 +495,23 @@ internal suspend fun CoroutineScope.runLoadModelBody(
                 pendingRuntimeRecoveries.remove(identity.identityHash)
             }
         }
-        modelStore.markLoaded(model.id)
-        admission.activeAdaptiveRecommendation = adaptive
-        val recommendation = runCatching {
-            advisor.recommend(
-                device = device,
-                localModels = listOf(model),
-                remoteFiles = emptyList(),
-                preference = store.current.preference
-            )
-        }.getOrNull()
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
-        val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
-        val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()
-        val visionReadyAfterLoad = runCatching {
-            JSONObject(nativeStatsAfterLoad).optBoolean("visionReady", false)
-        }.getOrDefault(false)
-        val logsAfterLoad = engine.recentEngineLogsOrEmpty()
-        managedRuntimeReadinessRefreshGate.invalidate()
-        store.update { state ->
-            cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
-            sessionsToPersist = state.chatSessions.bindSession(
-                sessionId = state.activeChatSessionId,
-                assistantId = state.selectedAssistantId,
-                modelMode = ChatBackend.LOCAL.bindingValue(),
-                modelId = model.id
-            )
-            state.copy(
-                loadedModelId = model.id,
-                loadedModelName = model.displayName,
-                selectedChatBackend = ChatBackend.LOCAL,
-                models = modelStore.listModels(),
-                chatSessions = sessionsToPersist,
-                busy = false,
-                stats = engine.stats.value,
-                engineLifecycle = AgentEngineLifecycle.READY,
-                autoTuningInProgress = false,
-                deviceProfile = device,
-                agentRecommendation = recommendation ?: state.agentRecommendation,
-                profileId = engine.activeExecutionProfile()?.profileId,
-                revision = engine.activeExecutionProfile()?.revision,
-                profileRecordState = if (profileState?.activeProfile != null) {
-                    AgentProfileRecordState.COMMITTED
-                } else {
-                    AgentProfileRecordState.NONE
-                },
-                verification = profileState?.activeProfile?.verificationLevel
-                    ?.let(::agentVerification)
-                    ?: AgentProfileVerification.SAFE,
-                pendingProfile = pendingTransaction?.let { pending ->
-                    AgentPendingProfile(
-                        profileId = pending.pendingProfile.profileId,
-                        revision = pending.pendingProfile.revision,
-                        summary = "${pending.journal.stage} · ${pending.pendingProfile.resolvedLoadSignature.take(12)}",
-                        readyToApply = pending.journal.state in setOf(
-                            TuningJournalState.STAGED.name,
-                            TuningJournalState.VALIDATING.name
-                        )
-                    )
-                },
-                rollbackProfile = profileState?.pointers?.rollbackTargetProfileId?.let { targetId ->
-                    AgentRollbackProfile(targetId, null, "事务锁定的稳定回退目标", true)
-                },
-                tuningJobState = profileState?.activeJob?.let(::agentJobState)
-                    ?: if (pendingTransaction != null) AgentTuningJobState.VALIDATING else AgentTuningJobState.IDLE,
-                tuningPhase = pendingTransaction?.journal?.stage,
-                tuningCandidateProgress = AgentCandidateProgress(),
-                logs = logsAfterLoad,
-                nativeStatsJson = nativeStatsAfterLoad,
-                statusMessage = buildString {
-                    append("已加载：").append(model.displayName)
-                    if (memoryAdmission.mode == LocalModelMemoryAdmissionMode.SPARSE_MOE_MMAP) {
-                        append("，稀疏 MoE mmap 模式已启用")
-                    }
-                    if (visionReadyAfterLoad) {
-                        append("，本地视觉组件已就绪")
-                    } else if (visionReadinessWarning != null) {
-                        // A failed projector must disable image input, not discard a
-                        // perfectly usable text runner. Vision readiness is an
-                        // independent capability from chat-model readiness.
-                        append("。图片输入未启用：").append(visionReadinessWarning)
-                    }
-                    if (visionReadinessWarning == null || visionReadyAfterLoad) {
-                        append("。安全基线和正确性校准通过，可直接聊天；性能调优可在 Agent 页单独启动。")
-                    } else {
-                        append("。安全基线和正确性校准通过，可继续文字聊天；图片输入需修复投影器后再用。性能调优可在 Agent 页单独启动。")
-                    }
-                },
-                tab = AppTab.CHAT
-            )
-        }
-    persistChatSessions(sessionsToPersist)
+    publishLoadedModelStateFor(
+        store = store,
+        admission = admission,
+        engine = engine,
+        modelStore = modelStore,
+        model = model,
+        adaptive = adaptive,
+        advisor = advisor,
+        device = device,
+        runtimeProfileStore = runtimeProfileStore,
+        identity = identity,
+        managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,
+        cloudApiStore = cloudApiStore,
+        memoryAdmission = memoryAdmission,
+        visionReadinessWarning = visionReadinessWarning,
+        persistChatSessions = persistChatSessions
+    )
     } catch (error: CancellationException) {
         if (runtimeBeforeLoad != null &&
             engine.nativeRuntimeReleaseObservedNow()
@@ -649,101 +552,3 @@ internal suspend fun CoroutineScope.runLoadModelBody(
     }
     }
 
-/** R3-S24：bootstrap 事务两助手顶层化（体逐字；runtimeProfileStore 参数化）。 */
-internal suspend fun stageBootstrapProfileFor(
-    runtimeProfileStore: ModelRuntimeProfileStore,
-    transactionId: String,
-    profile: ModelExecutionProfile,
-    rollbackTargetProfileId: String?
-) {
-        runtimeProfileStore.stageCandidate(
-            snapshot = profile.toPersistedExecutionProfileSnapshot(
-                parentCommittedProfileId = rollbackTargetProfileId,
-                verificationLevel = PersistedProfileVerificationLevel.SAFE,
-                sourceSummaryJson = JSONObject()
-                    .put("kind", "bootstrap_load")
-                    .put("probeKind", TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD.name)
-                    .put("profileId", profile.profileId)
-                    .put("resolvedLoadSignature", profile.resolvedLoadSignature.digest)
-                    .put("committedExecutionSignature", profile.committedExecutionSignature.digest)
-                    .toString()
-            ),
-            transactionId = transactionId,
-            rollbackTargetProfileId = rollbackTargetProfileId,
-            job = null
-        )
-        runtimeProfileStore.updateJournalStage(
-            transactionId = transactionId,
-            state = TuningJournalState.APPLYING,
-            stage = "BOOTSTRAP_WORKER_PENDING"
-        )
-}
-
-internal suspend fun recordBootstrapProbeMeasurementFor(
-    runtimeProfileStore: ModelRuntimeProfileStore,
-    result: TuningProbeWorkerProtocol.Result
-) {
-        require(result.probeKind == TuningProbeWorkerProtocol.ProbeKind.BOOTSTRAP_LOAD)
-        runtimeProfileStore.recordMeasurement(
-            CandidateMeasurementEntity(
-                measurementId = "bootstrap-${result.requestId}",
-                profileId = result.profileId,
-                jobId = null,
-                correctnessPassed = result.passed,
-                safetyPassed = !result.lowMemoryTriggered,
-                effectiveSignatureMatched = result.signatureMatched,
-                accepted = result.passed && result.signatureMatched,
-                metricsJson = JSONObject(result.evidenceJson)
-                    .put("runtimeStats", JSONObject(result.runtimeStatsJson))
-                    .put("elapsedMs", result.elapsedMs)
-                    .toString(),
-                failureCode = if (result.passed) null else "BOOTSTRAP_WORKER_REJECTED",
-                createdAt = System.currentTimeMillis()
-            )
-        )
-}
-
-/** R3-S24：正式加载 profile 落库助手顶层化（体逐字；store/engine 参数化）。 */
-internal suspend fun persistBootstrapProfileFor(
-    runtimeProfileStore: ModelRuntimeProfileStore,
-    engine: McaInferenceService,
-    profile: ModelExecutionProfile,
-    sourceSummary: String
-) {
-        val existing = runtimeProfileStore.profile(profile.profileId)
-        if (existing?.recordState == PersistedProfileRecordState.COMMITTED.name) return
-        val transactionId = "bootstrap-formal-${UUID.randomUUID()}"
-        val current = runtimeProfileStore.currentRuntimeState(profile.runtimeIdentity.identityHash)
-        val rollbackTargetProfileId = current?.activeProfile
-            ?.takeIf {
-                it.recordState == PersistedProfileRecordState.COMMITTED.name &&
-                    it.profileId != profile.profileId
-            }
-            ?.profileId
-        val snapshot = profile.toPersistedExecutionProfileSnapshot(
-            parentCommittedProfileId = rollbackTargetProfileId,
-            verificationLevel = PersistedProfileVerificationLevel.SAFE,
-            sourceSummaryJson = sourceSummary
-        )
-        runtimeProfileStore.stageCandidate(
-            snapshot = snapshot,
-            transactionId = transactionId,
-            rollbackTargetProfileId = rollbackTargetProfileId
-        )
-        runtimeProfileStore.updateJournalStage(
-            transactionId,
-            TuningJournalState.VALIDATING,
-            "FORMAL_LOAD_VALIDATED"
-        )
-        val signatures = engine.parameterSignatureSnapshot()
-            ?: error("安全基线缺少参数签名快照")
-        require(profile.matchesExactParameterSignatures(signatures)) {
-            "正式加载参数签名与待提交 profile 不一致"
-        }
-        runtimeProfileStore.commitCandidate(
-            transactionId = transactionId,
-            verificationLevel = PersistedProfileVerificationLevel.SAFE,
-            activeLoadedSignature = requireNotNull(signatures.active).digest,
-            effectiveExecutionSignature = requireNotNull(signatures.effective).digest
-        )
-    }

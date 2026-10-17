@@ -19,6 +19,22 @@ class ChatBackendUiTest {
     }
 
     @Test
+    fun mnnOpenClRemainsSelectableWithExperimentalCpuFallbackWarning() {
+        val options = chatBackendOptionsFor(ChatBackendFamily.MNN)
+        val cpu = options.first { it.id == "cpu" }
+        val openCl = options.first { it.id == "opencl" }
+        assertEquals("CPU", cpu.label)
+        assertTrue(cpu.enabled)
+        assertEquals("GPU / OpenCL（实验）", openCl.label)
+        assertTrue(openCl.enabled)
+        val note = openCl.availabilityNote.orEmpty()
+        assertTrue(note.contains("极慢"))
+        assertTrue(note.contains("输出异常"))
+        assertTrue(note.contains("CPU"))
+        assertTrue(note.contains("重新生成"))
+    }
+
+    @Test
     fun geniexLlamaAliasesUseTheirComputeUnitContract() {
         assertEquals(
             ChatBackendFamily.GENIEX_LLAMA_CPP,

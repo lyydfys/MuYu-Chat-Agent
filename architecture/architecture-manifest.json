@@ -7,224 +7,180 @@
     {
       "module_name": "app",
       "path": "app",
-      "total_files": 395,
-      "total_loc": 122171,
+      "total_files": 618,
+      "total_loc": 127688,
       "key_files": [
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/MainViewModel.kt",
-          "file_name": "MainViewModel.kt",
-          "loc": 2737,
-          "owner": "Presentation ViewModel",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/MainViewModelCompletionFallbackTest.kt",
-            "app/src/test/java/com/muyuchat/mca/MainViewModelLoadLifecycleContractTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImagePromptLanguage.kt",
-          "file_name": "LocalImagePromptLanguage.kt",
-          "loc": 2528,
+          "file_path": "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileTopology.kt",
+          "file_name": "ImageExecutionProfileTopology.kt",
+          "loc": 818,
           "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/LocalImagePromptLanguageTest.kt",
-            "app/src/test/java/com/muyuchat/mca/LocalImagePromptLanguageV4HardContractTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/CorePortAdapters.kt",
-          "file_name": "CorePortAdapters.kt",
-          "loc": 2504,
-          "owner": "Port Interface",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt",
-          "file_name": "SdxlImagePhaseProtocol.kt",
-          "loc": 2116,
+          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImagePromptCanonicalRelations.kt",
+          "file_name": "LocalImagePromptCanonicalRelations.kt",
+          "loc": 740,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/SdxlImagePhaseProtocolTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt",
-          "file_name": "LocalImageGenerationOperations.kt",
-          "loc": 1714,
-          "owner": "Domain Operations UseCase",
+          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt",
+          "file_name": "LocalImageGenerationQnnExecution.kt",
+          "loc": 681,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImagePromptCanonicalBindings.kt",
+          "file_name": "LocalImagePromptCanonicalBindings.kt",
+          "loc": 648,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/TuningProbeWorkerService.kt",
+          "file_name": "TuningProbeWorkerService.kt",
+          "loc": 646,
+          "owner": "Tuning / Benchmark",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
           "file_path": "app/src/main/java/com/muyuchat/mca/composition/McaAppContainer.kt",
           "file_name": "McaAppContainer.kt",
-          "loc": 1560,
+          "loc": 644,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageWorkerService.kt",
-          "file_name": "LocalImageWorkerService.kt",
-          "loc": 1449,
+          "file_path": "app/src/main/java/com/muyuchat/mca/LocalChatWorkerService.kt",
+          "file_name": "LocalChatWorkerService.kt",
+          "loc": 627,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileJson.kt",
-          "file_name": "ImageExecutionProfileJson.kt",
-          "loc": 1406,
+          "file_path": "app/src/main/java/com/muyuchat/mca/IsolatedNativeFailureDiagnostics.kt",
+          "file_name": "IsolatedNativeFailureDiagnostics.kt",
+          "loc": 608,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "app/src/test/java/com/muyuchat/mca/IsolatedNativeFailureDiagnosticsTest.kt"
+          ]
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImagePromptLanguageAdmission.kt",
+          "file_name": "LocalImagePromptLanguageAdmission.kt",
+          "loc": 604,
           "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/ImageExecutionProfileJsonTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/ImageExecutionProfile.kt",
-          "file_name": "ImageExecutionProfile.kt",
-          "loc": 1313,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/ImageExecutionProfileJsonTest.kt",
-            "app/src/test/java/com/muyuchat/mca/ImageExecutionProfileNativeContractTest.kt",
-            "app/src/test/java/com/muyuchat/mca/ImageExecutionProfileResolverTest.kt",
-            "app/src/test/java/com/muyuchat/mca/LocalImageExecutionProfileIntegrationTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageInputContract.kt",
-          "file_name": "LocalImageInputContract.kt",
-          "loc": 1313,
-          "owner": "Contract/Lead Architecture",
-          "status": "S_GRADE_CONTRACT",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/LocalImageInputContractTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/ModelRuntimeProfileStore.kt",
-          "file_name": "ModelRuntimeProfileStore.kt",
-          "loc": 1291,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/ModelRuntimeProfileStorePolicyTest.kt"
-          ]
-        },
-        {
-          "file_path": "app/src/main/java/com/muyuchat/mca/TextualInversionStore.kt",
-          "file_name": "TextualInversionStore.kt",
-          "loc": 1272,
-          "owner": "Persistence / Storage",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageWorkerClient.kt",
-          "file_name": "LocalImageWorkerClient.kt",
-          "loc": 1123,
-          "owner": "General Component",
+          "file_path": "app/src/main/java/com/muyuchat/mca/TuningOwnerStartAgentTuning.kt",
+          "file_name": "TuningOwnerStartAgentTuning.kt",
+          "loc": 604,
+          "owner": "Tuning / Benchmark",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/LocalImageWorkerClientLifecycleTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/LocalImageExecutionProfileIntegration.kt",
-          "file_name": "LocalImageExecutionProfileIntegration.kt",
-          "loc": 1114,
+          "file_path": "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseWireProtocol.kt",
+          "file_name": "SdxlImagePhaseWireProtocol.kt",
+          "loc": 585,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/LocalImageExecutionProfileIntegrationTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "app/src/main/java/com/muyuchat/mca/WebSearchProvider.kt",
-          "file_name": "WebSearchProvider.kt",
-          "loc": 1035,
+          "file_path": "app/src/main/java/com/muyuchat/mca/QnnInpaintInputArtifact.kt",
+          "file_name": "QnnInpaintInputArtifact.kt",
+          "loc": 580,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/WebSearchProviderTest.kt"
-          ]
+          "associated_tests": []
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/AgentTuningOperations.kt",
+          "file_name": "AgentTuningOperations.kt",
+          "loc": 579,
+          "owner": "Domain Operations UseCase",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/CloudModelConfigurationOperations.kt",
+          "file_name": "CloudModelConfigurationOperations.kt",
+          "loc": 579,
+          "owner": "Domain Operations UseCase",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "app/src/main/java/com/muyuchat/mca/ChatExecutionOperations.kt",
+          "file_name": "ChatExecutionOperations.kt",
+          "loc": 577,
+          "owner": "Domain Operations UseCase",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         }
       ],
-      "all_files_count": 395
+      "all_files_count": 618
     },
     {
       "module_name": "core:engine",
       "path": "core/engine",
-      "total_files": 45,
-      "total_loc": 16954,
+      "total_files": 96,
+      "total_loc": 20355,
       "key_files": [
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt",
-          "file_name": "LocalChatRunner.kt",
-          "loc": 3473,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtLmChatRunner.kt",
+          "file_name": "LiteRtLmChatRunner.kt",
+          "loc": 668,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/RemoteLocalChatRunnerStateTest.kt",
-            "core/engine/src/test/java/com/muyuchat/core/engine/LocalChatRunnerTest.kt"
+            "core/engine/src/test/java/com/muyuchat/core/engine/LiteRtLmChatRunnerTest.kt"
           ]
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt",
-          "file_name": "McaInferenceService.kt",
-          "loc": 3146,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceLoadRecovery.kt",
+          "file_name": "McaInferenceLoadRecovery.kt",
+          "loc": 612,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/McaInferenceServiceConditionalStopTest.kt",
-            "core/engine/src/test/java/com/muyuchat/core/engine/McaInferenceServiceLoadRecoveryTest.kt",
-            "core/engine/src/test/java/com/muyuchat/core/engine/McaInferenceServicePersistentPrefixCacheTest.kt",
-            "core/engine/src/test/java/com/muyuchat/core/engine/McaInferenceServicePhaseEventTest.kt",
-            "core/engine/src/test/java/com/muyuchat/core/engine/McaInferenceServiceRuntimeContextMergeTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/RuntimeParameters.kt",
-          "file_name": "RuntimeParameters.kt",
-          "loc": 2123,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LocalRunnerShells.kt",
+          "file_name": "LocalRunnerShells.kt",
+          "loc": 610,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/RuntimeParametersTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/PersistentPrefixCacheStore.kt",
-          "file_name": "PersistentPrefixCacheStore.kt",
-          "loc": 1016,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/PersistentPrefixCacheStoreTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LocalVisionInputPreparer.kt",
-          "file_name": "LocalVisionInputPreparer.kt",
-          "loc": 958,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/GenieXChatRunnerGeneration.kt",
+          "file_name": "GenieXChatRunnerGeneration.kt",
+          "loc": 586,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/LocalVisionInputPreparerTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/ChatTypes.kt",
-          "file_name": "ChatTypes.kt",
-          "loc": 849,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/ParameterCoordinator.kt",
+          "file_name": "ParameterCoordinator.kt",
+          "loc": 566,
+          "owner": "Domain Feature Coordinator",
+          "status": "MODERNIZED_ACTIVE",
           "associated_tests": []
         },
         {
@@ -236,6 +192,24 @@
           "associated_tests": [
             "core/engine/src/test/java/com/muyuchat/core/engine/ContextCompressionPolicyTest.kt"
           ]
+        },
+        {
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/RuntimeParameters.kt",
+          "file_name": "RuntimeParameters.kt",
+          "loc": 555,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "core/engine/src/test/java/com/muyuchat/core/engine/RuntimeParametersTest.kt"
+          ]
+        },
+        {
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/GenieXChatRunner.kt",
+          "file_name": "GenieXChatRunner.kt",
+          "loc": 532,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         },
         {
           "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/ContextWindowAdmission.kt",
@@ -258,137 +232,95 @@
           ]
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/ReasoningContentFilter.kt",
-          "file_name": "ReasoningContentFilter.kt",
-          "loc": 270,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/ReasoningContentFilterTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtLmVisionCapability.kt",
-          "file_name": "LiteRtLmVisionCapability.kt",
-          "loc": 262,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStreamChat.kt",
+          "file_name": "McaInferenceStreamChat.kt",
+          "loc": 445,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/QairtExecutionVerification.kt",
-          "file_name": "QairtExecutionVerification.kt",
-          "loc": 248,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStreamDecode.kt",
+          "file_name": "McaInferenceStreamDecode.kt",
+          "loc": 391,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/QairtExecutionVerificationTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/ContextSummarizationService.kt",
-          "file_name": "ContextSummarizationService.kt",
-          "loc": 247,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtGenerationSupport.kt",
+          "file_name": "LiteRtGenerationSupport.kt",
+          "loc": 385,
+          "owner": "Port Interface",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/CallbackRouter.kt",
+          "file_name": "CallbackRouter.kt",
+          "loc": 381,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/ContextSummarizationServiceTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/VisionAttachmentDedup.kt",
-          "file_name": "VisionAttachmentDedup.kt",
-          "loc": 225,
+          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStatsDiagnostics.kt",
+          "file_name": "McaInferenceStatsDiagnostics.kt",
+          "loc": 373,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/engine/src/test/java/com/muyuchat/core/engine/VisionAttachmentDedupTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/engine/src/main/java/com/muyuchat/core/engine/contract/CallbackEvent.kt",
-          "file_name": "CallbackEvent.kt",
-          "loc": 209,
-          "owner": "Contract/Lead Architecture",
-          "status": "S_GRADE_CONTRACT",
           "associated_tests": []
         }
       ],
-      "all_files_count": 45
+      "all_files_count": 96
     },
     {
       "module_name": "core:native",
       "path": "core/native",
-      "total_files": 64,
-      "total_loc": 48452,
+      "total_files": 307,
+      "total_loc": 69498,
       "key_files": [
-        {
-          "file_path": "core/native/src/main/cpp/qnn_native_bridge.cpp",
-          "file_name": "qnn_native_bridge.cpp",
-          "loc": 14366,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/native/src/main/cpp/mnn_native_engine.cpp",
-          "file_name": "mnn_native_engine.cpp",
-          "loc": 11398,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/native/src/main/cpp/native_engine.cpp",
-          "file_name": "native_engine.cpp",
-          "loc": 4480,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp",
-          "file_name": "qnn_sdxl_isolated_phases.hpp",
-          "loc": 2495,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/native/src/main/cpp/image_execution_math.cpp",
-          "file_name": "image_execution_math.cpp",
-          "loc": 1316,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/native/src/test/cpp/image_execution_math_test.cpp"
-          ]
-        },
-        {
-          "file_path": "core/native/src/main/cpp/translation/core/gguf_loader.cpp",
-          "file_name": "gguf_loader.cpp",
-          "loc": 1236,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/native/src/main/cpp/translation/m2m100.cpp",
-          "file_name": "m2m100.cpp",
-          "loc": 1208,
-          "owner": "Native Inference Engine",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
         {
           "file_path": "core/native/src/main/cpp/image_conditioning.cpp",
           "file_name": "image_conditioning.cpp",
-          "loc": 1128,
+          "loc": 1191,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
             "core/native/src/test/cpp/image_conditioning_test.cpp"
           ]
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_sd15_direct.cpp",
+          "file_name": "mnn_sd15_direct.cpp",
+          "loc": 1166,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate.cpp",
+          "file_name": "mnn_diffusion_generate.cpp",
+          "loc": 1129,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_clip_encode.cpp",
+          "file_name": "mnn_clip_encode.cpp",
+          "loc": 1119,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_protocol_parser.cpp",
+          "file_name": "mnn_protocol_parser.cpp",
+          "loc": 1118,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         },
         {
           "file_path": "core/native/src/main/cpp/qnn_controlnet_execution.cpp",
@@ -399,6 +331,30 @@
           "associated_tests": [
             "core/native/src/test/cpp/qnn_controlnet_execution_test.cpp"
           ]
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_chat_session.cpp",
+          "file_name": "mnn_chat_session.cpp",
+          "loc": 1037,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize.cpp",
+          "file_name": "mnn_diffusion_tokenize.cpp",
+          "loc": 1028,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_chat_entries.cpp",
+          "file_name": "mnn_chat_entries.cpp",
+          "loc": 1008,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         },
         {
           "file_path": "core/native/src/main/cpp/diffusion_scheduler.cpp",
@@ -412,6 +368,14 @@
           ]
         },
         {
+          "file_path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+          "file_name": "qnn_semantic_pipeline.cpp",
+          "loc": 942,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
           "file_path": "core/native/src/main/cpp/textual_inversion_conditioning.cpp",
           "file_name": "textual_inversion_conditioning.cpp",
           "loc": 896,
@@ -422,95 +386,171 @@
           ]
         },
         {
-          "file_path": "core/native/src/main/cpp/mnn_stable_diffusion_safe.cpp",
-          "file_name": "mnn_stable_diffusion_safe.cpp",
-          "loc": 653,
+          "file_path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_evidence.cpp",
+          "file_name": "qnn_semantic_evidence.cpp",
+          "loc": 862,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "core/native/src/main/cpp/qnn_inpaint_contract.hpp",
-          "file_name": "qnn_inpaint_contract.hpp",
-          "loc": 509,
-          "owner": "Contract/Lead Architecture",
-          "status": "S_GRADE_CONTRACT",
-          "associated_tests": [
-            "core/native/src/test/cpp/qnn_inpaint_contract_test.cpp"
-          ]
-        },
-        {
-          "file_path": "core/native/src/main/cpp/mnn_stream_protocol_filter.hpp",
-          "file_name": "mnn_stream_protocol_filter.hpp",
-          "loc": 443,
+          "file_path": "core/native/src/main/cpp/mca/mnn/mnn_bundle_config.cpp",
+          "file_name": "mnn_bundle_config.cpp",
+          "loc": 860,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/native/src/test/cpp/mnn_stream_protocol_filter_test.cpp"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "core/native/src/main/cpp/execution_asset_binding.hpp",
-          "file_name": "execution_asset_binding.hpp",
-          "loc": 428,
+          "file_path": "core/native/src/main/cpp/mca/qnn/qnn_semantic_stage_runner.cpp",
+          "file_name": "qnn_semantic_stage_runner.cpp",
+          "loc": 852,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 64
+      "all_files_count": 307
     },
     {
       "module_name": "core:sd-native",
       "path": "core/sd-native",
-      "total_files": 2,
-      "total_loc": 5948,
+      "total_files": 51,
+      "total_loc": 12928,
       "key_files": [
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_contract_parser.cpp",
+          "file_name": "sd_contract_parser.cpp",
+          "loc": 853,
+          "owner": "Contract/Lead Architecture",
+          "status": "S_GRADE_CONTRACT",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_output_transaction.cpp",
+          "file_name": "sd_output_transaction.cpp",
+          "loc": 718,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
         {
           "file_path": "core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp",
           "file_name": "stable_diffusion_bridge.cpp",
-          "loc": 5903,
+          "loc": 700,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
+            "build/repair-20261009-parity/host-e-main/CMakeFiles/mca_sd_bridge_image_input_contract_test.dir/E_/MAC/core/sd-native/src/test/cpp/stable_diffusion_bridge_image_input_contract_test.cpp.obj",
+            "build/repair-20261009-parity/host-tests/CMakeFiles/mca_sd_bridge_image_input_contract_test.dir/E_/MAC/core/sd-native/src/test/cpp/stable_diffusion_bridge_image_input_contract_test.cpp.obj",
             "core/sd-native/src/test/cpp/stable_diffusion_bridge_image_input_contract_test.cpp"
           ]
         },
         {
-          "file_path": "core/sd-native/src/main/java/com/muyuchat/core/sdnative/NativeStableDiffusionBridge.kt",
-          "file_name": "NativeStableDiffusionBridge.kt",
-          "loc": 45,
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_evidence_verifier.cpp",
+          "file_name": "sd_evidence_verifier.cpp",
+          "loc": 636,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_component_resolver.cpp",
+          "file_name": "sd_component_resolver.cpp",
+          "loc": 601,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_textual_inversion.cpp",
+          "file_name": "sd_textual_inversion.cpp",
+          "loc": 534,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_phase_machine.cpp",
+          "file_name": "sd_phase_machine.cpp",
+          "loc": 528,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_response_builder.cpp",
+          "file_name": "sd_response_builder.cpp",
+          "loc": 497,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_upscaler.cpp",
+          "file_name": "sd_upscaler.cpp",
+          "loc": 411,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_input_contract.cpp",
+          "file_name": "sd_input_contract.cpp",
+          "loc": 400,
+          "owner": "Contract/Lead Architecture",
+          "status": "S_GRADE_CONTRACT",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/sd_generate_execute.cpp",
+          "file_name": "sd_generate_execute.cpp",
+          "loc": 394,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_image_io.cpp",
+          "file_name": "sd_image_io.cpp",
+          "loc": 384,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/sd_generate_context.cpp",
+          "file_name": "sd_generate_context.cpp",
+          "loc": 375,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/sd_generate_publish.cpp",
+          "file_name": "sd_generate_publish.cpp",
+          "loc": 347,
+          "owner": "Native Inference Engine",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/sd-native/src/main/cpp/mca/sd/sd_lora_adapter.cpp",
+          "file_name": "sd_lora_adapter.cpp",
+          "loc": 337,
           "owner": "Native Inference Engine",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 2
+      "all_files_count": 51
     },
     {
       "module_name": "core:modelstore",
       "path": "core/modelstore",
-      "total_files": 14,
-      "total_loc": 6018,
+      "total_files": 25,
+      "total_loc": 6195,
       "key_files": [
-        {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreRepository.kt",
-          "file_name": "ModelStoreRepository.kt",
-          "loc": 2259,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/MnnBundleReadiness.kt",
-          "file_name": "MnnBundleReadiness.kt",
-          "loc": 848,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/modelstore/src/test/java/com/muyuchat/core/modelstore/MnnBundleReadinessAnalyzerTest.kt"
-          ]
-        },
         {
           "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/QairtBundleReadiness.kt",
           "file_name": "QairtBundleReadiness.kt",
@@ -532,6 +572,30 @@
           ]
         },
         {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreManifestCodec.kt",
+          "file_name": "ModelStoreManifestCodec.kt",
+          "loc": 468,
+          "owner": "Persistence / Storage",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreValidation.kt",
+          "file_name": "ModelStoreValidation.kt",
+          "loc": 409,
+          "owner": "Persistence / Storage",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreImportPipeline.kt",
+          "file_name": "ModelStoreImportPipeline.kt",
+          "loc": 398,
+          "owner": "Port Interface",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
           "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/GgufMetadataReader.kt",
           "file_name": "GgufMetadataReader.kt",
           "loc": 349,
@@ -542,6 +606,14 @@
           ]
         },
         {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/MnnBundleRequirementAnalysis.kt",
+          "file_name": "MnnBundleRequirementAnalysis.kt",
+          "loc": 336,
+          "owner": "UI Presentation",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
           "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/QairtBundleRiskAnalyzer.kt",
           "file_name": "QairtBundleRiskAnalyzer.kt",
           "loc": 336,
@@ -550,6 +622,22 @@
           "associated_tests": [
             "core/modelstore/src/test/java/com/muyuchat/core/modelstore/QairtBundleRiskAnalyzerTest.kt"
           ]
+        },
+        {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreRecovery.kt",
+          "file_name": "ModelStoreRecovery.kt",
+          "loc": 306,
+          "owner": "Persistence / Storage",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreDownloadRegistration.kt",
+          "file_name": "ModelStoreDownloadRegistration.kt",
+          "loc": 292,
+          "owner": "Persistence / Storage",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         },
         {
           "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelManifest.kt",
@@ -590,77 +678,53 @@
           ]
         },
         {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelCompatibility.kt",
-          "file_name": "ModelCompatibility.kt",
-          "loc": 120,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/modelstore/src/test/java/com/muyuchat/core/modelstore/ModelCompatibilityTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/SparseMoeModelPolicy.kt",
-          "file_name": "SparseMoeModelPolicy.kt",
-          "loc": 91,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/modelstore/src/test/java/com/muyuchat/core/modelstore/SparseMoeModelPolicyTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelImportClassifier.kt",
-          "file_name": "ModelImportClassifier.kt",
-          "loc": 76,
+          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelStoreAtomicImportAndDeletion.kt",
+          "file_name": "ModelStoreAtomicImportAndDeletion.kt",
+          "loc": 201,
           "owner": "Port Interface",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/modelstore/src/test/java/com/muyuchat/core/modelstore/ModelImportClassifierTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/modelstore/src/main/java/com/muyuchat/core/modelstore/ModelSizeFormat.kt",
-          "file_name": "ModelSizeFormat.kt",
-          "loc": 23,
-          "owner": "Persistence / Storage",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 14
+      "all_files_count": 25
     },
     {
       "module_name": "core:download",
       "path": "core/download",
-      "total_files": 16,
-      "total_loc": 7225,
+      "total_files": 32,
+      "total_loc": 7334,
       "key_files": [
         {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogData.kt",
-          "file_name": "ModelScopeCatalogData.kt",
-          "loc": 3125,
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeImageEngineContracts.kt",
+          "file_name": "ModelScopeImageEngineContracts.kt",
+          "loc": 593,
+          "owner": "Contract/Lead Architecture",
+          "status": "S_GRADE_CONTRACT",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeRecommendationCatalogPart1.kt",
+          "file_name": "ModelScopeRecommendationCatalogPart1.kt",
+          "loc": 521,
           "owner": "Download Manager",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeTypes.kt",
-          "file_name": "ModelScopeTypes.kt",
-          "loc": 1464,
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeRecommendationCatalogPart3.kt",
+          "file_name": "ModelScopeRecommendationCatalogPart3.kt",
+          "loc": 502,
           "owner": "Download Manager",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelBundleInstaller.kt",
-          "file_name": "ModelBundleInstaller.kt",
-          "loc": 724,
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeRecommendationCatalogPart2.kt",
+          "file_name": "ModelScopeRecommendationCatalogPart2.kt",
+          "loc": 485,
           "owner": "Download Manager",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/download/src/test/java/com/muyuchat/core/download/ModelBundleInstallerTest.kt"
-          ]
+          "associated_tests": []
         },
         {
           "file_path": "core/download/src/main/java/com/muyuchat/core/download/ResumableDownloader.kt",
@@ -673,10 +737,60 @@
           ]
         },
         {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogExecutionProfileBuilders.kt",
+          "file_name": "ModelScopeCatalogExecutionProfileBuilders.kt",
+          "loc": 458,
+          "owner": "UI Presentation",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogExecutionProfileVariants.kt",
+          "file_name": "ModelScopeCatalogExecutionProfileVariants.kt",
+          "loc": 433,
+          "owner": "Download Manager",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeImageEngineTypes.kt",
+          "file_name": "ModelScopeImageEngineTypes.kt",
+          "loc": 390,
+          "owner": "Download Manager",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogQnnSpecs.kt",
+          "file_name": "ModelScopeCatalogQnnSpecs.kt",
+          "loc": 348,
+          "owner": "Download Manager",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelBundleInstaller.kt",
+          "file_name": "ModelBundleInstaller.kt",
+          "loc": 342,
+          "owner": "Download Manager",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "core/download/src/test/java/com/muyuchat/core/download/ModelBundleInstallerTest.kt"
+          ]
+        },
+        {
           "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeRecommendedOperations.kt",
           "file_name": "ModelScopeRecommendedOperations.kt",
           "loc": 332,
           "owner": "Domain Operations UseCase",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogBundleSpecs.kt",
+          "file_name": "ModelScopeCatalogBundleSpecs.kt",
+          "loc": 323,
+          "owner": "Download Manager",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
@@ -699,73 +813,15 @@
           "associated_tests": []
         },
         {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeClientParsingHelpers.kt",
-          "file_name": "ModelScopeClientParsingHelpers.kt",
-          "loc": 150,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeNetworkOperations.kt",
-          "file_name": "ModelScopeNetworkOperations.kt",
-          "loc": 131,
-          "owner": "Domain Operations UseCase",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ResumableModelZip.kt",
-          "file_name": "ResumableModelZip.kt",
-          "loc": 81,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/MnnModelBundleInstallProfiles.kt",
-          "file_name": "MnnModelBundleInstallProfiles.kt",
-          "loc": 78,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelDownloadWorker.kt",
-          "file_name": "ModelDownloadWorker.kt",
-          "loc": 51,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/CompletedDownloadReceipt.kt",
-          "file_name": "CompletedDownloadReceipt.kt",
-          "loc": 47,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ChipsetCodeDetection.kt",
-          "file_name": "ChipsetCodeDetection.kt",
-          "loc": 35,
-          "owner": "Download Manager",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/download/src/test/java/com/muyuchat/core/download/ChipsetCodeDetectionTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/download/src/main/java/com/muyuchat/core/download/DownloadStorageBudget.kt",
-          "file_name": "DownloadStorageBudget.kt",
-          "loc": 31,
+          "file_path": "core/download/src/main/java/com/muyuchat/core/download/ModelScopeDownloadEligibility.kt",
+          "file_name": "ModelScopeDownloadEligibility.kt",
+          "loc": 182,
           "owner": "Download Manager",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 16
+      "all_files_count": 32
     },
     {
       "module_name": "core:telemetry",
@@ -841,13 +897,13 @@
     {
       "module_name": "core:deviceprofile",
       "path": "core/deviceprofile",
-      "total_files": 2,
-      "total_loc": 1079,
+      "total_files": 5,
+      "total_loc": 1092,
       "key_files": [
         {
-          "file_path": "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/DeviceAccelerationProfile.kt",
-          "file_name": "DeviceAccelerationProfile.kt",
-          "loc": 834,
+          "file_path": "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/DeviceAccelerationAnalysis.kt",
+          "file_name": "DeviceAccelerationAnalysis.kt",
+          "loc": 311,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
@@ -859,36 +915,40 @@
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
+        },
+        {
+          "file_path": "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/QnnRuntimeProfileSelection.kt",
+          "file_name": "QnnRuntimeProfileSelection.kt",
+          "loc": 187,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/QnnRuntimeStatusContract.kt",
+          "file_name": "QnnRuntimeStatusContract.kt",
+          "loc": 183,
+          "owner": "Contract/Lead Architecture",
+          "status": "S_GRADE_CONTRACT",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/deviceprofile/src/main/java/com/muyuchat/core/deviceprofile/DeviceAccelerationProfile.kt",
+          "file_name": "DeviceAccelerationProfile.kt",
+          "loc": 166,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         }
       ],
-      "all_files_count": 2
+      "all_files_count": 5
     },
     {
       "module_name": "core:tuning",
       "path": "core/tuning",
-      "total_files": 4,
-      "total_loc": 2559,
+      "total_files": 13,
+      "total_loc": 2601,
       "key_files": [
-        {
-          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningContracts.kt",
-          "file_name": "AdaptiveTuningContracts.kt",
-          "loc": 965,
-          "owner": "Contract/Lead Architecture",
-          "status": "S_GRADE_CONTRACT",
-          "associated_tests": [
-            "core/tuning/src/test/java/com/muyuchat/core/tuning/AdaptiveTuningContractsTest.kt"
-          ]
-        },
-        {
-          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/SpecializedTuningCanaryPolicy.kt",
-          "file_name": "SpecializedTuningCanaryPolicy.kt",
-          "loc": 650,
-          "owner": "Tuning / Benchmark",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "core/tuning/src/test/java/com/muyuchat/core/tuning/SpecializedTuningCanaryPolicyTest.kt"
-          ]
-        },
         {
           "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningPolicy.kt",
           "file_name": "AdaptiveTuningPolicy.kt",
@@ -906,9 +966,101 @@
           "owner": "Tuning / Benchmark",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningExecutionModels.kt",
+          "file_name": "AdaptiveTuningExecutionModels.kt",
+          "loc": 283,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningProfileBuilding.kt",
+          "file_name": "AdaptiveTuningProfileBuilding.kt",
+          "loc": 247,
+          "owner": "UI Presentation",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/SpeculativeMtpCanary.kt",
+          "file_name": "SpeculativeMtpCanary.kt",
+          "loc": 193,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/BatchKvCanary.kt",
+          "file_name": "BatchKvCanary.kt",
+          "loc": 162,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/LongContextNeedleCanary.kt",
+          "file_name": "LongContextNeedleCanary.kt",
+          "loc": 157,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningMeasurementModels.kt",
+          "file_name": "AdaptiveTuningMeasurementModels.kt",
+          "loc": 151,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningCorrectnessScoring.kt",
+          "file_name": "AdaptiveTuningCorrectnessScoring.kt",
+          "loc": 144,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningCapabilities.kt",
+          "file_name": "AdaptiveTuningCapabilities.kt",
+          "loc": 109,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/SpecializedTuningCanaryPolicy.kt",
+          "file_name": "SpecializedTuningCanaryPolicy.kt",
+          "loc": 107,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "core/tuning/src/test/java/com/muyuchat/core/tuning/SpecializedTuningCanaryPolicyTest.kt"
+          ]
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/AdaptiveTuningContracts.kt",
+          "file_name": "AdaptiveTuningContracts.kt",
+          "loc": 67,
+          "owner": "Contract/Lead Architecture",
+          "status": "S_GRADE_CONTRACT",
+          "associated_tests": [
+            "core/tuning/src/test/java/com/muyuchat/core/tuning/AdaptiveTuningContractsTest.kt"
+          ]
+        },
+        {
+          "file_path": "core/tuning/src/main/java/com/muyuchat/core/tuning/SpecializedCanaryIsolation.kt",
+          "file_name": "SpecializedCanaryIsolation.kt",
+          "loc": 37,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         }
       ],
-      "all_files_count": 4
+      "all_files_count": 13
     },
     {
       "module_name": "core:advisor",
@@ -1008,50 +1160,32 @@
     {
       "module_name": "api:local",
       "path": "api/local",
-      "total_files": 13,
-      "total_loc": 10123,
+      "total_files": 30,
+      "total_loc": 10598,
       "key_files": [
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
-          "file_name": "McaLoopbackServer.kt",
-          "loc": 2661,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerTest.kt",
-            "api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerWhitespaceContractTest.kt"
-          ]
-        },
-        {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiEvidenceValidation.kt",
-          "file_name": "ImageGenerationApiEvidenceValidation.kt",
-          "loc": 2612,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiOutputEvidenceValidation.kt",
+          "file_name": "ImageGenerationApiOutputEvidenceValidation.kt",
+          "loc": 1098,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt",
-          "file_name": "ImageGenerationApiContract.kt",
-          "loc": 1365,
-          "owner": "Contract/Lead Architecture",
-          "status": "S_GRADE_CONTRACT",
-          "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/ImageGenerationApiContractTest.kt"
-          ]
-        },
-        {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiRuntime.kt",
-          "file_name": "LocalApiRuntime.kt",
-          "loc": 1239,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiInputValidation.kt",
+          "file_name": "ImageGenerationApiInputValidation.kt",
+          "loc": 999,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "app/src/test/java/com/muyuchat/mca/LocalApiRuntimeOwnerTest.kt",
-            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeBackendEvidenceTest.kt",
-            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeBindingsSnapshotTest.kt",
-            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeCacheEvidenceTest.kt"
-          ]
+          "associated_tests": []
+        },
+        {
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiRequestEvidenceValidation.kt",
+          "file_name": "ImageGenerationApiRequestEvidenceValidation.kt",
+          "loc": 891,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
         },
         {
           "file_path": "api/local/src/main/java/com/muyuchat/api/local/OpenAiApiCompat.kt",
@@ -1072,6 +1206,43 @@
           "associated_tests": []
         },
         {
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiResponseEvidenceValidation.kt",
+          "file_name": "ImageGenerationApiResponseEvidenceValidation.kt",
+          "loc": 519,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerProtocolCodec.kt",
+          "file_name": "McaLoopbackServerProtocolCodec.kt",
+          "loc": 516,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerTuningControl.kt",
+          "file_name": "McaLoopbackServerTuningControl.kt",
+          "loc": 480,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiRuntime.kt",
+          "file_name": "LocalApiRuntime.kt",
+          "loc": 472,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "app/src/test/java/com/muyuchat/mca/LocalApiRuntimeOwnerTest.kt",
+            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeBackendEvidenceTest.kt",
+            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeBindingsSnapshotTest.kt",
+            "api/local/src/test/java/com/muyuchat/api/local/LocalApiRuntimeCacheEvidenceTest.kt"
+          ]
+        },
+        {
           "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiCapabilityRegistryEndpoints.kt",
           "file_name": "LocalApiCapabilityRegistryEndpoints.kt",
           "loc": 462,
@@ -1080,124 +1251,155 @@
           "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/OpenAiResponsesCompat.kt",
-          "file_name": "OpenAiResponsesCompat.kt",
-          "loc": 214,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/OpenAiResponsesCompatTest.kt"
-          ]
-        },
-        {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiControlPlane.kt",
-          "file_name": "LocalApiControlPlane.kt",
-          "loc": 191,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerChatSse.kt",
+          "file_name": "McaLoopbackServerChatSse.kt",
+          "loc": 408,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalLlmService.kt",
-          "file_name": "LocalLlmService.kt",
-          "loc": 155,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerImageGeneration.kt",
+          "file_name": "McaLoopbackServerImageGeneration.kt",
+          "loc": 380,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/PrivatePathFilter.kt",
-          "file_name": "PrivatePathFilter.kt",
-          "loc": 63,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiRuntimePublicJson.kt",
+          "file_name": "LocalApiRuntimePublicJson.kt",
+          "loc": 357,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/PrivatePathFilterTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/LocalApiCapabilityRegistry.kt",
-          "file_name": "LocalApiCapabilityRegistry.kt",
-          "loc": 60,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerResponsesSse.kt",
+          "file_name": "McaLoopbackServerResponsesSse.kt",
+          "loc": 347,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/LocalApiCapabilityRegistryCoverageTest.kt"
-          ]
+          "associated_tests": []
         },
         {
-          "file_path": "api/local/src/main/java/com/muyuchat/api/local/JsonBooleanField.kt",
-          "file_name": "JsonBooleanField.kt",
-          "loc": 29,
+          "file_path": "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
+          "file_name": "McaLoopbackServer.kt",
+          "loc": 343,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
-            "api/local/src/test/java/com/muyuchat/api/local/JsonBooleanFieldTest.kt"
+            "api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerTest.kt",
+            "api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerWhitespaceContractTest.kt",
+            "artifacts/architecture/20261017-b45-t1-bdevice-bugs/s1/after/api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerTest.kt",
+            "artifacts/architecture/20261017-b45-t1-bdevice-bugs/s1/before/api/local/src/test/java/com/muyuchat/api/local/McaLoopbackServerTest.kt"
           ]
         }
       ],
-      "all_files_count": 13
+      "all_files_count": 30
     },
     {
       "module_name": "feature:chat",
       "path": "feature/chat",
-      "total_files": 71,
-      "total_loc": 32794,
+      "total_files": 142,
+      "total_loc": 37189,
       "key_files": [
         {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImagesWorkspaceOverlay.kt",
-          "file_name": "ChatImagesWorkspaceOverlay.kt",
-          "loc": 1770,
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImagePromptBarScreens.kt",
+          "file_name": "ImagePromptBarScreens.kt",
+          "loc": 711,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageInputSupportScreens.kt",
-          "file_name": "ImageInputSupportScreens.kt",
-          "loc": 1632,
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt",
+          "file_name": "ImageWorkspaceScreens.kt",
+          "loc": 704,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetPreviewOverlay.kt",
+          "file_name": "ImageAssetPreviewOverlay.kt",
+          "loc": 649,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationResultScreens.kt",
+          "file_name": "ImageGenerationResultScreens.kt",
+          "loc": 596,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageInputOptionsPanel.kt",
+          "file_name": "ImageInputOptionsPanel.kt",
+          "loc": 589,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationParameterImport.kt",
+          "file_name": "ImageGenerationParameterImport.kt",
+          "loc": 586,
           "owner": "Port Interface",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationEditor.kt",
-          "file_name": "ImageGenerationEditor.kt",
-          "loc": 1186,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageLibrarySupportScreens.kt",
-          "file_name": "ImageLibrarySupportScreens.kt",
-          "loc": 1174,
-          "owner": "Port Interface",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatDeviceStatusScreens.kt",
-          "file_name": "ChatDeviceStatusScreens.kt",
-          "loc": 1134,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImagePromptTagAutocompleteUi.kt",
-          "file_name": "ImagePromptTagAutocompleteUi.kt",
-          "loc": 1103,
-          "owner": "UI Presentation",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
-            "feature/chat/src/test/java/com/muyuchat/feature/chat/ImagePromptTagAutocompleteUiTest.kt"
+            "feature/chat/src/test/java/com/muyuchat/feature/chat/ImageGenerationParameterImportTest.kt"
+          ]
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImagesWorkspaceMainPage.kt",
+          "file_name": "ChatImagesWorkspaceMainPage.kt",
+          "loc": 584,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskTools.kt",
+          "file_name": "ImageEditorMaskTools.kt",
+          "loc": 581,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageInputAdapterPanels.kt",
+          "file_name": "ImageInputAdapterPanels.kt",
+          "loc": 579,
+          "owner": "Platform / Port Adapter",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenerationSupport.kt",
+          "file_name": "ChatImageGenerationSupport.kt",
+          "loc": 574,
+          "owner": "Port Interface",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationBitmapEditing.kt",
+          "file_name": "ImageGenerationBitmapEditing.kt",
+          "loc": 571,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "feature/chat/src/test/java/com/muyuchat/feature/chat/ImageGenerationBitmapEditingContractTest.kt"
           ]
         },
         {
           "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImagePromptTagAutocomplete.kt",
           "file_name": "ImagePromptTagAutocomplete.kt",
-          "loc": 1086,
+          "loc": 571,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": [
@@ -1208,103 +1410,131 @@
           ]
         },
         {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenAssistantRolePages.kt",
-          "file_name": "ChatScreenAssistantRolePages.kt",
-          "loc": 1078,
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt",
+          "file_name": "ChatScreen.kt",
+          "loc": 561,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatComposerScreens.kt",
-          "file_name": "ChatComposerScreens.kt",
-          "loc": 959,
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/AssistantEditorPage.kt",
+          "file_name": "AssistantEditorPage.kt",
+          "loc": 553,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         },
         {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatGeneratedMessageScreens.kt",
-          "file_name": "ChatGeneratedMessageScreens.kt",
-          "loc": 952,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/AppMenuScreens.kt",
-          "file_name": "AppMenuScreens.kt",
-          "loc": 927,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImagePromptTagAutocompleteStore.kt",
-          "file_name": "ImagePromptTagAutocompleteStore.kt",
-          "loc": 927,
-          "owner": "Persistence / Storage",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "feature/chat/src/test/java/com/muyuchat/feature/chat/ImagePromptTagAutocompleteStoreTest.kt"
-          ]
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/AssistantScreens.kt",
-          "file_name": "AssistantScreens.kt",
-          "loc": 866,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": []
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationImageEditing.kt",
-          "file_name": "ImageGenerationImageEditing.kt",
-          "loc": 816,
-          "owner": "General Component",
-          "status": "LEGACY_ACTIVE",
-          "associated_tests": [
-            "feature/chat/src/test/java/com/muyuchat/feature/chat/ImageGenerationImageEditingTest.kt"
-          ]
-        },
-        {
-          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetScreens.kt",
-          "file_name": "ImageAssetScreens.kt",
-          "loc": 766,
+          "file_path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ContextLibraryPage.kt",
+          "file_name": "ContextLibraryPage.kt",
+          "loc": 540,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 71
+      "all_files_count": 142
     },
     {
       "module_name": "feature:agent",
       "path": "feature/agent",
-      "total_files": 1,
-      "total_loc": 1855,
+      "total_files": 5,
+      "total_loc": 1943,
       "key_files": [
+        {
+          "file_path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentTuningCards.kt",
+          "file_name": "AgentTuningCards.kt",
+          "loc": 578,
+          "owner": "Tuning / Benchmark",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
         {
           "file_path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentScreen.kt",
           "file_name": "AgentScreen.kt",
-          "loc": 1855,
+          "loc": 495,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentAdvancedParams.kt",
+          "file_name": "AgentAdvancedParams.kt",
+          "loc": 472,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentDebugAndHardwareCards.kt",
+          "file_name": "AgentDebugAndHardwareCards.kt",
+          "loc": 311,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentFormattingAndStateExtensions.kt",
+          "file_name": "AgentFormattingAndStateExtensions.kt",
+          "loc": 87,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
         }
       ],
-      "all_files_count": 1
+      "all_files_count": 5
     },
     {
       "module_name": "feature:modelhub",
       "path": "feature/modelhub",
-      "total_files": 3,
-      "total_loc": 3441,
+      "total_files": 10,
+      "total_loc": 3643,
       "key_files": [
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/CloudModelsSection.kt",
+          "file_name": "CloudModelsSection.kt",
+          "loc": 586,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/LocalModelsSection.kt",
+          "file_name": "LocalModelsSection.kt",
+          "loc": 571,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/MarketAndDownloads.kt",
+          "file_name": "MarketAndDownloads.kt",
+          "loc": 539,
+          "owner": "Download Manager",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/RecommendedModelsSection.kt",
+          "file_name": "RecommendedModelsSection.kt",
+          "loc": 443,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
         {
           "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/ModelHubScreen.kt",
           "file_name": "ModelHubScreen.kt",
-          "loc": 2995,
+          "loc": 358,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/RecommendedModelCard.kt",
+          "file_name": "RecommendedModelCard.kt",
+          "loc": 353,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
@@ -1320,6 +1550,22 @@
           ]
         },
         {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/ModelHubSharedComponents.kt",
+          "file_name": "ModelHubSharedComponents.kt",
+          "loc": 176,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/ModelHubUiTypes.kt",
+          "file_name": "ModelHubUiTypes.kt",
+          "loc": 171,
+          "owner": "UI Presentation",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
           "file_path": "feature/modelhub/src/main/java/com/muyuchat/feature/modelhub/RecommendationPresentation.kt",
           "file_name": "RecommendationPresentation.kt",
           "loc": 121,
@@ -1330,24 +1576,90 @@
           ]
         }
       ],
-      "all_files_count": 3
+      "all_files_count": 10
     },
     {
       "module_name": "feature:settings",
       "path": "feature/settings",
-      "total_files": 1,
-      "total_loc": 2960,
+      "total_files": 9,
+      "total_loc": 3149,
       "key_files": [
         {
-          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt",
-          "file_name": "SettingsScreens.kt",
-          "loc": 2960,
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/WebSearchDiagnostics.kt",
+          "file_name": "WebSearchDiagnostics.kt",
+          "loc": 600,
           "owner": "General Component",
           "status": "LEGACY_ACTIVE",
           "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsSearchScreen.kt",
+          "file_name": "SettingsSearchScreen.kt",
+          "loc": 525,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/LocalApiToolScreen.kt",
+          "file_name": "LocalApiToolScreen.kt",
+          "loc": 464,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsLogsPrivacyScreens.kt",
+          "file_name": "SettingsLogsPrivacyScreens.kt",
+          "loc": 395,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsRuntimeScreen.kt",
+          "file_name": "SettingsRuntimeScreen.kt",
+          "loc": 368,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt",
+          "file_name": "SettingsScreens.kt",
+          "loc": 298,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsSupport.kt",
+          "file_name": "SettingsSupport.kt",
+          "loc": 286,
+          "owner": "Port Interface",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/LocalApiSelfTestSupport.kt",
+          "file_name": "LocalApiSelfTestSupport.kt",
+          "loc": 207,
+          "owner": "Port Interface",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": []
+        },
+        {
+          "file_path": "feature/settings/src/main/java/com/muyuchat/feature/settings/LocalApiSelfTestImage.kt",
+          "file_name": "LocalApiSelfTestImage.kt",
+          "loc": 6,
+          "owner": "General Component",
+          "status": "LEGACY_ACTIVE",
+          "associated_tests": [
+            "feature/settings/src/test/java/com/muyuchat/feature/settings/LocalApiSelfTestImageTest.kt"
+          ]
         }
       ],
-      "all_files_count": 1
+      "all_files_count": 9
     }
   ]
 }

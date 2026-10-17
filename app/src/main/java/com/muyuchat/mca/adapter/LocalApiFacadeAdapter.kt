@@ -18,6 +18,41 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import org.json.JSONObject
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
+
+/**
+ * Explicit outcome of one Local API SSE stream. A bounded stream that could not deliver every frame
+ * must report *why* it ended instead of ending as if the terminal had been reached.
+ */
+sealed interface SseStreamOutcome {
+    val requestId: String
+
+    data class Completed(
+        override val requestId: String,
+        val terminalEvent: String
+    ) : SseStreamOutcome
+
+    data class Overflowed(
+        override val requestId: String,
+        val droppedSequence: Long,
+        val droppedTerminal: Boolean,
+        val deliveredFrames: Int
+    ) : SseStreamOutcome
+
+    data class Disconnected(override val requestId: String) : SseStreamOutcome
+}
+
+/**
+ * Raised to the SSE collector when the bounded frame buffer refused a frame. The message states
+ * whether the refused frame was the terminal, because a dropped terminal must never be silent.
+ */
+class SseStreamOverflowException(
+    override val message: String,
+    val requestId: String,
+    val droppedSequence: Long,
+    val droppedTerminal: Boolean
+) : IllegalStateException(message)
 
 /**
  * Result representation for Local API invocations.
@@ -55,8 +90,25 @@ class LocalApiFacadeAdapter(
     private val chatFacade: ChatExecutionFacade,
     private val imageFacade: ImageGenerationFacade,
     private val runtimeFacade: RuntimeFacade,
-    private val expectedApiKey: String? = null
+    private val expectedApiKey: String? = null,
+    private val sseBufferCapacity: Int = DEFAULT_SSE_BUFFER_CAPACITY
 ) {
+    private val sseOutcomes = ConcurrentHashMap<String, SseStreamOutcome>()
+
+    /**
+     * Explicit stream outcome for a request, or null while the stream is still open. Distinguishes
+     * "delivered the terminal" from "the bounded buffer overflowed" and "the client disconnected",
+     * none of which may be inferred from a silently ended flow.
+     */
+    fun sseOutcome(requestId: String): SseStreamOutcome? = sseOutcomes[requestId]
+
+    companion object {
+        /** Bounded per-stream frame buffer: frames beyond this are refused, never silently dropped. */
+        const val DEFAULT_SSE_BUFFER_CAPACITY = 64
+
+        private const val SSE_BACKPRESSURE_REASON = "SSE stream backpressure overflow"
+    }
+
     /**
      * Handles an incoming OpenAI-compatible Chat Completion HTTP POST request.
      */
@@ -100,29 +152,53 @@ class LocalApiFacadeAdapter(
             requestId = requestId
         )
 
-        // Gate 4: Bridge domain callback events into SSE stream
+        // Gate 4: Bridge domain callback events into a bounded SSE stream. A frame that the buffer
+        // refuses is never dropped silently: it closes the stream with an explicit, queryable
+        // overflow outcome (and settles the request) instead of ending as if it were complete.
         val eventBridge = LocalApiEventBridge(resumeAfterSequence = resumeAfterSequence)
-        val eventChannel = Channel<SseFrame>(Channel.BUFFERED)
+        val dispatchedIdentity = AtomicReference<RequestIdentity?>(null)
+        val stream = SseFrameStream(
+            requestId = requestId,
+            capacity = sseBufferCapacity,
+            onOverflow = { failure ->
+                sseOutcomes[requestId] = failure.outcome
+                // Settlement is identity-carrying; the identity is published as soon as dispatch
+                // returns, and the post-dispatch check below closes the (unreachable) window in
+                // which an overflow could be observed earlier.
+                dispatchedIdentity.get()?.let { dispatched ->
+                    chatFacade.settleStreamFailure(dispatched, SSE_BACKPRESSURE_REASON)
+                }
+            }
+        )
 
         val identity = chatFacade.dispatchChat(command) { event ->
             val frame = eventBridge.mapEventToSse(event)
             if (frame != null) {
-                eventChannel.trySend(frame)
-            }
-            if (eventBridge.isTerminalEmitted) {
-                eventChannel.close()
+                stream.publish(frame, event.sequence, event.isTerminal)
             }
         }
+        dispatchedIdentity.set(identity)
+        stream.awaitFailure()?.let { chatFacade.settleStreamFailure(identity, SSE_BACKPRESSURE_REASON) }
 
         val sseFlow: Flow<SseFrame> = flow {
+            var completed = false
             try {
-                for (frame in eventChannel) {
+                for (frame in stream.channel) {
                     emit(frame)
                 }
+                stream.awaitFailure()?.let { throw it.toException() }
+                sseOutcomes[requestId] = SseStreamOutcome.Completed(
+                    requestId = requestId,
+                    terminalEvent = stream.terminalEvent
+                )
+                completed = true
             } finally {
-                // Cooperative cancel if the client disconnected prematurely
-                if (chatFacade.isChatActive(identity.requestId)) {
-                    chatFacade.cancelChat(identity.requestId, "Client connection closed")
+                // A collector that left before the terminal arrived is a disconnect, and the request
+                // must be cancelled cooperatively with an outcome that says so. The cancel is
+                // attempt-checked: this stream may only cancel the exact attempt it dispatched.
+                if (!completed && chatFacade.isChatActive(identity.requestId)) {
+                    sseOutcomes[requestId] = SseStreamOutcome.Disconnected(identity.requestId)
+                    chatFacade.cancelChat(identity, "Client connection closed")
                 }
             }
         }
@@ -181,26 +257,44 @@ class LocalApiFacadeAdapter(
         )
 
         val bridge = LocalApiEventBridge()
-        val eventChannel = Channel<SseFrame>(Channel.BUFFERED)
+        val dispatchedIdentity = AtomicReference<RequestIdentity?>(null)
+        val stream = SseFrameStream(
+            requestId = requestId,
+            capacity = sseBufferCapacity,
+            onOverflow = { failure ->
+                sseOutcomes[requestId] = failure.outcome
+                dispatchedIdentity.get()?.let { dispatched ->
+                    imageFacade.settleStreamFailure(dispatched, SSE_BACKPRESSURE_REASON)
+                }
+            }
+        )
 
         val identity = imageFacade.dispatchImage(command) { event ->
             val frame = bridge.mapEventToSse(event)
             if (frame != null) {
-                eventChannel.trySend(frame)
-            }
-            if (bridge.isTerminalEmitted) {
-                eventChannel.close()
+                stream.publish(frame, event.sequence, event.isTerminal)
             }
         }
+        dispatchedIdentity.set(identity)
+        stream.awaitFailure()?.let { imageFacade.settleStreamFailure(identity, SSE_BACKPRESSURE_REASON) }
 
         val sseFlow: Flow<SseFrame> = flow {
+            var completed = false
             try {
-                for (frame in eventChannel) {
+                for (frame in stream.channel) {
                     emit(frame)
                 }
+                stream.awaitFailure()?.let { throw it.toException() }
+                sseOutcomes[requestId] = SseStreamOutcome.Completed(
+                    requestId = requestId,
+                    terminalEvent = stream.terminalEvent
+                )
+                completed = true
             } finally {
-                if (imageFacade.isImageActive(identity.requestId)) {
-                    imageFacade.cancelImage(identity.requestId, "Client connection closed")
+                // Attempt-checked cancel: this stream may only cancel the exact attempt it dispatched.
+                if (!completed && imageFacade.isImageActive(identity.requestId)) {
+                    sseOutcomes[requestId] = SseStreamOutcome.Disconnected(identity.requestId)
+                    imageFacade.cancelImage(identity, "Client connection closed")
                 }
             }
         }
@@ -216,5 +310,84 @@ class LocalApiFacadeAdapter(
      */
     fun cancelActiveRequest(requestId: String, reason: String = "Client requested abort"): Boolean {
         return chatFacade.cancelChat(requestId, reason) || imageFacade.cancelImage(requestId, reason)
+    }
+
+    /**
+     * Bounded frame buffer for one SSE stream.
+     *
+     * The buffer has a hard capacity: a frame that does not fit is *refused*, the stream is closed
+     * with an explicit overflow failure (including whether the refused frame was the terminal), and
+     * the request owner is told to settle it. Nothing is dropped without a record, and the terminal
+     * can never disappear silently.
+     */
+    private class SseFrameStream(
+        private val requestId: String,
+        capacity: Int,
+        private val onOverflow: (SseOverflow) -> Unit
+    ) {
+        /** One reserved slot is always left for the terminal, so a full buffer cannot hide it. */
+        val channel = Channel<SseFrame>(capacity.coerceAtLeast(2))
+        private val failure = AtomicReference<SseOverflow?>(null)
+
+        @Volatile private var closed = false
+
+        @Volatile var terminalEvent: String = ""
+
+            private set
+
+        private var deliveredFrames = 0
+
+        fun publish(frame: SseFrame, sequence: Long, isTerminal: Boolean) {
+            if (closed) return
+            val result = channel.trySend(frame)
+            if (result.isSuccess) {
+                deliveredFrames++
+                if (isTerminal) {
+                    terminalEvent = frame.event.orEmpty()
+                    closed = true
+                    channel.close()
+                }
+                return
+            }
+            // Bounded backpressure: refuse rather than silently drop, and report exactly what was
+            // refused. The channel is closed so the collector drains what was accepted and then
+            // observes the explicit failure.
+            val overflow = SseOverflow(
+                requestId = requestId,
+                droppedSequence = sequence,
+                droppedTerminal = isTerminal,
+                deliveredFrames = deliveredFrames
+            )
+            if (failure.compareAndSet(null, overflow)) {
+                closed = true
+                channel.close()
+                onOverflow(overflow)
+            }
+        }
+
+        fun awaitFailure(): SseOverflow? = failure.get()
+    }
+
+    private data class SseOverflow(
+        val requestId: String,
+        val droppedSequence: Long,
+        val droppedTerminal: Boolean,
+        val deliveredFrames: Int
+    ) {
+        val outcome: SseStreamOutcome
+            get() = SseStreamOutcome.Overflowed(
+                requestId = requestId,
+                droppedSequence = droppedSequence,
+                droppedTerminal = droppedTerminal,
+                deliveredFrames = deliveredFrames
+            )
+
+        fun toException(): SseStreamOverflowException = SseStreamOverflowException(
+            message = "Local API SSE buffer overflow for $requestId at sequence $droppedSequence" +
+                if (droppedTerminal) " (the terminal frame was refused)." else ".",
+            requestId = requestId,
+            droppedSequence = droppedSequence,
+            droppedTerminal = droppedTerminal
+        )
     }
 }

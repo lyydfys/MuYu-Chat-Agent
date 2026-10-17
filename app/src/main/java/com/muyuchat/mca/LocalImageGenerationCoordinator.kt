@@ -8,6 +8,12 @@ package com.muyuchat.mca
  * bind or native load is attempted.
  */
 internal class LocalImageGenerationCoordinator {
+    // The generated copy() must not expose the internal primary constructor to callers outside the
+    // module: lease identity (not value equality) is what releases a request, and a publicly
+    // constructible value-equal lease is exactly the shape that invariant must reject.
+    // ConsistentCopyVisibility keeps copy() at the constructor's own visibility instead of
+    // widening it, while remaining binary compatible with the class's existing internal surface.
+    @ConsistentCopyVisibility
     internal data class Lease internal constructor(
         val requestId: String,
         internal val epoch: Long

@@ -79,8 +79,9 @@ class ChatContextComposerTest {
 
     @Test
     fun enginePreservesComposedContextWhenAppendingDeviceClockContext() {
-        val engineSource = sourceFile(
-            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt"
+        val engineSource = sourceFiles(
+            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceService.kt",
+            "core/engine/src/main/java/com/muyuchat/core/engine/McaInferenceStreamChat.kt"
         )
         val mergeStart = engineSource.indexOf("val deviceClockContext =")
         val admissionStart = engineSource.indexOf(
@@ -178,6 +179,9 @@ class ChatContextComposerTest {
         }
         error("Unable to locate $relativePath")
     }
+
+    private fun sourceFiles(vararg relativePaths: String): String =
+        relativePaths.joinToString("\n") { sourceFile(it) }
 
     private fun functionBody(source: String, signature: String): String {
         val start = source.indexOf(signature)

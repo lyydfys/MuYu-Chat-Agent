@@ -2,7 +2,9 @@ package com.muyuchat.mca.facade
 
 import com.muyuchat.core.engine.contract.RequestState
 import com.muyuchat.core.engine.contract.RuntimeEpoch
-import com.muyuchat.core.engine.runtime.BackendRuntimeOwner
+import com.muyuchat.core.engine.runtime.BackendPort
+import com.muyuchat.core.engine.runtime.EnginePort
+import com.muyuchat.core.engine.runtime.HardwareProbeAdvisory
 import com.muyuchat.core.engine.runtime.RuntimeSupervisor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -86,30 +88,61 @@ class FacadeContractTest {
     }
 
     @Test
-    fun testModelLifecycleFacadeManagement() {
+    fun testModelLifecycleFacadeRefusesToFakeALoad() {
         val supervisor = RuntimeSupervisor(initialEpoch = 1L)
-        val backend = BackendRuntimeOwner(
-            backendKind = "GenericCpu",
-            epoch = supervisor.currentEpoch
-        )
+        // Recording loader: reports the truth (nothing was loaded) and records whether the
+        // facade released the engine before failing. A fake backend that reported success here
+        // would re-introduce exactly the fake-ready defect this test exists to prevent.
+        val engine = RecordingNotReadyEngine("engine-1", "/models/never-loaded.bin")
+        val backend = RecordingBackend(backendKind = "GenericCpu", epoch = supervisor.currentEpoch, engine = engine)
         supervisor.registerBackend("GenericCpu", backend)
 
         val modelFacade = ModelLifecycleFacade(supervisor)
 
-        // Create a temporary mock model file
         val tempModel = File.createTempFile("mca_test_model", ".bin")
         try {
-            val engine = modelFacade.loadModel("GenericCpu", tempModel.absolutePath)
-            assertNotNull(engine)
-            assertTrue(engine.isReady)
-            assertTrue(modelFacade.isModelLoaded(engine.engineId))
+            val failure = runCatching { modelFacade.loadModel("GenericCpu", tempModel.absolutePath) }
+                .exceptionOrNull()
 
-            val unloaded = modelFacade.unloadModel(engine.engineId)
-            assertTrue(unloaded)
+            assertTrue(
+                "an unwired skeleton must fail the load explicitly instead of reporting a fake ready engine",
+                failure is UnsupportedOperationException
+            )
+            assertTrue("the failure must name the backend", failure!!.message!!.contains("GenericCpu"))
+
+            // Resource contract: the engine that could not become ready is closed and is NOT
+            // registered as a loaded model.
+            assertTrue("the unusable engine must be released", engine.closeCount == 1)
             assertFalse(modelFacade.isModelLoaded(engine.engineId))
+            assertFalse(modelFacade.isModelLoaded("never-created"))
+            // Nothing was leaked into the facade, so unloading everything is a no-op that must not throw.
+            modelFacade.unloadAll()
         } finally {
             tempModel.delete()
             supervisor.shutdownProcess()
         }
+    }
+
+    private class RecordingNotReadyEngine(
+        override val engineId: String,
+        override val modelPath: String
+    ) : EnginePort {
+        var closeCount = 0
+        override val isReady: Boolean = false
+        override fun createSession(sessionId: String) = throw UnsupportedOperationException("not ready")
+        override fun unload() = Unit
+        override fun close() { closeCount++ }
+    }
+
+    private class RecordingBackend(
+        override val backendKind: String,
+        override val epoch: RuntimeEpoch,
+        private val engine: EnginePort
+    ) : BackendPort {
+        override val hardwareAdvisory = HardwareProbeAdvisory()
+        override val isInitialized = true
+        override fun createEngine(modelPath: String) = engine
+        override fun shutdown() = Unit
+        override fun close() = Unit
     }
 }

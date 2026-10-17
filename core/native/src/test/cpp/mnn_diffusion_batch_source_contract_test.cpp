@@ -57,8 +57,14 @@ void require_sequence(
 }  // namespace
 
 int main(int argc, char** argv) {
-    assert(argc == 2);
-    const auto source = read_text(argv[1]);
+    // T2B3: the batch contract's symbols now span the SD15-direct TU and the
+    // tokenize TU; argv is a file list and the bodies are searched in the union.
+    assert(argc >= 2);
+    std::string source;
+    for (int index = 1; index < argc; ++index) {
+        source += read_text(argv[index]);
+        source += "\n";
+    }
 
     const auto smoke = function_body(source, "json run_unet_interpreter_smoke(");
     require_contains(smoke, "diffusionBatchCandidates(true)");

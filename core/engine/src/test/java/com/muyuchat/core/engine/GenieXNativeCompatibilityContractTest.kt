@@ -8,9 +8,8 @@ import org.junit.Test
 class GenieXNativeCompatibilityContractTest {
     @Test
     fun geniexSdkInitializationIsDeferredUntilItsRunnerLoads() {
-        val runnerSource = sourceFile(
-            "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt"
-        ).substringAfter("internal class GenieXChatRunner(")
+        val runnerSource = genieXChatRunnerFamilySources()
+            .substringAfter("internal class GenieXChatRunner(")
         val initBody = functionBody(runnerSource, "override fun initBackends(nativeLibDir: String)")
         val loadBody = functionBody(
             runnerSource,
@@ -63,6 +62,12 @@ class GenieXNativeCompatibilityContractTest {
         }
         error("Unable to locate source file: $relativePath")
     }
+
+    private fun genieXChatRunnerFamilySources(): String = listOf(
+        "core/engine/src/main/java/com/muyuchat/core/engine/GenieXChatRunner.kt",
+        "core/engine/src/main/java/com/muyuchat/core/engine/GenieXChatRunnerLoad.kt",
+        "core/engine/src/main/java/com/muyuchat/core/engine/GenieXChatRunnerGeneration.kt"
+    ).joinToString("\n") { sourceFile(it) }
 
     private fun functionBody(source: String, signature: String): String {
         val start = source.indexOf(signature)

@@ -4,7 +4,7 @@ package com.muyuchat.core.download
  * Detects whether a chipset code identifies a Snapdragon part.
  *
  * One implementation, in one place, on purpose. This same five-line function existed twice
- * -- as `isSnapdragonChipsetCode` in ModelScopeTypes.kt and as
+ * -- as `isSnapdragonChipsetCode` in the former ModelScopeTypes aggregate and as
  * `isSnapdragonChipsetCodeForRecommendation` in feature:modelhub's RecommendationCatalog.kt --
  * with byte-identical bodies. Two copies of a vendor-detection predicate is how a ranking
  * hint eventually becomes a gate in one place and not the other.

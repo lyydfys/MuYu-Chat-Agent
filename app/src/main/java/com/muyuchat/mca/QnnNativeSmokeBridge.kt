@@ -99,7 +99,7 @@ internal data class QnnBinaryMetadataDiagnostics(
                 socModel = json.optInt("socModel", 0),
                 contextBlobSize = json.optLong("contextBlobSize", 0L),
                 graphCount = json.optInt("graphCount", 0),
-                graphNames = json.optJSONArray("graphNames").toStringList(),
+                graphNames = json.optJSONArray("graphNames")?.toStringList().orEmpty(),
                 message = json.optString("message")
             )
         }

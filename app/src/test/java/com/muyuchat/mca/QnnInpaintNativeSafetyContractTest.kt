@@ -24,9 +24,9 @@ class QnnInpaintNativeSafetyContractTest {
     @Test
     fun `masked rgb encode is reserved for the explicit nine channel topology`() {
         val bridge = source("core/native/src/main/cpp/qnn_native_bridge.cpp")
-        val encoder = bridge.substring(
-            bridge.indexOf("bool qnn_run_shared_img2img_encoder("),
-            bridge.indexOf("std::string qnn_semantic_generate_json("),
+        val encoder = bodyOf(
+            "bool qnn_run_shared_img2img_encoder(",
+            "std::string qnn_semantic_generate_json("
         )
 
         assertOrdered(
@@ -82,7 +82,15 @@ class QnnInpaintNativeSafetyContractTest {
     @Test
     fun `split sdxl preserves source before preview and pixel blends before png`() {
         val split = source("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
-        val unet = runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp") }.getOrElse {
+        // T2B18/R7-C7: the UNet phase body moved out of the header into three mca_qnn_runtime
+        // translation units.  The isolated-phases contract block stays first (it carries the
+        // scheduler/preserve ordering contract in its original spelling) and the real code
+        // follows so every needle below keeps observing the implementation.
+        val unet = split +
+            runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.cpp") }.getOrDefault("") +
+            runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_tiling.cpp") }.getOrDefault("") +
+            runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_execution.cpp") }.getOrDefault("") +
+            runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp") }.getOrElse {
             split.substring(
                 split.indexOf("std::string qnn_sdxl_unet_phase_json("),
                 split.indexOf("std::string qnn_sdxl_vae_phase_json("),
@@ -165,7 +173,49 @@ class QnnInpaintNativeSafetyContractTest {
         assertFalse(verifier.contains("recommendedModelId"))
     }
 
-    private fun source(path: String): String {
+    // The QNN bridge was slimmed from ~11.5k lines to ~1k by extracting the graph execution,
+    // conditioning, semantic and tensor-quantizer logic into mca/qnn modules (and leaving only the
+    // no-SDK fallbacks inline).  Tests in this file assert on facts that now live in those modules,
+    // so reading the bridge alone would make them assert against the fallback stubs.  Nothing about
+    // what is asserted changes below -- only the set of files a "bridge" read is composed from.
+    private val qnnExtractedModules = listOf(
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_pipeline.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_unet.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_ultrafix.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_sdxl.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_vae_decode.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_model_execution_img2img_encoder.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_request.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_conditioning.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_sdxl.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_stage_runner.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_output.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_evidence.cpp",
+    )
+
+    // T2B22-T4: the inpaint verifier bodies moved to their own files.  Reading the contract
+    // file unions those bodies back in, so every needle below keeps observing the same text;
+    // nothing about what is asserted changes.
+    private val qnnInpaintContractModules = listOf(
+        "app/src/main/java/com/muyuchat/mca/QnnInpaintSharedValidation.kt",
+        "app/src/main/java/com/muyuchat/mca/QnnInpaintSplitValidation.kt",
+    )
+
+    private fun source(relativePath: String): String {
+        val primary = readSource(relativePath)
+        if (relativePath.endsWith("QnnInpaintExecutionContract.kt")) {
+            return primary + qnnInpaintContractModules.joinToString("") { module ->
+                runCatching { readSource(module) }.getOrDefault("")
+            }
+        }
+        if (!relativePath.endsWith("qnn_native_bridge.cpp")) return primary
+        return primary + qnnExtractedModules.joinToString("") { module ->
+            runCatching { readSource(module) }.getOrDefault("")
+        }
+    }
+
+    private fun readSource(path: String): String {
         var current = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(8) {
             File(current, path).takeIf(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
@@ -182,4 +232,72 @@ class QnnInpaintNativeSafetyContractTest {
             cursor = index + fragment.length
         }
     }
+
+    /**
+     * Every QNN source that this contract now spans.
+     *
+     * The bridge used to hold all of this inline.  It was slimmed from ~11.5k lines to ~1k by
+     * extracting graph execution, conditioning, semantic and quantizer logic into mca/qnn modules,
+     * so a fact that used to be one `bridge.indexOf(...)` away may now live in a different file.
+     * Body extraction therefore searches **within a single source**, which is where the code
+     * actually is -- concatenating first would produce index ranges that span files and mean
+     * nothing.
+     */
+    private val qnnSources: List<String> by lazy {
+        buildList {
+            add(source("core/native/src/main/cpp/qnn_native_bridge.cpp"))
+            add(runCatching { source("core/native/src/main/cpp/mca/qnn/qnn_bridge_payloads.cpp") }.getOrDefault(""))
+            listOf(
+                "core/native/src/main/cpp/mca/qnn/qnn_system_symbol_loader.hpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.hpp",
+            ).forEach { add(runCatching { source(it) }.getOrDefault("")) }
+            listOf(
+                "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_pipeline.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_unet.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_ultrafix.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_sdxl.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_vae_decode.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_model_execution_img2img_encoder.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_pipeline.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_token_payload.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_json_fields.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_asset_evidence.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_asset_capture.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_conditioning_handoff_binding.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_request.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_conditioning.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_sdxl.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_stage_runner.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_output.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_semantic_evidence.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_graph_executor_helper.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_tensor_quantizer.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_tensor_inspect.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_system_symbol_loader.cpp",
+                "core/native/src/main/cpp/mca/qnn/qnn_image_writer.cpp",
+            ).forEach { add(runCatching { source(it) }.getOrDefault("")) }
+        }
+    }
+
+    /** The single source that contains [anchor], or null. */
+    private fun sourceContaining(anchor: String): String? =
+        qnnSources.firstOrNull { it.contains(anchor) }
+
+    /** True when no QNN source contains [fragment] -- the strong form of the old assertFalse. */
+    private fun absentEverywhere(fragment: String): Boolean =
+        qnnSources.none { it.contains(fragment) }
+
+    /** The text between two anchors located **inside the same source file**. */
+    private fun bodyOf(startAnchor: String, endAnchor: String): String {
+        for (src in qnnSources) {
+            val start = src.indexOf(startAnchor)
+            if (start < 0) continue
+            val end = src.indexOf(endAnchor, start)
+            if (end > start) return src.substring(start, end)
+        }
+        error("Unable to locate a single source containing '$startAnchor' .. '$endAnchor'")
+    }
+
 }

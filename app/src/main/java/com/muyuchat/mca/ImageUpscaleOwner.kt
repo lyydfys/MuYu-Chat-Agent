@@ -178,6 +178,13 @@ private fun LocalImageProgress.toImageUpscaleMessage(): String {
             port.context,
             McaGenerationForegroundService.KIND_IMAGE
         )
+        // The lease is acquired outside the coroutine, so the body's finally block is not
+        // sufficient: `launch` never runs the body of a job that is already cancelled (scope
+        // cancelled, or cancelled between launch and dispatch). Without this handler the lease
+        // stays in the registry, the last-owner stopService is never dispatched and the ongoing
+        // generation notification is pinned forever. `release` is idempotent and identity-checked,
+        // so the normal path releasing here as well cannot double-stop or stop another owner.
+        val releaseForegroundLease = { McaGenerationForegroundService.release(port.context, foregroundLease) }
         val executionJob = scope.launch(Dispatchers.IO) {
             var unpublishedImage: ImageAssetRecord? = null
             try {
@@ -385,9 +392,12 @@ private fun LocalImageProgress.toImageUpscaleMessage(): String {
                 }
                 if (imageUpscaleJob === executionJob) imageUpscaleJob = null
             } finally {
-                McaGenerationForegroundService.release(port.context, foregroundLease)
+                releaseForegroundLease()
             }
         }
+        // Compensating release for the case where the coroutine body never started. Idempotent:
+        // a normal run already released above, so this only fires when the body was skipped.
+        executionJob.invokeOnCompletion { releaseForegroundLease() }
     }
 
     fun cancelImageUpscale(scope: CoroutineScope) {

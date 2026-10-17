@@ -85,7 +85,8 @@ class PersistentPrefixNativeContractTest {
     }
 
     private fun persistentPrefixPreparationBody(): String = functionBody(
-        source = sourceFile("core/native/src/main/cpp/native_engine.cpp"),
+        source = sourceFile("core/native/src/main/cpp/native_engine.cpp") +
+            sourceFile("core/native/src/main/cpp/native_engine_prefix_cache.cpp"),
         signature = "PersistentPrefixPreparation prepare_persistent_prefix_locked("
     )
 

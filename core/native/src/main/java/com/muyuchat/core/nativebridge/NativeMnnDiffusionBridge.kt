@@ -2,15 +2,33 @@ package com.muyuchat.core.nativebridge
 
 class NativeMnnDiffusionBridge {
     companion object {
-        val loadError: Throwable? = runCatching {
+        /**
+         * Failure to load `libmca_mnn_native.so` itself. Only this condition means
+         * "the MNN diffusion bridge is not packaged in this APK".
+         */
+        private val libraryLoadError: Throwable? = runCatching {
             System.loadLibrary("mca_mnn_native")
         }.exceptionOrNull()
 
+        /**
+         * Linkage failure of the capability probe. A JNI entrypoint missing from
+         * an otherwise loadable library is a packaging/link defect, not "this APK
+         * has no MNN diffusion capability", so it is reported through [loadError]
+         * instead of being silently folded into `runnerReady == false`.
+         */
+        private val entryPointLoadError: Throwable? = libraryLoadError ?: runCatching {
+            NativeMnnDiffusionBridge().isRunnerReady()
+        }.exceptionOrNull()
+
+        val loadError: Throwable?
+            get() = libraryLoadError ?: entryPointLoadError
+
         val isAvailable: Boolean
-            get() = loadError == null
+            get() = libraryLoadError == null
 
         val runnerReady: Boolean
-            get() = isAvailable && runCatching { NativeMnnDiffusionBridge().isRunnerReady() }.getOrDefault(false)
+            get() = libraryLoadError == null && entryPointLoadError == null &&
+                runCatching { NativeMnnDiffusionBridge().isRunnerReady() }.getOrDefault(false)
     }
 
     external fun isRunnerReady(): Boolean

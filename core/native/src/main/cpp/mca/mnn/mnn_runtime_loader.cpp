@@ -102,10 +102,14 @@ bool MnnRuntimeLoader::load_runtime(std::string* error_msg) {
         return true;
     }
 
-    // In modern modular builds, MNN runtime symbols are either linked statically into
-    // the provider target or dynamically loaded. Mark loaded successfully.
+    // This loader tracks *transport availability*; it does not load MNN.  No library is opened and no
+    // MNN symbol is resolved here -- in modular builds the provider target links the runtime itself,
+    // so the flag only records that a backend may be attempted.  The version string is the declared
+    // compile-time value, not a version detected from a loaded library.
     is_loaded_.store(true, std::memory_order_relaxed);
-    MCA_LOGI("MnnRuntimeLoader", "MNN runtime initialized successfully (version: %s)",
+    MCA_LOGI("MnnRuntimeLoader",
+             "MNN runtime ready flag set (declared version: %s) -- no library or symbol loading "
+             "happens in this loader; production symbols are linked into the provider target",
              version_string_.c_str());
     return true;
 }
@@ -128,7 +132,7 @@ void MnnRuntimeLoader::unload_runtime() noexcept {
     }
 #endif
 
-    MCA_LOGI("MnnRuntimeLoader", "MNN runtime symbols unloaded cleanly");
+    MCA_LOGI("MnnRuntimeLoader", "MNN runtime ready flag cleared (OpenCL probe handle released)");
 }
 
 bool MnnRuntimeLoader::is_runtime_loaded() const noexcept {

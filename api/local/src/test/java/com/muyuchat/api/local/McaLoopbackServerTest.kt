@@ -2491,6 +2491,108 @@ class McaLoopbackServerTest {
     }
 
     @Test
+    fun stoppedStreamingChatClosesWithStopFrameAndDone() {
+        val firstChunkDelivered = CountDownLatch(1)
+        val providerCancelled = CountDownLatch(1)
+        val streamResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flow {
+                    emit(GenerateEvent.Chunk(text = "stop-me", stats = RuntimeStats(completionTokens = 1)))
+                    firstChunkDelivered.countDown()
+                    try {
+                        awaitCancellation()
+                    } finally {
+                        providerCancelled.countDown()
+                    }
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    streamResponse.set(
+                        rawHttp(
+                            port,
+                            chatRequest(
+                                """{"model":"active-model","messages":[{"role":"user","content":"stop"}],"stream":true}"""
+                            ).replace(
+                                "Host: 127.0.0.1\r\n",
+                                "Host: 127.0.0.1\r\nX-MCA-Request-Id: sse-stop-1\r\n"
+                            )
+                        )
+                    )
+                }
+            }.apply { start() }
+
+            assertTrue(firstChunkDelivered.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(
+                port,
+                authenticatedPost("/v1/generate/stop", body = """{"request_id":"sse-stop-1"}""")
+            )
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(stopResponse.contains("\"stopped\":true"))
+            requestThread.join(5_000L)
+            assertFalse("stopped SSE stream must not hang", requestThread.isAlive)
+            val response = requireNotNull(streamResponse.get())
+            assertTrue(response.startsWith("HTTP/1.1 200 OK"))
+            assertTrue(response.contains("stop-me"))
+            assertTrue(
+                "stopped stream must close with finish_reason:stop",
+                response.contains("\"finish_reason\":\"stop\"")
+            )
+            assertEquals(1, Regex("""data: \[DONE\]""").findAll(response).count())
+            assertTrue(response.trimEnd().endsWith("data: [DONE]"))
+            assertTrue("provider flow should observe cancellation", providerCancelled.await(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun stoppedStreamingChatWithoutVisibleContentStillWritesTheTerminalFrame() {
+        val providerRunning = CountDownLatch(1)
+        val streamResponse = AtomicReference<String>()
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = {
+                flow {
+                    providerRunning.countDown()
+                    awaitCancellation()
+                }
+            }
+            val requestThread = Thread {
+                runCatching {
+                    streamResponse.set(
+                        rawHttp(
+                            port,
+                            chatRequest(
+                                """{"model":"active-model","messages":[{"role":"user","content":"stop-empty"}],"stream":true}"""
+                            ).replace(
+                                "Host: 127.0.0.1\r\n",
+                                "Host: 127.0.0.1\r\nX-MCA-Request-Id: sse-stop-empty\r\n"
+                            )
+                        )
+                    )
+                }
+            }.apply { start() }
+
+            assertTrue(providerRunning.await(5, TimeUnit.SECONDS))
+            val stopResponse = rawHttp(
+                port,
+                authenticatedPost("/v1/generate/stop", body = """{"request_id":"sse-stop-empty"}""")
+            )
+
+            assertTrue(stopResponse.startsWith("HTTP/1.1 200 OK"))
+            requestThread.join(5_000L)
+            assertFalse(requestThread.isAlive)
+            val response = requireNotNull(streamResponse.get())
+            assertFalse(
+                "a user stop is not an empty-visible-output failure",
+                response.contains("generation_empty_visible_output")
+            )
+            assertTrue(response.contains("\"finish_reason\":\"stop\""))
+            assertTrue(response.trimEnd().endsWith("data: [DONE]"))
+        }
+    }
+
+    @Test
     fun standardChatRouteRejectsEmptyMessagesBeforeProviderExecution() {
         val calls = AtomicInteger(0)
         withServer(apiKey = "secret") { port ->
@@ -2670,6 +2772,68 @@ class McaLoopbackServerTest {
                 rawHttp(port, authenticatedPost("/v1/generate/stop"))
                 requestThread.join(5_000L)
             }
+        }
+    }
+
+    @Test
+    fun repeatedRequestIdOnImagesRouteWritesVisible409Json() {
+        withServer(apiKey = "secret") { port ->
+            val first = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = """{"prompt":"obs1"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            assertTrue(first.startsWith("HTTP/1.1 503 Service Unavailable"))
+
+            val duplicate = rawHttp(
+                port,
+                authenticatedPost("/v1/images/generations", body = """{"prompt":"obs1"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            // OBS-1: this rejection used to escape handle() through the closing socket wrapper, so
+            // the client read a zero-byte FIN instead of the JSON below.
+            assertTrue("duplicate response bytes=${duplicate.length}", duplicate.startsWith("HTTP/1.1 "))
+            assertTrue(duplicate.startsWith("HTTP/1.1 409 Conflict"))
+            assertEquals(
+                "request_id_conflict",
+                responseJson(duplicate).getJSONObject("error").getString("code")
+            )
+            assertTrue(duplicate.contains("Content-Length: 138\r\n"))
+            val headerEnd = duplicate.indexOf("\r\n\r\n")
+            assertTrue(headerEnd >= 0)
+            assertEquals(138, duplicate.substring(headerEnd + 4).toByteArray(Charsets.UTF_8).size)
+            assertEquals(652, duplicate.toByteArray(Charsets.UTF_8).size)
+
+            // The same consumed id is also rejected before the third request-id call site runs.
+            val crossRoute = rawHttp(
+                port,
+                authenticatedPost("/v1/chat/completions", body = """{"model":"active-model","messages":[]}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-images\r\n")
+            )
+            assertTrue(crossRoute.startsWith("HTTP/1.1 409 Conflict"))
+            assertEquals(
+                "request_id_conflict",
+                responseJson(crossRoute).getJSONObject("error").getString("code")
+            )
+        }
+    }
+
+    @Test
+    fun invalidRequestIdOnResponsesRouteWritesVisible400Json() {
+        withServer(apiKey = "secret") { port ->
+            LocalApiRuntime.streamChatProvider = { error("provider must not run") }
+            val response = rawHttp(
+                port,
+                authenticatedPost("/v1/responses", body = """{"model":"active-model","input":"hi"}""")
+                    .replace("Host: 127.0.0.1\r\n", "Host: 127.0.0.1\r\nX-MCA-Request-Id: obs1-bad!\r\n")
+            )
+            assertTrue("rejection response bytes=${response.length}", response.startsWith("HTTP/1.1 "))
+            assertTrue(response.startsWith("HTTP/1.1 400 Bad Request"))
+            assertEquals(
+                "invalid_request_id",
+                responseJson(response).getJSONObject("error").getString("code")
+            )
+            assertEquals(660, response.toByteArray(Charsets.UTF_8).size)
         }
     }
 

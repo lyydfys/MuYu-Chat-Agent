@@ -61,7 +61,12 @@ class SdxlUltraFixPhaseContractTest {
 
     @Test
     fun `isolated native ultrafix keeps all refinement steps in one unet worker`() {
-        val native = repositoryFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp").readText() +
+        // T2B18/R7-C7: the UNet phase body moved out of the header into three mca_qnn_runtime
+        // translation units; the union keeps every needle observable without weakening one.
+val native = repositoryFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp").readText() +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.cpp").readText() }.getOrDefault("") +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_tiling.cpp").readText() }.getOrDefault("") +
+            runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_execution.cpp").readText() }.getOrDefault("") +
             runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_unet_phase.hpp").readText() }.getOrDefault("") +
             runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_decoder_phase.hpp").readText() }.getOrDefault("") +
             runCatching { repositoryFile("core/native/src/main/cpp/mca/qnn/qnn_sdxl_encoder_phase.hpp").readText() }.getOrDefault("") +
@@ -70,9 +75,19 @@ class SdxlUltraFixPhaseContractTest {
             "app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt"
         ).readText() + repositoryFile(
             "app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlPhaseMergeEvidence.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlPhaseMergeAssembly.kt"
         ).readText()
         val protocol = repositoryFile(
-            "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt"
+            "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseWireProtocol.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseValidation.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlLatentArtifactIO.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/SdxlImagePhaseContract.kt"
         ).readText()
         val provider = repositoryFile(
             "app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt"
@@ -80,7 +95,9 @@ class SdxlUltraFixPhaseContractTest {
         // P5/L8: the provider-side UltraFix guard lives in the generate() body, moved to the
         // generation-operations owner; read it where it now lives.
         val generation = repositoryFile(
-            "app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt"
+            "app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt"
+        ).readText() + repositoryFile(
+            "app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt"
         ).readText()
 
         listOf(

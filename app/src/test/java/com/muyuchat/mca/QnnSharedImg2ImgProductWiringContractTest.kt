@@ -10,7 +10,8 @@ class QnnSharedImg2ImgProductWiringContractTest {
     fun `shared qnn img2img provider uses generic schedule tensor verifier and commit cancellation gate`() {
         // P5/L8: the shared-QNN product wiring lives in the generate() body, now owned by
         // LocalImageGenerationOperations.kt; read it where it now lives.
-        val provider = source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+        val provider = source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt") +
+            source("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt")
 
         listOf(
             ".withQnnProductSchedule(effectiveOptions)",
@@ -53,7 +54,15 @@ class QnnSharedImg2ImgProductWiringContractTest {
 
     @Test
     fun `img2img product admission is graph topology only and feeds ui capability resolution`() {
-        val profileSource = source("app/src/main/java/com/muyuchat/mca/ImageExecutionProfile.kt")
+        val profileSource = listOf(
+            // R7-B1: the file that declared ImageExecutionProfile was split by domain into
+            // four same-package files; read the union where this contract's code now lives
+            // (assertions below unchanged).
+            "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileTypeContracts.kt",
+            "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileRuntimeContracts.kt",
+            "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileModels.kt",
+            "app/src/main/java/com/muyuchat/mca/ImageExecutionProfileTopology.kt"
+        ).joinToString("\n") { source(it) }
         val helperStart = profileSource.indexOf(
             "internal fun ImageExecutionProfile.hasExecutableQnnImg2ImgTopology()"
         )
@@ -80,8 +89,13 @@ class QnnSharedImg2ImgProductWiringContractTest {
                 assertFalse("Topology admission contains forbidden gate: $forbidden", helper.contains(forbidden, true))
             }
 
+        // T2B22-T5: the task-mode capability helpers moved to their own files in the
+        // image-capabilities split; the union below reads them where they now live,
+        // with no assertion text changed.
         val uiCapabilities = source(
             "app/src/main/java/com/muyuchat/mca/LocalImageUiCapabilities.kt"
+        ) + "\n" + source(
+            "app/src/main/java/com/muyuchat/mca/LocalImageTaskModeCapabilities.kt"
         )
         assertTrue(uiCapabilities.contains("internal fun ImageExecutionProfile.exposesQnnImg2ImgForUi(): Boolean"))
         assertTrue(uiCapabilities.contains("hasExecutableQnnImg2ImgTopology()"))

@@ -6,10 +6,21 @@ package com.muyuchat.core.engine.contract
  * Spans UI, Facade, JNI boundary, Native engine, and isolated workers.
  * Used as the primary key for state transitions, callback routing, journal logging,
  * and stale event rejection.
+ *
+ * ## Attempt identity
+ *
+ * [attemptId] distinguishes execution attempts of the same logical request. It is **not** a
+ * decorative counter: settlement, cancellation, eviction and callback routing all compare the full
+ * identity, so two dispatches that share a requestId must never share an attempt.
+ *
+ * The runtime admission owner (`RuntimeSupervisor.admitRequest`) assigns a monotonic [attemptId] to
+ * every admitted request, and callers must use the identity that admission returned rather than
+ * rebuilding one. A worker that owns its own attempt progression may pass an explicit non-zero
+ * attempt ([nextAttempt]); [UNASSIGNED_ATTEMPT_ID] means "not yet assigned by admission".
  */
 data class RequestIdentity(
     val requestId: String,
-    val attemptId: Long = 0L,
+    val attemptId: Long = UNASSIGNED_ATTEMPT_ID,
     val sessionGeneration: Long = 0L,
     val runtimeEpoch: Long = 0L,
     val workerIncarnation: Long = 0L,
@@ -93,6 +104,9 @@ data class RequestIdentity(
         "RequestIdentity[id=$requestId, att=$attemptId, gen=$sessionGeneration, ep=$runtimeEpoch, wkr=$workerIncarnation, seq=$nativeSequence, trc=${if (traceId.isEmpty()) "none" else traceId}]"
 
     companion object {
+        /** Attempt value meaning "not yet assigned by the runtime admission owner". */
+        const val UNASSIGNED_ATTEMPT_ID: Long = 0L
+
         /**
          * Creates a fresh request identity with initial generation and epoch counters.
          */

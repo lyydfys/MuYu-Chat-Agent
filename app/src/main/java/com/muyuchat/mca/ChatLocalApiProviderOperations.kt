@@ -1,11 +1,17 @@
 package com.muyuchat.mca
 
 import com.muyuchat.api.local.LocalApiRuntime
+import com.muyuchat.core.engine.ChatExecutionBody
+import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.GenerateEvent
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.LocalChatExecutionContext
+import com.muyuchat.mca.facade.ChatExecutionFacade
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.mca.presentation.afterGenerationCompleted
 import com.muyuchat.mca.presentation.afterGenerationStarted
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onStart
@@ -19,6 +25,12 @@ import kotlinx.coroutines.flow.onStart
 internal interface ChatLocalApiProviderPort {
     val engine: McaInferenceService
     val chatRuns: ChatRunOwnership
+
+    /**
+     * The single chat execution facade (E06). Null keeps the historical direct-engine routing for
+     * focused tests that assemble the port without the runtime supervisor.
+     */
+    val chatExecutionFacade: ChatExecutionFacade?
     // R3/S26: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
     val uiState: StateFlow<MainUiState>
     fun updateUiState(transform: (MainUiState) -> MainUiState)
@@ -59,7 +71,9 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
         } else {
             request
         }
-        engine.streamChat(effectiveRequest, executionContext)
+        val routedStream = port.chatExecutionFacade?.streamChat(effectiveRequest, executionContext)
+            ?: engine.streamChat(effectiveRequest, executionContext)
+        routedStream
             .onStart {
                 if (ownsUiLifecycle()) {
                     port.updateUiState { state ->
@@ -81,12 +95,45 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
     }
     LocalApiRuntime.stopGenerationProvider = {
         port.cancelActiveLocalApiImageGeneration("Local API generation was stopped by the client.")
-        engine.stopGeneration()
+        val facade = port.chatExecutionFacade
+        if (facade != null) {
+            facade.stopGeneration()
+        } else {
+            engine.stopGeneration()
+        }
     }
     LocalApiRuntime.stopGenerationIfRequestActiveProvider = { requestId ->
         val token = engine.activeGenerationStopToken()
             ?.takeIf { it.requestId == requestId }
-        engine.stopGenerationIfActive(token)
+        val facade = port.chatExecutionFacade
+        if (facade != null) {
+            facade.stopGenerationIfActive(requestId)
+        } else {
+            engine.stopGenerationIfActive(token)
+        }
     }
     LocalApiRuntime.loadedModelJsonProvider = { port.loadedModelJson() }
 }
+
+/**
+ * Production execution body (E06): the engine call itself, unchanged. The facade/owner add
+ * admission identity and terminal settlement on top; the engine stays the single implementation
+ * of the actual generation for every channel.
+ */
+internal fun chatExecutionBodyFor(engine: McaInferenceService): ChatExecutionBody =
+    object : ChatExecutionBody {
+        override fun stream(
+            request: ChatRequest,
+            context: LocalChatExecutionContext
+        ): Flow<GenerateEvent> = engine.streamChat(request, context)
+
+        override suspend fun stopGeneration() {
+            engine.stopGeneration()
+        }
+
+        override suspend fun stopGenerationIfActive(requestId: String): Boolean {
+            val token = engine.activeGenerationStopToken()
+                ?.takeIf { it.requestId == requestId }
+            return engine.stopGenerationIfActive(token)
+        }
+    }

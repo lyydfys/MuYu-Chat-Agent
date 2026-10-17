@@ -18,6 +18,49 @@ std::string read_text(const char* path) {
     return buffer.str();
 }
 
+std::string directory_of(const std::string& path) {
+    const auto last_slash = path.find_last_of("/\\");
+    return last_slash == std::string::npos ? std::string() : path.substr(0, last_slash);
+}
+
+// Read a file that the contract REQUIRES to exist. A future extraction that moves the code again must
+// fail this test loudly instead of silently shrinking the read set (which is how the planted
+// "contract needle" comment block in qnn_native_bridge.cpp used to keep this test green).
+std::string read_required_text(const std::string& path) {
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        std::fprintf(
+            stderr,
+            "QNN prompt-proof contract: required extracted module is MISSING: %s\n",
+            path.c_str());
+        assert(false);
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
+// The QNN bridge was slimmed: the prompt-proof gate, the consumed-payload binding and the
+// structured-prompt decoding now live in mca/qnn modules. This test asserts on code that those
+// modules own, so the read set is composed from the bridge plus those modules rather than relying on
+// a comment block inside the bridge that merely repeated the same strings.
+std::string read_bridge_and_extracted_modules(const char* bridge_path) {
+    const std::string bridge = read_text(bridge_path);
+    const std::string dir = directory_of(std::string(bridge_path));
+    std::string composed = bridge;
+    for (const char* module : {
+                 "mca/qnn/qnn_contract_parser.cpp",
+                 "mca/qnn/qnn_semantic_pipeline.cpp",
+                 "mca/qnn/qnn_semantic_sdxl.cpp",
+                 "mca/qnn/qnn_semantic_evidence.cpp",
+                 "mca/qnn/qnn_conditioning_pipeline.cpp",
+                 "mca/qnn/qnn_conditioning_handoff_binding.cpp",
+         }) {
+        composed += read_required_text(dir + "/" + module);
+    }
+    return composed;
+}
+
 void require_contains(const std::string& source, const std::string& needle) {
     if (source.find(needle) == std::string::npos) {
         std::fprintf(stderr, "missing QNN prompt-proof needle: %s\n", needle.c_str());
@@ -150,7 +193,7 @@ void test_structured_prompt_decoding_and_hashing() {
 int main(int argc, char** argv) {
     assert(argc == 3);
     test_structured_prompt_decoding_and_hashing();
-    const std::string bridge = read_text(argv[1]);
+    const std::string bridge = read_bridge_and_extracted_modules(argv[1]);
     const std::string split = read_text(argv[2]);
 
     // Missing fields fail through the required-field parser; malformed SHA

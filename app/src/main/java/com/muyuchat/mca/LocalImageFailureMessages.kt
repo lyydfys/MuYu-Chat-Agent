@@ -187,8 +187,10 @@ internal fun localImageGenerationFailureMessage(error: Throwable): String = when
         EXECUTION_CONTRACT_MISMATCH.lowercase(),
         "execution_evidence_invalid", "execution_contract_invalid" ->
             imageExecutionContractFailureMessage(error.message)
-        else -> "本地图像生成引擎返回错误：${error.message.orEmpty().ifBlank { "未知错误" }}。" +
-            "下一步：重试一次；仍失败时请反馈模型名称、应用版本和此错误详情。"
+        else -> {
+            val detail = error.message.orEmpty().ifBlank { "未知错误" }
+            "本地图像生成引擎返回错误：$detail。" + localImageNativeFailureNextStep(detail)
+        }
     }
     is LocalImageWorkerException ->
         "本地图像生成 worker 返回了无效结果，本次请求未完成。下一步：先校验模型包和组件可读性，" +
@@ -200,6 +202,31 @@ private fun imageExecutionContractFailureMessage(detail: String?): String =
     "模型执行结果与应用配置不一致，本次图片未通过校验。" +
         "下一步：请更新应用后重试；仍失败时请反馈模型名称和此错误详情。" +
         "详情：${detail.orEmpty().ifBlank { "执行配置校验失败" }}"
+
+/**
+ * Actionable Chinese next step for recognisable QNN native failures (QNN context binary not
+ * matching this device, CLIP tokenizer returning zero token ids).  The original English message
+ * and its error code stay verbatim in the text above this suffix.  Display text only: this never
+ * changes an error code, the worker journal, or a download/import/load/run decision.
+ */
+private fun localImageNativeFailureNextStep(detail: String): String {
+    val normalized = detail.lowercase()
+    return when {
+        "contextcreatefrombinary failed" in normalized ->
+            "该 QNN 模型包通常是为其他骁龙平台编译的（与当前设备的目标 SoC / NPU 运行环境不一致），" +
+                "因此无法在本机加载。" +
+                "下一步：请在模型页选择面向本机芯片导出的 QNN 包（或重新下载本机匹配的运行包），" +
+                "也可以改用其他本地生图引擎（如 stable-diffusion.cpp、MNN）后重试；" +
+                "仍失败时请反馈模型名称、应用版本和此原始错误详情（其中含原生错误码）。"
+        "qnn clip tokenizer returned 0 ids" in normalized ->
+            "QNN 文本编码器没有得到任何提示词 token，通常说明该模型包与本机运行环境不匹配，" +
+                "或包内文本编码组件不完整。" +
+                "下一步：请在模型页重新校验/重新导入完整模型包，或更换面向本机导出的模型包后重试；" +
+                "仍失败时请反馈模型名称、应用版本和此原始错误详情。"
+        else ->
+            "下一步：重试一次；仍失败时请反馈模型名称、应用版本和此错误详情。"
+    }
+}
 
 internal fun List<ImageGenerationJobRecord>.withLocalImagePromptPreparationFailureIfActive(
     activeJobId: String?,

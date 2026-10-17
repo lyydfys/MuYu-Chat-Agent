@@ -38,6 +38,10 @@ struct RuntimeProbe {
     std::string message;
 };
 
+
+// Migrated from qnn_native_bridge.cpp (HEAD:766); it was never carried into a module.
+std::string runtime_probe_json(const RuntimeProbe& probe);
+
 int htp_library_version(const std::string& name);
 int physical_device_htp_arch_version();
 std::string htp_library_for_arch_in_dir(const std::string& dir, int arch_version, const std::string& suffix);
@@ -52,8 +56,8 @@ void append_common_android_adsp_paths(std::vector<std::string>* values);
 RuntimeProbe inspect_runtime_internal(
     const std::vector<std::string>& dirs,
     bool probe,
-    bool probe_htp = true,
-    std::atomic<bool>* poisoned_flag = nullptr
+    bool probe_htp,
+    std::atomic<bool>* poisoned_flag
 );
 
 /**
@@ -103,6 +107,9 @@ public:
     static std::vector<std::string> get_default_search_directories();
     static std::string build_adsp_library_path(const std::vector<std::string>& search_dirs);
 };
+
+// Migrated from qnn_native_bridge.cpp (HEAD:228 and HEAD:766).
+std::string compile_capability_json();
 
 } // namespace qnn
 } // namespace mca

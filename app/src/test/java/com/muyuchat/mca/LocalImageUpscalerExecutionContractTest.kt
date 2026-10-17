@@ -34,7 +34,8 @@ class LocalImageUpscalerExecutionContractTest {
     fun workerLeaseClosesTheModelHashToOpenRaceAndRemainsCancellable() {
         val inputs = source("LocalImageInputFiles.kt")
         val store = source("LocalImageUpscalerStore.kt")
-        val service = source("LocalImageWorkerService.kt")
+        val service = source("LocalImageWorkerService.kt") +
+            source("LocalImageWorkerExecution.kt")
 
         assertTrue(inputs.contains("channel.tryLock(0L, Long.MAX_VALUE, true)"))
         assertTrue(inputs.contains("source.sha256(isCancelled)"))

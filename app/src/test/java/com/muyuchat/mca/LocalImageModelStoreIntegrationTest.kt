@@ -29,7 +29,7 @@ class LocalImageModelStoreIntegrationTest {
         val imported = fixture.store.importFromSource("fixture.safetensors", { ByteArrayInputStream(payload) })
         val repeated = fixture.store.importFromSource("fixture.safetensors", { ByteArrayInputStream(payload) })
         val downloaded = File(fixture.external("image_models"), "remote/fixture.safetensors")
-            .apply { parentFile.mkdirs(); writeBytes(payload) }
+            .apply { parentFile!!.mkdirs(); writeBytes(payload) }
         val registered = fixture.store.registerDownloadedModel(downloaded, remote(downloaded.name))
 
         assertEquals(imported.id, repeated.id)
@@ -358,7 +358,7 @@ class LocalImageModelStoreIntegrationTest {
         downloadUrl = "https://example.invalid/fixture")
 
     private fun writeEntries(root: File, entries: Map<String, ByteArray>) = entries.forEach { (path, bytes) ->
-        File(root, path).apply { parentFile.mkdirs(); writeBytes(bytes) }
+        File(root, path).apply { parentFile!!.mkdirs(); writeBytes(bytes) }
     }
 
     private fun zip(entries: Map<String, ByteArray>): ByteArray = ByteArrayOutputStream().use { output ->

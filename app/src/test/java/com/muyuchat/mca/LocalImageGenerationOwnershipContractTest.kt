@@ -114,7 +114,8 @@ class LocalImageGenerationOwnershipContractTest {
         // wording and the typed 409 error live with the adapter. Both are read here, which keeps the
         // assertions checking the same contract rather than the same file.
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationContracts.kt")
         val acquisitions = Regex("tryAcquireObservedImageGenerationLease\\(").findAll(viewModel).count()
 
         assertTrue(

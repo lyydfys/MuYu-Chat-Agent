@@ -26,14 +26,25 @@ class ConversationTailPruneNativeCacheContractTest {
 
     @Test
     fun `gguf runtime validates token prefix and trims only the stale suffix`() {
-        val native = sourceFile("core/native/src/main/cpp/native_engine.cpp")
-        val prepare = functionBody(native, "size_t prepare_text_prefix_locked(", "int decode_text_prompt_locked(")
+        // prepare_text_prefix_locked is now a thin adapter: it builds the LlamaContextEnvironment and
+        // delegates to LlamaContextManager::prepare_text_prefix, which lives in mca/llm. The assertions
+        // below are unchanged; the prefix-cache reasoning is read from where it now lives.
+        val native = sourceFile("core/native/src/main/cpp/native_engine.cpp") +
+            sourceFile("core/native/src/main/cpp/native_engine_prefix_cache.cpp") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_context_manager.cpp") }.getOrDefault("") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_prefix_cache_policy.hpp") }.getOrDefault("")
+        // The prefix-cache reasoning moved into LlamaContextManager and now reaches the llama context
+        // through the LlamaContextEnvironment callbacks instead of the g_* globals directly.  The five
+        // facts asserted below (common-prefix probe, trim, resize, clear-on-below-threshold, checkpoint
+        // restore) are the same facts; only how they are spelled at the new call site changed.
+        val prepare = functionBody(native, "size_t prepare_text_prefix_locked(", "int decode_text_prompt_locked(") +
+            runCatching { sourceFile("core/native/src/main/cpp/mca/llm/llama_context_manager.cpp") }.getOrDefault("")
 
-        assertTrue(prepare.contains("longestCommonTokenPrefix(tokens, g_context_tokens)"))
-        assertTrue(prepare.contains("trim_context_locked(g_context, (llama_pos) reuse"))
-        assertTrue(prepare.contains("g_context_tokens.resize(reuse)"))
-        assertTrue(prepare.contains("clear_target_context_locked(\"common_prefix_below_threshold\")"))
-        assertTrue(prepare.contains("restore_turn_cache_checkpoint_locked(tokens"))
+        assertTrue(prepare.contains("longestCommonTokenPrefix(tokens, *env.context_tokens)"))
+        assertTrue(prepare.contains("env.trim_context((llama_pos) reuse"))
+        assertTrue(prepare.contains("env.context_tokens->resize(reuse)"))
+        assertTrue(prepare.contains("env.clear_target_context(\"common_prefix_below_threshold\")"))
+        assertTrue(prepare.contains("env.restore_turn_checkpoint(tokens"))
         assertTrue(prepare.contains("live_turn_prefix_hit"))
         assertTrue(native.contains("save_turn_cache_checkpoint_locked()"))
         assertTrue(native.contains("turn_checkpoint_hit"))
@@ -62,7 +73,7 @@ class ConversationTailPruneNativeCacheContractTest {
     }
 
     private fun sourceFile(relativePath: String): String {
-        var root = File(System.getProperty("user.dir")).canonicalFile
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
         repeat(8) {
             val candidate = File(root, relativePath)
             if (candidate.isFile) return candidate.readText()

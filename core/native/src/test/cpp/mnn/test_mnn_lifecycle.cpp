@@ -8,6 +8,9 @@
 #include "mca/mnn/mnn_token_emitter.hpp"
 #include "mca/prompt/mnn_qnn_prompt_gateway.hpp"
 #include "mca/runtime/process_runtime_host.hpp"
+#include "mca/mnn/mnn_sampling_strategy.hpp"
+#include "mca/mnn/mnn_token_boundary_guard.hpp"
+#include "mca/llm/llama_context_manager.hpp"
 
 #include <cassert>
 #include <iostream>
@@ -280,6 +283,117 @@ void test_prompt_gateway() {
     std::cout << "  -> test_prompt_gateway PASSED" << std::endl;
 }
 
+void test_sampling_strategy_lifecycle() {
+    std::cout << "[Test] test_sampling_strategy_lifecycle..." << std::endl;
+    nlohmann::json alias_json = {
+        {"temperature", 0.75},
+        {"topK", 35},
+        {"topP", 0.9},
+        {"minP", 0.05},
+        {"repeat_penalty", 1.12},
+        {"presencePenalty", 0.1},
+        {"frequencyPenalty", 0.2},
+        {"seed", 77}
+    };
+    auto parsed = mca::mnn::parse_sampling_params(alias_json);
+    assert(parsed.temperature == 0.75);
+    assert(parsed.top_k == 35);
+    assert(parsed.top_p == 0.9);
+    assert(parsed.min_p == 0.05);
+    assert(parsed.repetition_penalty == 1.12);
+    assert(parsed.presence_penalty == 0.1);
+    assert(parsed.frequency_penalty == 0.2);
+    assert(parsed.seed == 77);
+    assert(mca::mnn::has_penalties(parsed));
+
+    nlohmann::json config = {{"backend_type", "cpu"}};
+    mca::mnn::applyCpuCacheSafety(config);
+    assert(config["precision"] == "high");
+    assert(config["use_cached_mmap"] == false);
+
+    mca::mnn::applySamplingConfig(config, alias_json, nlohmann::json::object());
+    assert(config["temperature"] == 0.75);
+    assert(config["top_k"] == 35);
+    assert(config["sampler_type"] == "mixed");
+
+    std::cout << "  -> test_sampling_strategy_lifecycle PASSED" << std::endl;
+}
+
+void test_token_boundary_guard_lifecycle() {
+    std::cout << "[Test] test_token_boundary_guard_lifecycle..." << std::endl;
+    mca::mnn::MnnTokenBoundaryGuard guard;
+    assert(!guard.has_pending());
+
+    guard.feed_chunk("Ascii prefix ");
+    auto r1 = guard.take_pending_utf16(false);
+    assert(r1.has_content);
+
+    // Multi-byte CJK character split
+    guard.feed_chunk(std::string("\xE6\xB5"));
+    auto r2 = guard.take_pending_utf16(false);
+    assert(!r2.has_content);
+    assert(guard.pending_tail() == std::string("\xE6\xB5"));
+
+    guard.feed_chunk(std::string("\x8B\xE8\xAF\x95")); // remainder of "测" + "试"
+    auto r3 = guard.take_pending_utf16(false);
+    assert(r3.has_content);
+    assert(guard.pending_tail().empty());
+
+    // Transactional rollback
+    guard.feed_chunk("Draft Token");
+    std::vector<uint16_t> staged;
+    assert(guard.stage_pending_utf16(false, staged));
+    guard.rollback_staged();
+    assert(guard.has_pending());
+    assert(guard.pending_chunk() == "Draft Token");
+
+    assert(guard.stage_pending_utf16(false, staged));
+    guard.commit_staged();
+    assert(!guard.has_pending());
+
+    std::cout << "  -> test_token_boundary_guard_lifecycle PASSED" << std::endl;
+}
+
+void test_llama_context_manager_lifecycle() {
+    std::cout << "[Test] test_llama_context_manager_lifecycle..." << std::endl;
+    llama_pos current_pos = 8;
+    llama_tokens context_tokens = {10, 20, 30, 40, 50, 60, 70, 80};
+    bool cache_state_valid = true;
+    bool cache_reuse_hit = false;
+    int cache_reused_tokens = 0;
+    long long cache_reuse_hits = 0;
+    long long cache_reuse_misses = 0;
+    std::string cache_reuse_reason;
+    std::string cleared_reason;
+    llama_pos trimmed_pos = -1;
+
+    mca::llm::LlamaContextEnvironment env;
+    env.current_position = &current_pos;
+    env.context_tokens = &context_tokens;
+    env.cache_reuse_threshold = 3;
+    env.strategy = mca::llama::PrefixCacheStrategy::DirectTrim;
+    env.cache_state_valid = &cache_state_valid;
+    env.cache_reuse_hit = &cache_reuse_hit;
+    env.cache_reused_tokens = &cache_reused_tokens;
+    env.cache_reuse_hits = &cache_reuse_hits;
+    env.cache_reuse_misses = &cache_reuse_misses;
+    env.cache_reuse_reason = &cache_reuse_reason;
+    env.clear_target_context = [&](const std::string& r) { cleared_reason = r; };
+    env.trim_context = [&](llama_pos pos, const char*) { trimmed_pos = pos; return true; };
+
+    // Matches 5 tokens {10, 20, 30, 40, 50}
+    llama_tokens prompt = {10, 20, 30, 40, 50, 999};
+    size_t reused = mca::llm::LlamaContextManager::prepare_text_prefix(prompt, env);
+    assert(reused == 5);
+    assert(cache_reuse_hit);
+    assert(cache_reused_tokens == 5);
+    assert(cache_reuse_reason == "text_prefix_hit");
+    assert(trimmed_pos == 5);
+    assert(current_pos == 5);
+
+    std::cout << "  -> test_llama_context_manager_lifecycle PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "==================================================" << std::endl;
     std::cout << "  MCA MNN / llama / Chat Native Unit & Lifecycle  " << std::endl;
@@ -291,6 +405,9 @@ int main() {
     test_cancel_lifecycle_and_transitions();
     test_universal_device_admission();
     test_prompt_gateway();
+    test_sampling_strategy_lifecycle();
+    test_token_boundary_guard_lifecycle();
+    test_llama_context_manager_lifecycle();
 
     std::cout << "==================================================" << std::endl;
     std::cout << "  ALL MCA MNN LIFECYCLE TESTS PASSED!             " << std::endl;

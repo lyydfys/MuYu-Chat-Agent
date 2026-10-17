@@ -1,4 +1,5 @@
 #include "qnn_soc_htp_mapping.hpp"
+#include "qnn_htp_runtime_candidates.hpp"
 
 #include <array>
 #include <iostream>
@@ -76,6 +77,32 @@ int main() {
 
     if (mca::qnn::htp_arch_version_for_soc_model(9999) != 0) {
         std::cerr << "Unknown SoC identifiers must remain unknown.\n";
+        return 1;
+    }
+
+    const auto check_candidates = [](int context, int device, int preferred, int probed,
+                                     std::vector<int> packaged,
+                                     const std::vector<int>& expected) {
+        const auto actual = mca::qnn::qnn_htp_runtime_candidates(
+            context, device, preferred, probed, std::move(packaged));
+        if (actual != expected) {
+            std::cerr << "Unexpected QNN transport order for context V" << context
+                      << " / device V" << device << '\n';
+            return false;
+        }
+        return true;
+    };
+    // A known mismatch remains executable admission: select the physical
+    // transport first, then let the QNN loader validate unchanged graph bytes.
+    if (!check_candidates(81, 73, 0, 81, {73, 75, 79, 81}, {73, 81, 79, 75}) ||
+        !check_candidates(73, 79, 0, 79, {73, 79}, {79, 73}) ||
+        // Explicit graph-phase transport still leads for split graph packages.
+        !check_candidates(73, 79, 73, 79, {73, 79}, {73, 79}) ||
+        // Unknown metadata must retain every available generic transport.
+        !check_candidates(0, 0, 0, 0, {73, 81, 79, 73, 0}, {81, 79, 73}) ||
+        !check_candidates(0, 73, 0, 0, {79}, {73, 79}) ||
+        !check_candidates(73, 73, 73, 73, {73}, {73}) ||
+        !check_candidates(0, 0, 0, 0, {}, {})) {
         return 1;
     }
     return 0;

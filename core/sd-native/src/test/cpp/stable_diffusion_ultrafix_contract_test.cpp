@@ -58,6 +58,28 @@ std::string read_text(const char* path) {
     return buffer.str();
 }
 
+std::string directory_of(const std::string& path) {
+    const auto last_slash = path.find_last_of("/\\");
+    return last_slash == std::string::npos ? std::string() : path.substr(0, last_slash);
+}
+
+// The UltraFix source-fit / execution-count gates were extracted out of stable_diffusion_bridge.cpp
+// into mca/sd/sd_evidence_verifier.cpp. This test asserts on that code, so the bridge read set is
+// composed with that module. The module is REQUIRED: if a future extraction moves the code again the
+// test must fail loudly instead of silently shrinking its read set -- the previous revision relied on
+// a commented-out copy left inside the bridge, which is the "comment as contract" anti-pattern PLAN
+// 9.1 forbids.
+std::string read_required_text(const std::string& path) {
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input.good()) {
+        std::fprintf(stderr, "UltraFix contract: required extracted module is MISSING: %s\n", path.c_str());
+        assert(false);
+    }
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
 void require_contains(const std::string& source, const std::string& needle) {
     if (source.find(needle) == std::string::npos) {
         std::fprintf(stderr, "missing UltraFix contract needle: %s\n", needle.c_str());
@@ -97,8 +119,24 @@ int main(int argc, char** argv) {
     assert(argc == 6);
     const std::string public_header = read_text(argv[1]);
     const std::string engine = read_text(argv[2]);
-    const std::string bridge = read_text(argv[3]);
-    const std::string qnn_shared = read_text(argv[4]);
+    // The UltraFix evidence JSON, the source-fit gate and the execution-count gate were extracted out
+    // of the bridge into mca/sd modules; read them through the same "bridge" set so the assertions
+    // below observe the real implementation instead of the (now deleted) comment copy.
+    // T2B17/R7-C6: the generate request/execute phases moved out of the bridge; those files are
+    // part of the read set so the source-fit pin (execute phase) and the shrink guard (request
+    // phase) keep observing the real implementations.
+    const std::string bridge =
+            read_text(argv[3]) +
+            read_required_text(directory_of(std::string(argv[3])) + "/sd_generate_request.cpp") +
+            read_required_text(directory_of(std::string(argv[3])) + "/sd_generate_execute.cpp") +
+            read_required_text(directory_of(std::string(argv[3])) + "/mca/sd/sd_evidence_verifier.cpp") +
+            read_required_text(directory_of(std::string(argv[3])) + "/mca/sd/sd_response_builder.cpp");
+    const std::string qnn_shared =
+            read_text(argv[4]) +
+// T2B18/R7-C7: the split-SDXL UNet phase body moved into mca_qnn_runtime translation units;
+    // read the execution TU here too so the quality-evidence pins keep observing the real code.
+            read_required_text(directory_of(std::string(argv[4])) + "/mca/qnn/qnn_sdxl_unet_phase.hpp") +
+            read_required_text(directory_of(std::string(argv[4])) + "/mca/qnn/qnn_sdxl_unet_execution.cpp");
     const std::string qnn_split = read_text(argv[5]);
 
     // Source and target are distinct contracts. The source may be enlarged but
@@ -142,9 +180,16 @@ int main(int argc, char** argv) {
     require_contains(bridge, "ULTRAFIX_SOURCE_SHRINK_UNSUPPORTED");
     require_contains(bridge, "bool source_fit_matches =");
     require_contains(bridge, "dimensions_match && source_fit_matches");
+    // Re-pointed to the extracted implementation (mca/sd/sd_evidence_verifier.cpp). The previous
+    // needle matched a COMMENTED-OUT copy left in the bridge, i.e. the assertion passed on comment
+    // text while the live check sat in another file. Both the guard and its failure path are asserted
+    // now, so the check cannot be deleted without turning this test red.
     require_contains(
         bridge,
-        "if (!contract.ultrafix_enabled &&\n            actual_positive_execution_count != actual_timetable_count)");
+        "if (!contract.ultrafix_enabled &&\n        summary.actual_positive_execution_count != summary.actual_timetable_count)");
+    require_contains(
+        bridge,
+        "\"positiveDiffusionExecutionCount\",\n                \"positive conditioning did not physically execute once per completed sampling step\"");
     require_contains(bridge, "ultrafix_evidence.tiled_unet_tile_count");
     require_contains(bridge, "{\"sourceFit\", \"cover_center\"}");
     require_contains(bridge, "noiseInjectionSeedFingerprint");

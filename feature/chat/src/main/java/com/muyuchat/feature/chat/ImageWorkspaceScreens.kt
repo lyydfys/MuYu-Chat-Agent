@@ -68,6 +68,7 @@ internal fun ImagesWorkspaceScreen(
     backupState: ImageLibraryBackupUiState,
     jobs: List<ImageGenerationUiJob>,
     imageModels: List<ChatModelChoice>,
+    imageModelsLoading: Boolean,
     selectedImageModelId: String?,
     selectedImageModelName: String?,
     selectedImageModelIsCloud: Boolean,
@@ -239,9 +240,11 @@ internal fun ImagesWorkspaceScreen(
     }
     val activeImage = activeImages.firstOrNull()
     val isImageGenerating = activeJob?.isWorking == true
-    val canvasModelId = activeJob?.modelId ?: selectedImageModelId
-    val canvasModelName = activeJob?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
-    val canvasModelIsCloud = activeJob?.modelIsCloud ?: selectedImageModelIsCloud
+    // B45/S2: while the displayed job is still working the pill reports that job's model; once the
+    // job is terminal the canvas switcher is enabled again and must report the current selection.
+    val canvasModelId = activeJob?.takeIf { it.isWorking }?.modelId ?: selectedImageModelId
+    val canvasModelName = activeJob?.takeIf { it.isWorking }?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName
+    val canvasModelIsCloud = activeJob?.takeIf { it.isWorking }?.modelIsCloud ?: selectedImageModelIsCloud
 
     LaunchedEffect(images.map(ImageAssetUiItem::id)) {
         val available = images.mapTo(mutableSetOf(), ImageAssetUiItem::id)
@@ -333,6 +336,7 @@ internal fun ImagesWorkspaceScreen(
                 image = activeImage,
                 images = activeImages,
                 imageModels = imageModels,
+                imageModelsLoading = imageModelsLoading,
                 selectedImageModelId = canvasModelId,
                 selectedImageModelName = canvasModelName,
                 selectedImageModelIsCloud = canvasModelIsCloud,
@@ -391,6 +395,7 @@ internal fun ImagesWorkspaceScreen(
                 selectedImageIds = selectedImageIds,
                 batchSaving = batchSaving,
                 imageModels = imageModels,
+                imageModelsLoading = imageModelsLoading,
                 imageModelSwitchEnabled = jobs.none { it.isWorking },
                 selectedImageModelId = selectedImageModelId,
                 selectedImageModelName = selectedImageModelName,
@@ -596,7 +601,9 @@ internal fun ImagesWorkspaceScreen(
                     else -> onPickImageRole("input")
                 }
             },
-            onSubmit = ::submitFromImages,
+            // Local function references compare equal even when captured prompt/model values
+            // differ. Use a lambda so Compose refreshes the send action with the current input.
+            onSubmit = { submitFromImages() },
             placeholder = "描述图像",
             isGenerating = isImageGenerating,
             onStop = onCancelGeneration,

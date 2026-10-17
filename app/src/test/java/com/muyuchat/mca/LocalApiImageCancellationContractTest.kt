@@ -51,16 +51,19 @@ class LocalApiImageCancellationContractTest {
 
     @Test
     fun `loopback server cancels image request jobs without treating request half close as abort`() {
-        val server = sourceFile(
-            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt"
-        )
+        // T2B8/R7-B3: the loopback server is a shell + six same-package successor files;
+        // the union read keeps every extracted window byte-identical from the function name on.
+        val server = LOOPBACK_SERVER_SOURCE_FILES.joinToString("\n") { sourceFile(it) }
         val stop = functionBody(server, "fun stop()")
-        val imageHandler = functionBody(server, "private suspend fun handleImageGeneration(")
+        val imageHandler = functionBody(
+            server,
+            "handleImageGeneration(socket: Socket, body: String, clientRequestId: String?)"
+        )
         val disconnectMonitor = functionBody(
             server,
-            "private suspend fun <T> withImageClientDisconnectCancellation("
+            "withImageClientDisconnectCancellation(\n        socket: Socket,"
         )
-        val stopRoute = functionBody(server, "private suspend fun handleGenerationStop(")
+        val stopRoute = functionBody(server, "handleGenerationStop(socket: Socket, body: String)")
 
         assertTrue(stop.contains("cancelActiveImageRequests("))
         assertTrue(imageHandler.contains("registerImageRequest(requestId, requestJob, cancellationEpoch)"))
@@ -87,6 +90,17 @@ class LocalApiImageCancellationContractTest {
         )
         assertFalse(disconnectMonitor.contains("deviceProfile"))
     }
+
+    // T2B8/R7-B3: router source list for the union read (shell + six successors).
+    private val LOOPBACK_SERVER_SOURCE_FILES = listOf(
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerHttpTransport.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerChatSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerResponsesSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerImageGeneration.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerTuningControl.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerProtocolCodec.kt"
+        )
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

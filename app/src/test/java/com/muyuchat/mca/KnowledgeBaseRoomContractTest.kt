@@ -446,11 +446,20 @@ class KnowledgeBaseRoomContractTest {
     // The Room schema, DAO and entity declarations moved to their own files in the
     // persistence-layer split. The contract below reads the same declarations as before --
     // only the files they are read from changed; the assertions themselves are unchanged.
+    // The migration helpers moved to their own files in the chat/Room split (T2B21-T4);
+    // the union below now also reads them, with no assertion text changed.
+    // R7-C11/T2B22-T3: the knowledge/memory DAO split moved the knowledge queries into
+    // ChatSessionKnowledgeDao.kt; the union reads it too -- no assertion text changed.
     private fun chatSessionStoreSource(): String =
         sourceFile("ChatSessionStore.kt") +
             sourceFile("ChatSessionStoreRoomDatabase.kt") +
             sourceFile("ChatSessionStoreDao.kt") +
-            sourceFile("ChatSessionStoreEntities.kt")
+            sourceFile("ChatSessionStoreEntities.kt") +
+            sourceFile("ChatSessionStoreKnowledgeMigrations.kt") +
+            sourceFile("ChatSessionStoreColumnMigrations.kt") +
+            sourceFile("ChatSessionStoreSchemaNormalization.kt") +
+            sourceFile("ChatSessionStoreLegacyNormalization.kt") +
+            sourceFile("ChatSessionKnowledgeDao.kt")
 
     private fun knowledgeBaseStoreSource(): String = sourceFile("KnowledgeBaseStore.kt")
 

@@ -94,7 +94,7 @@ internal class MainCoordinatorAssembly(
                 imageGenerationOwnerProvider = { host.imageGenerationOwner },
                 chatImageRequestPort = { host.chatImageRequestPort },
                 persistChatSessions = { host.hostPersistChatSessions(it) },
-                buildChatImageRetrySnapshot = { req, sId -> host.hostBuildChatImageRetrySnapshot(req, sId ?: "") },
+                buildChatImageRetrySnapshot = { req, sId -> host.hostBuildChatImageRetrySnapshot(req, sId) },
                 chatImageNegativePromptSupported = { host.hostChatImageNegativePromptSupported(it) },
                 cancelImageGenerationForJob = { host.hostCancelImageGenerationForJob(it) },
                 reserveUiGenerationStart = host::hostReserveUiGenerationStart,

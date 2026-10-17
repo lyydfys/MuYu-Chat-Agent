@@ -45,6 +45,26 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $repo = Split-Path -Parent $PSScriptRoot
+# --- E01: unified build/test lock + run-input fingerprint (fail-closed) ---------------------
+# Every Gradle call below takes the SAME exclusive lock as scripts/build.ps1; a missing guard
+# module refuses the run instead of proceeding unguarded. The worktree fingerprint is compared
+# before/after the run: if production inputs change while the run executes, the result belongs
+# to no single snapshot and the run fails (`input-changed-during-run`).
+$guardDir = if ($env:MCA_BUILD_GUARDS_DIR) { $env:MCA_BUILD_GUARDS_DIR } else { Join-Path $repo 'tools\build-guards' }
+$mcaLockModule = Join-Path $guardDir 'McaBuildLock.psm1'
+$mcaFingerprintModule = Join-Path $guardDir 'McaWorktreeFingerprint.ps1'
+if (-not (Test-Path -LiteralPath $mcaLockModule) -or -not (Test-Path -LiteralPath $mcaFingerprintModule)) {
+    [Console]::Error.WriteLine("verify-code: build-guard modules missing under '$guardDir' (fail-closed, exit 3). Expected McaBuildLock.psm1 and McaWorktreeFingerprint.ps1.")
+    exit 3
+}
+Import-Module $mcaLockModule -Force
+. $mcaFingerprintModule
+$fpBefore = Get-McaWorktreeFingerprint -RepoRoot $repo
+Write-Host ('   run-input fingerprint: ' + $fpBefore.fingerprint + ' (' + $fpBefore.files + ' dirty/untracked inputs)') -ForegroundColor DarkGray
+try { Assert-McaBuildSlot | Out-Null } catch {
+    [Console]::Error.WriteLine('verify-code: refusing to start - ' + $_.Exception.Message)
+    exit 3
+}
 $gradlew = Join-Path $repo 'gradlew.bat'
 if (-not $env:JAVA_HOME) { $env:JAVA_HOME = 'E:\model\toolchains\jdk-21\jdk-21.0.12.1+1' }
 if (-not $env:MCA_QNN_SDK_ROOT) { $env:MCA_QNN_SDK_ROOT = 'E:\tools\qairt-sdk\2.45.0.260326' }
@@ -79,26 +99,24 @@ $failed = @()
 # and a human) corrupt each other's incremental caches: "Detected multiple Kotlin daemon sessions",
 # "Could not delete .../kotlin-classes", "Could not close incremental caches". `--no-daemon` does not
 # prevent that, because the Kotlin compiler runs its own daemon and both share the build directory.
-# A named system mutex serialises every Gradle call from any process on this machine, so parallel
-# work queues instead of failing. Wait up to 30 minutes, then fail loudly rather than corrupt.
-$script:buildMutex = New-Object System.Threading.Mutex($false, 'Global\McaGradleBuildQueue')
+#
+# E01: the former separate Global\McaGradleBuildQueue mutex is gone. Every Gradle call below takes
+# the SAME file lock as scripts/build.ps1 (build\.mca-exclusive-build.lock via McaBuildLock.psm1).
+# A live holder is named in the refusal, a dead holder is reclaimed, same-process nesting is
+# refused, and a missing lock module was already refused above (exit 3) - so no Gradle call in
+# this script can run unguarded.
 
 function Invoke-Gradle {
     param([string[]] $Arguments, [string] $LogPath)
-    $held = $false
+    $lock = $null
     try {
         try {
-            $held = $script:buildMutex.WaitOne([TimeSpan]::FromMinutes(30))
-        } catch [System.Threading.AbandonedMutexException] {
-            # A previous invocation (or a killed agent) terminated while holding the queue. The
-            # wait still transfers ownership, so the documented recovery is to proceed.
-            $held = $true
-        }
-        if (-not $held) {
-            Write-Host '   could not acquire the build queue within 30 minutes' -ForegroundColor Red
+            $lock = Enter-McaBuildLock -Kind test -RetrySeconds 1800 -RetryIntervalSeconds 2 -CommandLine ("verify-code.ps1 " + ($Arguments -join ' '))
+        } catch {
+            Write-Host ('   could not acquire the shared build lock within 30 minutes: ' + $_.Exception.Message) -ForegroundColor Red
             return 1
         }
-        # Serialization is the named mutex above; `--no-daemon` never prevented the Kotlin
+        # Serialization is the shared build lock acquired above; `--no-daemon` never prevented the Kotlin
         # daemon from sharing the build directory anyway. Reusing the resident Gradle daemon
         # removes the ~20-30s JVM cold start on every call, which the -Rerun lane (up to 7
         # separate invocations) pays repeatedly.
@@ -112,7 +130,7 @@ function Invoke-Gradle {
         Write-Host ("   gradle elapsed: {0}s" -f $elapsed) -ForegroundColor DarkGray
         return $code
     } finally {
-        if ($held) { $script:buildMutex.ReleaseMutex() }
+        if ($lock) { try { Exit-McaBuildLock -Lock $lock | Out-Null } catch { } }
     }
 }
 
@@ -353,6 +371,29 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             }
         }
     }
+
+    # A green result over ZERO executed tests is not evidence of anything. This used to pass:
+    # `-FullTests` without `-Rerun` leaves the Gradle test task up-to-date, no fresh report is
+    # written, tests=0 was printed, and the run still ended in VERIFY OK. Zero tests is now a
+    # failure, and the message names the fix so it is actionable rather than mysterious.
+    # (Skipped tests are separate: they are counted and reported above, and are not conflated
+    # with "did not run" here.)
+    $testsWereRequested = ($FullTests -or $FeatureTests -or ($Tests.Count -gt 0))
+    if ($testsWereRequested -and $totalTests -eq 0) {
+        Write-Host '   ERROR: tests=0 - no test was actually executed, so a green result would prove nothing.' -ForegroundColor Red
+        Write-Host '          Most common cause: -FullTests without -Rerun. Gradle then treats the test task as' -ForegroundColor Red
+        Write-Host '          up-to-date, writes no fresh report for this run, and the count above legitimately' -ForegroundColor Red
+        Write-Host '          sees nothing. Re-run with -Rerun to force real execution.' -ForegroundColor Red
+        Write-Host ("          counted report dirs: $countedDirs") -ForegroundColor Red
+        $failed += 'no-tests-executed (tests=0)'
+    }
+}
+
+$fpAfter = Get-McaWorktreeFingerprint -RepoRoot $repo
+if ($fpAfter.fingerprint -ne $fpBefore.fingerprint) {
+    Write-Host '   ERROR: production inputs changed while this run was executing; the result does not belong to one snapshot.' -ForegroundColor Red
+    Write-Host ('      before=' + $fpBefore.fingerprint + '  after=' + $fpAfter.fingerprint) -ForegroundColor Red
+    $failed += 'input-changed-during-run'
 }
 
 Write-Host '== working tree ==' -ForegroundColor Cyan

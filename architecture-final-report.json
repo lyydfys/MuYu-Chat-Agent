@@ -7,32 +7,42 @@
     "binary": "E:\\model\\toolchains\\jdk-21\\jdk-21.0.12.1+1\\bin\\java.exe",
     "status": "COMPLIANT_JDK21"
   },
-  "overall_status": "IN_PROGRESS_SCAFFOLDING",
-  "real_progress_estimate": "25% (R0/R1 85%, R2 40%, R3 15%, R4-R6 0%, R7 55%)",
+  "overall_status": "IN_PROGRESS_NOT_S_GRADE",
+  "blockers": [
+    "release_integrity",
+    "fault_injection_matrix",
+    "bridge_line_budgets",
+    "device_and_reliability_evidence"
+  ],
   "gate_results": {
-    "architecture_rules": "PASSED_SCAFFOLD",
+    "architecture_rules": "PASSED",
     "release_integrity": "FAILED",
-    "fault_injection_matrix": "FAILED",
+    "fault_injection_matrix": "MODEL_ONLY_UNVERIFIED",
     "local_only_guard": "PASSED",
-    "required_reports": "PASSED"
+    "required_reports": "PASSED",
+    "preprocessor_balance": "PASSED",
+    "qnn_runtime_compiles": "PASSED",
+    "bridge_line_budgets": "FAILED",
+    "viewmodel_line_budget": "PASSED",
+    "device_and_reliability_evidence": "UNVERIFIED"
   },
   "universal_device_admission": "VERIFIED_COMPLIANT",
   "local_only_guard": "VERIFIED_ISOLATED",
   "rating_evaluation": {
-    "S-C": "PARTIAL_SCAFFOLD (Cross-layer contracts frozen, 25348 lines in 4 giant bridges remain unmigrated)",
-    "S-R": "UNVERIFIED_NATIVE (22-Scenario fault matrix is paper status without native execution logs, VM still 1929 lines)",
-    "S-O": "UNVERIFIED_DEVICE (SBOM & Docs scaffolded, pending real ARM64 hardware build and release logs)"
+    "S-C": "BLOCKED (11664 bridge lines; MainViewModel 501 lines)",
+    "S-R": "UNVERIFIED_REAL_FAULT_AND_SOAK_EVIDENCE",
+    "S-O": "UNVERIFIED_RELEASE_INTEGRITY"
   },
   "giant_bridges_debt": {
-    "qnn_native_bridge.cpp": 11892,
-    "mnn_native_engine.cpp": 7613,
-    "native_engine.cpp": 3125,
-    "stable_diffusion_bridge.cpp": 2718,
-    "total_unmigrated_lines": 25348
+    "qnn_native_bridge.cpp": 952,
+    "mnn_native_engine.cpp": 7725,
+    "native_engine.cpp": 1586,
+    "stable_diffusion_bridge.cpp": 1401,
+    "total_unmigrated_lines": 11664
   },
   "viewmodel_debt": {
-    "MainViewModel.kt": 1929,
+    "MainViewModel.kt": 501,
     "target_lines": 600,
-    "over_lines": 1329
+    "over_lines": 0
   }
 }

@@ -97,7 +97,7 @@ class ChatSessionPersistenceOperationsTest {
     private fun ownerSource(): String = sourceFile("ChatSessionPersistenceOperations.kt")
 
     private fun sourceFile(name: String): String {
-        var directory: File? = File(System.getProperty("user.dir")).absoluteFile
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
             val candidates = listOf(

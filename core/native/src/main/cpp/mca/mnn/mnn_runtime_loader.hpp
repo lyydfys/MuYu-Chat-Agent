@@ -11,7 +11,12 @@ namespace mca {
 namespace mnn {
 
 /**
- * Manages MNN and OpenCL runtime dynamic library loading and symbol resolution.
+ * Tracks MNN/OpenCL transport availability for the lifecycle module.
+ *
+ * The OpenCL probe below opens a real platform library.  MNN itself is *not* loaded or resolved
+ * here: modular builds link the runtime into the provider target, so load_runtime() only records
+ * that a backend may be attempted.  Keep the log wording honest rather than implying a completed
+ * native load.
  *
  * Invariant: Never uses chipset or device profiles as admission blockers.
  * Unknown or uncertified devices automatically fall back to the generic compatible
@@ -31,12 +36,14 @@ public:
     [[nodiscard]] HardwareProbeAdvisory probe_hardware() const;
 
     /**
-     * Resolves and loads the MNN runtime libraries.
+     * Records that the MNN runtime may be attempted.
+     *
+     * Does not open a library or resolve MNN symbols; returns true once the ready flag is set.
      */
     bool load_runtime(std::string* error_msg = nullptr);
 
     /**
-     * Unloads runtime symbols and clears loaded state.
+     * Clears the ready flag and releases the OpenCL probe handle.
      */
     void unload_runtime() noexcept;
 
@@ -61,6 +68,7 @@ private:
     std::atomic<bool> is_loaded_{false};
     std::atomic<bool> opencl_available_{false};
     std::atomic<bool> vulkan_available_{false};
+    /** Declared compile-time version label, never detected from a loaded MNN library. */
     std::string version_string_{"MNN-3.x-MCA"};
     void* opencl_lib_handle_{nullptr};
 };

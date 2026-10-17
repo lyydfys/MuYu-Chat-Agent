@@ -20,7 +20,7 @@ import org.junit.Test
  * the right guard against silent wire changes but the wrong guard against an omission:
  * regenerating the fixture also ratifies a registry that is missing entries. This test is
  * built to be immune to that. It re-derives the route table and the key-free route set from
- * `McaLoopbackServer.kt` itself and compares them with the registry, and it additionally
+ * the router source files themselves and compares them with the registry, and it additionally
  * pins a hand-written freeze of the original entries so that "make the coverage test pass by
  * deleting an entry" fails loudly.
  *
@@ -275,7 +275,7 @@ class LocalApiCapabilityRegistryCoverageTest {
     private fun dispatchedBlock(): String =
         routingBlock().substringAfter(AUTH_CHECK_ANCHOR, missingDelimiterValue = "")
 
-    private fun routerSource(): String = sourceFile(SERVER_SOURCE)
+    private fun routerSource(): String = SERVER_SOURCE_FILES.joinToString("\n") { sourceFile(it) }
 
     /**
      * Every method/path the router can dispatch, read out of the dispatch block.
@@ -378,9 +378,9 @@ class LocalApiCapabilityRegistryCoverageTest {
         return literals
     }
 
-    /** Resolves `private const val NAME = "literal"` in the router. */
+    /** Resolves a `private`/`internal` `const val NAME = "literal"` in the router. */
     private fun stringConstant(name: String): String {
-        val match = Regex("""private const val $name = "([^"]*)"""").find(routerSource())
+        val match = Regex("""(?:private|internal) const val $name = "([^"]*)"""").find(routerSource())
         assertTrue(
             "the route prefix constant $name is referenced by the router but is no longer a " +
                 "string literal; the coverage scan cannot resolve it",
@@ -455,14 +455,26 @@ class LocalApiCapabilityRegistryCoverageTest {
     }
 
     private companion object {
-        const val SERVER_SOURCE = "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt"
+        // T2B8/R7-B3: the router now lives in the shell + six same-package successor files;
+        // the scan reads their union so every dispatch/list assertion still sees it whole.
+        val SERVER_SOURCE_FILES = listOf(
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerHttpTransport.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerChatSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerResponsesSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerImageGeneration.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerTuningControl.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerProtocolCodec.kt"
+        )
         const val PARAMETER_PLACEHOLDER = "{jobId}"
 
         const val HANDLE_ANCHOR = "private suspend fun handle(socket: Socket) {"
         const val ROUTE_FALLBACK_ANCHOR = "else -> writeError(client,"
         const val AUTH_CHECK_ANCHOR = "if (!isPublicRoute(method, path) && !isAuthorized(headers))"
+        // T2B8/R7-B3: readHttpRequest (transport successor) shares this predicate, so the
+        // declaration widened from `private ` to `internal `; the anchor follows the code.
         const val PUBLIC_ROUTE_ANCHOR =
-            "private fun isPublicRoute(method: String, path: String): Boolean ="
+            "internal fun isPublicRoute(method: String, path: String): Boolean ="
         const val NEXT_MEMBER = "\n    private fun "
 
         const val METHODS = "GET|POST|HEAD|PUT|PATCH|DELETE"

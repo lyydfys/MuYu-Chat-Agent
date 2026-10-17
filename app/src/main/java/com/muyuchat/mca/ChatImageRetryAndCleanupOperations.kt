@@ -87,7 +87,9 @@ contextTraceJson: String? = null
                 )
             val databaseAlreadyContains = recoveredImages.any { it.id == asset.id }
             val safelyAssociate = session != null && request != null && jobMatches
-            if (safelyAssociate && session != null && request != null) {
+            // `safelyAssociate` already proves both smart casts; re-testing them here is dead and
+            // was reported as "Condition is always 'true'" (two warnings on this one line).
+            if (safelyAssociate) {
                 val imageIds = (request.imageAssetIds + asset.id).distinct()
                 val completedRequest = request.copy(
                     status = ChatGeneratedImageStatus.DONE,

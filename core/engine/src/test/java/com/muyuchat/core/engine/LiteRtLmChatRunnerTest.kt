@@ -174,7 +174,7 @@ class LiteRtLmChatRunnerTest {
 
     @Test
     fun textOnlyCapabilityIsRejectedBeforeNativeImageInvocation() {
-        val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt")
+        val source = runnerSources()
         val start = source.indexOf("val latest = messages.last()")
         val end = source.indexOf("val generationParams", start)
         require(start >= 0 && end > start)
@@ -320,7 +320,7 @@ class LiteRtLmChatRunnerTest {
 
     @Test
     fun failedOrCancelledConversationCannotBeReused() {
-        val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt")
+        val source = runnerSources()
         assertTrue(source.contains("conversationReusable &&"))
         assertTrue(source.contains("conversationReusable = false"))
         assertTrue(source.contains("val oldConversation = conversation"))
@@ -330,7 +330,7 @@ class LiteRtLmChatRunnerTest {
 
     @Test
     fun qualcommNpuPreloadLoadsTheStagedDispatchPluginByAbsolutePath() {
-        val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt")
+        val source = runnerSources()
         val start = source.indexOf("private fun preloadQualcommHostLibraries")
         require(start >= 0)
         val end = source.indexOf("private fun isCompiledModelCacheFailure", start)
@@ -343,7 +343,7 @@ class LiteRtLmChatRunnerTest {
 
     @Test
     fun cancellationDoesNotWaitForeverOnTheLifecycleLock() {
-        val source = sourceFile("core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt")
+        val source = runnerSources()
         val classStart = source.indexOf("internal class LiteRtLmChatRunner")
         require(classStart >= 0)
         val start = source.indexOf("override fun requestStop()", classStart)
@@ -354,6 +354,12 @@ class LiteRtLmChatRunnerTest {
         assertTrue(body.contains("cancellationGate.request"))
         assertTrue(!body.contains("synchronized(lifecycleLock)"))
     }
+
+    private fun runnerSources(): String = listOf(
+        "core/engine/src/main/java/com/muyuchat/core/engine/LocalChatRunner.kt",
+        "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtLmChatRunner.kt",
+        "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtGenerationSupport.kt"
+    ).joinToString("\n") { sourceFile(it) }
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

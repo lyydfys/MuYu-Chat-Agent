@@ -101,7 +101,9 @@ class LocalApiTuningControlContractTest {
     }
 
     private fun controlPlaneSource(): String =
-        sourceFile("MainViewModel.kt") + "\n" + sourceFile("CorePortAdapters.kt")
+        sourceFile("MainViewModel.kt") + "\n" + sourceFile("CorePortAdapters.kt") + "\n" +
+            sourceFile("RuntimeProfileAndLocalApiPortAdapters.kt") + "\n" +
+            sourceFile("LocalApiImageAndControlPlanePortAdapters.kt")
 
     private fun mainViewModelSource(): String = controlPlaneSource()
 

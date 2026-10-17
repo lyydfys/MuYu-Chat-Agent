@@ -7,6 +7,18 @@
 namespace mca {
 namespace mnn {
 
+/**
+ * Marker written into MnnEngine::mnn_model_handle_ while the load is a lifecycle-only transition.
+ *
+ * \warning This header/source pair is a **skeleton**, not the production MNN engine.  The shipping
+ * shared library (mca_mnn_native) does not construct MnnEngine; only MnnEngineStatsSnapshot is read
+ * from this module.  Real MNN inference lives in mnn_native_engine.cpp.  Before this class is wired
+ * into the production path it must bind a real MNN interpreter/model instead of this sentinel, and
+ * MnnEngine::load_model() must only report success once that binding succeeded.
+ */
+static void* const kSkeletonModelHandle = reinterpret_cast<void*>(0x4D4F444C); // 'MODL'
+
+
 MnnEngine::MnnEngine(
     std::shared_ptr<MnnBackendOwner> backend,
     std::string model_id,
@@ -44,11 +56,18 @@ bool MnnEngine::load_model(std::string* error_msg) {
         return false;
     }
 
-    // Allocate engine model handle
-    mnn_model_handle_ = reinterpret_cast<void*>(0x4D4F444C); // 'MODL'
+    // This module owns the engine/session *lifecycle* state machine.  It deliberately does not bind
+    // an MNN graph yet: the real production MNN path is still mnn_native_engine.cpp, and nothing in
+    // the shipping shared library constructs an MnnEngine (only MnnEngineStatsSnapshot crosses into
+    // it).  The handle below is therefore an explicit marker, not an allocation, and the log line
+    // says so -- an earlier revision logged "Successfully loaded MNN model" here, which made a
+    // skeleton look like a completed load to anyone reading logcat or wiring this class up.
+    mnn_model_handle_ = kSkeletonModelHandle;
     is_model_loaded_.store(true, std::memory_order_relaxed);
 
-    MCA_LOGI("MnnEngine", "Successfully loaded MNN model [%s, ctx=%d, vocab=%d]",
+    MCA_LOGI("MnnEngine",
+             "Lifecycle marked loaded for [%s, ctx=%d, vocab=%d] -- skeleton state only, "
+             "no MNN graph is bound (production inference runs in mnn_native_engine.cpp)",
              get_model_id().c_str(), metadata_.context_window, metadata_.vocab_size);
     return true;
 }
@@ -82,7 +101,9 @@ std::shared_ptr<MnnSession> MnnEngine::create_mnn_session(int64_t initial_genera
 std::vector<int32_t> MnnEngine::tokenize(const std::string& text) const {
     std::vector<int32_t> tokens;
     tokens.reserve(text.size());
-    // Safe byte-based tokenization mapping for fallback / test verification
+    // NOT a tokenizer.  Byte + 10 is a lossless, collision-free stand-in so the lifecycle and session
+    // tests can move token counts around; real tokenization is done by the MNN tokenizers in the
+    // production path.  Kept because MnnSession counts these tokens.
     for (unsigned char ch : text) {
         tokens.push_back(static_cast<int32_t>(ch) + 10);
     }

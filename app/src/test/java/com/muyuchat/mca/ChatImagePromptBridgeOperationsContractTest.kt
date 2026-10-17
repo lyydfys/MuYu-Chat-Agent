@@ -225,10 +225,13 @@ class ChatImagePromptBridgeOperationsContractTest {
     private fun corePortAdaptersSource(): String = projectFile(
         "src/main/java/com/muyuchat/mca/CorePortAdapters.kt",
         "app/src/main/java/com/muyuchat/mca/CorePortAdapters.kt"
+    ) + "\n" + projectFile(
+        "src/main/java/com/muyuchat/mca/ChatExecutionPortAdapters.kt",
+        "app/src/main/java/com/muyuchat/mca/ChatExecutionPortAdapters.kt"
     )
 
     private fun projectFile(vararg candidates: String): String {
-        val root = File(System.getProperty("user.dir"))
+        val root = File(requireNotNull(System.getProperty("user.dir")))
         return candidates.asSequence()
             .map { File(root, it) }
             .firstOrNull(File::isFile)

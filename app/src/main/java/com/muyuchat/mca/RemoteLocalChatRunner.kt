@@ -20,33 +20,36 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
+internal const val WORKER_SESSION_LOST_FIELD = "workerSessionLost"
+internal const val WORKER_STAGE_JOURNAL_FIELD = "workerStageJournal"
+
 /** Main-process proxy for [LocalChatWorkerService]. */
 internal class RemoteLocalChatRunner(
     context: Context,
     override val runtime: LocalChatRuntime,
-    private val isolatedServiceClass: Class<out LocalChatWorkerService>? = null,
+    internal val isolatedServiceClass: Class<out LocalChatWorkerService>? = null,
     private val journalScope: String? = null,
     /** Disposable workers may retain Binder death evidence until native process exit is confirmed. */
-    private val retainWorkerDeathObserver: Boolean = false
+    internal val retainWorkerDeathObserver: Boolean = false
 ) : LocalChatRunner, AutoCloseable {
-    private val appContext = context.applicationContext
-    private val stageJournal = LocalChatWorkerStageJournal.forContext(appContext, journalScope)
-    private val stateLock = Any()
-    private var activeBinding: BindingAttempt? = null
-    private var connection: ServiceConnection? = null
-    private var bound = false
-    private var remote: ILocalChatWorker? = null
+    internal val appContext = context.applicationContext
+    internal val stageJournal = LocalChatWorkerStageJournal.forContext(appContext, journalScope)
+    internal val stateLock = Any()
+    internal var activeBinding: BindingAttempt? = null
+    internal var connection: ServiceConnection? = null
+    internal var bound = false
+    internal var remote: ILocalChatWorker? = null
     /** Retained after detach so a one-shot client can confirm its own process has exited. */
-    private val workerDeathEvidence = ConnectedWorkerDeathEvidence<IBinder>()
-    private var nativeLibDir: String = ""
-    private var modelLoadedInWorker = false
-    private var workerSessionLost = false
+    internal val workerDeathEvidence = ConnectedWorkerDeathEvidence<IBinder>()
+    internal var nativeLibDir: String = ""
+    internal var modelLoadedInWorker = false
+    internal var workerSessionLost = false
     /** Changes whenever a load attempt or Binder identity invalidates an in-flight readback. */
-    private var workerSessionEpoch = 0L
-    private var closed = false
+    internal var workerSessionEpoch = 0L
+    internal var closed = false
 
     @Volatile
-    private var failure: Throwable? = null
+    internal var failure: Throwable? = null
 
     override val isAvailable: Boolean
         get() = synchronized(stateLock) { !closed }
@@ -127,31 +130,12 @@ internal class RemoteLocalChatRunner(
         }
     }
 
-    /** Unloads through the Binder this owner already holds; cleanup must never start a replacement. */
-    internal fun unloadModelIfConnected() {
-        val service = remoteIfBound() ?: return
-        try {
-            service.unloadModel()
-        } catch (error: DeadObjectException) {
-            synchronized(stateLock) {
-                if (remote === service && workerDeathEvidence.lastEndpoint === service.asBinder()) {
-                    workerDeathEvidence.confirmDeath(service.asBinder())
-                }
-            }
-            handleRemoteFailure(service, disconnectedFailure("crashed or was reclaimed", error))
-            return
-        } catch (error: RemoteException) {
-            handleRemoteFailure(service, disconnectedFailure("disconnected", error))
-            return
-        }
-        synchronized(stateLock) {
-            if (remote === service) {
-                workerSessionEpoch += 1L
-                modelLoadedInWorker = false
-                workerSessionLost = false
-            }
-        }
-    }
+    /**
+     * B44: replacement loads run in a fresh worker process. The worker unloads the resident
+     * model and then ends its process; this proxy waits for the exact Binder death and
+     * clears the lost-session bookkeeping so the following load re-binds a new process.
+     */
+    override fun recycleWorkerForReplacement(): Boolean = recycleWorkerForReplacementImpl()
 
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int =
         invoke { service ->
@@ -399,8 +383,6 @@ internal class RemoteLocalChatRunner(
         attempt?.let { releaseBinding(it, preserveWorkerDeathObservation) }
     }
 
-    private fun remoteIfBound(): ILocalChatWorker? = synchronized(stateLock) { remote }
-
     private fun <T> invoke(block: (ILocalChatWorker) -> T): T {
         val service = ensureConnected()
         return try {
@@ -423,159 +405,6 @@ internal class RemoteLocalChatRunner(
         }
     }
 
-    private fun ensureConnected(): ILocalChatWorker {
-        val (attempt, shouldBind) = synchronized(stateLock) {
-            check(!closed) { "The isolated local chat runner is closed." }
-            remote?.let { return it }
-            activeBinding?.let { it to false } ?: createBindingAttempt().let { candidate ->
-                activeBinding = candidate
-                connection = candidate.connection
-                candidate to true
-            }
-        }
-
-        if (shouldBind) startBinding(attempt)
-        if (!attempt.connected.await(CONNECTION_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-            val timeout = workerFailure("timed out while binding.")
-            invalidateBinding(attempt, timeout)
-            throw timeout
-        }
-        attempt.error.get()?.let { throw it }
-        return synchronized(stateLock) {
-            check(!closed) { "The isolated local chat runner is closed." }
-            remote?.takeIf { activeBinding === attempt }
-                ?: throw workerFailure("did not return a Binder.")
-        }
-    }
-
-    private fun createBindingAttempt(): BindingAttempt {
-        val attempt = BindingAttempt()
-        lateinit var serviceConnection: ServiceConnection
-        serviceConnection = object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName, service: IBinder) {
-                val endpoint = ILocalChatWorker.Stub.asInterface(service)
-                val deathRecipient = IBinder.DeathRecipient {
-                    val invalidateCurrentAttempt = synchronized(stateLock) {
-                        workerDeathEvidence.confirmDeath(service)
-                        // The retained observer can outlive unbind. Ignore a retired Binder's
-                        // callback after this connection has accepted a replacement endpoint.
-                        activeBinding === attempt && (attempt.binder == null || attempt.binder === service)
-                    }
-                    if (invalidateCurrentAttempt) {
-                        invalidateBinding(
-                            attempt,
-                            workerFailure("process exited unexpectedly."),
-                            expectedBinder = service
-                        )
-                    }
-                }
-                try {
-                    service.linkToDeath(deathRecipient, 0)
-                } catch (error: Throwable) {
-                    invalidateBinding(
-                        attempt,
-                        workerFailure("died while connecting.", error)
-                    )
-                    return
-                }
-                val accepted = synchronized(stateLock) {
-                    if (activeBinding === attempt &&
-                        connection === serviceConnection &&
-                        !closed
-                    ) {
-                        attempt.binder = service
-                        attempt.deathRecipient = deathRecipient
-                        workerDeathEvidence.connected(service)
-                        remote = endpoint
-                        workerSessionEpoch += 1L
-                        if (!workerSessionLost) failure = null
-                        true
-                    } else {
-                        false
-                    }
-                }
-                if (!accepted) {
-                    runCatching { service.unlinkToDeath(deathRecipient, 0) }
-                    invalidateBinding(
-                        attempt,
-                        workerFailure("returned a stale connection callback.")
-                    )
-                } else {
-                    attempt.connected.countDown()
-                }
-            }
-
-            override fun onServiceDisconnected(name: ComponentName) {
-                invalidateBinding(
-                    attempt,
-                    workerFailure("service disconnected.")
-                )
-            }
-
-            override fun onBindingDied(name: ComponentName) {
-                invalidateBinding(
-                    attempt,
-                    workerFailure("binding died.")
-                )
-            }
-
-            override fun onNullBinding(name: ComponentName) {
-                invalidateBinding(
-                    attempt,
-                    workerFailure("returned a null Binder.")
-                )
-            }
-        }
-        attempt.connection = serviceConnection
-        return attempt
-    }
-
-    private fun startBinding(attempt: BindingAttempt) {
-        val serviceIntent = Intent(appContext, workerServiceClass())
-        val didBind = try {
-            appContext.bindService(
-                serviceIntent,
-                attempt.connection,
-                Context.BIND_AUTO_CREATE or Context.BIND_IMPORTANT
-            )
-        } catch (error: Throwable) {
-            val failure = workerFailure("could not be bound.", error)
-            invalidateBinding(attempt, failure)
-            throw failure
-        }
-        if (!didBind) {
-            val failure = workerFailure("could not be bound.")
-            invalidateBinding(attempt, failure)
-            throw failure
-        }
-
-        val unbindStale = synchronized(stateLock) {
-            attempt.bindSucceeded = true
-            if (activeBinding === attempt && connection === attempt.connection && !closed) {
-                bound = true
-                false
-            } else if (!attempt.unbindIssued) {
-                attempt.unbindIssued = true
-                true
-            } else {
-                false
-            }
-        }
-        if (unbindStale) unbindQuietly(attempt.connection)
-    }
-
-    /**
-     * Keep LiteRT-LM in its dedicated worker process/service so its Qualcomm dispatch
-     * preloading and native lifecycle cannot collide with the generic local-chat worker.
-     * All other runtimes continue to use the shared worker implementation.
-     */
-    private fun workerServiceClass(): Class<out LocalChatWorkerService> =
-        isolatedServiceClass ?: if (runtime == LocalChatRuntime.LITERT_LM) {
-            LiteRtChatWorkerService::class.java
-        } else {
-            LocalChatWorkerService::class.java
-        }
-
     private fun startResidentService() {
         val serviceIntent = Intent(appContext, workerServiceClass())
         runCatching {
@@ -587,169 +416,7 @@ internal class RemoteLocalChatRunner(
         }
     }
 
-    private fun handleRemoteFailure(service: ILocalChatWorker, error: Throwable) {
-        val attempt = synchronized(stateLock) {
-            if (remote === service && workerDeathEvidence.lastEndpoint === service.asBinder() &&
-                error.causeChainContainsDeadObject()
-            ) {
-                workerDeathEvidence.confirmDeath(service.asBinder())
-            }
-            activeBinding?.takeIf { remote === service }
-        } ?: return
-        invalidateBinding(attempt, error, expectedBinder = service.asBinder())
-    }
-
-    private fun Throwable.causeChainContainsDeadObject(): Boolean =
-        generateSequence(this) { it.cause }.any { it is DeadObjectException }
-
-    private fun invalidateBinding(
-        attempt: BindingAttempt,
-        error: Throwable,
-        expectedBinder: IBinder? = null
-    ) {
-        var shouldUnbind = false
-        var binder: IBinder? = null
-        var deathRecipient: IBinder.DeathRecipient? = null
-        synchronized(stateLock) {
-            if (expectedBinder != null && attempt.binder != null && attempt.binder !== expectedBinder) return
-            val isCurrent = activeBinding === attempt && connection === attempt.connection
-            if (isCurrent) {
-                markWorkerSessionLostLocked(error)
-                remote = null
-                workerSessionEpoch += 1L
-                activeBinding = null
-                connection = null
-                bound = false
-            }
-            attempt.error.compareAndSet(null, error)
-            binder = attempt.binder
-            deathRecipient = attempt.deathRecipient
-            attempt.binder = null
-            attempt.deathRecipient = null
-            if (attempt.bindSucceeded && !attempt.unbindIssued) {
-                attempt.unbindIssued = true
-                shouldUnbind = true
-            }
-        }
-        attempt.connected.countDown()
-        val keepDeathObserver = synchronized(stateLock) {
-            retainWorkerDeathObserver && binder != null && binder === workerDeathEvidence.lastEndpoint &&
-                !workerDeathEvidence.confirmedDeath
-        }
-        if (!keepDeathObserver && binder != null && deathRecipient != null) {
-            runCatching { binder.unlinkToDeath(deathRecipient, 0) }
-        }
-        if (shouldUnbind) unbindQuietly(attempt.connection)
-    }
-
-    private fun releaseBinding(
-        attempt: BindingAttempt,
-        preserveDeathObservation: Boolean = false
-    ) {
-        var shouldUnbind = false
-        val binder: IBinder?
-        val deathRecipient: IBinder.DeathRecipient?
-        synchronized(stateLock) {
-            binder = attempt.binder
-            deathRecipient = attempt.deathRecipient
-            if (!preserveDeathObservation) {
-                attempt.binder = null
-                attempt.deathRecipient = null
-            }
-            if (attempt.bindSucceeded && !attempt.unbindIssued) {
-                attempt.unbindIssued = true
-                shouldUnbind = true
-            }
-        }
-        if (!preserveDeathObservation && binder != null && deathRecipient != null) {
-            runCatching { binder.unlinkToDeath(deathRecipient, 0) }
-        }
-        if (shouldUnbind) unbindQuietly(attempt.connection)
-    }
-
-    private fun markWorkerSessionLostLocked(error: Throwable) {
-        if (modelLoadedInWorker) workerSessionLost = true
-        modelLoadedInWorker = false
-        failure = error
-    }
-
-    private fun workerFailureCodeLocked(): String? =
-        (failure as? RemoteLocalChatRunnerException)
-            ?.workerStageDiagnostic
-            ?.failureCode
-
-    private fun requiresExplicitAcceleratorReload(code: String?): Boolean =
-        code.orEmpty().lowercase().let { it.startsWith("litert_gpu_") || it.startsWith("mnn_opencl_") }
-
-    private fun explicitAcceleratorReloadMessage(code: String?): String? = when {
-        code.orEmpty().lowercase().startsWith("litert_gpu_") ->
-            "LiteRT-LM GPU 未在限定时间内完成，隔离会话已回收。当前请求不会自动回退到 CPU；请显式重新加载 GPU，或在模型设置中选择 CPU 后重试。"
-        code.orEmpty().lowercase().startsWith("mnn_opencl_") ->
-            "MNN OpenCL 未在限定时间内完成，隔离会话已回收。当前请求不会自动回退到 CPU；请显式重新加载 OpenCL，或在模型设置中选择 CPU 后重试。"
-        else -> null
-    }
-
-    private fun workerUnavailableStatsLocked(): String {
-        val diagnostic = (failure as? RemoteLocalChatRunnerException)?.workerStageDiagnostic
-            ?: runCatching { stageJournal.read() }.getOrNull()
-        return JSONObject()
-            .put("backend", runtime.backendId)
-            .put("loaded", false)
-            .put("runnerReady", !closed && !workerSessionLost)
-            .put(WORKER_SESSION_LOST_FIELD, workerSessionLost)
-            .apply {
-                failure?.message?.takeIf { it.isNotBlank() }?.let { put("lastError", it) }
-                diagnostic?.let {
-                    put(WORKER_STAGE_JOURNAL_FIELD, it.toJson())
-                    put("workerLastStage", it.stage)
-                    put("workerLastPssKb", it.pssKb)
-                }
-            }
-            .toString()
-    }
-
-    private inline fun <T> withRequestPayload(
-        request: LocalChatWorkerRequestTransport.BeginRequest,
-        block: (ParcelFileDescriptor) -> T
-    ): T {
-        val file = LocalChatWorkerRequestTransport.write(appContext, request)
-        try {
-            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                // The open descriptor remains valid after unlinking the cache
-                // entry, so a process death cannot leave prompt text on disk.
-                runCatching { file.delete() }
-                return block(descriptor)
-            }
-        } finally {
-            runCatching { file.delete() }
-        }
-    }
-
-    private fun disconnectedFailure(stage: String, cause: Throwable): RemoteLocalChatRunnerException =
-        workerFailure(stage, cause)
-
-    /** Reads only the bounded, prompt-free worker sidecar after a Binder failure. */
-    private fun workerFailure(summary: String, cause: Throwable? = null): RemoteLocalChatRunnerException {
-        val diagnostic = runCatching { stageJournal.read() }.getOrNull()
-        val safeCause = LocalDiagnosticRedactor.sanitize(cause?.message)
-        val message = buildString {
-            append("The isolated local text worker ").append(summary.trim())
-            if (safeCause.isNotBlank()) append(": ").append(safeCause)
-            diagnostic?.let {
-                append(". Last durable worker diagnostic: ").append(it.compactDescription())
-                explicitAcceleratorReloadMessage(it.failureCode)?.let { hint ->
-                    append(". ").append(hint)
-                }
-            }
-        }
-        return RemoteLocalChatRunnerException(message, cause, diagnostic)
-    }
-
-    private fun unbindQuietly(serviceConnection: ServiceConnection) {
-        runCatching { appContext.unbindService(serviceConnection) }
-    }
-
-    private class BindingAttempt {
+    internal class BindingAttempt {
         lateinit var connection: ServiceConnection
         val connected = CountDownLatch(1)
         val error = AtomicReference<Throwable?>(null)
@@ -766,10 +433,7 @@ internal class RemoteLocalChatRunner(
 
     private companion object {
         private const val REMOTE_LOG_TAG = "McaRemoteLocalChat"
-        private const val CONNECTION_TIMEOUT_MS = 15_000L
         private const val MAX_STATS_READ_ATTEMPTS = 2
         private const val NO_MODEL_LOADED_MESSAGE = "No local text model is loaded"
-        internal const val WORKER_SESSION_LOST_FIELD = "workerSessionLost"
-        internal const val WORKER_STAGE_JOURNAL_FIELD = "workerStageJournal"
     }
 }

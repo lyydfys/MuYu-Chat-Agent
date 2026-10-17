@@ -31,7 +31,7 @@ class LocalApiProtocolGoldenTest {
         val golden = goldenFile(REGISTRY_GOLDEN)
 
         if (!golden.exists()) {
-            golden.parentFile.mkdirs()
+            golden.parentFile!!.mkdirs()
             golden.writeText(canonicalize(LocalApiCapabilityRegistry.json(), pretty = true) + "\n")
             fail(
                 "Protocol golden was missing and has been generated at " +
@@ -52,7 +52,7 @@ class LocalApiProtocolGoldenTest {
         val golden = goldenFile(ROUTES_GOLDEN)
 
         if (!golden.exists()) {
-            golden.parentFile.mkdirs()
+            golden.parentFile!!.mkdirs()
             golden.writeText(routes.joinToString("\n") + "\n")
             fail(
                 "Route golden was missing and has been generated at " +
@@ -158,7 +158,7 @@ class LocalApiProtocolGoldenTest {
 
     @Test
     fun `the streaming contract keeps its SSE framing`() {
-        val source = sourceFile("api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt")
+        val source = routerSource()
 
         assertTrue(
             "SSE responses must keep this content type",
@@ -200,7 +200,7 @@ class LocalApiProtocolGoldenTest {
      */
     private fun routedPaths(): List<String> =
         Regex("\"(/v1/[A-Za-z0-9/_.\\-]*)\"")
-            .findAll(sourceFile("api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt"))
+            .findAll(routerSource())
             .map { it.groupValues[1] }
             .plus(constantRoutedPaths())
             .distinct()
@@ -238,6 +238,10 @@ class LocalApiProtocolGoldenTest {
         }
     }
 
+    // T2B8/R7-B3: the router is split into the shell + six same-package files; the wire
+    // contract (route literals + SSE framing) is read from their union.
+    private fun routerSource(): String = ROUTER_SOURCE_FILES.joinToString("\n") { sourceFile(it) }
+
     private fun goldenFile(relativePath: String): File = File(projectRoot(), relativePath)
 
     private fun sourceFile(relativePath: String): String = File(projectRoot(), relativePath).readText()
@@ -252,6 +256,15 @@ class LocalApiProtocolGoldenTest {
     }
 
     private companion object {
+        val ROUTER_SOURCE_FILES = listOf(
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServer.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerHttpTransport.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerChatSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerResponsesSse.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerImageGeneration.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerTuningControl.kt",
+            "api/local/src/main/java/com/muyuchat/api/local/McaLoopbackServerProtocolCodec.kt"
+        )
         const val REGISTRY_GOLDEN = "api/local/src/test/resources/local-api-capabilities.golden.json"
         const val ROUTES_GOLDEN = "api/local/src/test/resources/local-api-routes.golden.txt"
     }

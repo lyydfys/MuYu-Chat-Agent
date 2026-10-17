@@ -28,17 +28,17 @@ internal interface LocalImageCancellationPort {
 }
 
 internal fun runLocalImageCancellation(port: LocalImageCancellationPort): Boolean {
-    val activeRuntime = port.activeRuntime
+    val activeRuntime = port.activeRuntime ?: return false
     val activeSplitSdxlTerminal = port.activeSplitSdxlTerminal
     val cancellationRequested = port.cancellationRequested
-    val sdxlCoordinator = port.sdxlCoordinator
-    val qnnBridge = port.qnnBridge
-    val mnnDiffusionBridge = port.mnnDiffusionBridge
-    val qwenImage21Worker = port.qwenImage21Worker
+    val sdxlCoordinator by lazy(LazyThreadSafetyMode.NONE) { port.sdxlCoordinator }
+    val qnnBridge by lazy(LazyThreadSafetyMode.NONE) { port.qnnBridge }
+    val mnnDiffusionBridge by lazy(LazyThreadSafetyMode.NONE) { port.mnnDiffusionBridge }
+    val qwenImage21Worker by lazy(LazyThreadSafetyMode.NONE) { port.qwenImage21Worker }
     val qwenImage21RuntimeResident = port.qwenImage21RuntimeResident
     val activeQwenImage21RequestId = port.activeQwenImage21RequestId
-    val bridge = port.bridge
-    return when (activeRuntime ?: return false) {
+    val bridge by lazy(LazyThreadSafetyMode.NONE) { port.bridge }
+    return when (activeRuntime) {
         LocalImageRuntime.QNN_HTP -> {
             // The split request state is the linearization point against final output transfer.
             activeSplitSdxlTerminal.get()?.cancel()

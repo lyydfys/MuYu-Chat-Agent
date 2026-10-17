@@ -42,19 +42,23 @@ void require_contains(const std::string& source, const std::string& needle) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    assert(argc == 2);
-    const auto source = read_text(argv[1]);
+    // T2 batch-1: the SD1.5 backend-capability predicate was relocated from the
+    // monolith into mca/mnn/mnn_backend_predicates.cpp; argv[1] stays the engine
+    // source (direct-path contract), argv[2] is the relocated predicate module.
+    assert(argc == 3);
+    const auto engineSource = read_text(argv[1]);
+    const auto predicateSource = read_text(argv[2]);
 
-    require_contains(source, "bool mnn_sd15_unet_backend_unsupported(");
+    require_contains(predicateSource, "bool mnn_sd15_unet_backend_unsupported(");
     const auto predicate = function_body(
-            source, "bool mnn_sd15_unet_backend_unsupported(");
+            predicateSource, "bool mnn_sd15_unet_backend_unsupported(");
     require_contains(predicate, "status 2");
     require_contains(predicate, "NOT_SUPPORT");
     require_contains(predicate, "Create execution error : 304");
     require_contains(predicate, "GroupNorm");
 
     const auto generate = function_body(
-            source, "json run_mnn_sd15_interpreter_direct(");
+            engineSource, "json run_mnn_sd15_interpreter_direct(");
     require_contains(generate, "contract.backend_mode == \"cpu\"");
     require_contains(generate, "MNN_UNET_BACKEND_UNSUPPORTED");
     require_contains(generate, "fallbackEligible");

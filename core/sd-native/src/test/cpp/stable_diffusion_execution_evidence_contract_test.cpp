@@ -47,12 +47,43 @@ void require_before(const std::string& source,
 
 }  // namespace
 
+std::string directory_of(const std::string& path) {
+    const auto last_slash = path.find_last_of("/\\");
+    return last_slash == std::string::npos ? std::string() : path.substr(0, last_slash);
+}
+
+// The asserted text was extracted out of the bridge into mca/sd modules; the read set is composed so
+// the checks observe the real implementations.  A missing module fails the test loudly instead of
+// silently shrinking the read set (which is how a wrongly-wired test would appear to pass).
+std::string read_required_text(const std::string& path) {
+    std::ifstream input(path.c_str(), std::ios::binary);
+    assert(input.good());
+    std::ostringstream buffer;
+    buffer << input.rdbuf();
+    return buffer.str();
+}
+
 int main(int argc, char** argv) {
     assert(argc == 6);
     const std::string public_header = read_text(argv[1]);
     const std::string conditioner = read_text(argv[2]);
     const std::string engine = read_text(argv[3]);
+    const std::string dir = directory_of(argv[4]);
     const std::string bridge = read_text(argv[4]);
+    // requires the real implementations the extracted code now lives in (T2B17/R7-C6: the
+    // generate execute phase owns the context-local completion-evidence needle that moved out
+    // of the bridge).
+    const std::string contract = bridge
+            + read_required_text(dir + "/sd_generate_execute.cpp")
+            + read_required_text(dir + "/mca/sd/sd_evidence_verifier.cpp")
+            + read_required_text(dir + "/mca/sd/sd_response_builder.cpp")
+            + read_required_text(dir + "/mca/sd/sd_controlnet_adapter.cpp")
+            + read_required_text(dir + "/mca/sd/sd_preview_encoder.cpp")
+            + read_required_text(dir + "/mca/sd/sd_textual_inversion.cpp")
+            + read_required_text(dir + "/mca/sd/sd_runtime_diagnostics.cpp")
+            + read_required_text(dir + "/mca/sd/sd_component_resolver.cpp")
+            + read_required_text(dir + "/mca/sd/sd_contract_parser.cpp")
+            + read_required_text(dir + "/mca/sd/sd_effective_config.cpp");
     const std::string vae = read_text(argv[5]);
 
     // Evidence is owned by the native context and copied only after generation.
@@ -138,54 +169,55 @@ int main(int argc, char** argv) {
 
     // The bridge consumes native evidence and hashes the exact artifact. It
     // must never substitute request capacity or UI progress for actual work.
-    require_contains(bridge, "sd_get_last_image_execution_evidence(ctx, &execution_evidence)");
-    require_contains(bridge, "sha256_hex(conditioning_artifact)");
-    require_contains(bridge, "image_prompt_execution_sha256(");
-    require_contains(bridge, "7b2c4dab5874fc03fd088691ce5bea0ff34ded267b495fc5249853dd2110bed7");
-    require_contains(bridge, "77debda388ee058e0ce51f89e799e2ca7828a06142fc77b2b19cff3844b93579");
-    require_contains(bridge, "const uint64_t total_conditioning_token_count =");
-    require_contains(bridge, "execution_evidence.positive_conditioning_token_count +");
-    require_contains(bridge, "resolvedTokenCount");
-    require_contains(bridge, "positiveConditioningTokenCount");
-    require_contains(bridge, "negativeConditioningTokenCount");
-    require_contains(bridge, "nativePromptExecutionSha256");
-    require_contains(bridge, "nativePromptBindingStage\"] = \"conditioning_consumed\"");
-    require_contains(bridge, "validate_textual_inversion_execution_evidence(");
-    require_contains(bridge, "TEXTUAL_INVERSION_NATIVE_CONDITIONING_INCOMPLETE");
-    require_contains(bridge, "textual_inversion_selection_fingerprint(");
-    require_contains(bridge, "\"bindingStage\", validated_textual_inversions.empty()");
-    require_before(bridge,
+    require_contains(contract, "sd_get_last_image_execution_evidence(ctx, &execution_evidence)");
+    require_contains(contract, "sha256_hex(conditioning_artifact)");
+    require_contains(contract, "image_prompt_execution_sha256(");
+    require_contains(contract, "7b2c4dab5874fc03fd088691ce5bea0ff34ded267b495fc5249853dd2110bed7");
+    require_contains(contract, "77debda388ee058e0ce51f89e799e2ca7828a06142fc77b2b19cff3844b93579");
+    require_contains(contract, "const uint64_t total_conditioning_token_count =");
+    require_contains(contract, "execution_evidence.positive_conditioning_token_count +");
+    require_contains(contract, "resolvedTokenCount");
+    require_contains(contract, "positiveConditioningTokenCount");
+    require_contains(contract, "negativeConditioningTokenCount");
+    require_contains(contract, "nativePromptExecutionSha256");
+    require_contains(contract, "nativePromptBindingStage\"] = \"conditioning_consumed\"");
+    require_contains(contract, "validate_textual_inversion_execution_evidence(");
+    require_contains(contract, "TEXTUAL_INVERSION_NATIVE_CONDITIONING_INCOMPLETE");
+    require_contains(contract, "textual_inversion_selection_fingerprint(");
+    require_contains(contract, "\"bindingStage\", validated_textual_inversions.empty()");
+    require_before(contract,
                    "positive conditioning did not publish actual tokenizer evidence",
-                   "const std::string actual_native_prompt_execution_sha256");
-    require_contains(bridge, "actual physical diffusion model computes");
-    require_contains(bridge, "actual negative diffusion execution");
-    require_contains(bridge, "execution_evidence.control_net_compute_attempt_count");
-    require_contains(bridge, "actual_control_net_residual_consumption_count");
-    require_contains(bridge, "actual_positive_control_net_compute_attempt_count != actual_positive_execution_count");
-    require_contains(bridge, "actual_negative_control_net_compute_attempt_count != actual_negative_execution_count");
-    require_contains(bridge, "actual_positive_control_net_residual_consumption_count != actual_positive_execution_count");
-    require_contains(bridge, "actual_negative_control_net_residual_consumption_count != actual_negative_execution_count");
-    require_contains(bridge, "ControlNet did not successfully compute and feed residuals");
-    require_contains(bridge, "controlNetEvidence");
-    require_contains(bridge, "execution_evidence.vae_decode_tiling_invocation_count");
-    require_contains(bridge, "actual_vae_decode_planned_tile_count");
-    require_contains(bridge, "requested VAE tiling did not execute exactly once for every final image decode");
-    require_contains(bridge, "actual_vae_decode_tiling_invocation_count != contract.batch_count");
-    require_contains(bridge, "input_image_wired && actual_vae_encode_tiling_invocation_count <= 0");
-    require_contains(bridge, "actual_flow_shift_applied");
-    require_contains(bridge, "actual_distilled_guidance_applied");
-    require_contains(bridge, "requestedFlowShift");
-    require_contains(bridge, "requestedDistilledGuidance");
-    require_contains(bridge, "void sd_preview_callback(");
-    require_contains(bridge, "stbi_write_png(");
-    require_contains(bridge, "std::rename(partial.c_str(), target.c_str())");
-    require_contains(bridge, "sd_set_preview_callback(");
-    require_contains(bridge, "previewPublicationCount");
-    require_contains(bridge, "safe_sd_runtime_message(");
-    require_contains(bridge, "running native text conditioning");
+                   "summary.actual_native_prompt_execution_sha256 =");
+    require_contains(contract, "actual physical diffusion model computes");
+    require_contains(contract, "actual negative diffusion execution");
+    require_contains(contract, "execution_evidence.control_net_compute_attempt_count");
+    require_contains(contract, "controlNetResidualConsumptionCount");
+    require_contains(contract, "evidence.residual_consumption_count");
+    require_contains(contract, "evidence.positive_compute_attempt_count != actual_positive_execution_count");
+    require_contains(contract, "evidence.negative_compute_attempt_count != actual_negative_execution_count");
+    require_contains(contract, "evidence.positive_residual_consumption_count != actual_positive_execution_count");
+    require_contains(contract, "evidence.negative_residual_consumption_count != actual_negative_execution_count");
+    require_contains(contract, "ControlNet did not successfully compute and feed residuals");
+    require_contains(contract, "controlNetEvidence");
+    require_contains(contract, "execution_evidence.vae_decode_tiling_invocation_count");
+    require_contains(contract, "actual_vae_decode_planned_tile_count");
+    require_contains(contract, "requested VAE tiling did not execute exactly once for every final image decode");
+    require_contains(contract, "actual_vae_decode_tiling_invocation_count != contract.batch_count");
+    require_contains(contract, "input_image_wired && summary.actual_vae_encode_tiling_invocation_count <= 0");
+    require_contains(contract, "actual_flow_shift_applied");
+    require_contains(contract, "actual_distilled_guidance_applied");
+    require_contains(contract, "requestedFlowShift");
+    require_contains(contract, "requestedDistilledGuidance");
+    require_contains(contract, "void sd_preview_callback(");
+    require_contains(contract, "stbi_write_png(");
+    require_contains(contract, "std::rename(partial.c_str(), target.c_str())");
+    require_contains(contract, "sd_set_preview_callback(");
+    require_contains(contract, "previewPublicationCount");
+    require_contains(contract, "safe_sd_runtime_message(");
+    require_contains(contract, "running native text conditioning");
     require_absent(bridge, "set_progress_stage(\"conditioning\", message)");
     require_absent(bridge, "\"%s\", text == nullptr ? \"\" : text");
-    require_contains(bridge, "contract.preview_mode != \"projection\"");
+    require_contains(contract, "contract.preview_mode != \"projection\"");
     require_absent(bridge, "preview publication is not active in the worker protocol");
     require_absent(bridge, "out[\"flowShift\"] = contract.flow_shift");
     require_absent(bridge, "const int actual_token_count = contract.token_count");

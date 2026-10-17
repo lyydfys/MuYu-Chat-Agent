@@ -27,6 +27,50 @@ class LocalImageApiErrorMappingTest {
     }
 
     @Test
+    fun `qnn context binary mismatch keeps the native text and adds an actionable next step`() {
+        // Verbatim device text (B-matrix I-B1: SM8550 + snapdragon_8_elite_gen5 bundle).
+        val nativeDetail = "QNN contextCreateFromBinary failed: QNN_CONTEXT_ERROR_CREATE_FROM_BINARY: " +
+            "Failure to create context from binary (0x138d). The context binary may not match this " +
+            "device's QNN runtime, target SoC, or SDK version. Rebuild or download a QNN bundle " +
+            "compiled for the device runtime before enabling NPU image generation. " +
+            "QNN deviceCreate succeeded with default config."
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", nativeDetail)
+        )
+        // The original message and its error code survive verbatim for diagnosis.
+        assertTrue(message.contains(nativeDetail))
+        assertTrue(message.contains("0x138d"))
+        assertTrue(message.contains("QNN_CONTEXT_ERROR_CREATE_FROM_BINARY"))
+        // The next step names the real remedy instead of "retry and report".
+        assertTrue(message.contains("模型页"))
+        assertTrue(message.contains("stable-diffusion.cpp"))
+        assertTrue(message.contains("MNN"))
+        assertTrue(message.contains("下一步"))
+    }
+
+    @Test
+    fun `qnn tokenizer failure explains the package condition and the next action`() {
+        val nativeDetail = "QNN CLIP tokenizer returned 0 IDs; expected 154."
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", nativeDetail)
+        )
+        assertTrue(message.contains(nativeDetail))
+        assertTrue(message.contains("模型页"))
+        assertTrue(message.contains("重新导入"))
+        assertTrue(message.contains("下一步"))
+    }
+
+    @Test
+    fun `unrecognised native failures keep the generic retry guidance`() {
+        val message = localImageGenerationFailureMessage(
+            LocalImageWorkerRemoteException("generation_failed", "out of memory")
+        )
+        assertTrue(message.contains("out of memory"))
+        assertTrue(message.contains("下一步：重试一次"))
+        assertFalse(message.contains("模型页"))
+    }
+
+    @Test
     fun `ui worker failures explain the problem and the next action`() {
         val disconnected = localImageGenerationFailureMessage(
             LocalImageWorkerDisconnectedException("Local image worker process died.")

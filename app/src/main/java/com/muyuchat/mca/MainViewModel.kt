@@ -343,9 +343,7 @@ class MainViewModel @JvmOverloads constructor(
 
     internal fun newChatForAssistant(assistant: AssistantRecord?, bindDefaultModel: Boolean = false): Boolean {
         if (rejectWhileConversationMutationInProgress()) return false
-        val created = chatSessionManagementCoordinator.newChatForAssistant(assistant, bindDefaultModel)
-        if (created) markLocalConversationContextInvalid()
-        return created
+        return chatSessionManagementCoordinator.newChatForAssistant(assistant, bindDefaultModel)
     }
 
     fun deleteChatSession(sessionId: String) {
@@ -399,11 +397,6 @@ class MainViewModel @JvmOverloads constructor(
     private fun retireLocalApiListener(stopForegroundService: Boolean, forceServerStop: Boolean) = localApiServerCoordinator.retireLocalApiListener(stopForegroundService, forceServerStop)
 
     private fun claimLocalApiProcessOwnership() {
-        // contract: claimLocalApiProcessOwnership()
-        // contract: LocalApiRuntime.claimOwner(localApiRuntimeOwner)
-        // contract: localApiProcessOwnerToken !== localApiRuntimeOwner
-        // contract: LocalApiForegroundService.ensureListener(
-        // contract: LocalApiForegroundService.stopListener()
         localApiServerCoordinator.claimLocalApiProcessOwnership()
     }
 
@@ -503,9 +496,4 @@ class MainViewModel @JvmOverloads constructor(
     private fun persistPersistentPrefixCacheEnabled(application: Application, enabled: Boolean) = GenerationPreferences.persistPersistentPrefixCacheEnabled(application, enabled)
     private fun apiUrl(host: String): String = localApiRuntimeOwner.apiUrl(host)
     private fun currentOpenApiAddress(): String = localApiRuntimeOwner.currentOpenApiAddress(detectLanIpAddress())
-
-    // Contract needles preserved for static inspection:
-    // ImagePromptTokenMeasurementRoute.SDCPP_CLIP
-    // NativeStableDiffusionBridge().measurePromptTokens(
-    // exact = false
 }

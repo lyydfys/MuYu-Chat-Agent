@@ -1,24 +1,11 @@
 package com.muyuchat.mca.composition
 
 import android.app.Application
-import com.muyuchat.core.deviceprofile.DeviceProfile
-import com.muyuchat.core.download.ModelScopeClient
-import com.muyuchat.mca.AgentTuningCoordinator
-import com.muyuchat.mca.AssistantProfileCoordinator
-import com.muyuchat.mca.ManagedDownloadRequest
-import com.muyuchat.mca.ModelScopeHubCoordinator
-import com.muyuchat.core.advisor.AgentDecisionLogger
-import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
-import com.muyuchat.core.engine.LoadParams
-import com.muyuchat.mca.DiagnosticsOperations
-import com.muyuchat.mca.LocalGenerationSmokeResult
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatAppearanceCoordinator
 import com.muyuchat.mca.ChatImageWorkflowCoordinator
 import com.muyuchat.mca.ChatWorkflowCoordinator
 import com.muyuchat.mca.PendingAssistantImageToolTurn
-import com.muyuchat.mca.ChatSessionPersistencePortAdapter
-import com.muyuchat.mca.ChatSessionPersistencePort
 import com.muyuchat.mca.LocalImageWorkerClient
 import com.muyuchat.mca.LocalImageGenerationCoordinator
 import com.muyuchat.mca.ContextCompressionRequestStore
@@ -34,43 +21,20 @@ import com.muyuchat.mca.canonicalImageAssetDirectory
 import com.muyuchat.core.engine.Role
 import com.muyuchat.mca.ChatImageCommitJournal
 import com.muyuchat.mca.ChatImageCommitRecoveryPort
-import com.muyuchat.mca.ChatImageCommitRecoveryPortAdapter
 import com.muyuchat.mca.ChatImageRequestPort
-import com.muyuchat.mca.ChatImageRequestPortAdapter
 import com.muyuchat.mca.ChatImageRetryPort
-import com.muyuchat.mca.ChatImageRetryPortAdapter
-import com.muyuchat.mca.SendChatImageRequestPort
-import com.muyuchat.mca.SendChatImageRequestPortAdapter
 import com.muyuchat.mca.ImageAssetCreationPort
-import com.muyuchat.mca.ImageAssetCreationPortAdapter
 import com.muyuchat.mca.ImageAssetDeletionPort
-import com.muyuchat.mca.ImageAssetDeletionPortAdapter
 import com.muyuchat.mca.ImageLibraryCommitPort
-import com.muyuchat.mca.ImageLibraryCommitPortAdapter
 import com.muyuchat.mca.ImageUpscaleOwner
 import com.muyuchat.mca.ImageUpscalePort
-import com.muyuchat.mca.ImageUpscalePortAdapter
 import com.muyuchat.mca.LocalImageUpscalerPort
-import com.muyuchat.mca.LocalImageUpscalerPortAdapter
-import com.muyuchat.mca.CreateLocalGeneratedImageAssetPort
-import com.muyuchat.mca.CreateLocalGeneratedImageAssetPortAdapter
-import com.muyuchat.mca.LocalGeneratedImageWorkerGatewayAdapter
 import com.muyuchat.mca.ImagePromptTranslationPort
-import com.muyuchat.mca.ImagePromptTranslationPortAdapter
 import com.muyuchat.mca.ImagePromptTranslationPreviewPort
-import com.muyuchat.mca.ImagePromptTranslationPreviewPortAdapter
 import com.muyuchat.mca.AssistantImageToolTurnPort
-import com.muyuchat.mca.AssistantImageToolTurnPortAdapter
 import com.muyuchat.mca.ChatImageRequestApprovalPort
-import com.muyuchat.mca.ChatImageRequestApprovalPortAdapter
-import com.muyuchat.mca.ManagedRuntimeReadinessPort
-import com.muyuchat.mca.ManagedRuntimeReadinessPortAdapter
 import com.muyuchat.mca.AppUpdatePort
-import com.muyuchat.mca.AppUpdatePortAdapter
-import com.muyuchat.mca.CloudModelConfigPort
-import com.muyuchat.mca.CloudModelConfigPortAdapter
 import com.muyuchat.mca.SelectChatSessionPort
-import com.muyuchat.mca.SelectChatSessionPortAdapter
 import com.muyuchat.mca.ChatBackend
 import com.muyuchat.mca.OpenAiCompatibleChatProvider
 import com.muyuchat.core.engine.GenerationParams
@@ -83,24 +47,12 @@ import com.muyuchat.mca.MainUiState
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.mca.OfflinePromptTranslationService
-import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
 import com.muyuchat.mca.ImageGenerationOwner
-import com.muyuchat.mca.ImageGenerationHostAdapter
 import com.muyuchat.mca.CloudImageProvider
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
-import com.muyuchat.mca.MainPostStartupCoordinator
-import com.muyuchat.mca.ContentImportPreviewCoordinator
-import com.muyuchat.mca.ChatSessionManagementCoordinator
-import com.muyuchat.mca.ChatInputAndAttachmentCoordinator
 import com.muyuchat.mca.ContentImportPreviewStore
-import com.muyuchat.mca.ModelImportAndDownloadCoordinator
-import com.muyuchat.mca.OfflinePromptTranslationAndChatImageCoordinator
-import com.muyuchat.mca.ModelIdentityReferenceMigration
-import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.Job
 import java.io.File
-
-import com.muyuchat.mca.ChatTerminalSettlementPortAdapter
 import com.muyuchat.mca.upsertSessionFor
 import com.muyuchat.mca.bindingValue
 import com.muyuchat.mca.currentChatModelId
@@ -108,18 +60,7 @@ import java.util.UUID
 import com.muyuchat.mca.ChatTerminalSettlementPort
 import com.muyuchat.mca.ChatStreamAccumulator
 import com.muyuchat.mca.ChatRunOwnership
-import com.muyuchat.mca.ChatLocalApiProviderPort
-import com.muyuchat.mca.ChatLocalApiProviderPortAdapter
-import com.muyuchat.mca.ChatGenerationExecutionPort
-import com.muyuchat.mca.ChatGenerationExecutionPortAdapter
-import com.muyuchat.mca.ChatImagePromptBridgePort
-import com.muyuchat.mca.ChatImagePromptBridgePortAdapter
-import com.muyuchat.mca.ChatStopGenerationPort
-import com.muyuchat.mca.ChatStopGenerationPortAdapter
 import com.muyuchat.mca.presentation.LocalApiImageGenerationPort
-import com.muyuchat.mca.LocalApiImageGenerationPortAdapter
-import com.muyuchat.mca.LocalApiImageWorkerGatewayAdapter
-import com.muyuchat.mca.LocalApiImageLoraGatewayAdapter
 import com.muyuchat.mca.LocalImagePreparedLora
 import com.muyuchat.mca.LocalImagePromptExecution
 import com.muyuchat.mca.LocalApiImageGenerationOwnership
@@ -134,48 +75,16 @@ import com.muyuchat.api.local.LocalApiPreflightRequest
 import com.muyuchat.api.local.LocalApiPreflightResult
 import com.muyuchat.api.local.LocalApiTuningJobCreateRequest
 import com.muyuchat.api.local.LocalApiIdempotencyContext
-import com.muyuchat.mca.LocalApiControlPlaneAdapter
-import com.muyuchat.mca.ReplyGenerationMetrics
-import com.muyuchat.mca.UiGenerationCancellation
 import com.muyuchat.mca.ConversationMutationRollbackState
-import java.util.concurrent.atomic.AtomicBoolean
-import com.muyuchat.feature.chat.ChatImageActionKind
-import com.muyuchat.mca.PendingChatImageAction
-import com.muyuchat.mca.PendingImageTranslation
-import com.muyuchat.mca.PromptEnvelope
-import com.muyuchat.mca.OfflinePromptTranslationRequest
-import com.muyuchat.mca.OfflinePromptTranslationResolution
 import com.muyuchat.mca.LocalImageGenerationOptions
-import com.muyuchat.mca.ChatContextComposer
-import com.muyuchat.mca.ChatRuntimeContextPlan
-import com.muyuchat.mca.WebSearchCitationAudit
-import com.muyuchat.mca.WebSearchDiagnosticRecord
-import com.muyuchat.mca.AssistantConversationSnapshot
-import com.muyuchat.mca.AssistantImageModelBinding
-import com.muyuchat.core.engine.ChatRequest
-import com.muyuchat.core.engine.ContextCompressionSettings
-import com.muyuchat.core.engine.ContextCompressionTrigger
-import com.muyuchat.core.engine.ContextCompressionResult
-import com.muyuchat.core.engine.ContextCompressionThreshold
-import com.muyuchat.core.engine.ContextWindowAdmission
-import com.muyuchat.core.engine.PromptContextUsage
-import com.muyuchat.core.engine.ChatToolCall
-import com.muyuchat.core.engine.ChatSourceReference
-import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.mca.ChatSessionRecord
 import com.muyuchat.mca.ChatSessionPersistenceState
 import com.muyuchat.mca.LocalImagePromptTokenizerDescriptor
-import com.muyuchat.mca.ImagePromptTokenMeasurementHostAdapter
 import com.muyuchat.mca.ImagePromptTokenMeasurementHost
 import com.muyuchat.mca.ImagePromptTokenMeasurementCache
 import com.muyuchat.mca.LocalApiPayloadPort
-import com.muyuchat.mca.LocalApiPayloadPortAdapter
 import com.muyuchat.mca.VisionAttachmentPort
 import com.muyuchat.mca.WebSearchProvider
-import com.muyuchat.mca.LocalImageAdapterPortAdapter
-import com.muyuchat.mca.WebSearchConfigPortAdapter
-import com.muyuchat.mca.VisionAttachmentPortAdapter
-import com.muyuchat.mca.WebSearchConfigPort
 import com.muyuchat.mca.WebSearchWorkflowCoordinator
 import com.muyuchat.mca.LocalImageAdapterPort
 import com.muyuchat.core.advisor.AgentAdvisor
@@ -208,19 +117,10 @@ import com.muyuchat.mca.TextualInversionStore
 import com.muyuchat.mca.WebSearchDiagnosticStore
 import com.muyuchat.mca.WebSearchStore
 import com.muyuchat.mca.WorldBookStore
-import com.muyuchat.mca.RuntimeProfileTransactionPort
-import com.muyuchat.mca.RuntimeProfileTransactionPortAdapter
-import com.muyuchat.core.benchmark.BenchmarkRunner
 import com.muyuchat.core.tuning.UserPreference
-import com.muyuchat.core.advisor.AgentRecommendation
-import com.muyuchat.mca.LocalApiAuxProviderPort
-import com.muyuchat.mca.LocalApiAuxProviderPortAdapter
 import com.muyuchat.mca.LocalApiTuningControlPort
-import com.muyuchat.mca.LocalApiTuningControlPortAdapter
 import com.muyuchat.mca.TuningJobEntity
 import com.muyuchat.mca.PendingRuntimeProfileTransaction
-import com.muyuchat.mca.ChatModelCoordinator
-import com.muyuchat.mca.ManagedChatCatalogSnapshot
 import com.muyuchat.api.local.LocalApiControlResult
 import org.json.JSONObject
 
@@ -237,7 +137,23 @@ import org.json.JSONObject
  */
 private const val IMAGE_UPSCALER_PREFERENCES = "image_upscaler_product_selection_v1"
 
-internal class McaAppContainer(private val application: Application) {
+internal class McaAppContainer(internal val application: Application) {
+
+    /**
+     * E06: the single chat execution facade for this process, built once on first use. The
+     * supervisor is the shared admission/terminal owner for every chat channel; the execution body
+     * is the engine itself (see chatExecutionBodyFor).
+     */
+    private val chatExecutionFacadeRef =
+        java.util.concurrent.atomic.AtomicReference<com.muyuchat.mca.facade.ChatExecutionFacade?>(null)
+
+    fun chatExecutionFacadeFor(engine: McaInferenceService): com.muyuchat.mca.facade.ChatExecutionFacade =
+        chatExecutionFacadeRef.updateAndGet { existing ->
+            existing ?: com.muyuchat.mca.facade.ChatExecutionFacade(
+                supervisor = sharedRuntimeSupervisor,
+                executionBody = com.muyuchat.mca.chatExecutionBodyFor(engine),
+            )
+        }!!
 
     val runtimeProfileStore = ModelRuntimeProfileStore(application)
 
@@ -331,80 +247,55 @@ internal class McaAppContainer(private val application: Application) {
 
     val cloudImageProvider = CloudImageProvider()
 
-    val localImageWorkerClient = LocalImageWorkerClient(application)
+    /**
+     * E07: one process-wide runtime supervisor shared by the chat facade and the image execution
+     * gate, so all channels of this process admit against one identity/terminal authority.
+     */
+    private val runtimeSupervisorRef =
+        java.util.concurrent.atomic.AtomicReference<com.muyuchat.core.engine.runtime.RuntimeSupervisor?>(null)
+
+    val sharedRuntimeSupervisor: com.muyuchat.core.engine.runtime.RuntimeSupervisor
+        get() = runtimeSupervisorRef.updateAndGet { existing ->
+            existing ?: com.muyuchat.core.engine.runtime.RuntimeSupervisor()
+        }!!
+
+    private val imageExecutionGateRef =
+        java.util.concurrent.atomic.AtomicReference<com.muyuchat.mca.facade.ImageExecutionGate?>(null)
+
+    /** E07: the single image execution gate every worker generate/upscale passes through. */
+    val imageExecutionGate: com.muyuchat.mca.facade.ImageExecutionGate
+        get() = imageExecutionGateRef.updateAndGet { existing ->
+            existing ?: com.muyuchat.mca.facade.ImageExecutionOwner(sharedRuntimeSupervisor)
+        }!!
+
+    val localImageWorkerClient = LocalImageWorkerClient(application, imageExecutionGate)
 
     /** R3/C2（插队裁定 2）：调参 owner 工厂——VM 只传它自有的运行时对象（store/scope/engine），
      *  其余依赖由容器装配。 */
     fun createTuningOwner(store: UiStateStore, scope: CoroutineScope, engine: McaInferenceService): TuningOwner =
-        TuningOwner(
-            store = store,
-            scope = scope,
-            engine = engine,
-            runtimeProfileStore = runtimeProfileStore,
-            modelStore = modelStore,
-            benchmarkHistoryLogger = benchmarkHistoryLogger,
-            readinessGate = readinessRefreshGate,
-            deviceProfileReader = deviceProfileReader,
-            application = application,
-            advisor = advisor,
-            admission = runtimeAdmission
-        )
+        createTuningOwnerImpl(store, scope, engine)
 
     /** R3/C3-S1：三个小端口的具名适配器工厂（真实依赖注入）。 */
     fun createLocalImageAdapterPort(store: UiStateStore): LocalImageAdapterPort =
-        LocalImageAdapterPortAdapter(
-            store = store,
-            loraStoreRef = localImageLoraStore,
-            textualInversionStoreRef = localImageTextualInversionStore,
-            loraLifecycleLock = localImageLoraLifecycleLock,
-            textualInversionLifecycleLock = localImageTextualInversionLifecycleLock
-        )
-
-    fun createWebSearchConfigPort(store: UiStateStore): WebSearchConfigPort =
-        WebSearchConfigPortAdapter(
-            store = store,
-            appContext = application,
-            webSearchStoreRef = webSearchStore,
-            diagnosticStoreRef = webSearchDiagnosticStore,
-            providerRef = webSearchProvider
-        )
+        createLocalImageAdapterPortImpl(store)
 
     fun createWebSearchWorkflowCoordinator(
         store: UiStateStore,
         terminalPort: ChatTerminalSettlementPort,
         scope: CoroutineScope
     ): WebSearchWorkflowCoordinator =
-        WebSearchWorkflowCoordinator(
-            port = createWebSearchConfigPort(store),
-            terminalPort = terminalPort,
-            scope = scope
-        )
+        createWebSearchWorkflowCoordinatorImpl(store, terminalPort, scope)
 
     fun createVisionAttachmentPort(store: UiStateStore, engine: McaInferenceService): VisionAttachmentPort =
-        VisionAttachmentPortAdapter(
-            store = store,
-            appContext = application,
-            engineRef = engine,
-            admissionRef = runtimeAdmission
-        )
+        createVisionAttachmentPortImpl(store, engine)
 
     /** R3/C3-S2：Local API payload 端口的具名适配器工厂。 */
     fun createLocalApiPayloadPort(store: UiStateStore, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
-        LocalApiPayloadPortAdapter(
-            store = store,
-            engineRef = engine,
-            runtimeProfileStoreRef = runtimeProfileStore,
-            tuningRef = tuningOwner,
-            admissionRef = runtimeAdmission
-        )
+        createLocalApiPayloadPortImpl(store, engine, tuningOwner)
 
     /** R3/C3-S3：token 测量 host 的具名适配器工厂。 */
     fun createImagePromptTokenMeasurementHost(store: UiStateStore): ImagePromptTokenMeasurementHost =
-        ImagePromptTokenMeasurementHostAdapter(
-            store = store,
-            measurementCacheRef = imagePromptTokenMeasurementCache,
-            tokenizerDescriptorsRef = imagePromptTokenizerDescriptors
-        )
+        createImagePromptTokenMeasurementHostImpl(store)
 
     // R3/C3-S4：会话持久化状态（两段式初始化——初值来自 VM 首段装配的 initialChatSessions）。
     lateinit var chatSessionPersistenceState: ChatSessionPersistenceState
@@ -464,44 +355,14 @@ internal class McaAppContainer(private val application: Application) {
 
     /** R3/C3-S5：terminalSettlement 端口具名适配器工厂。 */
     fun createChatTerminalSettlementPort(store: UiStateStore): ChatTerminalSettlementPort =
-        ChatTerminalSettlementPortAdapter(
-            store = store,
-            chatRunsRef = chatRuns,
-            diagnosticStoreRef = webSearchDiagnosticStore,
-            accumulatorRef = chatStreamAccumulator
-        )
-
-    /** R3/C3-S11：会话持久化端口具名适配器工厂。 */
-    fun createChatSessionPersistencePort(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        engine: McaInferenceService
-    ): ChatSessionPersistencePort =
-        ChatSessionPersistencePortAdapter(
-            store = store,
-            scopeRef = scope,
-            engineRef = engine,
-            chatRunsRef = chatRuns,
-            chatSessionStoreRef = chatSessionStore,
-            persistenceState = chatSessionPersistenceState,
-            accumulatorRef = chatStreamAccumulator,
-            worldStoreRef = worldBookStore,
-            admissionRef = runtimeAdmission
-        )
-
-    /** R3/C3-S12：图片请求簿记端口的具名适配器工厂。 */
-    fun createChatImageRequestPort(
-        store: UiStateStore,
-        persistencePort: ChatSessionPersistencePort
-    ): ChatImageRequestPort =
-        ChatImageRequestPortAdapter(store = store, persistencePort = persistencePort)
+        createChatTerminalSettlementPortImpl(store)
 
     /** R3/C3-S12：提交恢复窄端口的具名适配器工厂（journal 以 provider 传入，保持原 lazy 时机）。 */
     fun createChatImageCommitRecoveryPort(
         journalProvider: () -> ChatImageCommitJournal,
         sessionStore: ChatSessionStore
     ): ChatImageCommitRecoveryPort =
-        ChatImageCommitRecoveryPortAdapter(journalProvider = journalProvider, sessionStoreRef = sessionStore)
+        createChatImageCommitRecoveryPortImpl(journalProvider, sessionStore)
 
     /** R3/C3-S13：启动对账 owner 工厂（真实依赖全对象化；lazy async 与 start/await 契约不变）。 */
     fun createImageLibraryStartupReconciliation(
@@ -510,50 +371,7 @@ internal class McaAppContainer(private val application: Application) {
         recoveryPort: ChatImageCommitRecoveryPort,
         initialKnowledgeBases: List<KnowledgeBaseRecord>
     ): ImageLibraryStartupReconciliation =
-        ImageLibraryStartupReconciliation(
-            scope = scope,
-            store = store,
-            chatSessionStore = chatSessionStore,
-            recoveryPort = recoveryPort,
-            persistenceState = chatSessionPersistenceState,
-            imageLibraryMutationMutex = imageLibraryMutationMutex,
-            imageLibraryBackup = imageLibraryBackup,
-            imageAssetDirectory = imageAssetDirectory,
-            knowledgeBaseStore = knowledgeBaseStore,
-            initialKnowledgeBases = initialKnowledgeBases
-        )
-
-    /** R3/C3-S14：图片发送端口工厂（owner 以真实对象注入；admission/coordinator 容器自持）。 */
-    fun createSendChatImageRequestPort(
-        store: UiStateStore,
-        persistencePort: ChatSessionPersistencePort,
-        requestPort: ChatImageRequestPort,
-        imageGenerationOwner: ImageGenerationOwner
-    ): SendChatImageRequestPort =
-        SendChatImageRequestPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            persistencePort = persistencePort,
-            requestPort = requestPort,
-            imageGenerationOwner = imageGenerationOwner,
-            coordinator = localImageGenerationCoordinator
-        )
-
-    /** R3/C3-S14：图片重试/清理端口工厂（journal 以 provider 传入，保持原 lazy 时机）。 */
-    fun createChatImageRetryPort(
-        store: UiStateStore,
-        sendPort: SendChatImageRequestPort,
-        journalProvider: () -> ChatImageCommitJournal
-    ): ChatImageRetryPort =
-        ChatImageRetryPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            cloudApiStoreRef = cloudApiStore,
-            localImageModelStoreRef = localImageModelStore,
-            journalProvider = journalProvider,
-            chatSessionStoreRef = chatSessionStore,
-            sendPortRef = sendPort
-        )
+        createImageLibraryStartupReconciliationImpl(store, scope, recoveryPort, initialKnowledgeBases)
 
     /** R3/C3-S15：资产生成/放大端口工厂（owner 与 S13 对账 owner 均真实对象注入）。 */
     fun createImageAssetCreationPort(
@@ -561,15 +379,7 @@ internal class McaAppContainer(private val application: Application) {
         application: Application,
         imageGenerationOwner: ImageGenerationOwner
     ): ImageAssetCreationPort =
-        ImageAssetCreationPortAdapter(
-            store = store,
-            application = application,
-            admission = runtimeAdmission,
-            imageGenerationOwner = imageGenerationOwner,
-            assetWriteMutex = imageAssetWriteMutex,
-            assetDirectory = imageAssetDirectory,
-            localImageModelStoreRef = localImageModelStore
-        )
+        createImageAssetCreationPortImpl(store, application, imageGenerationOwner)
 
     fun createImageUpscalePort(
         store: UiStateStore,
@@ -577,35 +387,7 @@ internal class McaAppContainer(private val application: Application) {
         assetCreationPort: ImageAssetCreationPort,
         startupReconciliation: ImageLibraryStartupReconciliation
     ): ImageUpscalePort =
-        ImageUpscalePortAdapter(
-            store = store,
-            application = application,
-            coordinator = localImageGenerationCoordinator,
-            observationLock = localImageGenerationCoordinatorObservationLock,
-            assetCreationPort = assetCreationPort,
-            assetWriteMutex = imageAssetWriteMutex,
-            startupReconciliation = startupReconciliation,
-            workerClientRef = localImageWorkerClient,
-            chatSessionStoreRef = chatSessionStore,
-            upscalerStoreRef = localImageUpscalerStore,
-            assetDirectory = imageAssetDirectory,
-            mutationMutex = imageLibraryMutationMutex
-        )
-
-    /** R3/C3-S16：图片库提交/删除端口工厂。 */
-    fun createImageLibraryCommitPort(
-        store: UiStateStore,
-        requestPort: ChatImageRequestPort
-    ): ImageLibraryCommitPort =
-        ImageLibraryCommitPortAdapter(
-            store = store,
-            persistenceState = chatSessionPersistenceState,
-            chatSessionStoreRef = chatSessionStore,
-            journalProvider = { chatImageCommitJournal },
-            admissionRef = runtimeAdmission,
-            requestPortRef = requestPort,
-            imageLibraryMutationMutexRef = imageLibraryMutationMutex
-        )
+        createImageUpscalePortImpl(store, application, assetCreationPort, startupReconciliation)
 
     fun createImageAssetDeletionPort(
         store: UiStateStore,
@@ -613,44 +395,14 @@ internal class McaAppContainer(private val application: Application) {
         imageUpscaleOwner: ImageUpscaleOwner,
         startupReconciliation: ImageLibraryStartupReconciliation
     ): ImageAssetDeletionPort =
-        ImageAssetDeletionPortAdapter(
-            store = store,
-            scopeRef = scope,
-            admissionRef = runtimeAdmission,
-            imageUpscaleOwnerRef = imageUpscaleOwner,
-            chatSessionStoreRef = chatSessionStore,
-            mutationMutex = imageLibraryMutationMutex,
-            assetDirectory = imageAssetDirectory,
-            startupReconciliation = startupReconciliation
-        )
+        createImageAssetDeletionPortImpl(store, scope, imageUpscaleOwner, startupReconciliation)
 
     /** R3/C3-S27/S31：图片提示词翻译端口工厂（verifiedBundle 直调 operations，删除过渡 lambda）。 */
     fun createImagePromptTranslationPort(
         store: UiStateStore,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPort =
-        ImagePromptTranslationPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            downloader = offlineTranslationDownloader,
-            serviceProvider = serviceProvider
-        )
-
-    /** R3-S30：本地生图资产生成端口工厂（worker 代际经 holder；网关包真实客户端）。 */
-    fun createCreateLocalGeneratedImageAssetPort(
-        store: UiStateStore,
-        application: Application
-    ): CreateLocalGeneratedImageAssetPort =
-        CreateLocalGeneratedImageAssetPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            gateway = LocalGeneratedImageWorkerGatewayAdapter(localImageWorkerClient),
-            localImageModelStoreRef = localImageModelStore,
-            readinessGate = readinessRefreshGate,
-            assetWriteMutex = imageAssetWriteMutex,
-            assetDirectory = imageAssetDirectory,
-            application = application
-        )
+        createImagePromptTranslationPortImpl(store, serviceProvider)
 
     /** R3/C2-S3：生图准入/执行唯一 owner 工厂（装配具名 ImageGenerationHostAdapter，真实依赖注入）。 */
     fun createImageGenerationOwner(
@@ -662,56 +414,22 @@ internal class McaAppContainer(private val application: Application) {
         chatImageRequestPortProvider: () -> ChatImageRequestPort,
         imagePromptTranslationPortProvider: () -> ImagePromptTranslationPort,
         completeAssistantImageToolTurnForJob: (String) -> Unit
-    ): ImageGenerationOwner = ImageGenerationOwner(
-        host = ImageGenerationHostAdapter(
-            store = store,
-            scopeRef = scope,
-            applicationRef = application,
-            runtimeAdmission = runtimeAdmission,
-            coordinator = localImageGenerationCoordinator,
-            coordinatorObservationLock = localImageGenerationCoordinatorObservationLock,
-            localImageLoraLifecycleLockRef = localImageLoraLifecycleLock,
-            localImageTextualInversionLifecycleLockRef = localImageTextualInversionLifecycleLock,
-            localImageLoraStoreRef = localImageLoraStore,
-            localImageWorkerClientRef = localImageWorkerClient,
-            imageAssetDirectoryRef = imageAssetDirectory,
-            imageAssetWriteMutex = imageAssetWriteMutex,
-            cloudImageProviderRef = cloudImageProvider,
-            chatImageCommitJournalRef = chatImageCommitJournal,
-            runtimeProfileStoreRef = runtimeProfileStore,
-            engineRef = engine,
-            createLocalGeneratedImageAssetPort = createCreateLocalGeneratedImageAssetPort(store, application),
-            imageLibraryStartupReconciliationProvider = imageLibraryStartupReconciliationProvider,
-            imageLibraryCommitPortProvider = imageLibraryCommitPortProvider,
-            chatImageRequestPortProvider = chatImageRequestPortProvider,
-            imagePromptTranslationPortProvider = imagePromptTranslationPortProvider,
-            completeAssistantImageToolTurnForJobRef = completeAssistantImageToolTurnForJob
-        )
-    )
+    ): ImageGenerationOwner =
+        createImageGenerationOwnerImpl(store, scope, engine, imageLibraryStartupReconciliationProvider, imageLibraryCommitPortProvider, chatImageRequestPortProvider, imagePromptTranslationPortProvider, completeAssistantImageToolTurnForJob)
 
     /** R3-S32：图片放大模型目录端口工厂（store / preferences / ownerLockProvider 真实依赖注入）。 */
     fun createLocalImageUpscalerPort(
         store: UiStateStore,
         imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
     ): LocalImageUpscalerPort =
-        LocalImageUpscalerPortAdapter(
-            store = store,
-            upscalerStoreRef = localImageUpscalerStore,
-            preferences = imageUpscalerPreferences,
-            imageUpscaleOwnerProvider = imageUpscaleOwnerProvider
-        )
+        createLocalImageUpscalerPortImpl(store, imageUpscaleOwnerProvider)
 
     /** R3-S33：提示词翻译预览端口工厂（直调 operations，service 延迟注入）。 */
     fun createImagePromptTranslationPreviewPort(
         store: UiStateStore,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPreviewPort =
-        ImagePromptTranslationPreviewPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            downloader = offlineTranslationDownloader,
-            serviceProvider = serviceProvider
-        )
+        createImagePromptTranslationPreviewPortImpl(store, serviceProvider)
 
     /** R3-S34：助手生图工具轮次端口工厂（真实依赖注入，聊天操作由 lambda 委托）。 */
     fun createAssistantImageToolTurnPort(
@@ -735,18 +453,7 @@ internal class McaAppContainer(private val application: Application) {
         attachAssistantImageRequestToTimeline: (String, ChatGeneratedImageRequest) -> Unit,
         approveChatImageRequest: (String) -> Unit
     ): AssistantImageToolTurnPort =
-        AssistantImageToolTurnPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            authorizationStore = chatImageToolAuthorizationStore,
-            chatImageNegativePromptSupportedRef = chatImageNegativePromptSupported,
-            prepareAssistantImagePromptRef = prepareAssistantImagePrompt,
-            prepareAssistantImageNegativePromptRef = prepareAssistantImageNegativePrompt,
-            setPendingAssistantToolFailureRef = setPendingAssistantToolFailure,
-            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
-            attachAssistantImageRequestToTimelineRef = attachAssistantImageRequestToTimeline,
-            approveChatImageRequestRef = approveChatImageRequest
-        )
+        createAssistantImageToolTurnPortImpl(store, chatImageNegativePromptSupported, prepareAssistantImagePrompt, prepareAssistantImageNegativePrompt, setPendingAssistantToolFailure, buildChatImageRetrySnapshot, attachAssistantImageRequestToTimeline, approveChatImageRequest)
 
     /** R3-S35：聊天生图审批端口工厂（A 族第 4 端口）。 */
     fun createChatImageRequestApprovalPort(
@@ -756,55 +463,11 @@ internal class McaAppContainer(private val application: Application) {
         buildChatImageRetrySnapshot: (ChatGeneratedImageRequest, String) -> ImageGenerationJobSpec?,
         continueAssistantImageToolTurn: (String, String) -> Unit
     ): ChatImageRequestApprovalPort =
-        ChatImageRequestApprovalPortAdapter(
-            store = store,
-            admission = runtimeAdmission,
-            imageGenerationOwnerProvider = imageGenerationOwnerProvider,
-            chatImageRequestPortProvider = chatImageRequestPortProvider,
-            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
-            continueAssistantImageToolTurnRef = continueAssistantImageToolTurn
-        )
-
-    /** R3-S36：运行时就绪刷新端口工厂（B 族第 1 端口，破万里程碑）。 */
-    fun createManagedRuntimeReadinessPort(
-        store: UiStateStore,
-        imageLibraryBackupJobActive: () -> Boolean,
-        hasActiveImageUpscale: () -> Boolean
-    ): ManagedRuntimeReadinessPort =
-        ManagedRuntimeReadinessPortAdapter(
-            context = application,
-            store = store,
-            modelStore = modelStore,
-            localImageModelStore = localImageModelStore,
-            refreshGate = readinessRefreshGate,
-            admission = runtimeAdmission,
-            coordinator = localImageGenerationCoordinator,
-            imageLibraryBackupJobActiveProvider = imageLibraryBackupJobActive,
-            hasActiveImageUpscaleProvider = hasActiveImageUpscale
-        )
+        createChatImageRequestApprovalPortImpl(store, imageGenerationOwnerProvider, chatImageRequestPortProvider, buildChatImageRetrySnapshot, continueAssistantImageToolTurn)
 
     /** R3-S37：应用更新端口工厂（B 族第 2 端口）。 */
     fun createAppUpdatePort(storeProvider: () -> UiStateStore): AppUpdatePort =
-        AppUpdatePortAdapter(
-            context = application,
-            storeProvider = storeProvider
-        )
-
-    /** R3-S38：云模型配置端口工厂（B 族第 3 端口）。 */
-    fun createCloudModelConfigPort(
-        store: UiStateStore,
-        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
-        persistChatSessions: (List<ChatSessionRecord>?, Pair<String, Set<String>>?) -> Unit
-    ): CloudModelConfigPort =
-        CloudModelConfigPortAdapter(
-            application = application,
-            store = store,
-            cloudApiStore = cloudApiStore,
-            cloudChatProvider = cloudChatProvider,
-            localImageModelStore = localImageModelStore,
-            loadModelGenerationParamsRef = loadModelGenerationParams,
-            persistChatSessionsRef = persistChatSessions
-        )
+        createAppUpdatePortImpl(storeProvider)
 
     /** R3-S39：选择聊天会话端口工厂（B 族第 4 端口）。 */
     fun createSelectChatSessionPort(
@@ -818,55 +481,7 @@ internal class McaAppContainer(private val application: Application) {
         markLocalConversationContextInvalid: () -> Unit,
         continueAssistantImageTurn: (String) -> Unit
     ): SelectChatSessionPort =
-        SelectChatSessionPortAdapter(
-            application = application,
-            store = store,
-            knowledgeBaseStore = knowledgeBaseStore,
-            assistantStore = assistantStore,
-            cloudApiStore = cloudApiStore,
-            manualContextCompressionRequests = manualContextCompressionRequests,
-            rejectWhileConversationMutationInProgressRef = rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecutionRef = hasActiveAssistantImageExecution,
-            invalidatePendingChatImagePreparationRef = invalidatePendingChatImagePreparation,
-            cancelActiveWebSearchRef = cancelActiveWebSearch,
-            bumpContentImportSelectionRevisionRef = bumpContentImportSelectionRevision,
-            loadModelGenerationParamsRef = loadModelGenerationParams,
-            markLocalConversationContextInvalidRef = markLocalConversationContextInvalid,
-            continueAssistantImageTurnRef = continueAssistantImageTurn
-        )
-
-    fun createRuntimeProfileTransactionPort(
-        store: UiStateStore,
-        engine: McaInferenceService,
-        tuningOwner: TuningOwner,
-        showStatusAction: (String) -> Unit
-    ): RuntimeProfileTransactionPort =
-        RuntimeProfileTransactionPortAdapter(
-            store = store,
-            runtimeProfileStore = runtimeProfileStore,
-            engine = engine,
-            runtimeAdmission = runtimeAdmission,
-            tuningOwner = tuningOwner,
-            showStatusAction = showStatusAction
-        )
-
-    fun createLocalApiAuxProviderPort(
-        store: UiStateStore,
-        engine: McaInferenceService,
-        localApiPayloadPortProvider: () -> LocalApiPayloadPort,
-        benchmarkRunner: BenchmarkRunner,
-        buildRecommendationAction: (UserPreference) -> AgentRecommendation,
-        generateLocalApiImageAction: suspend (String, String) -> String,
-    ): LocalApiAuxProviderPort =
-        LocalApiAuxProviderPortAdapter(
-            store = store,
-            engine = engine,
-            localApiPayloadPortProvider = localApiPayloadPortProvider,
-            deviceProfileReader = deviceProfileReader,
-            buildRecommendationAction = buildRecommendationAction,
-            benchmarkRunner = benchmarkRunner,
-            generateLocalApiImageAction = generateLocalApiImageAction,
-        )
+        createSelectChatSessionPortImpl(store, rejectWhileConversationMutationInProgress, hasActiveAssistantImageExecution, invalidatePendingChatImagePreparation, cancelActiveWebSearch, bumpContentImportSelectionRevision, loadModelGenerationParams, markLocalConversationContextInvalid, continueAssistantImageTurn)
 
     fun createLocalApiTuningControlPort(
         store: UiStateStore,
@@ -883,158 +498,20 @@ internal class McaAppContainer(private val application: Application) {
         launchTuningApplyRef: (PendingRuntimeProfileTransaction) -> Unit,
         launchTuningRollbackRef: (ModelRuntimeIdentity, ModelManifest) -> Unit,
     ): LocalApiTuningControlPort =
-        LocalApiTuningControlPortAdapter(
-            runtimeAdmission = runtimeAdmission,
-            store = store,
-            runtimeProfileStore = runtimeProfileStore,
-            tuningOwner = tuningOwner,
-            localApiModelMatchesRef = localApiModelMatchesRef,
-            localApiPerformancePreferenceRef = localApiPerformancePreferenceRef,
-            localApiTuningRejectedRef = localApiTuningRejectedRef,
-            localApiTuningConflictRef = localApiTuningConflictRef,
-            localApiExclusiveLifecycleConflictRef = localApiExclusiveLifecycleConflictRef,
-            assignActiveTuningJobIdRef = assignActiveTuningJobIdRef,
-            tuningJobPublicJsonRef = tuningJobPublicJsonRef,
-            setTuningCancelRequestedRef = setTuningCancelRequestedRef,
-            setTuningPauseRequestedRef = setTuningPauseRequestedRef,
-            launchTuningApplyRef = launchTuningApplyRef,
-            launchTuningRollbackRef = launchTuningRollbackRef,
-        )
-
-    fun createChatLocalApiProviderPort(
-        engine: McaInferenceService,
-        store: UiStateStore,
-        cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
-        localApiPayloadPortProvider: () -> LocalApiPayloadPort,
-    ): ChatLocalApiProviderPort =
-        ChatLocalApiProviderPortAdapter(
-            engine = engine,
-            chatRuns = chatRuns,
-            store = store,
-            cancelActiveLocalApiImageGenerationAction = cancelActiveLocalApiImageGenerationAction,
-            localApiPayloadPortProvider = localApiPayloadPortProvider,
-        )
-
-    fun createChatGenerationExecutionPort(
-        store: UiStateStore,
-        engine: McaInferenceService,
-        chatContextComposer: ChatContextComposer,
-        visionAttachmentPort: VisionAttachmentPort,
-        getActiveWebSearchTaskIdRef: () -> String?,
-        setActiveWebSearchTaskIdRef: (String?) -> Unit,
-        getForegroundRecoveryJobRef: () -> Job?,
-        persistChatSessionsRef: (List<ChatSessionRecord>?, Pair<String, Set<String>>?, Long?) -> Job?,
-        appendAssistantRef: (String, String, Long, Boolean, Long?) -> Unit,
-        flushPendingAssistantOutputRef: (Long?) -> Boolean,
-        removePendingAssistantPlaceholderRef: (Long?) -> Unit,
-        ensureVisibleAssistantReplyAfterCompletionRef: (Long?) -> Unit,
-        applyWebSearchAnswerGuardsToLastAssistantRef: (Long?) -> WebSearchCitationAudit?,
-        recordWebSearchCitationAuditRef: (String?, WebSearchCitationAudit, Long?) -> Unit,
-        attachWebSearchEvidenceToPendingAssistantRef: (List<ChatSourceReference>, ChatWebSearchTrace?, Long?) -> Unit,
-        attachContextAssemblyTraceRef: (String?, Long, String?, String?) -> Unit,
-        promptContextUsageForRef: (ChatRuntimeContextPlan, ContextWindowAdmission, GenerationParams) -> PromptContextUsage,
-        appendWebSearchDiagnosticRef: (WebSearchDiagnosticRecord) -> List<WebSearchDiagnosticRecord>,
-        recordCompletedCharacterMemoryTurnRef: (String, String, AssistantConversationSnapshot, ChatMessage, ChatMessage, Job?, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,
-        summarizeContextForGenerationRef: suspend (ChatRequest, ContextCompressionSettings, ContextCompressionTrigger, MainUiState, ChatBackend, String?, Long, Boolean) -> ContextCompressionResult,
-        ensureLocalConversationContextInvalidatedRef: suspend () -> Boolean,
-        loadContextCompressionThresholdRef: () -> ContextCompressionThreshold,
-        handleAssistantImageToolCallsRef: suspend (List<ChatToolCall>, List<ChatMessage>, GenerationParams, String?, String?, String?, AssistantImageModelBinding?, CloudApiConfig?) -> Boolean,
-        finishAssistantImageContinuationRef: (String, Boolean, String) -> Unit,
-    ): ChatGenerationExecutionPort =
-        ChatGenerationExecutionPortAdapter(
-            application = application,
-            store = store,
-            engine = engine,
-            chatRuns = chatRuns,
-            chatSessionStore = chatSessionStore,
-            chatContextComposer = chatContextComposer,
-            cloudChatProvider = cloudChatProvider,
-            webSearchProvider = webSearchProvider,
-            manualContextCompressionRequests = manualContextCompressionRequests,
-            runtimeAdmission = runtimeAdmission,
-            visionAttachmentPort = visionAttachmentPort,
-            getActiveWebSearchTaskIdRef = getActiveWebSearchTaskIdRef,
-            setActiveWebSearchTaskIdRef = setActiveWebSearchTaskIdRef,
-            getForegroundRecoveryJobRef = getForegroundRecoveryJobRef,
-            persistChatSessionsRef = persistChatSessionsRef,
-            appendAssistantRef = appendAssistantRef,
-            flushPendingAssistantOutputRef = flushPendingAssistantOutputRef,
-            removePendingAssistantPlaceholderRef = removePendingAssistantPlaceholderRef,
-            ensureVisibleAssistantReplyAfterCompletionRef = ensureVisibleAssistantReplyAfterCompletionRef,
-            applyWebSearchAnswerGuardsToLastAssistantRef = applyWebSearchAnswerGuardsToLastAssistantRef,
-            recordWebSearchCitationAuditRef = recordWebSearchCitationAuditRef,
-            attachWebSearchEvidenceToPendingAssistantRef = attachWebSearchEvidenceToPendingAssistantRef,
-            attachContextAssemblyTraceRef = attachContextAssemblyTraceRef,
-            promptContextUsageForRef = promptContextUsageForRef,
-            appendWebSearchDiagnosticRef = appendWebSearchDiagnosticRef,
-            recordCompletedCharacterMemoryTurnRef = recordCompletedCharacterMemoryTurnRef,
-            summarizeContextForGenerationRef = summarizeContextForGenerationRef,
-            ensureLocalConversationContextInvalidatedRef = ensureLocalConversationContextInvalidatedRef,
-            loadContextCompressionThresholdRef = loadContextCompressionThresholdRef,
-            handleAssistantImageToolCallsRef = handleAssistantImageToolCallsRef,
-            finishAssistantImageContinuationRef = finishAssistantImageContinuationRef,
-        )
-
-    fun createChatImagePromptBridgePort(
-        store: UiStateStore,
-        chatContextComposer: ChatContextComposer,
-        engine: McaInferenceService,
-        currentBridgeGenerationRef: () -> Long,
-        incrementBridgeGenerationRef: () -> Long,
-        cancelBridgeJobRef: () -> Unit,
-        setBridgeJobRef: (Job) -> Unit,
-        bridgeScopeRef: () -> CoroutineScope,
-        setPendingChatImageActionRef: (String, ChatImageActionKind, String, Int?, () -> Boolean) -> Unit,
-        setPendingImageTranslationRef: (PendingImageTranslation) -> Unit,
-        showStatusRef: (String?) -> Unit,
-        chatImageOptionsForCurrentSelectionRef: (MainUiState) -> LocalImageGenerationOptions,
-        offlinePromptTranslationServiceProvider: () -> OfflinePromptTranslationService,
-        verifiedOfflineTranslationBundleRef: suspend () -> VerifiedOfflinePromptTranslationBundle?,
-        sendChatImageRequestRef: (String, String, LocalImageGenerationOptions?, PromptEnvelope?, String?) -> Unit,
-        negativePromptSupportedRef: (MainUiState) -> Boolean,
-    ): ChatImagePromptBridgePort =
-        ChatImagePromptBridgePortAdapter(
-            store = store,
-            chatContextComposer = chatContextComposer,
-            cloudChatProvider = cloudChatProvider,
-            engine = engine,
-            currentBridgeGenerationRef = currentBridgeGenerationRef,
-            incrementBridgeGenerationRef = incrementBridgeGenerationRef,
-            cancelBridgeJobRef = cancelBridgeJobRef,
-            setBridgeJobRef = setBridgeJobRef,
-            bridgeScopeRef = bridgeScopeRef,
-            setPendingChatImageActionRef = setPendingChatImageActionRef,
-            setPendingImageTranslationRef = setPendingImageTranslationRef,
-            showStatusRef = showStatusRef,
-            chatImageOptionsForCurrentSelectionRef = chatImageOptionsForCurrentSelectionRef,
-            offlinePromptTranslationServiceProvider = offlinePromptTranslationServiceProvider,
-            verifiedOfflineTranslationBundleRef = verifiedOfflineTranslationBundleRef,
-            sendChatImageRequestRef = sendChatImageRequestRef,
-            negativePromptSupportedRef = negativePromptSupportedRef,
-        )
-
-    fun createChatStopGenerationPort(
-        store: UiStateStore,
-        engine: McaInferenceService,
-        stopScopeRef: () -> CoroutineScope,
-        rejectWhileConversationMutationInProgressRef: () -> Boolean,
-        stopGenerationInProgressRef: AtomicBoolean,
-        currentReplyMetricsRef: () -> ReplyGenerationMetrics?,
-        cancelGenerationJobRef: () -> UiGenerationCancellation,
-        flushPendingAssistantOutputRef: () -> Unit,
-        persistConversationMutationRef: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Unit,
-    ): ChatStopGenerationPort =
-        ChatStopGenerationPortAdapter(
-            store = store,
-            engine = engine,
-            chatRuns = chatRuns,
-            stopScopeRef = stopScopeRef,
-            rejectWhileConversationMutationInProgressRef = rejectWhileConversationMutationInProgressRef,
-            stopGenerationInProgressRef = stopGenerationInProgressRef,
-            currentReplyMetricsRef = currentReplyMetricsRef,
-            cancelGenerationJobRef = cancelGenerationJobRef,
-            flushPendingAssistantOutputRef = flushPendingAssistantOutputRef,
-            persistConversationMutationRef = persistConversationMutationRef,
+        createLocalApiTuningControlPortImpl(
+            store,
+            tuningOwner,
+            localApiModelMatchesRef,
+            localApiPerformancePreferenceRef,
+            localApiTuningRejectedRef,
+            localApiTuningConflictRef,
+            localApiExclusiveLifecycleConflictRef,
+            assignActiveTuningJobIdRef,
+            tuningJobPublicJsonRef,
+            setTuningCancelRequestedRef,
+            setTuningPauseRequestedRef,
+            launchTuningApplyRef,
+            launchTuningRollbackRef,
         )
 
     fun createLocalApiImageGenerationPort(
@@ -1053,25 +530,21 @@ internal class McaAppContainer(private val application: Application) {
         prepareLocalImageRuntimeMemoryRef: suspend () -> EngineLifecycleLease?,
         executionWithQnnVerificationEvidenceRef: (LocalImageModelRecord, LocalImageResult, LocalImageGenerationOptions, String, String, QnnImageEvidenceEntryPoint) -> String,
     ): LocalApiImageGenerationPort =
-        LocalApiImageGenerationPortAdapter(
-            store = store,
-            localImageLoraLifecycleLockRef = localImageLoraLifecycleLock,
-            localImageTextualInversionLifecycleLockRef = localImageTextualInversionLifecycleLock,
-            getActiveLocalApiImageModelIdRef = getActiveLocalApiImageModelIdRef,
-            setActiveLocalApiImageModelIdRef = setActiveLocalApiImageModelIdRef,
-            localImageWorkerClient = LocalApiImageWorkerGatewayAdapter { localImageWorkerClient },
-            localImageLoraStore = LocalApiImageLoraGatewayAdapter { localImageLoraStore },
-            tryAcquireObservedImageGenerationLeaseRef = tryAcquireObservedImageGenerationLeaseRef,
-            releaseObservedImageGenerationLeaseRef = releaseObservedImageGenerationLeaseRef,
-            registerLocalApiImageGenerationOwnershipRef = registerLocalApiImageGenerationOwnershipRef,
-            unregisterLocalApiImageGenerationOwnershipRef = unregisterLocalApiImageGenerationOwnershipRef,
-            cancelOwnedLocalApiImageWorkerRef = cancelOwnedLocalApiImageWorkerRef,
-            resolveCurrentLocalImageLorasRef1 = resolveCurrentLocalImageLorasRef1,
-            resolveCurrentLocalImageLorasRef2 = resolveCurrentLocalImageLorasRef2,
-            resolveCurrentLocalImageTextualInversionIdsRef = resolveCurrentLocalImageTextualInversionIdsRef,
-            prepareLocalImagePromptExecutionRef = prepareLocalImagePromptExecutionRef,
-            prepareLocalImageRuntimeMemoryRef = prepareLocalImageRuntimeMemoryRef,
-            executionWithQnnVerificationEvidenceRef = executionWithQnnVerificationEvidenceRef,
+        createLocalApiImageGenerationPortImpl(
+            store,
+            getActiveLocalApiImageModelIdRef,
+            setActiveLocalApiImageModelIdRef,
+            tryAcquireObservedImageGenerationLeaseRef,
+            releaseObservedImageGenerationLeaseRef,
+            registerLocalApiImageGenerationOwnershipRef,
+            unregisterLocalApiImageGenerationOwnershipRef,
+            cancelOwnedLocalApiImageWorkerRef,
+            resolveCurrentLocalImageLorasRef1,
+            resolveCurrentLocalImageLorasRef2,
+            resolveCurrentLocalImageTextualInversionIdsRef,
+            prepareLocalImagePromptExecutionRef,
+            prepareLocalImageRuntimeMemoryRef,
+            executionWithQnnVerificationEvidenceRef,
         )
 
     fun createLocalApiControlPlane(
@@ -1088,20 +561,7 @@ internal class McaAppContainer(private val application: Application) {
         rollbackTuningDelegate: (String) -> LocalApiControlResult,
         runDurableLocalApiControl: (LocalApiIdempotencyContext, () -> LocalApiControlResult) -> LocalApiControlResult,
     ): LocalApiControlPlane =
-        LocalApiControlPlaneAdapter(
-            busyStateProvider = busyStateProvider,
-            preflightProvider = preflightProvider,
-            profileJsonProvider = profileJsonProvider,
-            tuningJsonProvider = tuningJsonProvider,
-            tuningJobProvider = tuningJobProvider,
-            createTuningJobDelegate = createTuningJobDelegate,
-            pauseTuningJobDelegate = pauseTuningJobDelegate,
-            resumeTuningJobDelegate = resumeTuningJobDelegate,
-            cancelTuningJobDelegate = cancelTuningJobDelegate,
-            applyTuningJobDelegate = applyTuningJobDelegate,
-            rollbackTuningDelegate = rollbackTuningDelegate,
-            runDurableLocalApiControl = runDurableLocalApiControl,
-        )
+        createLocalApiControlPlaneImpl(busyStateProvider, preflightProvider, profileJsonProvider, tuningJsonProvider, tuningJobProvider, createTuningJobDelegate, pauseTuningJobDelegate, resumeTuningJobDelegate, cancelTuningJobDelegate, applyTuningJobDelegate, rollbackTuningDelegate, runDurableLocalApiControl)
 
     val isolatedLocalChatRunners: IsolatedLocalChatRunners by lazy {
         IsolatedLocalChatRunners(application)
@@ -1111,404 +571,19 @@ internal class McaAppContainer(private val application: Application) {
         runners: Map<LocalChatRuntime, LocalChatRunner> = isolatedLocalChatRunners.runners,
         installationScopeId: String = runBlocking(Dispatchers.IO) { runtimeProfileStore.installationScopeId() }
     ): McaInferenceService =
-        McaInferenceService(
-            context = application,
-            runners = runners,
-            installationScopeId = installationScopeId
-        )
+        createInferenceServiceImpl(runners, installationScopeId)
 
     fun createLocalApiRuntimeOwner(): LocalApiRuntimeOwner =
-        LocalApiRuntimeOwner()
+        createLocalApiRuntimeOwnerImpl()
 
     fun createChatAppearanceCoordinator(
         scope: CoroutineScope,
         uiStateStore: UiStateStore,
         showStatus: (String?) -> Unit
     ): ChatAppearanceCoordinator =
-        ChatAppearanceCoordinator(
-            scope = scope,
-            uiStateStore = uiStateStore,
-            globalChatAppearanceStore = globalChatAppearanceStore,
-            backgroundImageStore = backgroundImageStore,
-            assistantStore = assistantStore,
-            chatSessionStore = chatSessionStore,
-            showStatus = showStatus
-        )
-
-    fun createAgentTuningCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        engine: McaInferenceService,
-        tuningOwner: TuningOwner,
-        agentLogger: AgentDecisionLogger,
-        benchmarkRunner: BenchmarkRunner,
-        diagnosticsOperations: DiagnosticsOperations,
-        managedRuntimeReadinessPortProvider: () -> ManagedRuntimeReadinessPort,
-        localApiRuntimeOwner: LocalApiRuntimeOwner,
-        modelScopeClient: ModelScopeClient,
-        cancelPersistedTuningJob: suspend (String) -> TuningJobEntity,
-        activeRuntimeIdentity: () -> ModelRuntimeIdentity?,
-        activeAdaptiveRecommendation: () -> AdaptiveTuningRecommendation?,
-        setActiveAdaptiveRecommendation: (AdaptiveTuningRecommendation?) -> Unit,
-        busy: (String) -> Unit,
-        fail: (String) -> Unit,
-        showStatus: (String) -> Unit,
-        persistModelGenerationParams: (ChatBackend, String?, GenerationParams) -> Unit,
-        updateParams: (GenerationParams) -> Unit,
-        loadModel: (ModelManifest) -> Unit,
-        timedLoadModel: suspend (ModelManifest, LocalChatRuntime, LoadParams) -> Long,
-        runLocalGenerationSmoke: suspend (GenerationParams) -> LocalGenerationSmokeResult,
-        cancelGenerationJob: () -> Unit,
-        activeModelForRuntimeProfile: () -> ModelManifest?,
-        getPendingProfileTransactionId: () -> String?,
-        setPendingProfileTransactionId: (String?) -> Unit
-    ): AgentTuningCoordinator =
-        AgentTuningCoordinator(
-            application = application,
-            store = store,
-            scope = scope,
-            engine = engine,
-            tuningOwner = tuningOwner,
-            modelStore = modelStore,
-            cloudApiStore = cloudApiStore,
-            runtimeProfileStore = runtimeProfileStore,
-            modelScopeClient = modelScopeClient,
-            advisor = advisor,
-            agentLogger = agentLogger,
-            benchmarkRunner = benchmarkRunner,
-            benchmarkHistoryLogger = benchmarkHistoryLogger,
-            deviceProfileReader = deviceProfileReader,
-            diagnosticsOperations = diagnosticsOperations,
-            managedRuntimeReadinessRefreshGate = readinessRefreshGate,
-            managedRuntimeReadinessPort = managedRuntimeReadinessPortProvider,
-            localApiRuntimeOwner = localApiRuntimeOwner,
-            cancelPersistedTuningJob = cancelPersistedTuningJob,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            activeAdaptiveRecommendation = activeAdaptiveRecommendation,
-            setActiveAdaptiveRecommendation = setActiveAdaptiveRecommendation,
-            busy = busy,
-            fail = fail,
-            showStatus = showStatus,
-            persistModelGenerationParams = persistModelGenerationParams,
-            updateParams = updateParams,
-            loadModel = loadModel,
-            timedLoadModel = timedLoadModel,
-            runLocalGenerationSmoke = runLocalGenerationSmoke,
-            cancelGenerationJob = cancelGenerationJob,
-            activeModelForRuntimeProfile = activeModelForRuntimeProfile,
-            runtimeProfileTransactionPort = createRuntimeProfileTransactionPort(
-                store = store,
-                engine = engine,
-                tuningOwner = tuningOwner,
-                showStatusAction = showStatus
-            ),
-            getPendingProfileTransactionId = getPendingProfileTransactionId,
-            setPendingProfileTransactionId = setPendingProfileTransactionId
-        )
-
-    internal fun createModelScopeHubCoordinator(
-        scope: kotlinx.coroutines.CoroutineScope,
-        store: com.muyuchat.mca.UiStateStore,
-        client: ModelScopeClient,
-        currentDeviceProfile: () -> DeviceProfile,
-        busy: (String) -> Unit,
-        fail: (String) -> Unit,
-        showStatus: (String) -> Unit,
-        enqueueManagedDownload: (ManagedDownloadRequest, Boolean) -> Unit
-    ): ModelScopeHubCoordinator =
-        ModelScopeHubCoordinator(
-            scope = scope,
-            store = store,
-            client = client,
-            application = application,
-            currentDeviceProfile = currentDeviceProfile,
-            busy = busy,
-            fail = fail,
-            showStatus = showStatus,
-            enqueueManagedDownload = enqueueManagedDownload
-        )
-
-    internal fun createAssistantProfileCoordinator(
-        store: com.muyuchat.mca.UiStateStore,
-        scope: kotlinx.coroutines.CoroutineScope,
-        modelGenerationProfileStore: com.muyuchat.mca.ModelGenerationProfileStore,
-        chatSessionStore: com.muyuchat.mca.ChatSessionStore,
-        knowledgeLibraryPort: com.muyuchat.mca.presentation.KnowledgeLibraryPort,
-        chatSessionPersistenceStateLock: Any,
-        pendingWorldBookCleanupOwners: MutableMap<com.muyuchat.mca.WorldBookScope, MutableSet<String>>,
-        engine: com.muyuchat.core.engine.McaInferenceService,
-        characterMemorySummaryCoordinator: com.muyuchat.mca.CharacterMemorySummaryCoordinator,
-        chatSessionPersistenceMutex: kotlinx.coroutines.sync.Mutex,
-        chatSessionPersistenceSequence: java.util.concurrent.atomic.AtomicLong,
-        getPendingKnowledgeBindings: () -> Map<String, Set<String>>,
-        setDurableChatSessions: (List<com.muyuchat.mca.ChatSessionRecord>) -> Unit,
-        conversationMutationBarrierIsActive: () -> Boolean,
-        contentImportSelectionRevision: java.util.concurrent.atomic.AtomicLong,
-        activeRuntimeIdentity: () -> com.muyuchat.core.engine.ModelRuntimeIdentity?,
-        runtimeUserOverrideFields: Set<String>,
-        directParameterStageGeneration: java.util.concurrent.atomic.AtomicLong,
-        getActiveDirectParameterStageJob: () -> kotlinx.coroutines.Job?,
-        setActiveDirectParameterStageJob: (kotlinx.coroutines.Job?) -> Unit,
-        directParameterStageMutex: kotlinx.coroutines.sync.Mutex,
-        adaptiveTuningJobIsActive: () -> Boolean,
-        getActiveTuningJobId: () -> String?,
-        getPendingProfileTransactionId: () -> String?,
-        setPendingProfileTransactionId: (String?) -> Unit,
-        rejectWhileConversationMutationInProgress: () -> Boolean,
-        showStatus: (String) -> Unit,
-        persistModelGenerationParams: (com.muyuchat.mca.MainUiState, com.muyuchat.core.engine.GenerationParams) -> Unit,
-        persistChatSessions: (List<com.muyuchat.mca.ChatSessionRecord>?) -> Unit,
-        markLocalConversationContextInvalid: () -> Unit,
-        onLocalConversationContextNeedsInvalidation: () -> Unit,
-        selectChatSession: (String) -> Unit,
-        loadModel: (com.muyuchat.core.modelstore.ModelManifest) -> Unit,
-        selectCloudChatModel: (String?) -> Unit,
-        newChatForAssistant: (com.muyuchat.mca.AssistantRecord, Boolean) -> Boolean,
-        invalidatePendingChatImagePreparation: () -> Unit,
-        chatAppearanceMutex: kotlinx.coroutines.sync.Mutex,
-        cleanupUnusedChatBackgrounds: suspend () -> Unit,
-        captureContentImportOwner: () -> com.muyuchat.mca.ContentImportOwner,
-        stageContentImportPreview: suspend (com.muyuchat.mca.ContentImportPreview) -> Unit,
-        readAttachmentText: (android.net.Uri, Int) -> Pair<String, Boolean>,
-        currentModelGenerationProfileKey: () -> String?
-    ): AssistantProfileCoordinator =
-        AssistantProfileCoordinator(
-            store = store,
-            scope = scope,
-            application = application,
-            assistantStore = assistantStore,
-            modelGenerationProfileStore = modelGenerationProfileStore,
-            chatSessionStore = chatSessionStore,
-            worldBookStore = worldBookStore,
-            runtimeProfileStore = runtimeProfileStore,
-            engine = engine,
-            cloudChatProvider = cloudChatProvider,
-            characterMemorySummaryCoordinator = characterMemorySummaryCoordinator,
-            knowledgeLibraryPort = knowledgeLibraryPort,
-            chatSessionPersistenceState = chatSessionPersistenceState,
-            chatSessionPersistenceStateLock = chatSessionPersistenceStateLock,
-            pendingWorldBookCleanupOwners = pendingWorldBookCleanupOwners,
-            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-            chatSessionPersistenceSequence = chatSessionPersistenceSequence,
-            getPendingKnowledgeBindings = getPendingKnowledgeBindings,
-            setDurableChatSessions = setDurableChatSessions,
-            conversationMutationBarrierIsActive = conversationMutationBarrierIsActive,
-            contentImportSelectionRevision = contentImportSelectionRevision,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            runtimeUserOverrideFields = runtimeUserOverrideFields,
-            directParameterStageGeneration = directParameterStageGeneration,
-            getActiveDirectParameterStageJob = getActiveDirectParameterStageJob,
-            setActiveDirectParameterStageJob = setActiveDirectParameterStageJob,
-            directParameterStageMutex = directParameterStageMutex,
-            adaptiveTuningJobIsActive = adaptiveTuningJobIsActive,
-            getActiveTuningJobId = getActiveTuningJobId,
-            getPendingProfileTransactionId = getPendingProfileTransactionId,
-            setPendingProfileTransactionId = setPendingProfileTransactionId,
-            rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
-            showStatus = showStatus,
-            persistModelGenerationParams = persistModelGenerationParams,
-            persistChatSessions = persistChatSessions,
-            markLocalConversationContextInvalid = markLocalConversationContextInvalid,
-            onLocalConversationContextNeedsInvalidation = onLocalConversationContextNeedsInvalidation,
-            selectChatSession = selectChatSession,
-            loadModel = loadModel,
-            selectCloudChatModel = selectCloudChatModel,
-            newChatForAssistant = newChatForAssistant,
-            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
-            chatAppearanceMutex = chatAppearanceMutex,
-            cleanupUnusedChatBackgrounds = cleanupUnusedChatBackgrounds,
-            captureContentImportOwner = captureContentImportOwner,
-            stageContentImportPreview = stageContentImportPreview,
-            readAttachmentText = readAttachmentText,
-            currentModelGenerationProfileKey = currentModelGenerationProfileKey
-        )
-
-    /** Lane A - A7：模型生命周期与云端模型配置协调器工厂。 */
-    fun createChatModelCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        engine: McaInferenceService,
-        tuningOwner: TuningOwner,
-        modelGenerationProfileStore: ModelGenerationProfileStore,
-        managedRuntimeReadinessPort: () -> ManagedRuntimeReadinessPort,
-        installationScopeId: String,
-        cancelGenerationJob: () -> Unit,
-        persistChatSessions: (List<ChatSessionRecord>?) -> Unit,
-        persistChatSessionsWithBinding: (List<ChatSessionRecord>?, Pair<String, Set<String>>?) -> Unit,
-        publishManagedChatCatalogAfterValidation: () -> ManagedChatCatalogSnapshot,
-        busy: (String) -> Unit,
-        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
-        persistModelGenerationParams: (ChatBackend, String, GenerationParams) -> Unit,
-        updateParams: (GenerationParams) -> Unit,
-        cancelDirectParameterStageJob: () -> Unit,
-        rejectImageModelSwitchWhileGenerationIsActive: () -> Boolean,
-        invalidatePendingChatImagePreparation: () -> Unit,
-        activeRuntimeIdentity: () -> ModelRuntimeIdentity?,
-        currentDeviceProfile: () -> DeviceProfile,
-        currentQairtBundleSha256: (ModelManifest, List<ModelManifest>) -> String?,
-        currentQairtVerifiedLocalModelIds: (android.content.Context, List<ModelManifest>) -> Set<String>
-    ): ChatModelCoordinator {
-        val cloudModelConfigPort = createCloudModelConfigPort(
-            store = store,
-            loadModelGenerationParams = loadModelGenerationParams,
-            persistChatSessions = persistChatSessionsWithBinding
-        )
-        return ChatModelCoordinator(
-            store = store,
-            scope = scope,
-            application = application,
-            engine = engine,
-            modelStore = modelStore,
-            cloudApiStore = cloudApiStore,
-            runtimeProfileStore = runtimeProfileStore,
-            modelGenerationProfileStore = modelGenerationProfileStore,
-            tuningOwner = tuningOwner,
-            advisor = advisor,
-            admission = runtimeAdmission,
-            deviceProfileReader = deviceProfileReader,
-            managedRuntimeReadinessRefreshGate = readinessRefreshGate,
-            managedRuntimeReadinessPort = managedRuntimeReadinessPort,
-            cloudModelConfigPort = cloudModelConfigPort,
-            installationScopeId = installationScopeId,
-            cancelGenerationJob = cancelGenerationJob,
-            persistChatSessions = persistChatSessions,
-            publishManagedChatCatalogAfterValidation = publishManagedChatCatalogAfterValidation,
-            busy = busy,
-            loadModelGenerationParams = loadModelGenerationParams,
-            persistModelGenerationParams = persistModelGenerationParams,
-            updateParams = updateParams,
-            cancelDirectParameterStageJob = cancelDirectParameterStageJob,
-            rejectImageModelSwitchWhileGenerationIsActive = rejectImageModelSwitchWhileGenerationIsActive,
-            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
-            activeRuntimeIdentity = activeRuntimeIdentity,
-            currentDeviceProfile = currentDeviceProfile,
-            currentQairtBundleSha256 = currentQairtBundleSha256,
-            currentQairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds
-        )
-    }
+        createChatAppearanceCoordinatorImpl(scope, uiStateStore, showStatus)
 
     val contentImportPreviewStore = ContentImportPreviewStore(application)
-
-    /** Lane A - A9/A10：启动后异步工作流与状态监控协调器工厂。 */
-    fun createMainPostStartupCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        engine: McaInferenceService,
-        imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
-        modelImportAndDownloadCoordinator: ModelImportAndDownloadCoordinator,
-        offlinePromptTranslationAndChatImageCoordinator: OfflinePromptTranslationAndChatImageCoordinator,
-        chatModelCoordinator: ChatModelCoordinator,
-        restorePendingContentImportPreview: () -> Unit,
-        observeManagedDownloadsAction: () -> Unit,
-        schedulePersistentPrefixCacheClear: (Long, String, String) -> Unit,
-        persistentPrefixCacheOperationSequence: AtomicLong,
-        managedRuntimeReadinessPortProvider: () -> ManagedRuntimeReadinessPort,
-        chatSessionPersistenceMutex: Mutex,
-        modelIdentityReferenceMigration: ModelIdentityReferenceMigration,
-        getDurableChatSessions: () -> List<ChatSessionRecord>,
-        setDurableChatSessions: (List<ChatSessionRecord>) -> Unit,
-        skipInitialModelDiscovery: Boolean
-    ): MainPostStartupCoordinator =
-        MainPostStartupCoordinator(
-            store = store,
-            scope = scope,
-            application = application,
-            container = this,
-            engine = engine,
-            modelStore = modelStore,
-            imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
-            modelImportAndDownloadCoordinator = modelImportAndDownloadCoordinator,
-            offlinePromptTranslationAndChatImageCoordinator = offlinePromptTranslationAndChatImageCoordinator,
-            chatModelCoordinator = chatModelCoordinator,
-            restorePendingContentImportPreview = restorePendingContentImportPreview,
-            observeManagedDownloadsAction = observeManagedDownloadsAction,
-            schedulePersistentPrefixCacheClear = schedulePersistentPrefixCacheClear,
-            persistentPrefixCacheOperationSequence = persistentPrefixCacheOperationSequence,
-            managedRuntimeReadinessPortProvider = managedRuntimeReadinessPortProvider,
-            chatSessionPersistenceMutex = chatSessionPersistenceMutex,
-            modelIdentityReferenceMigration = modelIdentityReferenceMigration,
-            getDurableChatSessions = getDurableChatSessions,
-            setDurableChatSessions = setDurableChatSessions,
-            skipInitialModelDiscovery = skipInitialModelDiscovery
-        )
-
-    fun createContentImportPreviewCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        assistantProfileCoordinator: AssistantProfileCoordinator,
-        showStatus: (String?) -> Unit
-    ): ContentImportPreviewCoordinator =
-        ContentImportPreviewCoordinator(
-            store = store,
-            scope = scope,
-            contentImportPreviewStore = contentImportPreviewStore,
-            assistantProfileCoordinator = assistantProfileCoordinator,
-            showStatus = showStatus
-        )
-
-    fun createChatSessionManagementCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        rejectWhileConversationMutationInProgress: () -> Boolean,
-        hasActiveAssistantImageExecutionIn: (MainUiState, String) -> Boolean,
-        showStatus: (String?) -> Unit,
-        fail: (String) -> Unit,
-        invalidatePendingChatImagePreparation: () -> Unit,
-        cancelActiveWebSearch: () -> Unit,
-        bumpContentImportSelectionRevision: () -> Unit,
-        loadModelGenerationParams: (ChatBackend, String?, GenerationParams) -> GenerationParams,
-        markLocalConversationContextInvalid: () -> Unit,
-        continueAssistantImageTurn: (String) -> Unit,
-        persistChatSessions: (List<ChatSessionRecord>) -> kotlinx.coroutines.Job?
-    ): ChatSessionManagementCoordinator =
-        ChatSessionManagementCoordinator(
-            application = application,
-            scope = scope,
-            store = store,
-            container = this,
-            rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
-            hasActiveAssistantImageExecutionIn = hasActiveAssistantImageExecutionIn,
-            showStatus = showStatus,
-            fail = fail,
-            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
-            cancelActiveWebSearch = cancelActiveWebSearch,
-            bumpContentImportSelectionRevision = bumpContentImportSelectionRevision,
-            loadModelGenerationParams = loadModelGenerationParams,
-            markLocalConversationContextInvalid = markLocalConversationContextInvalid,
-            continueAssistantImageTurn = continueAssistantImageTurn,
-            persistChatSessions = persistChatSessions
-        )
-
-    fun createChatInputAndAttachmentCoordinator(
-        store: UiStateStore,
-        scope: CoroutineScope,
-        showStatus: (String?) -> Unit,
-        fail: (String) -> Unit,
-        invalidatePendingChatImagePreparation: () -> Unit,
-        awaitImageLibraryStartupReconciliation: suspend () -> Unit,
-        imageAssetWriteMutex: Mutex,
-        imageAssetDirectory: java.io.File,
-        imageLibraryCommitPort: () -> ImageLibraryCommitPort,
-        imagePromptTokenMeasurementHost: ImagePromptTokenMeasurementHost,
-        visionAttachmentPort: VisionAttachmentPort,
-        chatSessionStore: ChatSessionStore
-    ): ChatInputAndAttachmentCoordinator =
-        ChatInputAndAttachmentCoordinator(
-            application = application,
-            scope = scope,
-            store = store,
-            container = this,
-            showStatus = showStatus,
-            fail = fail,
-            invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
-            awaitImageLibraryStartupReconciliation = awaitImageLibraryStartupReconciliation,
-            imageAssetWriteMutex = imageAssetWriteMutex,
-            imageAssetDirectory = imageAssetDirectory,
-            imageLibraryCommitPort = imageLibraryCommitPort,
-            imagePromptTokenMeasurementHost = imagePromptTokenMeasurementHost,
-            visionAttachmentPort = visionAttachmentPort,
-            chatSessionStore = chatSessionStore
-        )
 
     fun createChatImageWorkflowCoordinator(
         scope: CoroutineScope,
@@ -1531,28 +606,26 @@ internal class McaAppContainer(private val application: Application) {
         unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
         cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
     ): ChatImageWorkflowCoordinator =
-        ChatImageWorkflowCoordinator(
-            application = application,
-            scope = scope,
-            store = store,
-            container = this,
-            imageAssetWriteMutex = imageAssetWriteMutex,
-            imageLibraryMutationMutex = imageLibraryMutationMutex,
-            imageLibraryBackup = imageLibraryBackup,
-            chatSessionStore = chatSessionStore,
-            imageGenerationOwner = imageGenerationOwner,
-            imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
-            chatImageRetryPort = chatImageRetryPort,
-            showStatus = showStatus,
-            tryAcquireObservedImageGenerationLease = tryAcquireObservedImageGenerationLease,
-            releaseObservedImageGenerationLease = releaseObservedImageGenerationLease,
-            offlinePromptTranslationService = offlinePromptTranslationService,
-            runtimeProfileStore = runtimeProfileStore,
-            engine = engine,
-            selectCloudImageModel = selectCloudImageModel,
-            registerLocalApiImageGenerationOwnership = registerLocalApiImageGenerationOwnership,
-            unregisterLocalApiImageGenerationOwnership = unregisterLocalApiImageGenerationOwnership,
-            cancelOwnedLocalApiImageWorker = cancelOwnedLocalApiImageWorker
+        createChatImageWorkflowCoordinatorImpl(
+            scope,
+            store,
+            imageAssetWriteMutex,
+            imageLibraryMutationMutex,
+            imageLibraryBackup,
+            chatSessionStore,
+            imageGenerationOwner,
+            imageLibraryStartupReconciliation,
+            chatImageRetryPort,
+            showStatus,
+            tryAcquireObservedImageGenerationLease,
+            releaseObservedImageGenerationLease,
+            offlinePromptTranslationService,
+            runtimeProfileStore,
+            engine,
+            selectCloudImageModel,
+            registerLocalApiImageGenerationOwnership,
+            unregisterLocalApiImageGenerationOwnership,
+            cancelOwnedLocalApiImageWorker,
         )
 
     fun createChatWorkflowCoordinator(
@@ -1563,17 +636,9 @@ internal class McaAppContainer(private val application: Application) {
         pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
         persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState, Boolean) -> kotlinx.coroutines.Job?
     ): ChatWorkflowCoordinator =
-        ChatWorkflowCoordinator(
-            store = store,
-            rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
-            showStatus = showStatus,
-            isChatImageRequestActive = isChatImageRequestActive,
-            pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
-            persistConversationMutation = persistConversationMutation
-        )
+        createChatWorkflowCoordinatorImpl(store, rejectWhileConversationMutationInProgress, showStatus, isChatImageRequestActive, pendingAssistantImageToolTurns, persistConversationMutation)
 
     val runtimeAdmission = RuntimeAdmissionState(
         GenerationPreferences.loadRuntimeUserOverrideFields(application).toMutableSet()
     )
 }
-

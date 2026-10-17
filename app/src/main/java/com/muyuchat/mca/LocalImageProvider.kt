@@ -93,7 +93,7 @@ class LocalImageProvider(context: Context) {
             }
 
             override fun logLocalImageNativeFailure(result: JSONObject, fallbackMessage: String) {
-                logLocalImageNativeFailure(result, fallbackMessage)
+                com.muyuchat.mca.logLocalImageNativeFailure(result, fallbackMessage)
             }
 
             override suspend fun generateQwenImage21(
@@ -117,7 +117,7 @@ class LocalImageProvider(context: Context) {
                 }
 
             override fun logLocalImageNativeFailure(result: JSONObject, fallbackMessage: String) {
-                logLocalImageNativeFailure(result, fallbackMessage)
+                com.muyuchat.mca.logLocalImageNativeFailure(result, fallbackMessage)
             }
 
             override fun begin(runtime: LocalImageRuntime) {

@@ -32,14 +32,14 @@ import org.json.JSONObject
 internal class SdxlTwoPhaseCoordinator(
     context: Context
 ) {
-    private val appContext = context.applicationContext
-    private val coordinationRoot = File(
+    internal val appContext = context.applicationContext
+    internal val coordinationRoot = File(
         appContext.noBackupFilesDir,
         SDXL_TWO_PHASE_COORDINATION_DIRECTORY
     ).apply { mkdirs() }
-    private val cancelled = AtomicBoolean(false)
-    private val stateLock = Any()
-    private var activeClient: SdxlPhaseClient? = null
+    internal val cancelled = AtomicBoolean(false)
+    internal val stateLock = Any()
+    internal var activeClient: SdxlPhaseClient? = null
 
     /** Resets cancellation only at the provider's request-admission boundary. */
     fun begin() {
@@ -55,42 +55,6 @@ internal class SdxlTwoPhaseCoordinator(
         return true
     }
 
-    fun prepareLease(
-        requestId: String,
-        params: JSONObject,
-        embeddingsFile: File,
-        latentFile: File,
-        metadataFile: File,
-        inputTensorFile: File,
-        encoderLatentFile: File,
-        encoderMetadataFile: File,
-        outputFile: File,
-        encoderJournal: File,
-        unetJournal: File,
-        vaeJournal: File,
-        maskTensorFile: File? = null,
-        fullMaskTensorFile: File? = null
-    ): SdxlTwoPhaseRequestLease {
-        requireSplitSdxlPreviewDisabled(params, "lease admission")
-        return SdxlTwoPhaseRequestLease.acquire(
-            requestId = requestId,
-            params = params,
-            workerPid = Process.myPid(),
-            coordinationRoot = coordinationRoot,
-            embeddingsFile = embeddingsFile,
-            latentFile = latentFile,
-            metadataFile = metadataFile,
-            inputTensorFile = inputTensorFile,
-            encoderLatentFile = encoderLatentFile,
-            encoderMetadataFile = encoderMetadataFile,
-            outputFile = outputFile,
-            encoderJournal = encoderJournal,
-            unetJournal = unetJournal,
-            vaeJournal = vaeJournal,
-            maskTensorFile = maskTensorFile,
-            fullMaskTensorFile = fullMaskTensorFile
-        )
-    }
 
     suspend fun generate(
         lease: SdxlTwoPhaseRequestLease,
@@ -573,128 +537,5 @@ internal class SdxlTwoPhaseCoordinator(
         }
     }
 
-    private suspend fun runPhaseWithRuntimeCandidates(
-        phase: SdxlImagePhase,
-        candidates: List<SdxlPhaseRuntimeCandidate>,
-        request: SdxlImagePhaseRequest,
-        timeoutMs: Long,
-        onProgress: (SdxlImagePhaseProgress) -> Unit
-    ): SdxlPhaseCandidateCompletion {
-        val selected = executeSdxlRuntimeCandidates(
-            phase = phase,
-            candidates = candidates,
-            isCancelled = cancelled::get
-        ) { candidate ->
-            runPhase(
-                phase = phase,
-                request = request.copy(
-                    runtimeProfile = candidate.runtimeProfile
-                ),
-                timeoutMs = timeoutMs,
-                onProgress = onProgress
-            )
-        }
-        return SdxlPhaseCandidateCompletion(
-            candidate = selected.candidate,
-            completion = selected.value
-        )
-    }
 
-    private suspend fun runPhase(
-        phase: SdxlImagePhase,
-        request: SdxlImagePhaseRequest,
-        timeoutMs: Long,
-        onProgress: (SdxlImagePhaseProgress) -> Unit
-    ): SdxlPhaseCompletion {
-        val client = SdxlPhaseClient(appContext, phase, onProgress)
-        synchronized(stateLock) { activeClient = client }
-        return try {
-            check(!cancelled.get()) { "SDXL generation was cancelled." }
-            client.execute(request, timeoutMs)
-        } finally {
-            synchronized(stateLock) { if (activeClient === client) activeClient = null }
-            client.close()
-        }
-    }
-
-    private fun cleanupHandoff(vararg files: File) {
-        files.forEach { file ->
-            runCatching { file.delete() }
-            runCatching { File(file.path + ".part").delete() }
-            file.parentFile?.mkdirs()
-        }
-    }
-
-    private fun stageBothRuntimeProfiles(
-        bundleRoot: File,
-        packagedRuntimeDirsJson: String
-    ): SdxlPhaseRuntimeDirectories {
-        val bundleContextProfile = qnnImageBundleRuntimeProfileForArchOrNull(
-            bundleRoot,
-            SDXL_ARCHIVE_CONTEXT_HTP_ARCH
-        )
-        val preferredTransportArch = runCatching {
-            DeviceProfileReader(appContext).read().accelerationProfile
-        }.getOrNull()?.let { acceleration ->
-            DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(
-                acceleration.chipsetCode
-            ) ?: acceleration.qnnRuntime.htpArchVersion.takeIf { it > 0 }
-        }
-        val candidates = if (bundleContextProfile == null) {
-            // Public SDXL archives contain graph contexts and prompt encoders,
-            // but no host/Skel/Stub libraries. Enumerate every complete APK/OEM
-            // transport. Device discovery only ranks the first attempt; all
-            // candidates remain available to real load in disposable workers.
-            sdxlRuntimeCandidatesForPackagedDirs(
-                runtimeDirsJson = packagedRuntimeDirsJson,
-                preferredHtpArch = preferredTransportArch
-            )
-        } else {
-            val stager = QnnImageRuntimeStager(
-                File(appContext.codeCacheDir, "qnn-image-runtime-sdxl-phases")
-            )
-            val availableProfiles = qnnImageBundleRuntimeProfiles(bundleRoot)
-            val orderedProfiles = buildList {
-                preferredTransportArch
-                    ?.let { arch -> availableProfiles.firstOrNull { it.htpArchVersion == arch } }
-                    ?.let(::add)
-                add(bundleContextProfile)
-                addAll(availableProfiles)
-            }.distinctBy { profile -> profile.directory.canonicalPath to profile.htpArchVersion }
-            val staged = orderedProfiles.mapNotNull { transportProfile ->
-                val result = if (transportProfile.htpArchVersion == bundleContextProfile.htpArchVersion) {
-                    stager.stage(bundleContextProfile)
-                } else {
-                    stager.stage(
-                        QnnImageRuntimeStagePlan(
-                            contextProfile = bundleContextProfile,
-                            transportProfile = transportProfile
-                        )
-                    )
-                }
-                result.runtime?.let { runtime ->
-                    val directory = runtime.directory.canonicalPath
-                    SdxlPhaseRuntimeCandidate(
-                        runtimeProfile = SdxlQnnRuntimeProfile(
-                            hostDirectory = directory,
-                            dspDirectory = directory,
-                            htpArchVersion = transportProfile.htpArchVersion
-                        )
-                    )
-                }
-            }
-            require(staged.isNotEmpty()) {
-                "Unable to stage any complete SDXL QNN runtime candidate for real execution."
-            }
-            staged
-        }
-        // Every attempt gets one exact coherent host/DSP tuple. Side-loaded and staged
-        // runtimes stay self-contained; an OEM platform runtime may bind two platform
-        // directories explicitly. A retry advances only after the prior process has died.
-        return SdxlPhaseRuntimeDirectories(
-            encoderCandidates = candidates,
-            unetCandidates = candidates,
-            vaeCandidates = candidates
-        )
-    }
 }

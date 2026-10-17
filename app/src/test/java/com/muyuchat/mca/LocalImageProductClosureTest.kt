@@ -14,7 +14,13 @@ class LocalImageProductClosureTest {
     @Test
     fun `UI request identity reaches coordinator and worker while API keeps its own identity`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val ui = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
+        val ui = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
+            "fun submit("
+        ) + functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwnerExecution.kt"),
+            "fun runImageGenerationExecution("
+        )
         // The publish half moved to its own file. Reading it through `source` used to pass for the
         // wrong reason: the wrapper left behind is an expression body, so the extractor walked past it
         // into an unrelated declaration and the assertions below never saw the real code.
@@ -37,7 +43,13 @@ class LocalImageProductClosureTest {
     @Test
     fun `requested image model is snapshotted and API model never falls through to selection`() {
         val source = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val ui = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
+        val ui = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
+            "fun submit("
+        ) + functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwnerExecution.kt"),
+            "fun runImageGenerationExecution("
+        )
         val api = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/presentation/LocalApiImageGenerationOperations.kt"), "internal suspend fun generateLocalApiImageOperations(")
         val explicitModelBranch = api.substring(
             api.indexOf("if (requestedModel.isNotBlank())"),
@@ -91,7 +103,13 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceS
         // the ViewModel, an expression in MainActivity and one in ChatScreen. No assertion
         // changed -- only the file the first one reads.
         val persistedRecords = sourceFile("app/src/main/java/com/muyuchat/mca/PersistedRecords.kt")
-        val generate = functionBody(sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"), "fun submit(")
+        val generate = functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt"),
+            "fun submit("
+        ) + functionBody(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwnerExecution.kt"),
+            "fun runImageGenerationExecution("
+        )
 
         assertTrue(persistedRecords.contains("CANCELLED(\"已取消\", terminal = true)"))
         assertTrue(generate.contains("error is LocalImageWorkerCancelledException"))
@@ -133,9 +151,9 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
 
     @Test
     fun `QNN conditioning digest is derived from the bytes consumed by the graph`() {
-        val source = sourceFile("core/native/src/main/cpp/qnn_native_bridge.cpp")
+        val source = qnnSource()
         val isolatedSdxl = sourceFile("core/native/src/main/cpp/qnn_sdxl_isolated_phases.hpp")
-        val mnn = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        val mnn = mnnSource()
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
         // P5/L6: the QNN semantic-defaults JSON builder moved to LocalImageNativeConfigSupport.kt;
         // that one assertion reads the body where it now lives (everything else stays in provider).
@@ -143,17 +161,24 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageNativeConfigSupport.kt")
         // P5/L8: the sdxlQnnConditioningGraphSha256 call moved with the generate() body.
         val generation =
-            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt") +
+                sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt")
         // P7/S31: the durable request lease moved to SdxlTwoPhaseRequestLease.kt; reading it here
         // keeps the same contract under test -- the assertions below are unchanged.
         val coordinator = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinator.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseCoordinatorPhaseMerge.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseRequestLease.kt")
-        val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseProtocol.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlTwoPhaseRequestLease.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlPhaseMergeAssembly.kt")
+        val phaseProtocol = sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseWireProtocol.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseValidation.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlLatentArtifactIO.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/SdxlImagePhaseContract.kt")
         val normalizedSource = source.replace("\r\n", "\n")
         val normalizedIsolatedSdxl = isolatedSdxl.replace("\r\n", "\n")
         val resolver = functionBody(source, "bool resolve_qnn_conditioning_evidence(")
         val runtimeSelector = functionBody(source, "bool select_qnn_runtime_profile_for_context(")
+        // Preferring a transport is only a ranking hint now, so the ranking helper is part of the read set.
+        val candidatesHeader = sourceFile("core/native/src/main/cpp/qnn_htp_runtime_candidates.hpp")
 
         assertTrue(source.contains("qnn_consumed_payload_sha256("))
         assertTrue(source.contains("consumed_conditioning_artifact_sha256"))
@@ -204,12 +229,48 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         assertTrue(coordinator.contains("SDXL_ISOLATED_ENCODER_UNET_VAE_MODE"))
         assertFalse(coordinator.contains("same_transport"))
         assertTrue(runtimeSelector.contains("int preferred_htp_arch"))
-        // A known context/device pair is an exact admission constraint.  A
-        // caller preference may only be used when it matches the required
-        // architecture; the selector then appends that required arch.
-        assertTrue(runtimeSelector.contains("const int required_arch"))
-        assertTrue(runtimeSelector.contains("preferred_htp_arch == required_arch"))
-        assertTrue(runtimeSelector.contains("append_arch(required_arch)"))
+        // Device admission is decided by the real QNN load, not by a host-side arch block:
+        // a known device/context pair only ranks candidate transports.  The old
+        // required_arch equality gate must not come back.
+        assertTrue(runtimeSelector.contains("const int context_htp_arch"))
+        assertTrue(runtimeSelector.contains("const int device_htp_arch"))
+        assertTrue(
+            runtimeSelector.contains(
+                "const std::vector<int> candidate_arches = qnn_htp_runtime_candidates("
+            )
+        )
+        assertTrue(runtimeSelector.contains("for (const int htp_arch : candidate_arches)"))
+        assertTrue(runtimeSelector.contains("deferring compatibility to QNN contextCreateFromBinary"))
+        assertFalse(runtimeSelector.contains("required_arch"))
+        assertTrue(candidatesHeader.contains("inline std::vector<int> qnn_htp_runtime_candidates("))
+        assertTrue(
+            candidatesHeader.contains(
+                "// Hardware and context metadata rank transports. Availability and actual QNN\n" +
+                    "// loading determine whether a transport can execute the unchanged binary."
+            )
+        )
+        // Ranking order is preference -> physical device -> context metadata -> probe ->
+        // packaged transports, deduplicated, with unknown (non-positive) arches dropped.
+        val rankOrder = listOf(
+            "append(preferred_arch);",
+            "append(device_arch);",
+            "append(context_arch);",
+            "append(probed_arch);",
+            "for (const int arch : packaged_arches) append(arch);"
+        )
+        var rankCursor = -1
+        rankOrder.forEach { needle ->
+            val at = candidatesHeader.indexOf(needle)
+            assertTrue("QNN transport rank step missing or out of order: $needle", at > rankCursor)
+            rankCursor = at
+        }
+        assertTrue(candidatesHeader.contains("if (arch > 0 &&"))
+        assertTrue(
+            candidatesHeader.contains(
+                "std::find(candidates.begin(), candidates.end(), arch) == candidates.end()"
+            )
+        )
+        assertTrue(candidatesHeader.contains("left > right"))
         assertTrue(isolatedSdxl.contains("expected_profile"))
         assertEquals(3, Regex("expected_profile\\)\\)").findAll(isolatedSdxl).count())
     }
@@ -249,7 +310,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         val provider = sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageProvider.kt")
         // P5/L8: the shared-MNN evidence assembly moved with the generate() body.
         val generation =
-            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationOperations.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnPreparation.kt") +
+                sourceFile("app/src/main/java/com/muyuchat/mca/LocalImageGenerationQnnExecution.kt")
         val integration = sourceFile(
             "app/src/main/java/com/muyuchat/mca/LocalImageExecutionProfileIntegration.kt"
         )
@@ -259,8 +321,8 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         val debugSmoke = sourceFile(
             "app/src/debug/java/com/muyuchat/mca/debug/LocalImageSmokeActivity.kt"
         )
-        val qnn = sourceFile("core/native/src/main/cpp/qnn_native_bridge.cpp")
-        val mnn = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        val qnn = qnnSource()
+        val mnn = mnnSource()
         val readinessProfile = functionBody(
             integration,
             "internal fun resolveEffectiveLocalImageManifestProfile("
@@ -375,8 +437,20 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         val adapter = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationBitmapEditing.kt"
         )
+        // T2B21/T1-A: the mask editor / scaffold / dialogs moved to same-package files; the
+        // reader concatenates the shell and the new files so every assertion below keeps reading
+        // the same text it pinned before. No assertion changed -- only the files the reads
+        // concatenate.
         val editor = sourceFile(
             "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationEditor.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskTools.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorChrome.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorDialogs.kt"
+        ) + sourceFile(
+            "feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEditorMaskOverlays.kt"
         )
         val dimensionProbe = functionBody(adapter, "fun probeDimensionsBounded(")
         val decoder = functionBody(adapter, "fun decodeBounded(")
@@ -398,7 +472,10 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
         assertTrue(maskOverlay.contains("state.baseGrayscaleValue == ImageMaskStrokeMode.BRUSH.grayscaleValue"))
         assertTrue(maskOverlay.contains("clipRect("))
         assertTrue(maskOverlay.contains("topLeft = Offset(imageBounds.left.toFloat(), imageBounds.top.toFloat())"))
-        assertTrue(editor.contains("private fun PositionedMaskDrawingDialog("))
+        // T2B21/T1-A: PositionedMaskDrawingDialog moved out and was widened to internal
+        // (cross-file use), so the literal follows the registered widen; the assertion itself
+        // is unchanged.
+        assertTrue(editor.contains("internal fun PositionedMaskDrawingDialog("))
         assertTrue(editor.contains("Text(\"在当前位置应用\")"))
         assertTrue(editor.contains("maskState.applyPointAtCursor("))
         assertFalse(adapter.contains("catch (error: Throwable)"))
@@ -411,8 +488,16 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageGenera
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt") + // P9/B1: 头部类型与常量簇移出 ChatScreen.kt，拼接表随迁。
 sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadTypes.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") + sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatUiItemModels.kt")
-        val api = sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiContract.kt")
-        val bridge = sourceFile("core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp")
+        val api = sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiFingerprint.kt") + // T2B8/R7-B3: 协议文件拆分后读取面随迁，拼接表覆盖三文件；断言未变。
+            sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiTypes.kt") +
+            sourceFile("api/local/src/main/java/com/muyuchat/api/local/ImageGenerationApiInputValidation.kt")
+        // T2B17/R7-C6: the generate-execute phase (gen.loras wiring) moved into
+        // sd_generate_execute.cpp; the LoRA apply-completeness needles read the live LoRA
+        // adapter instead of the in-bridge comment the split leaves behind.  Assertions are
+        // unchanged; only the file each needle reads moved.
+        val bridge = sourceFile("core/sd-native/src/main/cpp/stable_diffusion_bridge.cpp") +
+            sourceFile("core/sd-native/src/main/cpp/sd_generate_execute.cpp")
+        val loraNative = sourceFile("core/sd-native/src/main/cpp/mca/sd/sd_lora_adapter.cpp")
         val uiItemStart = chat.indexOf("data class ImageLoraUiItem(")
         val uiItemEnd = chat.indexOf("data class ImageGenerationUiLoraSelection(", uiItemStart)
         require(uiItemStart >= 0 && uiItemEnd > uiItemStart)
@@ -424,14 +509,15 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadT
         assertTrue(api.contains("val loras: List<ImageGenerationApiLora>"))
         assertTrue(api.contains("private val LORA_FIELDS = setOf(\"id\", \"multiplier\")"))
         assertTrue(bridge.contains("gen.loras = native_loras.empty() ? nullptr : native_loras.data()"))
-        assertTrue(bridge.contains("LORA_NATIVE_APPLY_INCOMPLETE"))
-        assertTrue(bridge.contains("lora_applied_tensor_count == 0u"))
+        assertTrue(loraNative.contains("LORA_NATIVE_APPLY_INCOMPLETE"))
+        assertTrue(loraNative.contains("lora_applied_tensor_count == 0u"))
     }
 
     @Test
     fun `native preview progress reaches the existing generation canvas while synchronous API rejects it`() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwner.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/ImageGenerationOwnerExecution.kt")
         val mainActivity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") + sourceFile("app/src/main/java/com/muyuchat/mca/MainChatScreenActions.kt") +
             sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
         // The call site stays in MainActivity; the mapping it calls moved to the presentation
@@ -498,6 +584,84 @@ sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadT
         assertTrue(client.contains("worker_exit_unconfirmed"))
         assertTrue(client.contains("The exact Binder death was not confirmed"))
         assertFalse(client.contains("isolated worker was terminated"))
+    }
+
+    @Test
+    fun `B45 S2 canvas switcher unlocks on terminal jobs and a loading catalog never reads as missing`() {
+        // B45/S2: the canvas model pill was hardcoded off (a terminal job could never switch models
+        // again without restarting), and the dropdown rendered "capabilities not prepared yet" as
+        // "暂无本地生图模型". ImageEngineTemplateScreens.kt, ImageGalleryHome.kt and
+        // ChatImagesWorkspaceMainPage.kt join this suite's read set for the first time with this
+        // reader. No assertion above this one changed.
+        val activity = sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
+        val resultScreens = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGenerationResultScreens.kt")
+        val chat = sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreenHeadTypes.kt") +
+            sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImagesWorkspaceMainPage.kt") +
+            sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageWorkspaceScreens.kt") +
+            sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageGalleryHome.kt") +
+            resultScreens +
+            sourceFile("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageEngineTemplateScreens.kt")
+
+        assertTrue(activity.contains("imageModelsLoading = state.localImageModels.any { model -> preparedImageUi[model.path] == null }"))
+        assertTrue(chat.contains("val imageModelsLoading: Boolean = false,"))
+        assertTrue(chat.contains("imageModelsLoading = state.imageModelsLoading,"))
+        assertTrue(chat.contains("imageModelsLoading = imageModelsLoading,"))
+        assertTrue(chat.contains("val canvasModelName = activeJob?.takeIf { it.isWorking }?.modelName?.takeIf(String::isNotBlank) ?: selectedImageModelName"))
+        assertTrue(resultScreens.contains("enabled = job?.isWorking != true"))
+        assertFalse(resultScreens.contains("enabled = false,"))
+        assertTrue(chat.contains("loading = imageModelsLoading"))
+        assertTrue(chat.contains("imageEngineMenuEmptyText(isCloud = source == ImageEngineSource.CLOUD, loading = loading)"))
+        assertTrue(chat.contains("internal fun imageEngineMenuEmptyText(isCloud: Boolean, loading: Boolean): String"))
+        assertTrue(chat.contains("\"正在加载本地生图模型…\""))
+        assertTrue(chat.contains("\"暂无本地生图模型\""))
+        assertTrue(chat.contains("\"暂无云端生图模型\""))
+    }
+
+    // The QNN bridge was slimmed from ~11.9k lines to ~1k and the conditioning / graph / runtime
+    // selection logic moved into mca/qnn modules.  Tests that used to read the bridge alone now have
+    // to read the module that actually holds the code, otherwise the signature lookup fails (or,
+    // worse, silently resolves against a leftover fallback).  Order matters: the .cpp definitions are
+    // listed first so the first occurrence of a signature is the real definition, not a declaration.
+    private val qnnExtractedModules = listOf(
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_pipeline.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_request.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_conditioning.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_sdxl.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_stage_runner.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_output.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_semantic_evidence.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_executable_graph.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_graph_runtime_support.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_pipeline.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_token_payload.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_json_fields.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_asset_evidence.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_asset_capture.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_conditioning_handoff_binding.cpp",
+        "core/native/src/main/cpp/mca/qnn/qnn_bridge_payloads.cpp",
+        // The transport-ranking helper is a header, but the runtime selector contract above is
+        // unassertable without it; keeping it last preserves "definition before declaration".
+        "core/native/src/main/cpp/qnn_htp_runtime_candidates.hpp"
+    )
+
+    // T2B3: the monolith body dissolved into the diffusion owner split, so the
+    // MNN-side contract reads the union of the shell and the new TUs.
+    private fun mnnSource(): String {
+        val shell = sourceFile("core/native/src/main/cpp/mnn_native_engine.cpp")
+        return shell + listOf(
+            "core/native/src/main/cpp/mca/mnn/mnn_diffusion_state.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_clip_encode.cpp",
+            "core/native/src/main/cpp/mca/mnn/mnn_sd15_direct.cpp"
+        ).joinToString("") { sourceFile(it) }
+    }
+
+    private fun qnnSource(): String {
+        val bridge = sourceFile("core/native/src/main/cpp/qnn_native_bridge.cpp")
+        // sourceFile() throws when a module is missing, so a future extraction cannot silently shrink
+        // the read set and turn these contract assertions into no-ops.
+        return bridge + qnnExtractedModules.joinToString("") { sourceFile(it) }
     }
 
     private fun sourceFile(relativePath: String): String {

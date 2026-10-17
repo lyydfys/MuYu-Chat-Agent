@@ -46,7 +46,7 @@ class DownloadFormattingTest {
     // Exercise the production private formatters without changing their visibility
     // or creating a second implementation in the test.
     private fun format(name: String, value: Long): String =
-        Class.forName("com.muyuchat.feature.modelhub.ModelHubScreenKt")
+        Class.forName("com.muyuchat.feature.modelhub.MarketAndDownloadsKt") // T2B9/R7-B4: formatDownloadRate/formatDuration 迁至 MarketAndDownloads.kt，facade 随迁；断言未变。
             .getDeclaredMethod(name, java.lang.Long.TYPE)
             .apply { isAccessible = true }
             .invoke(null, value) as String

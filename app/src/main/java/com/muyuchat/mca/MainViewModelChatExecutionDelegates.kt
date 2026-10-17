@@ -104,6 +104,17 @@ fun MainViewModel.selectTab(tab: AppTab) {
 internal fun MainViewModel.restorePendingContentImportPreview() =
     contentImportPreviewCoordinator.restorePendingContentImportPreview()
 
+/**
+ * Canonical ViewModel entry for staging an import preview.
+ *
+ * Restored after the 76348a5b extraction dropped it (the host adapter already declares this VM
+ * entry in [com.muyuchat.mca.composition.MainCoordinatorHost], so its absence made the snapshot
+ * depend on a direct coordinator call instead). The body is the verbatim delegation the reference
+ * ViewModel had at 02fc0181 (`MainViewModel.kt:1066`).
+ */
+internal suspend fun MainViewModel.stageContentImportPreview(preview: ContentImportPreview) =
+    contentImportPreviewCoordinator.stageContentImportPreview(preview)
+
 internal fun MainViewModel.finishSelectingNewAssistant(assistant: AssistantRecord) {
     assistantProfileCoordinator.finishSelectingNewAssistant(assistant)
 }

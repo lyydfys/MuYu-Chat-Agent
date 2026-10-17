@@ -593,7 +593,7 @@ internal class LocalChatWorkerStageJournal private constructor(
             return sanitizeParameterSummary(result)
         }
 
-        private fun isSafeParameterValue(value: Any): Boolean = when (value) {
+        private fun isSafeParameterValue(value: Any?): Boolean = when (value) {
             is Boolean -> true
             is Number -> value.toDouble().isFinite()
             else -> false

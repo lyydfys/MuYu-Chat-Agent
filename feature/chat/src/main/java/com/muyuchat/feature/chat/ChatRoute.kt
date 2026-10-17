@@ -46,14 +46,14 @@ data class ChatRouteInputs(
  * thirteen inputs are forwarded from the holder rather than from the parameters so that the page
  * has exactly one source for what it renders.
  *
- * ## Why the state is read as a value instead of collected
+ * ## Why the state is rendered from the parameter
  *
- * `update` publishes this frame's projection before the value is read below, so reading
- * `state.value` yields exactly the instance this composition was given. Collecting it with
- * `collectAsState()` would deliver an emission one frame later, which would render a stale frame on
- * every keystroke. Preserving the existing frame timing is a hard requirement of this change, so the
- * holder's value is read synchronously; [ChatViewModel.state] remains the reactive surface for any
- * other observer.
+ * `update` publishes this frame's projection and is identity-checked (`if (_state.value !== state)`),
+ * so after the update the holder's value is the very instance passed in here. The page therefore
+ * renders the `state` parameter directly: same instance, same frame timing, but without reading a
+ * `StateFlow.value` inside composition. Collecting it with `collectAsState()` would deliver an
+ * emission one frame later, which would render a stale frame on every keystroke, so that remains
+ * excluded; [ChatViewModel.state] is still the reactive surface for any other observer.
  */
 @Composable
 fun ChatRoute(
@@ -65,7 +65,7 @@ fun ChatRoute(
     val viewModel = remember { ChatViewModel(state, inputs, actions) }
     viewModel.update(state = state, inputs = inputs, capabilities = actions)
 
-    val pageState = viewModel.state.value
+    val pageState = state
     val pageInputs = viewModel.inputs
 
     ChatScreen(

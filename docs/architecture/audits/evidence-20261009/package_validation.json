@@ -1,0 +1,17 @@
+{
+  "timestamp": "2026-10-09T21:13:29.968710+08:00",
+  "changed_after_compile_checks": [
+    {
+      "source": "core/native/src/main/cpp/qnn_native_bridge.cpp",
+      "older_check": "exact_compile_results.json",
+      "current_sha256": "0554d965e8019ab4d09a27ec600ae2a02af802b1711e9e0201073d9f6488888f"
+    }
+  ],
+  "report_file_links_checked": 47,
+  "invalid_links": [],
+  "findings": {
+    "P0": 6,
+    "P1": 15,
+    "P2": 6
+  }
+}

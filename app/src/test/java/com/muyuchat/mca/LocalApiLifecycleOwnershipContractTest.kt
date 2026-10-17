@@ -49,7 +49,14 @@ class LocalApiLifecycleOwnershipContractTest {
     }
 
     private fun mainViewModelSource(): String =
-        sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        // The process-ownership lock, the owner token and the `!==` comparisons were extracted into
+        // LocalApiServerCoordinator; MainViewModel only delegates. The read set is therefore composed
+        // from both files, with MainViewModel FIRST so the claim-then-claimOwner ordering assertion
+        // above still measures the real MainViewModel sequence (MainViewModel.kt:205 -> :206) rather
+        // than an artefact of concatenation. sourceFile() throws when the coordinator is missing, so a
+        // future extraction cannot silently shrink the read set and turn these assertions into no-ops.
+        sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/LocalApiServerCoordinator.kt")
 
     private fun sourceFile(relativePath: String): String {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile

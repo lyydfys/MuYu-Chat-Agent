@@ -119,8 +119,14 @@ void require_sequence_from(const std::string& source,
 }  // namespace
 
 int main(int argc, char** argv) {
-    assert(argc == 2);
-    const std::string source = read_text(argv[1]);
+    // T2B3: the proof contract's symbols now span several owner TUs; argv is a
+    // file list and the assertions read the union.
+    assert(argc >= 2);
+    std::string source;
+    for (int index = 1; index < argc; ++index) {
+        source += read_text(argv[index]);
+        source += "\n";
+    }
 
     std::string parser_source = source;
     if (parser_source.find("const size_t expectedTokenCount =") == std::string::npos) {

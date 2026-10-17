@@ -8,14 +8,14 @@ import org.junit.Test
 /**
  * Freezes the user-visible settings surface so no label or help text can disappear silently.
  *
- * `SettingsScreens.kt` is 2,961 lines and carries 429 distinct Chinese strings: section
+ * The settings screen surface (shell `SettingsScreens.kt` + its section files, formerly a single 2,961-line file) carries 429 distinct Chinese strings: section
  * titles, switch labels, help paragraphs, error text and button captions. It is the
  * largest user-visible surface in the app, and unlike the Local API it had no contract
  * test at all -- the only settings-named tests in the repository cover address
  * normalisation, one prefix-cache UI state and search diagnostics.
  *
  * The plan forbids hiding an entry or removing a setting to make a refactor easier, and
- * P3-P6 move code across module boundaries. A dropped label in a 2,961-line file is easy
+ * P3-P6 move code across module boundaries. A dropped label across the split settings screen files is easy
  * to miss in review, so it is pinned here instead. This mirrors the route golden in
  * api:local: the check is a text contract, and losing a line means losing UI.
  *
@@ -33,7 +33,7 @@ class SettingsSurfaceGoldenTest {
         val golden = goldenFile()
 
         if (!golden.exists()) {
-            golden.parentFile.mkdirs()
+            golden.parentFile!!.mkdirs()
             golden.writeText(goldenText(actual))
             throw AssertionError(
                 "Settings surface golden was missing and has been generated at $GOLDEN_PATH. " +
@@ -75,11 +75,16 @@ class SettingsSurfaceGoldenTest {
 
     /** Quoted string literals containing at least one CJK character, sorted and de-duplicated. */
     private fun chineseLiterals(): List<String> =
-        CHINESE_LITERAL.findAll(sourceFile().readText())
+        CHINESE_LITERAL.findAll(sourceText())
             .map { it.groupValues[1] }
             .distinct()
             .sorted()
             .toList()
+
+    // T2B9/R7-B4: SettingsScreens.kt 拆分为「壳 + 7 个同包文件」后读取面随迁：
+    // 可见中文文案集合改读新文件并集；旧路径壳保留（测试 2 的 isFile 锚），断言与 golden 未变。
+    private fun sourceText(): String =
+        SOURCE_FILES.joinToString("\n") { File(projectRoot(), it).readText() }
 
     private fun goldenText(values: List<String>): String = buildString {
         appendLine("# User-visible Chinese strings in SettingsScreens.kt, sorted and de-duplicated.")
@@ -104,6 +109,18 @@ class SettingsSurfaceGoldenTest {
     private companion object {
         const val SOURCE_PATH =
             "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsScreens.kt"
+
+        // T2B9/R7-B4: 拆分后的读取面 = 壳 + 7 个同包后继文件；SOURCE_PATH 仍是壳（test 2 isFile 锚）。
+        val SOURCE_FILES = listOf(
+            SOURCE_PATH,
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsRuntimeScreen.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsLogsPrivacyScreens.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsSearchScreen.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/WebSearchDiagnostics.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/LocalApiToolScreen.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/LocalApiSelfTestSupport.kt",
+            "feature/settings/src/main/java/com/muyuchat/feature/settings/SettingsSupport.kt"
+        )
         const val GOLDEN_PATH = "feature/settings/src/test/resources/settings-surface.golden.txt"
 
         /** A double-quoted literal that is not escaped and contains a CJK character. */

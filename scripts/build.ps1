@@ -1,8 +1,49 @@
+# PROCESS-SPEEDUP-SPEC-20261012 section 3.3: -Incremental omits --rerun-tasks so Gradle can reuse
+# up-to-date outputs; full runs stay the default and are required every 4th train / on SDK-or-ABI change.
+param([switch]$Incremental)
+
 $ErrorActionPreference = "Stop"
 
 # Resolve the repository root from this script so the release recipe is stable when it is
 # invoked from a CI runner or another working directory.
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# --- Exclusive build slot (T24) -------------------------------------------------------------
+# Take the shared build lock BEFORE anything else, and refuse to start when it cannot be taken.
+# Exit code 3 means "another participant holds / is occupying the build slot"; it is deliberately
+# distinct from a compile/test failure so callers can tell the two apart.
+#
+# Honest scope: this mutex holds only when every participant uses the lock. A builder that never
+# calls Enter-McaBuildLock still bypasses it - this does NOT globally prevent concurrent builds.
+# What it adds is a runtime occupancy probe: if compiler/link processes are running while NOBODY
+# holds the lock, the build is refused rather than silently competing with them.
+$mcaLockModule = Join-Path $projectRoot 'tools\build-guards\McaBuildLock.psm1'
+$script:McaBuildLockHandle = $null
+if (Test-Path -LiteralPath $mcaLockModule) {
+    Import-Module $mcaLockModule -Force
+    try {
+        Assert-McaBuildSlot | Out-Null
+    } catch {
+        Write-Host ("BUILD REFUSED (exit 3): " + $_.Exception.Message) -ForegroundColor Red
+        exit 3
+    }
+    try {
+        $script:McaBuildLockHandle = Enter-McaBuildLock -Kind build -CommandLine ("build.ps1 " + $MyInvocation.Line)
+    } catch {
+        Write-Host ("BUILD REFUSED (exit 3): " + $_.Exception.Message) -ForegroundColor Red
+        exit 3
+    }
+    Write-Host ("build slot acquired: $($script:McaBuildLockHandle.path) (pid $PID)")
+    # Release on every exit path, including an early `exit` further down this script.
+    Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+        if ($script:McaBuildLockHandle) { Exit-McaBuildLock -Lock $script:McaBuildLockHandle }
+    } | Out-Null
+} else {
+    Write-Host ("BUILD REFUSED (exit 3): build-guard lock module not found at " + $mcaLockModule + " (fail-closed).") -ForegroundColor Red
+    exit 3
+}
+# --------------------------------------------------------------------------------------------
+
 $buildRunId = (Get-Date).ToUniversalTime().ToString("yyyyMMdd-HHmmss-fffZ")
 $buildRecordDirectory = Join-Path $projectRoot "artifacts\apk-build-records"
 New-Item -ItemType Directory -Path $buildRecordDirectory -Force | Out-Null
@@ -295,9 +336,32 @@ $gradleArgs = @(
     "--no-daemon",
     "--console=plain"
 )
+if ($Incremental) { $gradleArgs = @($gradleArgs | Where-Object { $_ -ne '--rerun-tasks' }) }
 $buildRecord.gradleArguments = @($gradleArgs)
 $buildRecord.qnnRuntimeRoot = (Resolve-Path -LiteralPath $qnnRuntimeRoot).Path
 Save-BuildRecord
+
+# --- Process-side memory monitoring (approved 2026-10-10) ------------------------------------
+# A start-of-build threshold only guards against STARTING too low; it does not guard against a
+# plunge DURING the build. Measured: a build started at 3246 MB free and dipped to 1060 MB - far
+# below the 2600 MB exception floor - yet finished without OOM. That was luck, not margin.
+# The sampler RECORDS and WARNS only. It must never abort: stopping mid-build risks a more
+# inconsistent state than finishing, the worktree is already covered by the stability guard, and a
+# real OOM surfaces as hs_err.
+$minFreeOut = Join-Path $buildRecordDirectory ".minfree-$buildRunId.txt"
+$minFreeStop = Join-Path $buildRecordDirectory ".minfree-$buildRunId.stop"
+$minFreeSampler = Join-Path $projectRoot 'tools\build-guards\Measure-McaMinFree.ps1'
+$minFreePid = $null
+if (Test-Path -LiteralPath $minFreeSampler) {
+    Remove-Item -LiteralPath $minFreeOut -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $minFreeStop -Force -ErrorAction SilentlyContinue
+    $samplerCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$minFreeSampler`" -OutFile `"$minFreeOut`" -StopFile `"$minFreeStop`""
+    try {
+        $sp = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $samplerCmd }
+        if ($sp.ReturnValue -eq 0) { $minFreePid = $sp.ProcessId }
+    } catch { }
+}
+
 $gradlewPath = Join-Path $projectRoot "gradlew.bat"
 $gradleExecutable = if (Test-Path -LiteralPath $gradlewPath) { $gradlewPath } else { "gradle" }
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -580,4 +644,48 @@ Write-Host "Build record: $buildRecordPath"
     $buildRecord.completedAtUtc = (Get-Date).ToUniversalTime().ToString("o")
     try { Save-BuildRecord } catch { Write-Warning "Could not write build record at $buildRecordPath : $($_.Exception.Message)" }
     throw
+} finally {
+    # Release the build slot on EVERY path: normal completion, an early `exit`, or the `throw`
+    # above. The previous attempt used a Register-EngineEvent PowerShell.Exiting handler, which
+    # runs asynchronously in a separate runspace and did NOT run before the host tore down - the
+    # 2026-10-10 08:45 build left `.mca-exclusive-build.lock` on disk with its own (by then dead)
+    # pid inside, and a teammate read that and concluded a build was still running. `finally` runs
+    # for `exit` as well as for `throw`, so this path cannot be skipped.
+    # (A hard kill, SIGKILL-equivalent, cannot run any cleanup at all: the lock file then remains
+    #  and must be read as "stale if the recorded pid is dead".)
+    if ($script:McaBuildLockHandle) {
+        try { Exit-McaBuildLock -Lock $script:McaBuildLockHandle | Out-Null } catch { }
+        $script:McaBuildLockHandle = $null
+    }
+
+    # Stop the memory sampler and fold its result into the record before the script ends.
+    if ($minFreePid) {
+        try { [System.IO.File]::WriteAllText($minFreeStop, 'stop'); Start-Sleep -Seconds 3 } catch { }
+        try {
+            if (Test-Path -LiteralPath $minFreeOut) {
+                $state = (Get-Content -LiteralPath $minFreeOut -Raw).Trim()
+                $kv = @{}
+                foreach ($pair in ($state -split '\s+')) {
+                    $p = $pair -split '=', 2
+                    if ($p.Count -eq 2) { $kv[$p[0]] = $p[1] }
+                }
+                $minMb = [int]$kv['minMB']
+                $warnHits = [int]$kv['warnHits']
+                $alertHits = [int]$kv['alertHits']
+                $buildRecord.minFreePhysicalMB = $minMb
+                $buildRecord.minFreeSamples = [int]$kv['samples']
+                $buildRecord.minFreeWarnHits = $warnHits
+                $buildRecord.minFreeAlertHits = $alertHits
+                if ($alertHits -gt 0) {
+                    Write-Host ("ALERT: free physical memory fell below 1000 MB during this build (min ${minMb} MB, ${alertHits} sample(s)). The build was NOT aborted by design; report this for scheduling.") -ForegroundColor Red
+                } elseif ($warnHits -gt 0) {
+                    Write-Host ("WARNING: free physical memory fell below 1500 MB during this build (min ${minMb} MB, ${warnHits} sample(s)). Recorded, not aborted.") -ForegroundColor Yellow
+                } else {
+                    Write-Host ("memory: min free ${minMb} MB during the build (no threshold hit)")
+                }
+                try { Save-BuildRecord } catch { }
+            }
+        } catch { }
+        try { Remove-Item -LiteralPath $minFreeStop -Force -ErrorAction SilentlyContinue } catch { }
+    }
 }

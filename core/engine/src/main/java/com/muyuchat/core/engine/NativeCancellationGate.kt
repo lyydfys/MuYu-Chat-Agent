@@ -3,20 +3,29 @@ package com.muyuchat.core.engine
 /** Serializes cancel/close ownership without making the caller enter a potentially blocked JNI cancel. */
 internal class NativeCancellationGate {
     @Volatile private var pending: Thread? = null
-    @Volatile private var exclusive = false
+
+    /**
+     * The thread that currently owns the exclusive close/telemetry section, or null. Recording the
+     * owner thread (rather than a bare boolean) is what lets a self-owned wait return immediately
+     * instead of spinning until its own timeout.
+     */
+    @Volatile private var exclusiveOwner: Thread? = null
 
     @Synchronized fun request(action: () -> (() -> Unit)?) {
         // An idle close/telemetry call already owns the handle. The caller has set its stop
         // flag; never queue a stale cancel behind that call or block the watchdog on its mutex.
-        if (pending?.isAlive == true || exclusive) return
+        if (pending?.isAlive == true || exclusiveOwner != null) return
         val cancel = action() ?: return
         pending = Thread({ runCatching(cancel) }, "mca-litert-native-cancel").apply { isDaemon = true }
         pending!!.start()
     }
 
-    fun isPending(): Boolean = pending?.isAlive == true || exclusive
+    fun isPending(): Boolean = pending?.isAlive == true || exclusiveOwner != null
 
     fun await(timeoutMs: Long): Boolean {
+        // The calling thread already owns the exclusive section: it can never observe the wait
+        // condition clearing from inside itself, so fail fast instead of burning the timeout.
+        if (exclusiveOwner === Thread.currentThread()) return false
         val deadline = System.nanoTime() + timeoutMs.coerceAtLeast(1) * 1_000_000L
         while (isPending()) {
             if (pending === Thread.currentThread()) return false
@@ -31,9 +40,16 @@ internal class NativeCancellationGate {
 
     fun whenIdle(action: () -> Unit): Boolean {
         synchronized(this) {
-            if (pending?.isAlive == true || exclusive) return false
-            exclusive = true
+            if (pending?.isAlive == true || exclusiveOwner != null) return false
+            exclusiveOwner = Thread.currentThread()
         }
-        return try { action(); true } finally { synchronized(this) { exclusive = false } }
+        return try {
+            action()
+            true
+        } finally {
+            synchronized(this) {
+                if (exclusiveOwner === Thread.currentThread()) exclusiveOwner = null
+            }
+        }
     }
 }

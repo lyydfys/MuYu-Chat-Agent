@@ -13,6 +13,7 @@
 #else
 #include "../../../../../third_party/llama.cpp/vendor/nlohmann/json.hpp"
 #endif
+#include "mca/mnn/mnn_text_encoder_asset.hpp"
 
 #include "diffusion_scheduler_config.hpp"
 #include "execution_asset_binding.hpp"
@@ -35,16 +36,6 @@ struct MnnSchedulerExecutionContract {
     float eta = 0.0f;
 };
 
-struct MnnTextEncoderAssetRequest {
-    bool declared = false;
-    std::string path;
-    std::string sha256;
-    uint64_t size_bytes = 0U;
-    bool has_weight = false;
-    std::string weight_path;
-    std::string weight_sha256;
-    uint64_t weight_size_bytes = 0U;
-};
 
 struct MnnSemanticExecutionContract {
     std::string profile_id;

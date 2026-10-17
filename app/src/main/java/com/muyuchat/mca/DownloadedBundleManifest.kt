@@ -91,6 +91,17 @@ internal fun downloadedImageBundleManifestJson(
                 .put("expectedOutputMime", bundle.smokeSpec.expectedOutputMime)
         )
         .put("components", components)
+    // Runtime requirements participate in the observed manifest contract. They
+    // must be present before binding the execution profile to that contract.
+    bundle.requiredRuntimeProfile?.let { profile ->
+        manifest.put(
+            "requiredRuntimeProfile",
+            JSONObject()
+                .put("qnnSdk", profile.qnnSdk)
+                .put("htpArch", profile.htpArch)
+                .put("completeBundleRuntime", profile.completeBundleRuntime)
+        )
+    }
     bundle.executionProfile?.let {
         val primaryFile = primary?.second?.takeIf(File::isFile)
             ?: error("Image execution profile requires a concrete downloaded primary model file.")
@@ -149,15 +160,6 @@ internal fun downloadedImageBundleManifestJson(
             )
         } ?: resolvedProfile
         manifest.put("executionProfile", ImageExecutionProfileJson.toJson(profile))
-    }
-    bundle.requiredRuntimeProfile?.let { profile ->
-        manifest.put(
-            "requiredRuntimeProfile",
-            JSONObject()
-                .put("qnnSdk", profile.qnnSdk)
-                .put("htpArch", profile.htpArch)
-                .put("completeBundleRuntime", profile.completeBundleRuntime)
-        )
     }
     if (bundle.qnnSmokeSpecs.isNotEmpty()) {
         manifest.put(

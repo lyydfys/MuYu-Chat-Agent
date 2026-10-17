@@ -9,7 +9,7 @@ package com.muyuchat.api.local
  *
  * One implementation, in one place. The same function existed twice, body for body, as
  * looksLikePrivatePath in app/ImageGenerationHistoryMetadata.kt and as
- * looksLikePrivateExecutionPath in this module's ImageGenerationApiContract.kt. A leak filter
+ * looksLikePrivateExecutionPath in this module's ImageGenerationApiInputValidation.kt. A leak filter
  * duplicated across a storage path and an API path is how one of the two ends up missing a
  * scheme the other catches.
  *

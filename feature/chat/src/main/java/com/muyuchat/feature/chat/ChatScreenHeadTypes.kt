@@ -21,6 +21,8 @@ data class ChatUiState(
     val history: List<ChatHistoryItem> = emptyList(),
     val localModels: List<ChatModelChoice> = emptyList(),
     val imageModels: List<ChatModelChoice> = emptyList(),
+    /** 本地生图模型行仍在准备（capabilities 未就绪）；选择器应显示加载态而非“暂无”。 */
+    val imageModelsLoading: Boolean = false,
     val existingImageModelIds: Set<String> = emptySet(),
     val assistants: List<AssistantUiItem> = emptyList(),
     val selectedAssistantId: String = "default",

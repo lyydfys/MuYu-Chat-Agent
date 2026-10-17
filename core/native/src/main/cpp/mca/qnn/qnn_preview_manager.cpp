@@ -60,6 +60,14 @@ std::mutex g_qnn_image_preview_publish_mutex;
 std::mutex g_qnn_image_preview_state_mutex;
 QnnImagePreviewProgress g_qnn_image_preview_progress;
 
+// The single definition of the process-wide QNN context-execution mutex.
+//
+// The pre-refactor bridge defined this in its anonymous namespace; now that the users live in
+// several translation units it must be a namespace-scope object with external linkage so that the
+// bridge, the semantic pipeline and the SDXL phase headers all lock the *same* mutex.  Do not make
+// this `static`/per-TU and do not move it back into a header.
+std::timed_mutex g_qnn_context_execution_mutex;
+
 long long monotonic_millis() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now().time_since_epoch()

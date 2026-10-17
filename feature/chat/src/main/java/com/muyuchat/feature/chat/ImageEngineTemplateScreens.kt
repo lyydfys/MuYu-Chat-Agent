@@ -65,6 +65,7 @@ internal fun ImageEngineSwitcher(
     selectedModelName: String?,
     selectedModelIsCloud: Boolean,
     enabled: Boolean = true,
+    loading: Boolean = false,
     onSelectModel: (String) -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
@@ -165,7 +166,7 @@ internal fun ImageEngineSwitcher(
                 ) {
                     if (sourceModels.isEmpty()) {
                         DropdownMenuItem(
-                            text = { Text(if (source == ImageEngineSource.CLOUD) "暂无云端生图模型" else "暂无本地生图模型") },
+                            text = { Text(imageEngineMenuEmptyText(isCloud = source == ImageEngineSource.CLOUD, loading = loading)) },
                             onClick = { modelMenuSource = null }
                         )
                     } else {
@@ -193,6 +194,13 @@ internal fun ImageEngineSwitcher(
                 }
         }
     }
+}
+
+/** B45/S2: three-state empty text; only the local source can be "still loading". */
+internal fun imageEngineMenuEmptyText(isCloud: Boolean, loading: Boolean): String = when {
+    isCloud -> "暂无云端生图模型"
+    loading -> "正在加载本地生图模型…"
+    else -> "暂无本地生图模型"
 }
 
 @Composable

@@ -119,7 +119,7 @@ class LocalImageExecutionProfileIntegrationTest {
                             .put("pad_token", "<|endoftext|>")
                         else -> JSONObject()
                     }
-                    root.resolve(sidecar.relativePath).apply { parentFile.mkdirs(); writeText(content.toString()) }
+                    root.resolve(sidecar.relativePath).apply { parentFile!!.mkdirs(); writeText(content.toString()) }
                     components.put(JSONObject().put("role", sidecar.role.name)
                         .put("path", sidecar.relativePath).put("required", true)
                         .put("sourceRepo", sidecar.repoId).put("sourcePath", sidecar.fileName))
@@ -226,7 +226,7 @@ class LocalImageExecutionProfileIntegrationTest {
                             .put("pad_token", "<|endoftext|>")
                         else -> JSONObject()
                     }
-                    root.resolve(sidecar.relativePath).apply { parentFile.mkdirs(); writeText(content.toString()) }
+                    root.resolve(sidecar.relativePath).apply { parentFile!!.mkdirs(); writeText(content.toString()) }
                     components.put(JSONObject().put("role", sidecar.role.name)
                         .put("path", sidecar.relativePath).put("required", true)
                         .put("sourceRepo", sidecar.repoId).put("sourcePath", sidecar.fileName))

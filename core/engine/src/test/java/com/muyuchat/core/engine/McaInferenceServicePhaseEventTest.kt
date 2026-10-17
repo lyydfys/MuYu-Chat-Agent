@@ -498,13 +498,14 @@ class McaInferenceServicePhaseEventTest {
         val activate = McaInferenceService::class.java.getDeclaredMethod(
             "activateGenerationStopTarget",
             String::class.java,
-            LocalChatRunner::class.java
+            LocalChatRunner::class.java,
+            kotlinx.coroutines.Job::class.java
         ).apply { isAccessible = true }
         val clear = McaInferenceService::class.java.getDeclaredMethod(
             "clearGenerationStopTarget",
             GenerationStopToken::class.java
         ).apply { isAccessible = true }
-        val orphan = activate.invoke(service, "old-vision-request", runner) as GenerationStopToken
+        val orphan = activate.invoke(service, "old-vision-request", runner, null) as GenerationStopToken
 
         service.loadModel(
             modelPath = "/models/phase/model.gguf",

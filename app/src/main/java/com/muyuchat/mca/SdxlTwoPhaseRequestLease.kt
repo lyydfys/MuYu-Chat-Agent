@@ -22,11 +22,20 @@ internal class SdxlTwoPhaseRequestLease private constructor(
     private val trackedPaths: Set<String>,
     private val leaseToken: String,
     private val lockFile: File,
-    private var ownerLock: SdxlRequestFileLock?,
+    ownerLock: SdxlRequestFileLock?,
     entry: ImageExecutionJournalEntry
 ) : AutoCloseable {
     var entry: ImageExecutionJournalEntry = entry
         private set
+
+    /**
+     * Guards the release of [ownerLock]. The lease is acquired on the provider thread and may be
+     * closed from a different worker/coroutine thread, so release is a single compare-and-take: a
+     * repeated or racing close can neither double-close the lock nor observe a half-cleared field.
+     */
+    private val ownershipLock = Any()
+
+    @Volatile private var ownerLock: SdxlRequestFileLock? = ownerLock
 
     fun requireGenerationIdentity(
         contract: SdxlImageExecutionContract,
@@ -63,8 +72,13 @@ internal class SdxlTwoPhaseRequestLease private constructor(
     }
 
     private fun releaseProcessOwnership() {
-        ownerLock?.close()
-        ownerLock = null
+        // Compare-and-take: exactly one caller ever receives the lock instance and closes it.
+        val lock = synchronized(ownershipLock) {
+            val current = ownerLock
+            ownerLock = null
+            current
+        }
+        lock?.close()
     }
 
     override fun close() = releaseProcessOwnership()

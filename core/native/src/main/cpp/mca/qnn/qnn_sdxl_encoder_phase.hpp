@@ -163,7 +163,7 @@ inline std::string execute_sdxl_encoder_phase(
     }
     generation.record_stage(::mca::qnn::ImageStage::ContextLock, kQnnImageContextLock);
     std::unique_lock<std::timed_mutex> execution_lock(
-        g_qnn_context_execution_mutex, std::defer_lock);
+        ::mca::qnn::g_qnn_context_execution_mutex, std::defer_lock);
     while (!execution_lock.try_lock_for(std::chrono::milliseconds(50))) {
         if (generation.cancelled()) return qnn_image_generation_cancelled_json();
     }
@@ -375,7 +375,9 @@ inline std::string execute_sdxl_encoder_phase(
             "ENCODER_OUTPUT_INVALID",
             "VAE encoder outputs have an invalid full-latent element count.");
     }
-    constexpr float kEncoderLatentScalingFactor = 0.13025f;
+    // Keep the protocol value in double precision. Publishing the FP32-rounded
+    // value makes a valid encoder fail the cross-process scaling contract.
+    constexpr double kEncoderLatentScalingFactor = 0.13025;
     std::seed_seq posterior_seed{
         execution_contract.seed,
         0x5344584cU,
@@ -387,7 +389,7 @@ inline std::string execute_sdxl_encoder_phase(
     for (size_t index = 0; index < latents.size(); ++index) {
         latents[index] =
             (mean[index] + stddev[index] * posterior_normal(posterior_rng)) *
-            kEncoderLatentScalingFactor;
+            static_cast<float>(kEncoderLatentScalingFactor);
     }
     if (!std::all_of(latents.begin(), latents.end(), [](float value) {
             return std::isfinite(value);

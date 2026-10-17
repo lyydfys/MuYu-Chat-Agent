@@ -93,15 +93,78 @@ target_include_directories(mca_runtime_lifecycle PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_runtime_lifecycle PUBLIC mca_common mca_contract mca_jni_boundary)
 
+# mca_native sources.
+#
+# Listed inline, in full, on purpose: a text-parsing gate must be able to see every
+# translation unit. An earlier revision assembled this list through a helper variable
+# plus list(APPEND ...) so that the ON build stayed byte-identical; the variable made
+# the list invisible to the source-set gate (review finding #1) and that feedback loop
+# is exactly what this comment used to encode. Source order still matters for the
+# linked bytes, so the ON sequence below is the original one, unchanged.
+#
+# On the acceptance condition: "the produced .so still hashes to the old value" is NOT
+# a correctness criterion - it would let a stale artifact stand in for current source,
+# which the audit forbids. Reproducibility is the property that matters (same source ->
+# same bytes on a repeat build), and parity with a historical artifact may be reported
+# alongside functional verification but never as the acceptance condition on its own.
 add_library(mca_native SHARED
         native_engine.cpp
+        native_engine_runtime_state.cpp
+        native_engine_backend_loader.cpp
+        native_engine_prefix_cache.cpp
+        native_engine_speculative.cpp
+        native_engine_stats_gpu.cpp
         mca/llm/llm_prefill_tracker.cpp
         mca/llm/llm_prefix_cache_manager.cpp
         mca/llm/llm_stats_collector.cpp
         mca/llm/llm_runtime_config.cpp
         mca/llm/llm_backend_loader.cpp
         mca/llm/llm_turn_cache.cpp
-        mca/llm/llm_prompt_formatter.cpp)
+        mca/llm/llm_prompt_formatter.cpp
+        mca/llm/llama_context_manager.cpp
+        mca/llm/llama_gpu_evaluator.cpp
+        mca/llm/llama_speculative_engine.cpp
+        mca/llm/llama_completion_planner.cpp
+        mca/llm/llama_model_loader.cpp)
+# Mode-0 compile boundary (restored): the llama-dependent units include llama/ggml
+# headers without a guarded fallback, so they must not be compiled when llama.cpp is
+# disabled. This mirrors the pre-extraction layout, where mca_native was a single
+# native_engine.cpp that guarded its own includes, and it is why the historical OFF
+# branch (message(WARNING ...) + MCA_WITH_LLAMA_CPP=0 + android/log) below is
+# sufficient again. Verified empirically: exactly these six plus native_engine.cpp were
+# the TUs that failed with 'file not found' in a real OFF build; native_engine.cpp stays
+# unconditional because T03 restores its guards.
+# (T2B16) The five native_engine_* companions above follow the same discipline: every
+# llama-only region keeps its MCA_WITH_LLAMA_CPP guard, so OFF mode compiles them from
+# this same list (verified with a dedicated OFF-mode compile pass).
+#
+# The removal happens here rather than by conditionalising the add_library call so that
+# the ON path keeps one flat, parseable, correctly-ordered list.
+if(NOT MCA_WITH_LLAMA_CPP)
+    get_target_property(MCA_NATIVE_SOURCES_RAW mca_native SOURCES)
+    set(MCA_NATIVE_SOURCES_KEPT ${MCA_NATIVE_SOURCES_RAW})
+    list(FILTER MCA_NATIVE_SOURCES_KEPT EXCLUDE REGEX
+            "mca/llm/(llm_runtime_config|llm_backend_loader|llama_gpu_evaluator|llama_speculative_engine|llama_completion_planner|llama_model_loader)\\.cpp$")
+    list(LENGTH MCA_NATIVE_SOURCES_RAW MCA_NATIVE_SRC_BEFORE)
+    list(LENGTH MCA_NATIVE_SOURCES_KEPT MCA_NATIVE_SRC_AFTER)
+    if(MCA_NATIVE_SRC_AFTER EQUAL MCA_NATIVE_SRC_BEFORE)
+        message(FATAL_ERROR "MCA_WITH_LLAMA_CPP=OFF: expected to drop the llama-dependent mca/llm units but the source list was unchanged.")
+    endif()
+    set_property(TARGET mca_native PROPERTY SOURCES ${MCA_NATIVE_SOURCES_KEPT})
+    message(STATUS "MCA mode 0: mca_native sources ${MCA_NATIVE_SRC_BEFORE} -> ${MCA_NATIVE_SRC_AFTER} (llama-dependent units removed)")
+endif()
+# T2B16: the split native_engine family gained external-linkage helpers; keep every symbol
+# of these six units hidden so the .so export surface stays the 14 JNI entries (JNIEXPORT
+# carries visibility("default") and is unaffected; verified by the object/
+# synthetic-.so symbol audit).
+set_source_files_properties(
+        native_engine.cpp
+        native_engine_runtime_state.cpp
+        native_engine_backend_loader.cpp
+        native_engine_prefix_cache.cpp
+        native_engine_speculative.cpp
+        native_engine_stats_gpu.cpp
+        PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden")
 target_link_libraries(mca_native PRIVATE mca_contract mca_common mca_observability mca_jni_boundary mca_runtime_lifecycle)
 add_library(mca_prompt_handoff SHARED
         mnn_qnn_prompt_handoff.cpp
@@ -124,10 +187,87 @@ add_library(mca_qnn_runtime STATIC
         mca/qnn/qnn_tensor_inspect.cpp
         mca/qnn/qnn_ultrafix_handler.cpp
         mca/qnn/qnn_inpaint_blend.cpp
-        mca/qnn/qnn_contract_parser.cpp)
+        mca/qnn/qnn_contract_parser.cpp
+        # qnn_context_binary_cache.cpp is deliberately NOT compiled: its header is included only
+        # by itself and its own test, while the symbols it defines (ScopedReadOnlyMmap,
+        # read_binary_file, select_qnn_system_interface, append_graph_names,
+        # qnn_context_load_failure_message, inspect_qnn_context_binary_metadata) are duplicated
+        # verbatim in qnn_system_symbol_loader.{hpp,cpp} -- which is the pair production actually
+        # includes (qnn_executable_graph.cpp, qnn_native_bridge.cpp).  Linking both translation
+        # units put several strong definitions of the same symbol in mca_qnn_runtime, so which
+        # body won depended on link order.  The file is kept on disk, uncompiled, until its
+        # remaining unique content is either folded into qnn_system_symbol_loader or deleted.
+        mca/qnn/qnn_tensor_quantizer.cpp
+        mca/qnn/qnn_graph_executor_helper.cpp
+        mca/qnn/qnn_bundle_manifest.cpp
+        mca/qnn/qnn_system_symbol_loader.cpp
+        mca/qnn/qnn_htp_controller.cpp
+        mca/qnn/qnn_tensor_memory.cpp
+        mca/qnn/qnn_executable_graph.cpp
+        mca/qnn/qnn_conditioning_pipeline.cpp
+        mca/qnn/qnn_model_execution_pipeline.cpp
+        mca/qnn/qnn_bridge_payloads.cpp
+        mca/qnn/qnn_semantic_pipeline.cpp
+        mca/qnn/qnn_semantic_request.cpp
+        mca/qnn/qnn_semantic_conditioning.cpp
+        mca/qnn/qnn_semantic_sdxl.cpp
+        mca/qnn/qnn_semantic_stage_runner.cpp
+        mca/qnn/qnn_semantic_output.cpp
+        mca/qnn/qnn_semantic_evidence.cpp
+        mca/qnn/qnn_coherent_runtime_session.cpp
+        mca/qnn/qnn_graph_lifecycle.cpp
+        mca/qnn/qnn_graph_smoke.cpp
+        mca/qnn/qnn_graph_runtime_support.cpp
+        mca/qnn/qnn_conditioning_token_payload.cpp
+        mca/qnn/qnn_conditioning_json_fields.cpp
+        mca/qnn/qnn_conditioning_asset_evidence.cpp
+        mca/qnn/qnn_conditioning_asset_capture.cpp
+        mca/qnn/qnn_conditioning_handoff_binding.cpp
+        mca/qnn/qnn_model_execution_unet.cpp
+        mca/qnn/qnn_model_execution_ultrafix.cpp
+        mca/qnn/qnn_model_execution_sdxl.cpp
+        mca/qnn/qnn_model_execution_vae_decode.cpp
+        mca/qnn/qnn_model_execution_img2img_encoder.cpp
+        mca/qnn/qnn_sdxl_unet_phase.cpp
+        mca/qnn/qnn_sdxl_unet_tiling.cpp
+        mca/qnn/qnn_sdxl_unet_execution.cpp)
 target_include_directories(mca_qnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(mca_qnn_runtime PUBLIC mca_common mca_contract mca_runtime_lifecycle)
+# T2B14/T2B16 TU splits widened this static library's exported symbol face (arm64
+# libmca_qnn_native.so +1,131,968 B from debug-20261013-153623-334Z to
+# debug-20261013-165122-963Z).  Keep implementation symbols out of the shared object's
+# dynamic table; the JNI entries in mca_qnn_native carry JNIEXPORT (default visibility),
+# so the DSO's real external surface is unaffected.  Evidence: T2B16 b-REPORT.md.
+set_target_properties(mca_qnn_runtime PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        C_VISIBILITY_PRESET hidden)
+# DWARF amplification offset (T2B16, measured): each split-derived TU re-emits per-CU
+# debug metadata (.debug_info/.debug_loc/.debug_ranges/.debug_line) even though the code
+# is byte-identical, so the packaged libmca_qnn_native.so grew while its .text shrank.
+# The TUs produced by the T2B14/T2B16 splits below therefore carry line-table debug
+# (-g1); every other TU keeps full -g.  Size/export tables: b-REPORT.md visibility
+# section.  This is a debug-fidelity offset only: code bytes and symbols are unchanged.
+set_source_files_properties(
+        mca/qnn/qnn_semantic_request.cpp
+        mca/qnn/qnn_semantic_conditioning.cpp
+        mca/qnn/qnn_semantic_sdxl.cpp
+        mca/qnn/qnn_semantic_stage_runner.cpp
+        mca/qnn/qnn_semantic_output.cpp
+        mca/qnn/qnn_semantic_evidence.cpp
+        mca/qnn/qnn_coherent_runtime_session.cpp
+        mca/qnn/qnn_graph_lifecycle.cpp
+        mca/qnn/qnn_graph_smoke.cpp
+        mca/qnn/qnn_graph_runtime_support.cpp
+        mca/qnn/qnn_conditioning_token_payload.cpp
+        mca/qnn/qnn_conditioning_json_fields.cpp
+        mca/qnn/qnn_conditioning_asset_evidence.cpp
+        mca/qnn/qnn_conditioning_asset_capture.cpp
+        mca/qnn/qnn_conditioning_handoff_binding.cpp
+        mca/qnn/qnn_sdxl_unet_phase.cpp
+        mca/qnn/qnn_sdxl_unet_tiling.cpp
+        mca/qnn/qnn_sdxl_unet_execution.cpp
+        PROPERTIES COMPILE_OPTIONS "-g1")
 
 add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_runtime_loader.cpp
@@ -144,7 +284,9 @@ add_library(mca_mnn_runtime STATIC
         mca/mnn/mnn_prompt_cache_manager.cpp
         mca/mnn/mnn_protocol_parser.cpp
         mca/mnn/mnn_clip_tokenizer.cpp
-        mca/mnn/mnn_file_utils.cpp)
+        mca/mnn/mnn_file_utils.cpp
+        mca/mnn/mnn_sampling_strategy.cpp
+        mca/mnn/mnn_token_boundary_guard.cpp)
 target_include_directories(mca_mnn_runtime PUBLIC
         "${CMAKE_CURRENT_LIST_DIR}"
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../third_party/llama.cpp/vendor")
@@ -158,14 +300,49 @@ target_sources(mca_mnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
         diffusion_scheduler.cpp
-        mca/mnn/mnn_prompt_weighting.cpp)
+        mca/mnn/mnn_prompt_weighting.cpp
+        mca/mnn/mnn_backend_predicates.cpp
+        mca/mnn/mnn_chat_session.cpp
+        mca/mnn/mnn_chat_entries.cpp
+        mca/mnn/mnn_diffusion_state.cpp
+        mca/mnn/mnn_diffusion_generate.cpp
+        mca/mnn/mnn_diffusion_tokenize.cpp
+        mca/mnn/mnn_clip_encode.cpp
+        mca/mnn/mnn_sd15_direct.cpp)
+# T01 patch 1 (at T02's request, PLAN 1.4 "断开残缺委托/去重"): the eight entries
+# formerly listed here were refactor-era extraction modules that the restored
+# monolith no longer references.  Two of them (mnn_sdxl_pipeline.cpp,
+# mnn_qnn_prompt_payload.cpp) also carried includes of headers that do not exist
+# anywhere in the repository (`prompt_language_rules.hpp`, `prompt_handoff.hpp`),
+# which made mca_mnn_native unbuildable:
+#   E:/MAC/core/native/src/main/cpp/mca/mnn/mnn_qnn_prompt_payload.cpp:6:10:
+#   fatal error: 'prompt_handoff.hpp' file not found
+# The .cpp files remain on disk, unmodified.  The restored mnn_native_engine.cpp
+# keeps every helper it needs in an anonymous namespace, so re-adding them later
+# would not duplicate symbols -- but their includes must be fixed first.
+# Revived since (listed in the arm64 diffusion source block above): mnn_tensor_copy
+#          (E08d), mnn_diffusion_assets (E08e), mnn_diffusion_pipeline (E08f).
+# All eight refactor-era extraction modules have been revived or dispositioned:
+#   E08d mnn_tensor_copy, E08e mnn_diffusion_assets, E08f mnn_diffusion_pipeline,
+#   E08g mnn_unet_smoke, E08h mnn_sdxl_pipeline, E08i mnn_qnn_prompt_payload,
+#   E08j mnn_session_manager (compatibility TU), E08k mnn_debug_trace.
 target_sources(mca_qnn_native PRIVATE
         image_conditioning.cpp
         textual_inversion_conditioning.cpp
         image_execution_math.cpp
+        image_execution_math_tiling.cpp
+        image_execution_math_ultrafix.cpp
         qnn_controlnet_execution.cpp
         diffusion_scheduler.cpp
         mca/qnn/qnn_image_writer.cpp)
+# T2B18 / R7-C7: the image_execution_math split below adds two TUs to mca_qnn_native.
+# Give them line-table debug (-g1), like the T2B14/T2B16 split TUs, so the packaged
+# libmca_qnn_native.so DWARF stays bounded; code bytes and symbols are unchanged
+# (size/export evidence: T2B18 b-REPORT.md).
+set_source_files_properties(
+        image_execution_math_tiling.cpp
+        image_execution_math_ultrafix.cpp
+        PROPERTIES COMPILE_OPTIONS "-g1")
 target_compile_definitions(mca_qnn_native PRIVATE MCA_WITH_TOKENIZERS_CPP=0)
 
 # tokenizers-cpp executes the complete Hugging Face tokenizer.json contract.
@@ -404,6 +581,20 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
             ${LLAMA_SRC}/ggml/src)
     target_link_libraries(mca_native PRIVATE llama llama-common mca_mtmd android log dl)
 else()
+    # Restored verbatim from the reference layout (76348a5b:406-410).
+    #
+    # This is the original mode-0 contract: compile the bridge with
+    # MCA_WITH_LLAMA_CPP=0, link only android/log, and let native_engine.cpp's own
+    # #if MCA_WITH_LLAMA_CPP guards select the OFF paths (no backend capability ->
+    # the original error outcomes, empty device enumeration, no fabricated tokens).
+    #
+    # An earlier revision of this file replaced this branch with message(FATAL_ERROR)
+    # on the theory that OFF needed "a second architecture". That was wrong: the
+    # OFF build only broke because the llama-dependent mca/llm TUs were listed
+    # UNCONDITIONALLY and had no OFF fallback, and because native_engine.cpp lost its
+    # guards during the extraction. The compile boundary (conditional source list
+    # above) plus T03's restored guards make the original branch sufficient again,
+    # exactly as it was when mca_native was a single guarded native_engine.cpp.
     message(WARNING "MCA_WITH_LLAMA_CPP is OFF or llama.cpp is missing; building JNI stub.")
     target_compile_definitions(mca_native PRIVATE MCA_WITH_LLAMA_CPP=0)
     target_link_libraries(mca_native PRIVATE android log)
@@ -497,6 +688,30 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
     set_target_properties(mca_imported_mnn_llm PROPERTIES
             IMPORTED_LOCATION "${MCA_MNN_RUNTIME_ROOT}/${MCA_MNN_RUNTIME_LLM_RELATIVE}")
     target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_LLM=1)
+    # The MNN helper library compiles capability-gated TUs of its own
+    # (mca/mnn/mnn_prompt_cache_manager.cpp, mca/mnn/mnn_vision_adapter.cpp).
+    # PRIVATE definitions and include dirs do not propagate into a STATIC
+    # library's own compilation, so without this wiring their #else stubs stay
+    # live and every MNN request fails in beginCompletion with -203:
+    #   text  -> "MCA built without MNN LLM."          (prompt cache prefill stub)
+    #   vision-> "does not include MNN image codecs"   (MNN_IMGCODECS gate)
+    # Device evidence (build3 .so): text beginCompletion=-203
+    # "MNN beginCompletion exception (backend=cpu): MCA built without MNN LLM.";
+    # vision beginCompletion=-203 "This MCA build does not include MNN image codecs".
+    # mca_mnn_runtime is linked only by mca_mnn_native (see target_link_libraries
+    # below), so teaching it the capability adds no new deliverable dependency.
+    target_compile_definitions(mca_mnn_runtime PRIVATE
+            MCA_WITH_MNN_LLM=1
+            MNN_IMGCODECS=1
+            MNN_IMGPROC_COLOR=1)
+    target_include_directories(mca_mnn_runtime PRIVATE
+            ${MCA_MNN_SOURCE_ROOT}/include
+            ${MCA_MNN_SOURCE_ROOT}/source
+            ${MCA_MNN_SOURCE_ROOT}/tools/cv/include
+            ${MCA_MNN_SOURCE_ROOT}/tools/audio/include
+            ${MCA_MNN_SOURCE_ROOT}/3rd_party
+            ${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/include
+            ${MCA_MNN_SOURCE_ROOT}/transformers/llm/engine/src)
     include("${CMAKE_CURRENT_LIST_DIR}/mnn_vendor_cache.cmake")
     mca_mnn_cache_namespace(
         "${CMAKE_CURRENT_LIST_DIR}/../../../../../vendor/mnn/mnn-vendor.properties"
@@ -534,6 +749,14 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" AND EXISTS "${MCA_MNN_LLM_HEADER}" AND MCA_M
         message(STATUS "MCA building MNN Stable Diffusion safe runner shim.")
         target_sources(mca_mnn_native PRIVATE
                 mca/mnn/mnn_tensor_ops.cpp
+                mca/mnn/mnn_tensor_copy.cpp
+                mca/mnn/mnn_diffusion_assets.cpp
+                mca/mnn/mnn_diffusion_pipeline.cpp
+                mca/mnn/mnn_unet_smoke.cpp
+                mca/mnn/mnn_sdxl_pipeline.cpp
+                mca/mnn/mnn_qnn_prompt_payload.cpp
+                mca/mnn/mnn_session_manager.cpp
+                mca/mnn/mnn_debug_trace.cpp
                 mca/mnn/mnn_vae_image_writer.cpp
                 mca/mnn/mnn_clip_weighting.cpp
                 mca/mnn/mnn_pndm_scheduler.cpp
@@ -585,5 +808,9 @@ else()
     message(STATUS "MCA building MNN runner stub. Build the complete MNN split runtime to enable MNN chat and diffusion.")
     target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_LLM=0)
     target_compile_definitions(mca_mnn_native PRIVATE MCA_WITH_MNN_DIFFUSION=0)
+    # Keep mca_mnn_runtime aligned with mca_mnn_native so its capability-gated TUs
+    # take the same #else path in a non-MNN build. MNN_IMGCODECS stays undefined
+    # here on purpose: mnn_vision_adapter.cpp tests !defined(MNN_IMGCODECS).
+    target_compile_definitions(mca_mnn_runtime PRIVATE MCA_WITH_MNN_LLM=0)
     target_link_libraries(mca_mnn_native PRIVATE android log)
 endif()

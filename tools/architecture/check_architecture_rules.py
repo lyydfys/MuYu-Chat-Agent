@@ -3,13 +3,19 @@
 check_architecture_rules.py
 
 Static architecture enforcement gate for MCA S-grade refactor:
-1. Domain Android import = 0: core:engine contract files must not import android.* or androidx.*
+1. Domain Android import = 0: core:engine/**/contract/*.kt must not import android.* or androidx.*
+   -- SCOPE: the contract subpackage only.  A pass does NOT mean :core:engine is Android-free;
+      the module is still an Android library and still depends on :core:native.
 2. Feature boundary: feature modules must not directly depend on :core:native or :core:sd-native
 3. C++ contract purity: mca/contract/*.hpp must not include jni.h or platform UI headers
 4. File LOC limits: enforces hard ceilings on contract and catalog files
 5. Local-only policy guard: verifies AGENTS.md and UniversalDeviceAdmissionPolicyTest.kt are excluded
 6. Universal Device Admission: verifies no device allowlist/whitelist patterns are added
 7. Line ending purity: checks that all contract files have 0 CRLF (\r\n) line endings
+8. API/Worker UI decoupling: api/local and app worker must not import MainViewModel or UI screens
+
+Each rule above lists its own scope; the gate prints that scope before it runs so a pass is
+never read as a broader claim than it is.
 """
 
 import os
@@ -186,7 +192,24 @@ def check_api_worker_no_ui_dependencies(errors):
 
 def main():
     print(f"=== MCA Architecture Gate Verification ===")
-    print(f"Working tree: {REPO_ROOT}\n")
+    print(f"Working tree: {REPO_ROOT}")
+    print("")
+    print("SCOPE -- exactly what this gate inspects:")
+    print(f"  Rule 1  android.*/androidx.* imports : {CONTRACT_KOTLIN_DIR.relative_to(REPO_ROOT)} only")
+    print(f"  Rule 2  native deps                  : {FEATURE_DIR.relative_to(REPO_ROOT)}/*/build.gradle.kts only")
+    print(f"  Rule 3  platform headers             : {CONTRACT_CPP_DIR.relative_to(REPO_ROOT)} only")
+    print("  Rule 4  LOC ceilings                 : the Rule 1 and Rule 3 contract directories only")
+    print(f"  Rule 5  local-only git exclusion     : the {len(LOCAL_ONLY_PATHS)} LOCAL_ONLY_PATHS entries only")
+    print("  Rule 6  device allowlist keywords    : the Rule 1 and Rule 3 contract directories only")
+    print("  Rule 7  pure LF line endings         : the Rule 1 and Rule 3 contract directories only")
+    print("  Rule 8  UI imports                   : api/local/src/main and app/.../worker only")
+    print("")
+    print("NOT CHECKED -- a pass below says nothing about these:")
+    print("  * The rest of :core:engine outside the contract subpackage. That module is still an")
+    print("    Android library and still depends on :core:native; Rule 1 does not make it Android-free.")
+    print("  * Any other module, any dependency edge not listed in Rule 2, and any file outside the")
+    print("    directories named above.")
+    print("")
 
     errors = []
 
@@ -206,7 +229,11 @@ def main():
             print(f"  [X] {err}")
         sys.exit(1)
     else:
-        print("ALL ARCHITECTURE GATES PASSED (EXIT=0)")
+        print("ALL 8 CHECKED ARCHITECTURE RULES PASSED (EXIT=0)")
+        print("  Scope: only the directories listed under SCOPE above were inspected.")
+        print("  This is NOT a clean bill of health for any whole module: :core:engine remains an")
+        print("  Android library depending on :core:native, and its non-contract sources were not")
+        print("  examined for Android imports by this gate.")
         sys.exit(0)
 
 if __name__ == "__main__":

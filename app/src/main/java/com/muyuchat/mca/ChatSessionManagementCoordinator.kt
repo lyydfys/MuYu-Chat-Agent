@@ -45,7 +45,7 @@ internal class ChatSessionManagementCoordinator(
         bindDefaultModel: Boolean = false
     ): Boolean {
         if (rejectWhileConversationMutationInProgress()) return false
-        val created = newChatForAssistantFor(
+        return newChatForAssistantFor(
             store = store,
             rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
             hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(store.current, it) },
@@ -58,10 +58,6 @@ internal class ChatSessionManagementCoordinator(
             assistant = assistant,
             bindDefaultModel = bindDefaultModel
         )
-        if (created) {
-            markLocalConversationContextInvalid()
-        }
-        return created
     }
 
     fun branchMixedChatSession(sessionId: String, assistantId: String) =

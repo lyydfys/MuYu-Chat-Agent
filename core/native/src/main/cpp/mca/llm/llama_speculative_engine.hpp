@@ -40,7 +40,19 @@ struct SpeculativeEnvironment {
     llama_context *mtp_context{nullptr};
     llama_batch *batch{nullptr};
     common_sampler *sampler{nullptr};
-    common_speculative_ptr speculative;
+
+    // The draft-MTP engine is session-scoped: the native engine keeps the single unique_ptr owner
+    // for the whole loaded-model lifetime and destroys it at teardown (before the model and the
+    // target/MTP contexts it was created against).  An environment, a step and a single generated
+    // chunk only ever *borrow* that engine.  Moving the owner into a temporary environment
+    // destroys the engine when the temporary goes out of scope, i.e. at the end of the first
+    // chunk, and every later chunk then runs without a speculative context (P1-01).
+    //
+    // `speculative_owner` is the session slot that receives a freshly created engine, so creating
+    // an engine publishes the ownership instead of transferring it; `speculative` is the live
+    // borrow of `*speculative_owner`.
+    common_speculative_ptr *speculative_owner{nullptr};
+    common_speculative *speculative{nullptr};
 
     bool spec_requested{false};
     bool *spec_request_active{nullptr};

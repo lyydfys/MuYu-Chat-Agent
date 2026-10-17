@@ -152,7 +152,7 @@ class StatusMessageWriterContractTest {
             val root = directory ?: return@repeat
             val candidate = File(root, relative)
             if (candidate.isFile) {
-                val packageDir = candidate.parentFile
+                val packageDir = requireNotNull(candidate.parentFile)
                 return packageDir.listFiles { file -> file.extension == "kt" }
                     ?.sortedBy { it.name }
                     ?.joinToString("\n") { it.readText(Charsets.UTF_8) }

@@ -114,6 +114,7 @@ internal fun ImageGenerationCanvas(
     image: ImageAssetUiItem?,
     images: List<ImageAssetUiItem>,
     imageModels: List<ChatModelChoice>,
+    imageModelsLoading: Boolean,
     selectedImageModelId: String?,
     selectedImageModelName: String?,
     selectedImageModelIsCloud: Boolean,
@@ -160,7 +161,10 @@ internal fun ImageGenerationCanvas(
                 selectedModelId = selectedImageModelId,
                 selectedModelName = selectedImageModelName,
                 selectedModelIsCloud = selectedImageModelIsCloud,
-                enabled = false,
+                // B45/S2: the canvas stays on screen after a terminal job; only a working job may keep
+                // the pill disabled, so completion/failure/cancel can switch models again.
+                enabled = job?.isWorking != true,
+                loading = imageModelsLoading,
                 onSelectModel = onSelectImageModel
             )
         }

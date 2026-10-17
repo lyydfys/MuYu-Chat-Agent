@@ -9,8 +9,8 @@ import org.junit.Test
 class LocalImageWorkerClientLifecycleTest {
     @Test
     fun upscaleStartsBoundedWatchdogAfterAcceptanceAndPreservesTimeoutTermination() {
-        val source = localImageWorkerClientSource()
-        val upscale = functionBody(source, "suspend fun upscale(")
+        val source = localImageWorkerSource("LocalImageWorkerClientUpscale.kt")
+        val upscale = functionBody(source, "internal suspend fun LocalImageWorkerClient.upscale(")
         val accepted = upscale.indexOf("request.handshake.completeRemoteStart(accepted)")
         val watchdog = upscale.indexOf("startUpscaleWatchdog(request)", accepted)
         val awaitTerminal = upscale.indexOf("request.completion.await()", watchdog)
@@ -26,11 +26,14 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun upscaleWatchdogUsesWorkerCallbacksAsHeartbeatWithoutDeviceAdmission() {
         val source = localImageWorkerClientSource()
-        val callback = functionBody(source, "private fun callbackFor(")
-        val watchdog = functionBody(source, "private fun startUpscaleWatchdog(")
+        val callback = functionBody(source, "fun callbackFor(")
+        val watchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startUpscaleWatchdog("
+        )
         val termination = functionBody(
-            source,
-            "private fun completeWatchdogTimeoutAndRequestExit("
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.completeWatchdogTimeoutAndRequestExit("
         )
 
         assertTrue(callback.contains("request.lastWorkerCallbackAtMs = SystemClock.elapsedRealtime()"))
@@ -59,7 +62,10 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun upscaleWorkerPublishesPreparationHeartbeatAndClosesModelLease() {
-        val service = functionBody(localImageWorkerServiceSource(), "private fun acceptUpscale(")
+        val service = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runUpscaleJob("
+        )
         val heartbeat = service.indexOf("phase = \"worker_preparing\"")
         val materialize = service.indexOf("workerInputStore.materializeUpscale(")
         val closeLease = service.indexOf("workerInputs?.close()")
@@ -98,9 +104,15 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun newBindWaitsForDisposableWorkerRetirementAfterTerminalRelease() {
-        val source = localImageWorkerClientSource()
-        val awaitService = functionBody(source, "): BoundWorker {")
-        val cooldown = functionBody(source, "private suspend fun awaitRebindCooldown(")
+        val source = localImageWorkerClientSource() + localImageWorkerSource("LocalImageWorkerClientBinding.kt")
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
+        val cooldown = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitRebindCooldown("
+        )
         assertTrue(awaitService.contains("awaitRebindCooldown()"))
         assertTrue(cooldown.contains("LOCAL_IMAGE_WORKER_REBIND_COOLDOWN_MS"))
         assertTrue(cooldown.contains("bindingSession != null"))
@@ -134,9 +146,15 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun eachBindingEpochOwnsItsConnectionAndAllTerminalCallbacksCarryIt() {
         val source = localImageWorkerClientSource()
-        val connectionClass = functionBody(source, "private inner class WorkerServiceConnection(")
-        val awaitService = functionBody(source, "): BoundWorker {")
-        val connectionLoss = functionBody(source, "private fun handleConnectionLoss(")
+        val connectionClass = functionBody(source, "inner class WorkerServiceConnection(")
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
+        val connectionLoss = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss("
+        )
 
         assertTrue(connectionClass.contains("val lease: LocalImageWorkerBindingLifecycle.Session"))
         assertTrue(connectionClass.contains("handleServiceConnected(this, binder)"))
@@ -155,7 +173,10 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun bindingOwnerPublicationIsAtomicAndStaleBindCompletionRetiresItself() {
         val source = localImageWorkerClientSource()
-        val awaitService = functionBody(source, "): BoundWorker {")
+        val awaitService = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitService("
+        )
         val selectionLock = functionBody(awaitService, "synchronized(stateLock)")
 
         assertTrue(selectionLock.contains("onSessionSelected(session)"))
@@ -174,7 +195,10 @@ class LocalImageWorkerClientLifecycleTest {
     fun cancelledPreparationReleasesOnlyItsExactUnclaimedBindingEpoch() {
         val source = localImageWorkerClientSource()
         val begin = functionBody(source, "fun begin(")
-        val release = functionBody(source, "private fun releaseBindingAfterPreparationFailure(")
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterPreparationFailure("
+        )
 
         assertTrue(begin.contains("releaseBindingAfterPreparationFailure(next, error)"))
         assertTrue(release.contains("candidate.bindingSession"))
@@ -268,7 +292,10 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun normalFailureClaimsTerminalBeforeWritingFailedJournal() {
-        val job = functionBody(localImageWorkerServiceSource(), "val job = scope.launch {")
+        val job = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runGenerateJob("
+        )
         val catchStart = job.indexOf("} catch (error: Throwable) {")
         require(catchStart >= 0) { "Missing worker failure handler" }
         val failureHandler = job.substring(catchStart)
@@ -312,9 +339,15 @@ class LocalImageWorkerClientLifecycleTest {
         val clientSource = localImageWorkerClientSource()
         val serviceSource = localImageWorkerServiceSource()
         val cancel = functionBody(clientSource, "private fun cancelInternal(")
-        val cancelRemote = functionBody(clientSource, "private fun cancelRemote(")
+        val cancelRemote = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.cancelRemote("
+        )
         val serviceCancel = functionBody(serviceSource, "override fun cancel(")
-        val cancellationTerminal = functionBody(serviceSource, "private fun publishCancellationTerminal(")
+        val cancellationTerminal = functionBody(
+            localImageWorkerSource("LocalImageWorkerTerminal.kt"),
+            "internal fun LocalImageWorkerService.publishCancellationTerminal("
+        )
         val onError = functionBody(clientSource, "override fun onError(")
 
         assertTrue(
@@ -344,7 +377,10 @@ class LocalImageWorkerClientLifecycleTest {
         val generateEnd = source.indexOf("override fun close()", generateStart)
         require(generateEnd > generateStart) { "Missing close() after generate()" }
         val generate = source.substring(generateStart, generateEnd)
-        val release = functionBody(source, "private fun releaseBindingAfterRequest(")
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterRequest("
+        )
 
         val finallyBlock = generate.substring(generate.indexOf("finally {") + "finally {".length)
         assertTrue(finallyBlock.contains("releaseBindingAfterRequest(request, model.runtime)"))
@@ -364,22 +400,33 @@ class LocalImageWorkerClientLifecycleTest {
     fun releasedWorkerRequiresBinderDeathProofBeforeMemoryCanBeReused() {
         val source = localImageWorkerClientSource()
         val awaitRelease = functionBody(source, "suspend fun awaitOwnedWorkerRelease(")
-        val release = functionBody(source, "private fun releaseBindingAfterRequest(")
-        val arm = functionBody(source, "private fun armReleasedWorkerExitWaiterLocked(")
+        val release = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.releaseBindingAfterRequest("
+        )
+        val arm = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.armReleasedWorkerExitWaiterLocked("
+        )
 
         assertTrue(awaitRelease.contains("image_worker_exit_unconfirmed"))
         assertTrue(awaitRelease.contains("withTimeoutOrNull(timeoutMs)"))
         assertTrue(release.contains("armReleasedWorkerExitWaiterLocked(remoteBinder)"))
         assertTrue(arm.contains("binder.linkToDeath(recipient, 0)"))
         assertTrue(arm.contains("releasedWorkerExits[binder] = waiter"))
-        assertFalse(functionBody(source, "private fun handleConnectionLoss(")
+        assertFalse(functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss(")
             .contains(".complete(Unit)"))
     }
 
     @Test
     fun successfulDeliveryCommitsPublicationBeforeClientUnbindCanDestroyTheService() {
         val source = localImageWorkerServiceSource()
-        val job = functionBody(source, "val job = scope.launch {")
+        val job = functionBody(
+            localImageWorkerSource("LocalImageWorkerExecution.kt"),
+            "internal suspend fun LocalImageWorkerService.runGenerateJob("
+        )
         val beginPublication = job.indexOf("active.tryBeginResultPublication()")
         val deliver = job.indexOf("val delivered = sendComplete(")
         val completed = job.indexOf(
@@ -390,7 +437,10 @@ class LocalImageWorkerClientLifecycleTest {
         val terminalAttemptFinished =
             job.indexOf("active.markResultPublicationTerminalAttemptFinished()")
         val onDestroy = functionBody(source, "override fun onDestroy()")
-        val writeResult = functionBody(source, "private fun writeResultFile(")
+        val writeResult = functionBody(
+            localImageWorkerSource("LocalImageWorkerTerminal.kt"),
+            "internal fun LocalImageWorkerService.writeResultFile("
+        )
 
         assertTrue("worker job must contain its result callback", deliver >= 0)
         assertTrue(
@@ -464,10 +514,16 @@ class LocalImageWorkerClientLifecycleTest {
         val clientSource = localImageWorkerClientSource()
         val serviceSource = localImageWorkerServiceSource()
         val connected = functionBody(clientSource, "override fun onServiceConnected(")
-        val serviceConnected = functionBody(clientSource, "private fun handleServiceConnected(")
-        val connectionLoss = functionBody(clientSource, "private fun handleConnectionLoss(")
+        val serviceConnected = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleServiceConnected("
+        )
+        val connectionLoss = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientBinding.kt"),
+            "internal fun LocalImageWorkerClient.handleConnectionLoss("
+        )
         val generate = functionBody(serviceSource, "override fun generate(")
-        val deadClient = functionBody(serviceSource, "private fun cancelForDeadClient(")
+        val deadClient = functionBody(serviceSource, "internal fun cancelForDeadClient(")
 
         assertTrue(connected.contains("handleServiceConnected(this, binder)"))
         assertTrue(serviceConnected.contains("handleConnectionLoss("))
@@ -552,16 +608,25 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun watchdogTerminationIsRequestBoundAndNeverKillsACallbackPid() {
         val clientSource = localImageWorkerClientSource()
-        val generationWatchdog = functionBody(clientSource, "private fun startWatchdog(")
-        val upscaleWatchdog = functionBody(clientSource, "private fun startUpscaleWatchdog(")
-        val termination = functionBody(clientSource, "private fun requestRemoteSelfTermination(")
+        val generationWatchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startWatchdog("
+        )
+        val upscaleWatchdog = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.startUpscaleWatchdog("
+        )
+        val termination = functionBody(
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.requestRemoteSelfTermination("
+        )
         val timeoutDispatch = functionBody(
-            clientSource,
-            "private fun completeWatchdogTimeoutAndRequestExit("
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal fun LocalImageWorkerClient.completeWatchdogTimeoutAndRequestExit("
         )
         val awaitDispatch = functionBody(
-            clientSource,
-            "private suspend fun awaitWatchdogTerminationDispatch("
+            localImageWorkerSource("LocalImageWorkerClientWatchdogs.kt"),
+            "internal suspend fun LocalImageWorkerClient.awaitWatchdogTerminationDispatch("
         )
         val serviceTermination = functionBody(
             localImageWorkerServiceSource(),
@@ -588,8 +653,8 @@ class LocalImageWorkerClientLifecycleTest {
     @Test
     fun restartedWorkerRecoversOldJournalWithoutTrustingReusedPid() {
         val recovery = functionBody(
-            localImageWorkerServiceSource(),
-            "private fun recoverInterruptedExecutions("
+            localImageWorkerSource("LocalImageWorkerRecovery.kt"),
+            "internal fun LocalImageWorkerService.recoverInterruptedExecutions("
         )
 
         assertTrue(recovery.contains("recoverInterrupted(cleanupRoots = listOf(cacheDir)) { false }"))
@@ -608,7 +673,11 @@ class LocalImageWorkerClientLifecycleTest {
 
     @Test
     fun randomSeedSentinelIsResolvedBeforeNativeWorkerExecution() {
-        val generate = functionBody(localImageWorkerServiceSource(), "override fun generate(")
+        val generate = functionBody(localImageWorkerServiceSource(), "override fun generate(") +
+            functionBody(
+                localImageWorkerSource("LocalImageWorkerExecution.kt"),
+                "internal suspend fun LocalImageWorkerService.runGenerateJob("
+            )
 
         assertTrue(generate.contains("request.options.seed == null || request.options.seed == -1"))
         assertTrue(generate.contains("val workerOptions = workerInputs.options"))
@@ -662,7 +731,8 @@ class LocalImageWorkerClientLifecycleTest {
         // moved out of LocalImageProvider.kt into this owner file.
         val qwenGeneration = localImageWorkerSource("LocalImageQwenImage21Operations.kt")
         // P5/L8: the provider-side SPLIT request lease tail lives in the generate() body.
-        val generation = localImageWorkerSource("LocalImageGenerationOperations.kt")
+        val generation = localImageWorkerSource("LocalImageGenerationQnnPreparation.kt") +
+            localImageWorkerSource("LocalImageGenerationQnnExecution.kt")
         val phaseService = localImageWorkerSource("SdxlImagePhaseWorkerService.kt")
         val workerService = localImageWorkerServiceSource()
         val awaitFinish = functionBody(
