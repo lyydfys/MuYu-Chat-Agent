@@ -338,6 +338,160 @@ class LocalImageModelStoreIntegrationTest {
         assertTrue(fixture.store.loadModels().isEmpty())
     }
 
+    @Test fun chatPackagesInSharedModelsRootAreNotDiscoveredAsImageModels() {
+        val fixture = fixture()
+        val shared = fixture.external("models")
+        File(shared, "single-chat/gemma-4-E4B-it-Q4_K_M.gguf").apply {
+            parentFile!!.mkdirs()
+            writeBytes("chat weights".toByteArray())
+        }
+        File(shared, "mnn-chat/llm.mnn").apply {
+            parentFile!!.mkdirs()
+            writeBytes("llm graph".toByteArray())
+        }
+        File(shared, "mnn-chat/visual.mnn").writeBytes("vision graph".toByteArray())
+        File(shared, "mnn-chat/llm.mnn.weight").writeBytes("llm weights".toByteArray())
+        File(shared, "mnn-chat/llm_config.json").writeText("{\"model_type\":\"qwen3\"}")
+        File(fixture.filesModels(), "private-chat/gemma.gguf").apply {
+            parentFile!!.mkdirs()
+            writeBytes("private chat weights".toByteArray())
+        }
+        File(shared, "sdxl-chat/gemma.gguf").apply {
+            parentFile!!.mkdirs()
+            writeBytes("family-name chat weights".toByteArray())
+        }
+        File(fixture.filesModels(), "vae-llm-chat/gemma.gguf").apply {
+            parentFile!!.mkdirs()
+            writeBytes("path-token chat weights".toByteArray())
+        }
+        File(fixture.filesModels(), "foo-vae").apply { mkdirs() }.let { root ->
+            File(root, "gemma.gguf").writeBytes("vae-token chat weights".toByteArray())
+            File(root, "vae-notes.txt").writeText("not a VAE")
+            File(root, "llm_config.json").writeText("{\"model_type\":\"gemma\"}")
+        }
+
+        assertTrue(fixture.store.loadModels().isEmpty())
+        assertTrue(fixture.store.loadModels(discover = false).isEmpty())
+    }
+
+    @Test fun persistedChatInferenceRowsAreTombstonedWithoutDeletingFiles() {
+        val fixture = fixture()
+        val primary = File(fixture.filesModels(), "single-chat/gemma.gguf").apply {
+            parentFile!!.mkdirs()
+            writeBytes("chat weights".toByteArray())
+        }
+        val legacy = LocalImageModelRecord(
+            id = "legacy-chat-image", displayName = "Gemma chat",
+            path = primary.absolutePath, fileName = primary.name, sizeBytes = primary.length(),
+            sha256 = "a".repeat(64), runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.CUSTOM, source = "local:discovered",
+            recommendationId = "qwen_image_21_mnn_opencl",
+            bundleRoot = primary.parentFile!!.absolutePath
+        )
+        assertTrue(fixture.preferences.instance.edit()
+            .putString(KEY_MODELS, JSONArray().put(legacy.toJson()).toString())
+            .putString(KEY_SELECTED_MODEL_ID, legacy.id).commit())
+
+        assertTrue(fixture.store.loadModels(discover = false).isEmpty())
+
+        assertTrue(primary.isFile)
+        assertTrue(parseImageCatalogRecords(fixture.preferences.instance.getString(KEY_MODELS, "").orEmpty()).isEmpty())
+        assertEquals("", fixture.preferences.instance.getString(KEY_SELECTED_MODEL_ID, "").orEmpty())
+        assertTrue(legacy.catalogPhysicalKeys().all {
+            it in fixture.preferences.instance.getStringSet(KEY_SUPPRESSED_PATHS, emptySet()).orEmpty()
+        })
+        assertTrue(fixture.preferences.instance.getString("catalog_recovery_raw", "").orEmpty().contains(legacy.id))
+        val commitsAfterMigration = fixture.preferences.commits
+        assertTrue(fixture.store.loadModels(discover = false).isEmpty())
+        assertEquals(commitsAfterMigration, fixture.preferences.commits)
+    }
+
+    @Test fun validLegacyCompanionShapesInSharedModelsRootRemainDiscoverable() {
+        val fixture = fixture()
+        val sdRoot = File(fixture.external("models"), "generic-sdcpp").apply { mkdirs() }
+        File(sdRoot, "model.safetensors").writeBytes("diffusion".toByteArray())
+        File(sdRoot, "vae.safetensors").writeBytes("vae".toByteArray())
+        File(sdRoot, "text_encoder.safetensors").writeBytes("encoder".toByteArray())
+        File(sdRoot, "tokenizer.json").writeText("{}")
+        val mnnRoot = File(fixture.filesModels(), "generic-mnn").apply { mkdirs() }
+        File(mnnRoot, "model.mnn").writeBytes("diffusion".toByteArray())
+        File(mnnRoot, "vae_decoder.mnn").writeBytes("vae".toByteArray())
+        File(mnnRoot, "text_encoder.mnn").writeBytes("encoder".toByteArray())
+        File(mnnRoot, "tokenizer.mtok").writeBytes("tokenizer".toByteArray())
+
+        val models = fixture.store.loadModels()
+
+        assertEquals(2, models.size)
+        assertTrue(models.any { File(it.path).name == "model.safetensors" })
+        assertTrue(models.any { File(it.path).name == "model.mnn" })
+    }
+
+    @Test fun tombstoneMatrixRetainsUnknownAndMixedCopies() {
+        val fixture = fixture()
+        val chatRoot = File(fixture.external("models"), "chat-a").apply { mkdirs() }
+        val chatA = File(chatRoot, "gemma.gguf").apply { writeBytes("chat-a".toByteArray()) }
+        val chatBRoot = File(fixture.filesModels(), "chat-b").apply { mkdirs() }
+        val chatB = File(chatBRoot, "llama.gguf").apply { writeBytes("chat-b".toByteArray()) }
+        fun record(id: String, file: File) = LocalImageModelRecord(
+            id = id, displayName = file.name, path = file.absolutePath, fileName = file.name,
+            sizeBytes = file.length(), sha256 = "a".repeat(64), runtime = LocalImageRuntime.STABLE_DIFFUSION_CPP,
+            family = LocalImageModelFamily.CUSTOM, source = "local:discovered", bundleRoot = file.parentFile!!.absolutePath
+        )
+        val first = record("first", chatA)
+        val second = record("second", chatB)
+        assertTrue(first.copy(physicalCopies = listOf(second.asPhysicalCopy())).hasNegativeLocalImageEvidence())
+        assertTrue(first.copy(recommendationId = "retired-recommendation").hasNegativeLocalImageEvidence())
+        assertFalse(first.copy(physicalCopies = listOf(second.copy(path = "$chatBRoot/missing.gguf").asPhysicalCopy()))
+            .hasNegativeLocalImageEvidence())
+        val unknownRoot = File(fixture.filesModels(), "unknown-package").apply { mkdirs() }
+        val unknown = File(unknownRoot, "model.gguf").apply { writeBytes("unknown".toByteArray()) }
+        assertFalse(record("unknown", unknown).hasNegativeLocalImageEvidence())
+
+        val imageRoot = File(fixture.external("image_models"), "valid-image").apply { mkdirs() }
+        val imageFile = File(imageRoot, "unet.bin").apply { writeBytes("diffusion".toByteArray()) }
+        val image = record("image", imageFile).copy(runtime = LocalImageRuntime.QNN_HTP)
+        assertFalse(first.copy(physicalCopies = listOf(image.asPhysicalCopy())).hasNegativeLocalImageEvidence())
+    }
+
+    @Test fun explicitImageModelsDirectoryAcceptsBareModelWithoutManifest() {
+        val fixture = fixture()
+        val root = File(fixture.external("image_models"), "user-import").apply { mkdirs() }
+        val modelFile = File(root, "custom-model.gguf").apply { writeBytes("image weights".toByteArray()) }
+
+        val model = fixture.store.loadModels().single()
+
+        assertEquals(modelFile.canonicalPath, File(model.path).canonicalPath)
+        assertEquals(LocalImageRuntime.STABLE_DIFFUSION_CPP, model.runtime)
+    }
+
+    @Test fun validLegacyImageShapeInSharedModelsRootRemainsDiscoverable() {
+        val fixture = fixture()
+        val root = File(fixture.external("models"), "sdxl-legacy-qnn").apply { mkdirs() }
+        File(root, "unet.bin").writeBytes("diffusion".toByteArray())
+        File(root, "vae.bin").writeBytes("vae".toByteArray())
+        File(root, "text_encoder.bin").writeBytes("encoder".toByteArray())
+        File(root, "clip.mnn").writeBytes("clip graph".toByteArray())
+
+        val model = fixture.store.loadModels().single()
+
+        assertEquals(File(root, "unet.bin").canonicalPath, File(model.path).canonicalPath)
+        assertEquals(LocalImageRuntime.QNN_HTP, model.runtime)
+    }
+
+    @Test fun validImageManifestInSharedModelsRootRemainsDiscoverable() {
+        val fixture = fixture()
+        val root = File(fixture.external("models"), "image-bundle").apply { mkdirs() }
+        val entries = bundleEntries().toMutableMap()
+        val manifest = requireNotNull(entries.remove("manifest.json"))
+        entries["MANIFEST.JSON"] = manifest
+        writeEntries(root, entries)
+
+        val model = fixture.store.loadModels().single()
+
+        assertEquals(File(root, "model.safetensors").canonicalPath, File(model.path).canonicalPath)
+        assertEquals(LocalImageRuntime.STABLE_DIFFUSION_CPP, model.runtime)
+    }
+
     private fun bundleEntries(
         model: String = "same model", vae: String = "same VAE", tokenizer: String = "same tokenizer", encoderDirectory: String? = null
     ): Map<String, ByteArray> {
@@ -373,6 +527,7 @@ class LocalImageModelStoreIntegrationTest {
     private class Fixture(val root: File) {
         val preferences = MemoryPreferences()
         fun external(type: String) = File(root, "external/" + type).apply { mkdirs() }
+        fun filesModels() = File(root, "files/models").apply { mkdirs() }
         private val context = object : ContextWrapper(null) {
             override fun getApplicationContext(): Context = this
             override fun getFilesDir(): File = File(root, "files").apply { mkdirs() }

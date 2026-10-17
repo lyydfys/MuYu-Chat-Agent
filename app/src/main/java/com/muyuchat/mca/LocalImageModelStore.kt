@@ -74,6 +74,24 @@ class LocalImageModelStore(context: Context) {
             !prefs.contains("catalog_recovery_raw")) {
             prefs.edit().putString("catalog_recovery_raw", raw).apply()
         }
+        val ineligible = persisted.filter(LocalImageModelRecord::hasNegativeLocalImageEvidence)
+        if (ineligible.isNotEmpty()) {
+            // Older catalogs can contain chat GGUF/MNN packages that were inferred as
+            // image models solely from their file extension. Preserve the original JSON
+            // and tombstone only the image-catalog identity in one atomic commit. Model
+            // files are never deleted, and an unrecognised package shape is retained.
+            val remaining = persisted.filterNot { it in ineligible }
+            val suppressed = suppressedImageModelPaths() + ineligible.flatMap { it.catalogPhysicalKeys() }
+            val selected = loadSelectedModelId()?.takeUnless { selectedId ->
+                ineligible.any { it.matchesCatalogId(selectedId) }
+            }
+            val normalizedRemaining = normalizeLocalImageModelRecords(remaining, selected)
+            val recoveryRaw = raw.takeIf { it.isNotBlank() && !prefs.contains("catalog_recovery_raw") }
+            runCatching {
+                persistModels(normalizedRemaining, suppressed, selected, catalogRecoveryRaw = recoveryRaw)
+            }
+            persisted = normalizedRemaining
+        }
         if (!discover) {
             val normalized = normalizeLocalImageModelRecords(persisted, loadSelectedModelId())
             if (normalized != persisted) persistModels(normalized)
