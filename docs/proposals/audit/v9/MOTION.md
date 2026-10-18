@@ -66,6 +66,14 @@ introduced by the motion slices. The only geometry animation is an explicit expa
   difference, writes `motion.json`/`RUN.md`, and refuses to pass without motion. Device self-tests:
   drawer PASS (6 motion frames, max 25.61), menu+model PASS (7 frames), static FAIL, animation
   scale 0 → NOT_RUN, unloaded-model send → BLOCKED.
+- Round 5 on the installed 0.2.4 build: after the readiness fix (`8d1a0b08`) the script reports
+  **PASS** for `drawer,menu` (11 motion frames, max 23.11) — evidence
+  `artifacts/ui-motion/chat-20261019-060310-23468`.
+- Round 5 drawer-back verification: with the restored `BackHandler` (`2fcc66c5`), a back gesture
+  while the drawer is open closes the drawer and **stays in the chat** (`r5-drawer.png` before,
+  `r5-back.mp4` during, `r5-after-back.png` after). Before the fix the same gesture exited to the
+  previous app (`r4-after-back.png`).
+- Dark mode: `r5-dark-chat.png`, `r5-dark-drawer.png`; large font (2.0): `r5-font20-chat.png`.
 - `ChatMotionContractTest` pins the compositor-only translation and the shared spring/channel use.
 
 ## 5. Known limits
@@ -81,6 +89,8 @@ introduced by the motion slices. The only geometry animation is an explicit expa
   but the chat surface appeared at ~22 s on the first launch after an update and ~8.7 s on the
   following cold start. This is the launch-screen duration users actually see and is the next
   performance target; the launch surface itself is already animated and phase-accurate.
-- Device verification of the restored drawer back handler is pending a build window: the parallel
-  agent session runs `scripts/release.ps1`, whose `gradlew --stop` terminates concurrent builds in
-  this shared checkout.
+- **Shared checkout: build under the MCA lock.** A parallel agent session runs
+  `scripts/agent-verify.ps1`, which force-stops every `GradleDaemon`/`KotlinCompileDaemon` after
+  taking `tools/build-guards/McaBuildLock.psm1`. A manual `gradlew` invocation that does not hold
+  that lock is killed mid-build (observed three times inside R8/ksp). Hold the same lock around any
+  long build; that made `:app:assembleRelease` complete in 11m26s on the same machine.
