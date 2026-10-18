@@ -7,6 +7,7 @@ import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
@@ -30,6 +31,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -43,10 +45,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -54,26 +59,34 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.muyuchat.feature.chat.McaBrandLogo
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 /**
  * Launch surface shown until the first [MainViewModel] is ready.
  *
  * Performance contract:
- * - The infinite pulse/shimmer/sweep are held as `State<Float>` and read **inside**
- *   `graphicsLayer`, so a running animation never recomposes this screen.
- * - The entrance is a single [Animatable]; the staggered reveals are derived from it inside
- *   the same layer blocks.
+ * - The infinite pulse/shimmer/orbit/sweep are held as `State<Float>` and read **inside**
+ *   `graphicsLayer`/draw lambdas, so running animations never recompose this screen.
+ * - The determinate bar animates through `animateFloatAsState` whose value is read by the
+ *   indicator's progress lambda (draw phase), not during composition.
  * - Standard Compose animations are used, so the system animator duration scale applies.
  *
- * Design contract:
- * - The skeleton mirrors the chat geometry the user is about to see (right-aligned user bubble
- *   with the 20/6 corner pair, full-width assistant lines) instead of a generic spinner.
- * - Colours, radii and type styles come from the existing theme; no new palette or type scale.
+ * Honesty contract:
+ * - The phase label and percentage come from real [AppStartupPhase] boundaries published by
+ *   [AppStartupViewModel]; there is no synthetic timer.
  */
 @Composable
 internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSkipScan: () -> Unit) {
     val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
+    val isDark = colors.background.luminance() < 0.5f
+    val shimmerHighlight = if (isDark) {
+        colors.onSurface.copy(alpha = 0.10f)
+    } else {
+        Color.White.copy(alpha = 0.70f)
+    }
 
     val entrance = remember { Animatable(0f) }
     LaunchedEffect(Unit) {
@@ -93,23 +106,28 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
         ),
         label = "brand-breath",
     )
-    val shimmer = ambient.animateFloat(
-        initialValue = 0.28f,
-        targetValue = 0.62f,
+    val orbit = ambient.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
         animationSpec = infiniteRepeatable(
-            animation = tween(1150, easing = LinearEasing),
-            repeatMode = RepeatMode.Reverse,
+            animation = tween(9000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart,
         ),
-        label = "skeleton-shimmer",
+        label = "brand-orbit",
     )
-    val sweep = ambient.animateFloat(
+    val shimmer = ambient.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = tween(1500, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
         ),
-        label = "progress-sweep",
+        label = "skeleton-sweep",
+    )
+    val animatedProgress = animateFloatAsState(
+        targetValue = state.progress,
+        animationSpec = spring(dampingRatio = 1f, stiffness = 90f),
+        label = "startup-progress",
     )
 
     Box(
@@ -118,6 +136,23 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
             .background(colors.background),
         contentAlignment = Alignment.Center,
     ) {
+        // Ambient brand glow: one static radial, drawn once per size change.
+        Canvas(Modifier.fillMaxSize()) {
+            val radius = size.width * 0.95f
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(
+                        colors.primary.copy(alpha = if (isDark) 0.08f else 0.05f),
+                        Color.Transparent,
+                    ),
+                    center = Offset(size.width / 2f, size.height * 0.28f),
+                    radius = radius,
+                ),
+                radius = radius,
+                center = Offset(size.width / 2f, size.height * 0.28f),
+            )
+        }
+
         Column(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -127,7 +162,12 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
                 .padding(horizontal = 28.dp, vertical = 40.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            BrandBlock(breath = { breath.value }, reveal = reveal)
+            BrandBlock(
+                breath = { breath.value },
+                orbit = { orbit.value },
+                highlight = shimmerHighlight,
+                reveal = reveal,
+            )
             Spacer(Modifier.height(22.dp))
             Text(
                 text = "MCA",
@@ -142,11 +182,23 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
 
             if (state.loading) {
                 Spacer(Modifier.height(26.dp))
-                StartupSkeleton(shimmer = { shimmer.value }, reveal = reveal)
-                Spacer(Modifier.height(26.dp))
-                StartupProgress(sweep = { sweep.value }, reveal = reveal)
-                Spacer(Modifier.height(18.dp))
-                StatusLine(reveal = reveal, label = "正在读取本地记录…")
+                StartupSkeleton(
+                    sweep = { shimmer.value },
+                    highlight = shimmerHighlight,
+                    reveal = reveal,
+                )
+                Spacer(Modifier.height(24.dp))
+                StartupProgress(
+                    progress = { animatedProgress.value },
+                    sweep = { shimmer.value },
+                    reveal = reveal,
+                )
+                Spacer(Modifier.height(16.dp))
+                StatusLine(
+                    reveal = reveal,
+                    label = state.phase.label,
+                    progressText = "${(state.progress * 100).roundToInt()}%",
+                )
                 Spacer(Modifier.height(6.dp))
                 CaptionLine(reveal = reveal, text = "大型模型的扫描将在后台继续。")
 
@@ -183,11 +235,16 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
 }
 
 @Composable
-private fun BrandBlock(breath: () -> Float, reveal: (Float) -> Float) {
+private fun BrandBlock(
+    breath: () -> Float,
+    orbit: () -> Float,
+    highlight: Color,
+    reveal: (Float) -> Float,
+) {
     val colors = MaterialTheme.colorScheme
     Box(
         modifier = Modifier
-            .size(116.dp)
+            .size(124.dp)
             .graphicsLayer {
                 val p = reveal(0f)
                 alpha = p
@@ -197,29 +254,48 @@ private fun BrandBlock(breath: () -> Float, reveal: (Float) -> Float) {
             },
         contentAlignment = Alignment.Center,
     ) {
-        // Soft halo behind the mark; drawn inside the layer, never read during composition.
-        Canvas(Modifier.size(116.dp)) {
+        Canvas(Modifier.size(124.dp)) {
             val center = Offset(size.width / 2f, size.height / 2f)
+            val radius = size.minDimension / 2f
+            // Breathing halo.
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
-                        colors.primary.copy(alpha = 0.18f),
+                        colors.primary.copy(alpha = 0.20f),
                         colors.primary.copy(alpha = 0.06f),
                         Color.Transparent,
                     ),
                     center = center,
-                    radius = size.minDimension / 2f,
+                    radius = radius,
                 ),
-                radius = size.minDimension / 2f,
+                radius = radius,
                 center = center,
             )
+            // Two orbiting sparks read the angle at draw time.
+            val angle = orbit()
+            val orbitRadius = radius * 0.86f
+            listOf(0f, 180f).forEachIndexed { index, offsetDeg ->
+                val rad = Math.toRadians((angle + offsetDeg).toDouble())
+                drawCircle(
+                    color = colors.primary.copy(alpha = if (index == 0) 0.75f else 0.45f),
+                    radius = (if (index == 0) 2.6f else 2.0f).dp.toPx(),
+                    center = Offset(
+                        center.x + (cos(rad) * orbitRadius).toFloat(),
+                        center.y + (sin(rad) * orbitRadius).toFloat(),
+                    ),
+                )
+            }
         }
         McaBrandLogo(size = 72.dp, cornerRadius = 18.dp)
     }
 }
 
 @Composable
-private fun StartupSkeleton(shimmer: () -> Float, reveal: (Float) -> Float) {
+private fun StartupSkeleton(
+    sweep: () -> Float,
+    highlight: Color,
+    reveal: (Float) -> Float,
+) {
     val colors = MaterialTheme.colorScheme
     val bubbleShape = RoundedCornerShape(
         topStart = 20.dp,
@@ -233,40 +309,17 @@ private fun StartupSkeleton(shimmer: () -> Float, reveal: (Float) -> Float) {
             .clearAndSetSemantics { },
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        SkeletonRow(
-            reveal = reveal,
-            shimmer = shimmer,
-            delay = 0.2f,
-            bubbleFraction = 0.62f,
-            lineFractions = listOf(0.84f, 0.6f, 0.38f),
-            bubbleShape = bubbleShape,
-            colors = colors,
-        )
-        SkeletonRow(
-            reveal = reveal,
-            shimmer = shimmer,
-            delay = 0.28f,
-            bubbleFraction = 0.46f,
-            lineFractions = listOf(0.72f, 0.9f, 0.31f),
-            bubbleShape = bubbleShape,
-            colors = colors,
-        )
-        SkeletonRow(
-            reveal = reveal,
-            shimmer = shimmer,
-            delay = 0.36f,
-            bubbleFraction = 0.56f,
-            lineFractions = listOf(0.66f),
-            bubbleShape = bubbleShape,
-            colors = colors,
-        )
+        SkeletonRow(reveal, sweep, highlight, 0.2f, 0.62f, listOf(0.84f, 0.6f, 0.38f), bubbleShape, colors)
+        SkeletonRow(reveal, sweep, highlight, 0.28f, 0.46f, listOf(0.72f, 0.9f, 0.31f), bubbleShape, colors)
+        SkeletonRow(reveal, sweep, highlight, 0.36f, 0.56f, listOf(0.66f), bubbleShape, colors)
     }
 }
 
 @Composable
 private fun SkeletonRow(
     reveal: (Float) -> Float,
-    shimmer: () -> Float,
+    sweep: () -> Float,
+    highlight: Color,
     delay: Float,
     bubbleFraction: Float,
     lineFractions: List<Float>,
@@ -284,58 +337,111 @@ private fun SkeletonRow(
         verticalArrangement = Arrangement.spacedBy(9.dp),
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            Box(
-                Modifier
-                    .fillMaxWidth(bubbleFraction)
-                    .height(34.dp)
-                    .graphicsLayer { alpha = shimmer() }
-                    .background(colors.surfaceVariant, bubbleShape)
+            SkeletonBar(
+                fraction = bubbleFraction,
+                heightDp = 34,
+                shape = bubbleShape,
+                base = colors.surfaceVariant,
+                highlight = highlight,
+                sweep = sweep,
             )
         }
         lineFractions.forEach { fraction ->
-            Box(
-                Modifier
-                    .fillMaxWidth(fraction)
-                    .height(11.dp)
-                    .graphicsLayer { alpha = shimmer() }
-                    .background(colors.surfaceVariant, RoundedCornerShape(6.dp))
+            SkeletonBar(
+                fraction = fraction,
+                heightDp = 11,
+                shape = RoundedCornerShape(6.dp),
+                base = colors.surfaceVariant,
+                highlight = highlight,
+                sweep = sweep,
             )
         }
     }
 }
 
 @Composable
-private fun StartupProgress(sweep: () -> Float, reveal: (Float) -> Float) {
+private fun SkeletonBar(
+    fraction: Float,
+    heightDp: Int,
+    shape: RoundedCornerShape,
+    base: Color,
+    highlight: Color,
+    sweep: () -> Float,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth(fraction)
+            .height(heightDp.dp)
+            .clip(shape)
+            .drawBehind {
+                drawRect(base)
+                // Highlight band travels across the bar; read at draw time only.
+                val center = (sweep() * 1.8f - 0.4f) * size.width
+                val half = size.width * 0.35f
+                drawRect(
+                    brush = Brush.horizontalGradient(
+                        colors = listOf(Color.Transparent, highlight, Color.Transparent),
+                        startX = center - half,
+                        endX = center + half,
+                    ),
+                    size = size,
+                )
+            }
+    )
+}
+
+@Composable
+private fun StartupProgress(progress: () -> Float, sweep: () -> Float, reveal: (Float) -> Float) {
     val colors = MaterialTheme.colorScheme
-    var trackWidth by remember { mutableIntStateOf(0) }
     Box(
         modifier = Modifier
-            .fillMaxWidth(0.72f)
-            .height(3.dp)
+            .fillMaxWidth(0.86f)
+            .height(4.dp)
             .graphicsLayer { alpha = reveal(0.42f) }
             .clip(CircleShape)
-            .background(colors.surfaceVariant)
-            .onSizeChanged { trackWidth = it.width }
-            .semantics { contentDescription = "正在读取本地记录" },
+            .semantics { contentDescription = "启动进度" },
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth(0.34f)
-                .height(3.dp)
-                .graphicsLayer {
-                    val widthPx = trackWidth.toFloat()
-                    translationX = widthPx * (sweep() * 1.6f - 0.5f)
-                }
-                .background(colors.primary, CircleShape)
+        LinearProgressIndicator(
+            progress = progress,
+            modifier = Modifier.fillMaxSize(),
+            color = colors.primary,
+            trackColor = colors.surfaceVariant,
+            strokeCap = StrokeCap.Round,
+            // The default Material stop dot reads as a stray marker on a thin 4dp bar.
+            drawStopIndicator = {},
         )
+        // A slow highlight travelling over the track keeps the wait alive without implying
+        // extra progress; it is drawn after the indicator so it reads as moving light.
+        Canvas(Modifier.fillMaxSize()) {
+            val center = (sweep() * 1.8f - 0.4f) * size.width
+            val half = size.width * 0.22f
+            drawRect(
+                brush = Brush.horizontalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        if (colors.background.luminance() < 0.5f) {
+                            Color.White.copy(alpha = 0.22f)
+                        } else {
+                            Color.White.copy(alpha = 0.55f)
+                        },
+                        Color.Transparent,
+                    ),
+                    startX = center - half,
+                    endX = center + half,
+                ),
+                size = size,
+            )
+        }
     }
 }
 
 @Composable
-private fun StatusLine(reveal: (Float) -> Float, label: String) {
+private fun StatusLine(reveal: (Float) -> Float, label: String, progressText: String) {
     val colors = MaterialTheme.colorScheme
     Row(
-        modifier = Modifier.graphicsLayer { alpha = reveal(0.5f) },
+        modifier = Modifier
+            .fillMaxWidth(0.86f)
+            .graphicsLayer { alpha = reveal(0.5f) },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(9.dp),
     ) {
@@ -346,6 +452,12 @@ private fun StatusLine(reveal: (Float) -> Float, label: String) {
                 .background(colors.primary)
         )
         Text(text = label, style = MaterialTheme.typography.bodyLarge, color = colors.onBackground)
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = progressText,
+            style = MaterialTheme.typography.labelMedium,
+            color = colors.onSurfaceVariant,
+        )
     }
 }
 

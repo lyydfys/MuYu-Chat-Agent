@@ -22,12 +22,26 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
+/**
+ * Real, observable startup phases. The label is what the launch surface shows verbatim, so it
+ * must stay truthful: a phase is only entered when the corresponding work actually starts.
+ */
+internal enum class AppStartupPhase(val label: String) {
+    PREPARING("正在准备本地引擎…"),
+    MIGRATING("正在整理本地数据…"),
+    ASSEMBLING("正在装载应用组件…"),
+    READING("正在读取本地记录…"),
+    FINISHING("即将完成…"),
+}
+
 internal data class AppStartupState(
     val model: MainViewModel? = null,
     val loading: Boolean = true,
     val slow: Boolean = false,
     val problem: String? = null,
-    val diagnostic: String = ""
+    val diagnostic: String = "",
+    val phase: AppStartupPhase = AppStartupPhase.PREPARING,
+    val progress: Float = 0f,
 )
 
 /** The launcher stays usable even when a model directory or database cannot be read. */
@@ -39,6 +53,16 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
     private var cleared = false
     private var startupJob: Job? = null
     private val pendingActions = ArrayDeque<(MainViewModel) -> Unit>()
+
+    /** Publishes a real phase boundary; ignored once the app model is ready. */
+    private fun mark(phase: AppStartupPhase, progress: Float) {
+        if (state.value.model != null) return
+        mutableState.value = state.value.copy(
+            loading = true,
+            phase = phase,
+            progress = progress.coerceIn(0f, 1f),
+        )
+    }
 
     init { start(checkPreviousAttempt = true) }
 
@@ -62,6 +86,7 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val app = getApplication<Application>()
                 val previous = withContext(Dispatchers.IO) { StartupDiagnostics.read(app) }
+                mark(AppStartupPhase.PREPARING, 0.05f)
                 if (checkPreviousAttempt && previous.optBoolean("starting")) {
                     mutableState.value = AppStartupState(loading = false,
                         problem = "上次启动未完成。可以暂缓扫描模型后进入应用，模型和聊天记录都会保留。",
@@ -69,14 +94,17 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                     return@launch
                 }
                 withContext(Dispatchers.IO) { StartupDiagnostics.record(app, true, null) }
+                mark(AppStartupPhase.MIGRATING, 0.12f)
                 // Retain the instance even if the Activity is closed during construction;
                 // finally clears its ViewModelStore and cancels any owned work.
-                withContext(Dispatchers.IO) {
+                val migrated = withContext(Dispatchers.IO) {
+                    ModelIdentityReferenceMigration(app).migratePendingReferences()
+                }
+                mark(AppStartupPhase.ASSEMBLING, 0.22f)
+                prepared = withContext(Dispatchers.IO) {
                     val container = McaAppContainer(app)
-                    val migration = ModelIdentityReferenceMigration(app)
-                    val migrated = migration.migratePendingReferences()
                     val installationScopeId = container.runtimeProfileStore.installationScopeId()
-                    prepared = MainViewModel(
+                    MainViewModel(
                         app,
                         deferStartup = true,
                         skipInitialModelDiscovery = skipModelDiscovery,
@@ -87,14 +115,21 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                         )
                     )
                 }
+                mark(AppStartupPhase.READING, 0.35f)
                 val main = requireNotNull(prepared)
                 ViewModelProvider(children, object : ViewModelProvider.Factory {
                     @Suppress("UNCHECKED_CAST")
                     override fun <T : ViewModel> create(modelClass: Class<T>): T = main as T
                 })[MainViewModel::class.java]
                 withContext(Dispatchers.IO) { main.startAfterConstruction() }
+                mark(AppStartupPhase.FINISHING, 0.62f)
                 withContext(Dispatchers.IO) { StartupDiagnostics.record(app, false, null) }
-                mutableState.value = AppStartupState(model = main, loading = false)
+                mutableState.value = AppStartupState(
+                    model = main,
+                    loading = false,
+                    phase = AppStartupPhase.FINISHING,
+                    progress = 1f,
+                )
                 published = true
                 while (pendingActions.isNotEmpty()) pendingActions.removeFirst()(main)
             } catch (cancelled: CancellationException) {
