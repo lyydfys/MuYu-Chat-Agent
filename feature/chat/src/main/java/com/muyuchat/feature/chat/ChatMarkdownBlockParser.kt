@@ -194,11 +194,13 @@ private fun parsePlainMarkdownBlocks(content: String): List<MarkdownBlock> {
 }
 
 
+private val NUMBERED_LIST_ITEM_PATTERN = Regex("""\d{1,4}[.)、](?=\s|[^\d\s])\s*.+""")
+
 private fun String.isBulletLine(): Boolean {
     val trimmed = trimStart()
     return trimmed.startsWith("- ") ||
         trimmed.startsWith("* ") ||
-        trimmed.matches(Regex("""\d{1,4}[.)、](?=\s|[^\d\s])\s*.+"""))
+        trimmed.matches(NUMBERED_LIST_ITEM_PATTERN)
 }
 
 private fun String.isNumberedLine(): Boolean =

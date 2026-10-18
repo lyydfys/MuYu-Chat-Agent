@@ -37,16 +37,27 @@ internal fun detectCodeLanguage(lines: List<String>): String? {
     val sample = lines.joinToString("\n") { it.trim() }
     val lower = sample.lowercase()
     return when {
-        Regex("""(?m)^(def|from|import|elif|except|print)\b""").containsMatchIn(sample) -> "python"
-        Regex("""(?m)^(fun|val|var|package|override|private|suspend)\b""").containsMatchIn(sample) -> "kotlin"
-        Regex("""(?m)^(const|let|function|export|interface|type)\b""").containsMatchIn(sample) -> "typescript"
+        PYTHON_HINT.containsMatchIn(sample) -> "python"
+        KOTLIN_HINT.containsMatchIn(sample) -> "kotlin"
+        TYPESCRIPT_HINT.containsMatchIn(sample) -> "typescript"
         "#include" in sample || "std::" in sample -> "cpp"
-        Regex("""(?m)^(public|private|protected)\s+(class|static|void|int|String)\b""").containsMatchIn(sample) -> "java"
-        Regex("""(?m)^(select|insert|update|delete|create|alter)\b""", RegexOption.IGNORE_CASE).containsMatchIn(sample) -> "sql"
+        JAVA_HINT.containsMatchIn(sample) -> "java"
+        SQL_HINT.containsMatchIn(sample) -> "sql"
         "<html" in lower || "</" in sample -> "html"
         else -> null
     }
 }
+
+// 探测用正则只在类加载时编译一次：detectCodeLanguage 会随每个代码块调用。
+private val PYTHON_HINT = Regex("""(?m)^(def|from|import|elif|except|print)\b""")
+private val KOTLIN_HINT = Regex("""(?m)^(fun|val|var|package|override|private|suspend)\b""")
+private val TYPESCRIPT_HINT = Regex("""(?m)^(const|let|function|export|interface|type)\b""")
+private val JAVA_HINT = Regex("""(?m)^(public|private|protected)\s+(class|static|void|int|String)\b""")
+private val SQL_HINT = Regex("""(?m)^(select|insert|update|delete|create|alter)\b""", RegexOption.IGNORE_CASE)
+
+private val MULTI_SPACE_PATTERN = Regex("""[ \t]{2,}""")
+private val INDENT_AFTER_NEWLINE_PATTERN = Regex("""\n[ \t]+""")
+private val MULTI_BLANK_LINE_PATTERN = Regex("""\n{3,}""")
 
 private val CODE_DECLARATION_PATTERN = Regex(
     pattern = """^(def|class|fun|function|const|let|var|val|public|private|protected|override|interface|type|struct|enum|async\s+def)\b.*"""
@@ -84,9 +95,9 @@ internal fun cleanReasoningForDisplay(value: String): String {
         .replace("<channel>", "", ignoreCase = true)
         .replace("\r\n", "\n")
         .replace('\r', '\n')
-        .replace(Regex("""[ \t]{2,}"""), " ")
-        .replace(Regex("""\n[ \t]+"""), "\n")
-        .replace(Regex("""\n{3,}"""), "\n\n")
+        .replace(MULTI_SPACE_PATTERN, " ")
+        .replace(INDENT_AFTER_NEWLINE_PATTERN, "\n")
+        .replace(MULTI_BLANK_LINE_PATTERN, "\n\n")
         .trim()
 }
 
@@ -121,6 +132,19 @@ internal fun buildInlineMarkdown(
         append(wrapForDisplay(text))
     }
 
+    // 单调游标：URL 正则只对尚未扫描的后缀执行一次 find。
+    // 命中被消费（index 越过 match.range.last）后才从新位置重扫，
+    // 避免每个纯文本片段都对整段剩余后缀跑一次正则。
+    var cachedUrlMatch: MatchResult? = null
+    var cachedUrlScannedFrom = -1
+    fun urlMatchAt(from: Int): MatchResult? {
+        val cached = cachedUrlMatch
+        if (cached != null && cached.range.first >= from) return cached
+        if (cached == null && cachedUrlScannedFrom in 0..from) return null
+        cachedUrlScannedFrom = from
+        return URL_PATTERN.find(value, from).also { cachedUrlMatch = it }
+    }
+
     while (index < value.length) {
         when {
             value.startsWith("[", index) -> {
@@ -140,8 +164,8 @@ internal fun buildInlineMarkdown(
                     index++
                 }
             }
-            URL_PATTERN.find(value, index)?.range?.first == index -> {
-                val match = URL_PATTERN.find(value, index)!!
+            urlMatchAt(index)?.let { it.range.first == index } == true -> {
+                val match = urlMatchAt(index)!!
                 withStyle(
                     SpanStyle(
                         color = linkColor,
@@ -207,14 +231,18 @@ internal fun buildInlineMarkdown(
                 }
             }
             else -> {
-                val next = listOf(
-                    value.indexOf('$', startIndex = index).takeIf { it >= 0 } ?: value.length,
-                    value.indexOf('`', startIndex = index).takeIf { it >= 0 } ?: value.length,
-                    value.indexOf("**", startIndex = index).takeIf { it >= 0 } ?: value.length,
-                    value.indexOf("__", startIndex = index).takeIf { it >= 0 } ?: value.length,
-                    value.indexOf("[", startIndex = index).takeIf { it >= 0 } ?: value.length,
-                    URL_PATTERN.find(value, index)?.range?.first ?: value.length
-                ).min()
+                // 顺序取最小候选，避免每个片段都分配一个 List。
+                var next = urlMatchAt(index)?.range?.first ?: value.length
+                val dollar = value.indexOf('$', startIndex = index)
+                if (dollar in 0 until next) next = dollar
+                val backtick = value.indexOf('`', startIndex = index)
+                if (backtick in 0 until next) next = backtick
+                val bold = value.indexOf("**", startIndex = index)
+                if (bold in 0 until next) next = bold
+                val underline = value.indexOf("__", startIndex = index)
+                if (underline in 0 until next) next = underline
+                val bracket = value.indexOf('[', startIndex = index)
+                if (bracket in 0 until next) next = bracket
                 appendPlain(value.substring(index, next))
                 index = next
             }
