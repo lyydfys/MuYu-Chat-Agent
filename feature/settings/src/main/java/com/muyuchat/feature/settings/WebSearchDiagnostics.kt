@@ -31,6 +31,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
@@ -57,11 +58,15 @@ internal fun WebSearchTestStatusPanel(
         } else {
             "先做网络预检；如需关键词搜索，请配置真实搜索源。"
         }
-    val needsAttention = message.contains("失败") ||
-        message.contains("未通过") ||
-        message.contains("需检查") ||
-        message.contains("请先") ||
-        latestDiagnostic?.success == false
+    // W9-1: status-keyword scanning is mapped once per status/diagnostic value instead of on every
+    // recomposition of the settings page.
+    val needsAttention = remember(statusMessage, latestDiagnostic?.message, latestDiagnostic?.success, configured) {
+        message.contains("失败") ||
+            message.contains("未通过") ||
+            message.contains("需检查") ||
+            message.contains("请先") ||
+            latestDiagnostic?.success == false
+    }
     val accent = if (needsAttention) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
     Column(
         modifier = Modifier
@@ -195,9 +200,12 @@ internal fun WebSearchDiagnosticCard(
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val citationChecks = item.closedLoopChecks.filter { it.startsWith("引用审计") }
-    val closedLoopChecks = item.closedLoopChecks.filterNot { it.startsWith("引用审计") }
-    val troubleshootingAdvice = item.webSearchTroubleshootingAdvice()
+    // W9-1: filter/scan the diagnostic evidence once per item value. These lists are derived from
+    // strings and were rebuilt on every recomposition of the settings surface.
+    val citationChecks = remember(item) { item.closedLoopChecks.filter { it.startsWith("引用审计") } }
+    val closedLoopChecks = remember(item) { item.closedLoopChecks.filterNot { it.startsWith("引用审计") } }
+    val troubleshootingAdvice = remember(item) { item.webSearchTroubleshootingAdvice() }
+    val citationWarning = remember(item) { item.warnings.any { it.contains("引用") } }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -305,7 +313,7 @@ internal fun WebSearchDiagnosticCard(
                 DiagnosticEvidenceSection(
                     title = "引用审计",
                     values = citationChecks.take(4),
-                    error = item.warnings.any { it.contains("引用") }
+                    error = citationWarning
                 )
             }
             if (item.topSources.isNotEmpty()) {

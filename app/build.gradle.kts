@@ -248,6 +248,17 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+        // G00/Q01: release-like target for :benchmark. It inherits R8/shrinking from release,
+        // stays non-debuggable (Macrobenchmark refuses to measure a debuggable target), and is
+        // signed with the local debug key only so it can be installed on a test device. The
+        // ".benchmark" suffix keeps its app data completely separate from a real install.
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+            applicationIdSuffix = ".benchmark"
+            isDebuggable = false
+        }
     }
 
     buildFeatures {
@@ -313,6 +324,19 @@ android {
     // production logging on those paths stays exercised by the unit test.
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+// G00/Q01: Compose compiler reports + metrics for stability/jank triage (diagnostics only; the
+// emitted runtime behavior is unchanged). `-Pmca.composeCompilerReports=false` skips generating
+// them for a build that only needs an artifact; the default keeps them enabled.
+val composeCompilerReportsEnabled = providers.gradleProperty("mca.composeCompilerReports")
+    .map { value -> !value.trim().equals("false", ignoreCase = true) }
+    .orElse(true)
+composeCompiler {
+    if (composeCompilerReportsEnabled.get()) {
+        reportsDestination = layout.buildDirectory.dir("compose-compiler/reports")
+        metricsDestination = layout.buildDirectory.dir("compose-compiler/metrics")
     }
 }
 
@@ -447,6 +471,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.work.runtime.ktx)
+    // Macrobenchmark needs ProfileInstaller 1.3+ inside the *target* app to install/reset
+    // profiles and clear shader caches between iterations.
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
@@ -467,9 +494,9 @@ dependencies {
     testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    androidTestImplementation("androidx.test:runner:1.7.0")
-    androidTestImplementation("androidx.test.ext:junit:1.3.0")
-    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.uiautomator)
 }
 
 // Room schema export.

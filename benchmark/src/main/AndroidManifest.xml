@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Benchmark test APK manifest. It is self-instrumenting (see android.experimental
+      .self-instrumenting in build.gradle.kts), so the benchmark code lives in src/main and this
+      APK is the instrumentation entry point.
+
+      Package visibility (Android 11+): the benchmark drives the target app by package name.
+    -->
+    <queries>
+        <package android:name="com.muyuchat.mca.benchmark" />
+    </queries>
+
+    <!-- Macrobenchmark writes additional test output on API 29. -->
+    <application android:requestLegacyExternalStorage="true" />
+</manifest>

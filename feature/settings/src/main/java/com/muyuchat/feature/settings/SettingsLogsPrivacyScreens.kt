@@ -29,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -38,6 +39,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.telemetry.RuntimeMetrics
 import kotlinx.coroutines.launch
 
 private const val MAX_VISIBLE_RUNTIME_LOGS = 10
@@ -53,8 +55,14 @@ fun LogsApiScreen(
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val visibleLogs = state.logs.takeLast(MAX_VISIBLE_RUNTIME_LOGS).asReversed()
-    val visibleAgentLogs = state.agentLogs.take(MAX_VISIBLE_AGENT_LOGS)
+    // W9-1: derive the bounded visible windows once per list value. `asReversed()` allocates and
+    // `takeLast` walks the list; doing it in composition rebuilt both on every unrelated update.
+    val visibleLogs = remember(state.logs) {
+        state.logs.takeLast(MAX_VISIBLE_RUNTIME_LOGS).asReversed()
+    }
+    val visibleAgentLogs = remember(state.agentLogs) {
+        state.agentLogs.take(MAX_VISIBLE_AGENT_LOGS)
+    }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -119,11 +127,13 @@ fun LogsApiScreen(
                 )
             }
             items(visibleLogs) { log ->
-                val rssKb = log.processRssKb.takeIf { it > 0L }
+                // W9-1: number formatting and KB conversion run once per metrics row, not on every
+                // recomposition of this page (the page also observes live runtime state).
+                val row = remember(log) { runtimeLogRowPresentation(log) }
                 InfoCard(
-                    title = shortName(log.model).ifBlank { "运行记录" },
-                    primary = "速度 ${"%.2f".format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms",
-                    secondary = "输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}"
+                    title = row.title,
+                    primary = row.primary,
+                    secondary = row.secondary
                 )
             }
         }
@@ -136,9 +146,10 @@ fun LogsApiScreen(
                 )
             }
             items(visibleAgentLogs) { log ->
+                val primary = remember(log) { log.take(120) }
                 InfoCard(
                     title = "智能调参",
-                    primary = log.take(120),
+                    primary = primary,
                     secondary = "完整记录只保存在本机，可按需导出。"
                 )
             }
@@ -176,10 +187,13 @@ fun PrivacyDataScreen(
             )
         }
         item {
+            val localDataText = remember(state.imageAssetBytes, state.fileAssetBytes) {
+                "图片占用 ${formatBytes(state.imageAssetBytes)} · 文件索引 ${formatBytes(state.fileAssetBytes)}。使用云端模型时，发送的消息、图片和启用的上下文会按所选服务商接口规则传输。"
+            }
             InfoCard(
                 title = "本地数据",
                 primary = "聊天 ${state.chatSessionCount} 条 · 图片 ${state.imageAssetCount} 张 · 文件 ${state.fileAssetCount} 个",
-                secondary = "图片占用 ${formatBytes(state.imageAssetBytes)} · 文件索引 ${formatBytes(state.fileAssetBytes)}。使用云端模型时，发送的消息、图片和启用的上下文会按所选服务商接口规则传输。"
+                secondary = localDataText
             )
         }
         item {
@@ -263,6 +277,9 @@ private fun PersistentPrefixCacheCard(
     onEnabledChanged: (Boolean) -> Unit,
     onRequestClear: () -> Unit
 ) {
+    val usageText = remember(entryCount, bytes) {
+        "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}"
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -289,7 +306,7 @@ private fun PersistentPrefixCacheCard(
                 )
             }
             Text(
-                "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}",
+                usageText,
                 style = MaterialTheme.typography.bodyMedium
             )
             Text(
@@ -386,6 +403,11 @@ fun ExperimentsScreen(
     state: SettingsUiState,
     modifier: Modifier = Modifier
 ) {
+    // W9-1: the vision-readiness flag is a scan over the whole native stats JSON. Cache it by the
+    // full JSON value so recompositions that only change unrelated settings do not rescan it.
+    val visionReady = remember(state.nativeStatsJson) {
+        state.nativeStatsJson.contains("\"visionReady\":true")
+    }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -404,7 +426,7 @@ fun ExperimentsScreen(
         item {
             InfoCard(
                 title = "本地多模态",
-                primary = if (state.nativeStatsJson.contains("\"visionReady\":true")) "视觉 runner 已就绪" else "需要 MNN 多模态包或 GGUF+mmproj",
+                primary = if (visionReady) "视觉 runner 已就绪" else "需要 MNN 多模态包或 GGUF+mmproj",
                 secondary = "不是所有文本模型都能识图；MNN 需要完整多模态包，GGUF 需要匹配的视觉投影器。"
             )
         }
@@ -423,4 +445,23 @@ fun ExperimentsScreen(
             )
         }
     }
+}
+
+/**
+ * W9-1: presentation for one runtime metrics row. Formatting and KB/MB conversion are evaluated
+ * once per row value inside `remember`, not on every recomposition of the logs page.
+ */
+private class RuntimeLogRowPresentation(
+    val title: String,
+    val primary: String,
+    val secondary: String
+)
+
+private fun runtimeLogRowPresentation(log: RuntimeMetrics): RuntimeLogRowPresentation {
+    val rssKb = log.processRssKb.takeIf { it > 0L }
+    return RuntimeLogRowPresentation(
+        title = shortName(log.model).ifBlank { "运行记录" },
+        primary = "速度 ${"%.2f".format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms",
+        secondary = "输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}"
+    )
 }

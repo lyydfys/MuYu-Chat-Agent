@@ -22,6 +22,19 @@ android {
     }
 }
 
+// G00/Q01: Compose compiler reports + metrics for stability/jank triage (diagnostics only; the
+// emitted runtime behavior is unchanged). `-Pmca.composeCompilerReports=false` skips generating
+// them for a build that only needs an artifact; the default keeps them enabled.
+val composeCompilerReportsEnabled = providers.gradleProperty("mca.composeCompilerReports")
+    .map { value -> !value.trim().equals("false", ignoreCase = true) }
+    .orElse(true)
+composeCompiler {
+    if (composeCompilerReportsEnabled.get()) {
+        reportsDestination = layout.buildDirectory.dir("compose-compiler/reports")
+        metricsDestination = layout.buildDirectory.dir("compose-compiler/metrics")
+    }
+}
+
 dependencies {
     implementation(project(":core:designsystem"))
     implementation(project(":core:engine"))

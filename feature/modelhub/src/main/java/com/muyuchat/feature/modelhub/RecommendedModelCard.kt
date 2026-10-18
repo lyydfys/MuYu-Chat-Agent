@@ -26,6 +26,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -89,12 +90,16 @@ internal fun RecommendedModelCard(
     onVerifyLocalChatModel: (ModelManifest) -> Unit = {}
 ) {
     val hasModelPage = !model.repoId.startsWith("pending/", ignoreCase = true)
-    val downloadAccess = recommendationDownloadAccess(
-        model,
-        deviceChipsetCode,
-        deviceIsSnapdragon,
-        deviceSupportedAbis
-    )
+    // W9: eligibility and installed-model lookups scan device/list data. Cache them per real input
+    // so a download-progress recomposition does not redo the scan for every visible card.
+    val downloadAccess = remember(model, deviceChipsetCode, deviceIsSnapdragon, deviceSupportedAbis) {
+        recommendationDownloadAccess(
+            model,
+            deviceChipsetCode,
+            deviceIsSnapdragon,
+            deviceSupportedAbis
+        )
+    }
     val fitLabel = deviceFitLabel(model, deviceTotalRamBytes, deviceAvailableRamBytes)
     val hardwareLine = recommendationHardwareLine(model, fitLabel)
     val qnnCompatibilityLine = recommendationQnnCompatibilityLine(model, deviceChipsetCode)
@@ -103,10 +108,14 @@ internal fun RecommendedModelCard(
     val imageSizeLine = recommendationImageSizeLine(model)
     var detailsExpanded by rememberSaveable(model.id) { mutableStateOf(false) }
     val downloadSize = recommendationDownloadSizeBytes(model)
-    val localImageModel = localImageModels.firstOrNull { local ->
-        local.recommendationId == model.id || local.id == model.imageEngineBundle?.id
+    val localImageModel = remember(model, localImageModels) {
+        localImageModels.firstOrNull { local ->
+            local.recommendationId == model.id || local.id == model.imageEngineBundle?.id
+        }
     }
-    val localChatModel = recommendedLocalChatModel(model, localModels)
+    val localChatModel = remember(model, localModels) {
+        recommendedLocalChatModel(model, localModels)
+    }
     val localImageVerificationPassed = localImageModel != null && localImageModel.verificationStatus in setOf(
         "PASSED", "MNN_SMOKE_PASSED", "QNN_IMAGE_SMOKE_PASSED", "QNN_SMOKE_PASSED", "QNN_PIPELINE_PROBE_PASSED"
     )

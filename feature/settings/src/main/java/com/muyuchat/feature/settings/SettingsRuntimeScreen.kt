@@ -67,6 +67,22 @@ fun RuntimeScreen(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
+    // P08/W9-1: the native stats JSON is parsed once per distinct full value. The previous
+    // composition-time JSONObject(...) ran on every system-load tick (1 Hz) and on every
+    // download-progress recomposition, which is exactly the parse-on-recompose cost this slice
+    // removes. The key is the complete JSON value, never the loaded model id.
+    val nativeStats = remember(state.nativeStatsJson) {
+        runtimeNativeStatsPresentation(state.nativeStatsJson)
+    }
+    // W9-1: the translation status is a small string, but its keyword scan belongs to a mapping
+    // step keyed by the status value, not to every recomposition of the scrollable runtime list.
+    val offlineStatus = remember(offlineTranslationStatus) {
+        RuntimeOfflineTranslationStatus(
+            needsAttention = offlineTranslationStatus.contains("失败") ||
+                offlineTranslationStatus.contains("错误"),
+            downloadFailed = offlineTranslationStatus.contains("下载失败")
+        )
+    }
     var systemLoad by remember { mutableStateOf(SystemLoadSnapshot()) }
     LaunchedEffect(lifecycleOwner) {
         val reader = SystemLoadReader(context.applicationContext)
@@ -91,7 +107,7 @@ fun RuntimeScreen(
                 Text(
                     offlineTranslationStatus,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (offlineTranslationStatus.contains("失败") || offlineTranslationStatus.contains("错误")) {
+                    color = if (offlineStatus.needsAttention) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -115,7 +131,7 @@ fun RuntimeScreen(
                         ) {
                             Icon(if (offlineTranslationDownloading) Icons.Default.Close else Icons.Default.Download, contentDescription = null)
                             Text(
-                                if (offlineTranslationDownloading) "取消下载" else if (offlineTranslationStatus.contains("下载失败")) "重试下载" else "下载",
+                                if (offlineTranslationDownloading) "取消下载" else if (offlineStatus.downloadFailed) "重试下载" else "下载",
                                 modifier = Modifier.padding(start = 6.dp)
                             )
                         }
@@ -149,44 +165,43 @@ fun RuntimeScreen(
             )
         }
         item {
+            val modelText = remember(state.stats.modelPath, state.stats.loaded, nativeStats) {
+                RuntimeModelText(
+                    name = state.stats.modelPath?.substringAfterLast('/') ?: "未加载",
+                    details = if (state.stats.loaded) {
+                        buildString {
+                            append("模型已加载。")
+                            append(nativeStats.componentSummary)
+                        }
+                    } else {
+                        "请先在模型页加载模型。"
+                    }
+                )
+            }
             InfoCard(
                 "当前模型",
-                state.stats.modelPath?.substringAfterLast('/') ?: "未加载",
-                if (state.stats.loaded) buildString {
-                    append("模型已加载。")
-                    val components = runCatching {
-                        JSONObject(state.nativeStatsJson).optJSONObject("componentBackends")
-                    }.getOrNull()
-                    for ((componentId, label) in listOf("llm" to "LLM", "vision" to "视觉", "audio" to "音频")) {
-                        val component = components?.optJSONObject(componentId) ?: continue
-                        val selected = (component.opt("selected") as? String)
-                            ?.takeIf { it.isNotBlank() } ?: when (component.optString("selectionSource")) {
-                                "sdk_model_default" -> "SDK/模型默认"
-                                "not_submitted" -> "未提交"
-                                else -> "未知"
-                            }
-                        val actual = (component.opt("actual") as? String)
-                            ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) } ?: "未知"
-                        append('\n').append(label).append("：选择 ").append(selected)
-                            .append("；实际 ").append(actual)
-                    }
-                } else "请先在模型页加载模型。"
+                modelText.name,
+                modelText.details
             )
         }
         item {
-            InfoCard(
-                "性能",
-                "首 token ${state.stats.ttftMs} ms · 速度 ${"%.2f".format(state.stats.decodeTps)} token/s",
-                "已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。"
-            )
+            val performanceText = remember(state.stats) {
+                RuntimePerformanceText(
+                    primary = "首 token ${state.stats.ttftMs} ms · 速度 ${"%.2f".format(state.stats.decodeTps)} token/s",
+                    secondary = "已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。"
+                )
+            }
+            InfoCard("性能", performanceText.primary, performanceText.secondary)
         }
         item {
-            val rssKb = state.stats.processRssKb.takeIf { it > 0L }
-            InfoCard(
-                "内存",
-                "RSS ${formatKb(rssKb ?: state.stats.nativePssKb)} · PSS ${formatKb(state.stats.nativePssKb)}",
-                "Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}"
-            )
+            val memoryText = remember(state.stats) {
+                val rssKb = state.stats.processRssKb.takeIf { it > 0L }
+                RuntimeMemoryText(
+                    primary = "RSS ${formatKb(rssKb ?: state.stats.nativePssKb)} · PSS ${formatKb(state.stats.nativePssKb)}",
+                    secondary = "Native 堆 ${formatKb(state.stats.nativeHeapKb)} · Java 堆 ${formatKb(state.stats.javaHeapKb)} · 系统可用 ${formatKb(state.stats.availMemKb)} · 运行预算 ${formatKb(state.stats.modelMemoryBudgetKb)}"
+                )
+            }
+            InfoCard("内存", memoryText.primary, memoryText.secondary)
         }
         item {
             val cpu = systemLoad.systemCpuPercent?.let { "$it%" } ?: "不可用"
@@ -197,11 +212,8 @@ fun RuntimeScreen(
                 "不可用"
             }
             val gpu = systemLoad.gpuPercent?.let { "$it%" } ?: "不可用"
-            val npuExecutionProven = runCatching {
-                JSONObject(state.nativeStatsJson).optBoolean("npuExecutionProven", false)
-            }.getOrDefault(false)
             val npu = systemLoad.npuPercent?.let { "$it%" } ?:
-                if (npuExecutionProven) "已执行（无公开占用率）" else "不可用"
+                if (nativeStats.npuExecutionProven) "已执行（无公开占用率）" else "不可用"
             InfoCard(
                 "实时负载",
                 "CPU $cpu · 进程 $processCpu · 内存 $memory",
@@ -210,13 +222,120 @@ fun RuntimeScreen(
         }
         item {
             val error = state.stats.lastError
+            val diagnosticText = remember(error) {
+                RuntimeDiagnosticText(
+                    title = if (error.isNullOrBlank()) "诊断" else "最近问题",
+                    primary = if (error.isNullOrBlank()) "运行正常" else friendlyError(error),
+                    secondary = if (error.isNullOrBlank()) {
+                        "需要排错时，可到“日志与接口”导出完整诊断。"
+                    } else {
+                        "完整信息已保留在诊断报告中。"
+                    }
+                )
+            }
             InfoCard(
-                title = if (error.isNullOrBlank()) "诊断" else "最近问题",
-                primary = if (error.isNullOrBlank()) "运行正常" else friendlyError(error),
-                secondary = if (error.isNullOrBlank()) "需要排错时，可到“日志与接口”导出完整诊断。" else "完整信息已保留在诊断报告中。"
+                title = diagnosticText.title,
+                primary = diagnosticText.primary,
+                secondary = diagnosticText.secondary
             )
         }
     }
+}
+
+private class RuntimeOfflineTranslationStatus(
+    val needsAttention: Boolean,
+    val downloadFailed: Boolean
+)
+
+/** Presentation-only projection of the runtime stats cards; computed once per stats value. */
+private class RuntimeModelText(val name: String, val details: String)
+
+private class RuntimePerformanceText(val primary: String, val secondary: String)
+
+private class RuntimeMemoryText(val primary: String, val secondary: String)
+
+private class RuntimeDiagnosticText(val title: String, val primary: String, val secondary: String)
+
+/**
+ * W9-1/P08: parse the native runtime stats JSON once per distinct full value.
+ *
+ * This deliberately keys off the whole JSON string (not the loaded model id): the renderer can
+ * publish new component backend selections without the model id changing. Runs outside composition
+ * in a `remember`, so the 1 Hz system-load sampler and download-progress updates no longer trigger
+ * a JSON parse.
+ */
+private class RuntimeNativeStatsPresentation(
+    val componentSummary: String,
+    val npuExecutionProven: Boolean
+)
+
+private fun runtimeNativeStatsPresentation(json: String): RuntimeNativeStatsPresentation {
+    val root = runCatching { JSONObject(json) }.getOrNull()
+    val components = root?.optJSONObject("componentBackends")
+    val componentSummary = buildString {
+        for ((componentId, label) in listOf("llm" to "LLM", "vision" to "视觉", "audio" to "音频")) {
+            val component = components?.optJSONObject(componentId) ?: continue
+            val selected = (component.opt("selected") as? String)
+                ?.takeIf { it.isNotBlank() } ?: when (component.optString("selectionSource")) {
+                "sdk_model_default" -> "SDK/模型默认"
+                "not_submitted" -> "未提交"
+                else -> "未知"
+            }
+            val actual = (component.opt("actual") as? String)
+                ?.takeIf { it.isNotBlank() && !it.equals("unknown", ignoreCase = true) } ?: "未知"
+            append('\n').append(label).append("：选择 ").append(selected)
+                .append("；实际 ").append(actual)
+        }
+    }
+    return RuntimeNativeStatsPresentation(
+        componentSummary = componentSummary,
+        npuExecutionProven = root?.optBoolean("npuExecutionProven", false) ?: false
+    )
+}
+
+private class AppUpdateStatusPresentation(
+    val checking: Boolean,
+    val downloading: Boolean,
+    val verifying: Boolean,
+    val readyToInstall: Boolean,
+    val hasUpdate: Boolean,
+    val statusLabel: String,
+    val statusIsError: Boolean
+)
+
+/**
+ * W9-1: the update card used to re-scan the status/notes strings on every recomposition
+ * (download progress can update several times per second). Map it once per status value instead.
+ */
+private fun appUpdateStatusPresentation(status: String, canDownload: Boolean): AppUpdateStatusPresentation {
+    val normalizedStatus = status.trim().uppercase()
+    val checking = normalizedStatus == "CHECKING" || normalizedStatus.contains("检查")
+    val downloading = normalizedStatus == "DOWNLOADING" || normalizedStatus.contains("下载")
+    val verifying = normalizedStatus == "VERIFYING" || normalizedStatus.contains("校验")
+    val readyToInstall = normalizedStatus == "READY_TO_INSTALL" ||
+        normalizedStatus == "READY" ||
+        normalizedStatus.contains("可安装")
+    val updateAvailable = normalizedStatus == "AVAILABLE" || normalizedStatus.contains("可更新")
+    val retryableDownload = canDownload && normalizedStatus == "ERROR"
+    return AppUpdateStatusPresentation(
+        checking = checking,
+        downloading = downloading,
+        verifying = verifying,
+        readyToInstall = readyToInstall,
+        hasUpdate = (updateAvailable && canDownload) || retryableDownload || downloading || verifying || readyToInstall,
+        statusLabel = when (normalizedStatus) {
+            "IDLE" -> "未检查"
+            "CHECKING" -> "检查中"
+            "UP_TO_DATE" -> "已是最新稳定版"
+            "AVAILABLE" -> "有可用更新"
+            "DOWNLOADING" -> "下载中"
+            "VERIFYING" -> "校验中"
+            "READY_TO_INSTALL" -> "可安装"
+            "ERROR" -> "失败"
+            else -> status.ifBlank { "未检查" }
+        },
+        statusIsError = normalizedStatus == "ERROR" || normalizedStatus.contains("失败")
+    )
 }
 
 @Composable
@@ -228,29 +347,19 @@ private fun AppUpdateCard(
     onOpenRelease: () -> Unit,
     onAutoCheckChanged: (Boolean) -> Unit
 ) {
-    val normalizedStatus = state.status.trim().uppercase()
-    val checking = normalizedStatus == "CHECKING" || normalizedStatus.contains("检查")
-    val downloading = normalizedStatus == "DOWNLOADING" || normalizedStatus.contains("下载")
-    val verifying = normalizedStatus == "VERIFYING" || normalizedStatus.contains("校验")
-    val readyToInstall = normalizedStatus == "READY_TO_INSTALL" ||
-        normalizedStatus == "READY" ||
-        normalizedStatus.contains("可安装")
-    val updateAvailable = normalizedStatus == "AVAILABLE" || normalizedStatus.contains("可更新")
-    val retryableDownload = state.canDownload && normalizedStatus == "ERROR"
-    val hasUpdate = (updateAvailable && state.canDownload) || retryableDownload || downloading || verifying || readyToInstall
-    val statusLabel = when (normalizedStatus) {
-        "IDLE" -> "未检查"
-        "CHECKING" -> "检查中"
-        "UP_TO_DATE" -> "已是最新稳定版"
-        "AVAILABLE" -> "有可用更新"
-        "DOWNLOADING" -> "下载中"
-        "VERIFYING" -> "校验中"
-        "READY_TO_INSTALL" -> "可安装"
-        "ERROR" -> "失败"
-        else -> state.status.ifBlank { "未检查" }
+    val presentation = remember(state.status, state.canDownload) {
+        appUpdateStatusPresentation(state.status, state.canDownload)
     }
-    val notes = state.releaseNotes.trim().let { value ->
-        if (value.length > 1200) value.take(1197).trimEnd() + "..." else value
+    val statusLabel = presentation.statusLabel
+    val checking = presentation.checking
+    val downloading = presentation.downloading
+    val verifying = presentation.verifying
+    val readyToInstall = presentation.readyToInstall
+    val hasUpdate = presentation.hasUpdate
+    val notes = remember(state.releaseNotes) {
+        state.releaseNotes.trim().let { value ->
+            if (value.length > 1200) value.take(1197).trimEnd() + "..." else value
+        }
     }
 
     Card(
@@ -319,7 +428,7 @@ private fun AppUpdateCard(
                 Text(
                     message,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (normalizedStatus == "ERROR" || normalizedStatus.contains("失败")) {
+                    color = if (presentation.statusIsError) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant

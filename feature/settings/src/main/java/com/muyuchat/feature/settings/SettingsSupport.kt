@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -94,6 +95,9 @@ private fun ExpandableSettingsHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // Accessibility: the two-line header makes this row a full-width click target; keep it
+            // at least 44dp tall without changing typography or horizontal density.
+            .heightIn(min = 44.dp)
             .clickable(onClick = onClick),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically

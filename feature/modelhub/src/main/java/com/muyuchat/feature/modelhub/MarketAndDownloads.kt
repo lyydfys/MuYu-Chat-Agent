@@ -45,6 +45,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -127,14 +128,18 @@ internal fun RemoteFilesSection(
     modifier: Modifier
 ) {
     var fileFilter by rememberSaveable { mutableStateOf("") }
-    val visibleFiles = filterRemoteModelFiles(state.remoteFiles, fileFilter)
+    // W9: filtering the remote file list is a per-item string scan. It only depends on the file
+    // list and the filter, so a download-progress recomposition must not redo it.
+    val visibleFiles = remember(state.remoteFiles, fileFilter) {
+        filterRemoteModelFiles(state.remoteFiles, fileFilter)
+    }
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(state.importTasks, key = { "import-${it.id}" }) { task ->
             ModelImportProgressCard(task, onPauseImport, onResumeImport)
         }
         item {
             Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
-                Icon(Icons.Default.UploadFile, contentDescription = "导入本地推理引擎", modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("导入本地推理引擎")
             }
@@ -197,23 +202,29 @@ internal fun DownloadProgressPanel(
     val total = state.downloadTotalBytes
     val downloaded = state.downloadedBytes
     val progress = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+    // The animation is read only inside the draw-phase progress lambda below, so the 350 ms tween
+    // never drives layout or composition; only the target float changes per download tick.
     val animatedProgress by animateFloatAsState(
         targetValue = progress,
         animationSpec = tween(durationMillis = 350),
         label = "downloadProgress"
     )
-    val percentText = when (state.downloadStatus) {
-        DownloadStatus.FAILED -> "失败"
-        DownloadStatus.PAUSED -> "已暂停"
-        DownloadStatus.DONE -> "完成"
-        else -> when (state.downloadPhase) {
-            ModelHubDownloadPhase.INSTALLING,
-            ModelHubDownloadPhase.INTEGRITY_CHECK,
-            ModelHubDownloadPhase.EXECUTION_CHECK -> state.downloadPhase?.label ?: "处理中"
-            else -> if (total > 0L) "%.1f%%".format(progress * 100f) else "下载中"
+    // W9: status/percentage/size formatting is mapped from its real inputs, not rebuilt on every
+    // recomposition caused by unrelated model-hub state (busy, selection, status text).
+    val percentText = remember(state.downloadStatus, state.downloadPhase, progress, total) {
+        when (state.downloadStatus) {
+            DownloadStatus.FAILED -> "失败"
+            DownloadStatus.PAUSED -> "已暂停"
+            DownloadStatus.DONE -> "完成"
+            else -> when (state.downloadPhase) {
+                ModelHubDownloadPhase.INSTALLING,
+                ModelHubDownloadPhase.INTEGRITY_CHECK,
+                ModelHubDownloadPhase.EXECUTION_CHECK -> state.downloadPhase?.label ?: "处理中"
+                else -> if (total > 0L) "%.1f%%".format(progress * 100f) else "下载中"
+            }
         }
     }
-    val totalText = if (total > 0L) formatBytes(total) else "未知大小"
+    val totalText = remember(total) { if (total > 0L) formatBytes(total) else "未知大小" }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
@@ -241,14 +252,15 @@ internal fun DownloadProgressPanel(
                     TextButton(
                         onClick = onPauseDownloads,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp)
+                        // W9 accessibility: keep the dense look while guaranteeing a >= 44dp target.
+                        modifier = Modifier.heightIn(min = 44.dp)
                     ) { Text("暂停", style = MaterialTheme.typography.labelMedium) }
                 }
                 if (state.downloadStatus == DownloadStatus.PAUSED || state.downloadStatus == DownloadStatus.FAILED) {
                     TextButton(
                         onClick = onResumeDownloads,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-                        modifier = Modifier.height(28.dp)
+                        modifier = Modifier.heightIn(min = 44.dp)
                     ) { Text(if (state.downloadStatus == DownloadStatus.FAILED) "重试" else "继续",
                         style = MaterialTheme.typography.labelMedium) }
                 }
@@ -273,13 +285,18 @@ internal fun DownloadProgressPanel(
             } else {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth().height(2.dp))
             }
-            val transferSummary = buildString {
-                if (state.downloadSpeedBytesPerSecond > 0L) {
-                    append(formatDownloadRate(state.downloadSpeedBytesPerSecond))
-                }
-                state.downloadRemainingSeconds?.let { seconds ->
-                    if (isNotEmpty()) append(" · ")
-                    append("剩余约 ").append(formatDuration(seconds))
+            val transferSummary = remember(
+                state.downloadSpeedBytesPerSecond,
+                state.downloadRemainingSeconds
+            ) {
+                buildString {
+                    if (state.downloadSpeedBytesPerSecond > 0L) {
+                        append(formatDownloadRate(state.downloadSpeedBytesPerSecond))
+                    }
+                    state.downloadRemainingSeconds?.let { seconds ->
+                        if (isNotEmpty()) append(" · ")
+                        append("剩余约 ").append(formatDuration(seconds))
+                    }
                 }
             }
             if (transferSummary.isNotEmpty() && state.downloadStatus == DownloadStatus.RUNNING) {
@@ -292,9 +309,12 @@ internal fun DownloadProgressPanel(
                 )
             }
             if (state.downloadStatus == DownloadStatus.FAILED) {
-                Text(
+                val failureText = remember(state.downloadFailureSource, state.statusMessage) {
                     listOfNotNull(state.downloadFailureSource?.label, state.statusMessage)
-                        .joinToString("：").ifBlank { "下载失败，请查看详情后重试。" },
+                        .joinToString("：").ifBlank { "下载失败，请查看详情后重试。" }
+                }
+                Text(
+                    failureText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.error,
                     maxLines = 1,
@@ -315,7 +335,7 @@ internal fun DownloadDetailsDialog(
     val context = LocalContext.current
     val total = state.downloadTotalBytes
     val downloaded = state.downloadedBytes
-    val totalText = if (total > 0L) formatBytes(total) else "未知大小"
+    val totalText = remember(total) { if (total > 0L) formatBytes(total) else "未知大小" }
     val stageLabel = if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
         state.downloadPhase?.label ?: state.downloadStatus.downloadStatusLabel()
     } else {
@@ -453,11 +473,13 @@ private fun HubModelCard(
     CardBox {
         Text(shortName(model.displayName), fontWeight = FontWeight.Bold)
         Text("${formatBytes(model.fileSizeBytes)} · 下载 ${model.downloads} · 收藏 ${model.likes} · ${model.license ?: "未知许可"}", style = MaterialTheme.typography.bodySmall)
-        val tags = model.tags.filter {
-            it.contains("gguf", ignoreCase = true) ||
-                it.contains("mnn", ignoreCase = true) ||
-                it.startsWith("task:")
-        }.take(3)
+        val tags = remember(model.tags) {
+            model.tags.filter {
+                it.contains("gguf", ignoreCase = true) ||
+                    it.contains("mnn", ignoreCase = true) ||
+                    it.startsWith("task:")
+            }.take(3)
+        }
         if (tags.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 tags.forEach { tag -> StaticStatusTag(tag.substringAfter(':')) }

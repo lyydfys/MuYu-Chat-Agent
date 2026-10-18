@@ -267,6 +267,19 @@ fun AgentScreen(
     val recommendation = state.recommendation
     val tuningPlan = recommendation?.tuningPlan
     val benchmark = state.benchmark
+    // W9: recommendation/candidate copy and row text are derived once per recommendation value, so
+    // a runtime/progress state update does not re-format every visible card.
+    val recommendationUi = remember(recommendation) {
+        recommendation?.let(::recommendationCardUi)
+    }
+    val candidateUis = remember(recommendation) {
+        // Distinct by model id: the row key must be unique for LazyColumn, and the advisor's
+        // candidate source can merge local and remote profiles.
+        recommendation?.candidates?.take(5)
+            ?.map(::candidateCardUi)
+            ?.distinctBy { it.modelId }
+            .orEmpty()
+    }
     val presentations = remember(
         mainContentActive,
         state.benchmarkHistory,
@@ -353,22 +366,38 @@ fun AgentScreen(
             }
 
             item {
+                // Stable callback instance: keeps SmartDebugCard skippable while runtime progress
+                // updates recompose the page.
+                val onAgentInfoClick = remember(
+                    benchmark == null,
+                    recommendation == null,
+                    onAgentInfo
+                ) {
+                    {
+                        onAgentInfo()
+                        infoDialog = if (benchmark == null || recommendation == null) {
+                            AgentInfoDialog.GUIDE
+                        } else {
+                            AgentInfoDialog.RESULT
+                        }
+                    }
+                }
                 SmartDebugCard(
-                    state = state,
+                    state = SmartDebugCardUi(
+                        preference = state.preference,
+                        isBusy = state.isBusy,
+                        loadedModelName = state.loadedModelName,
+                        hasBenchmark = benchmark != null,
+                        hasRecommendation = recommendation != null,
+                        localStabilitySmokeSummary = state.localStabilitySmokeSummary
+                    ),
                     onPreferenceChange = onPreferenceChange,
                     onQuickDebug = onQuickDebug,
                     onStandardDebug = onStandardDebug,
                     onDeepDebug = onDeepDebug,
                     onPowerDebug = onPowerDebug,
                     onStabilitySmoke = onStabilitySmoke,
-                    onAgentInfo = {
-                        onAgentInfo()
-                        infoDialog = if (state.benchmark == null || state.recommendation == null) {
-                            AgentInfoDialog.GUIDE
-                        } else {
-                            AgentInfoDialog.RESULT
-                        }
-                    }
+                    onAgentInfo = onAgentInfoClick
                 )
             }
 
@@ -393,10 +422,10 @@ fun AgentScreen(
                 )
             }
 
-            state.recommendation?.let { recommendation ->
+            recommendationUi?.let { ui ->
                 item {
                     RecommendationCard(
-                        recommendation = recommendation,
+                        ui = ui,
                         onApplyRecommendation = onApplyRecommendation
                     )
                 }
@@ -409,12 +438,10 @@ fun AgentScreen(
                 }
             }
 
-            state.recommendation?.let { recommendation ->
-                if (recommendation.candidates.isNotEmpty()) {
-                    item { SectionTitle("候选模型") }
-                    items(recommendation.candidates.take(5)) { candidate ->
-                        CandidateCard(candidate)
-                    }
+            if (candidateUis.isNotEmpty()) {
+                item { SectionTitle("候选模型") }
+                items(candidateUis, key = { it.modelId }) { candidate ->
+                    CandidateCard(candidate)
                 }
             }
 
@@ -538,7 +565,7 @@ private fun AgentHeader(
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
                     Icon(
                         Icons.Default.AutoFixHigh,
-                        contentDescription = "智能调参",
+                        contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
                             .padding(8.dp)
@@ -552,18 +579,18 @@ private fun AgentHeader(
                 }
             }
             TextButton(onClick = onScan, enabled = !isBusy) {
-                Icon(Icons.Default.Refresh, contentDescription = "体检", modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("体检")
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = onScan, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Default.AutoFixHigh, contentDescription = "体检")
+                Icon(Icons.Default.AutoFixHigh, contentDescription = null)
                 Text("体检", modifier = Modifier.padding(start = 6.dp))
             }
             OutlinedButton(onClick = onBenchmark, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Default.Speed, contentDescription = "测速")
+                Icon(Icons.Default.Speed, contentDescription = null)
                 Text("测速", modifier = Modifier.padding(start = 6.dp))
             }
         }

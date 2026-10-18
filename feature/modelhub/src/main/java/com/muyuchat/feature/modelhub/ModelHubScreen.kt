@@ -30,6 +30,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -58,6 +59,12 @@ internal data class ModelHubHeaderPresentation(
     val canDismissDownloadSummary: Boolean,
     val statusMessage: String?,
     val statusIsError: Boolean
+)
+
+/** Status copy plus its severity, derived once per status value instead of per recomposition. */
+internal data class ModelHubStatusPresentation(
+    val message: String?,
+    val isError: Boolean
 )
 
 private val MODEL_HUB_ERROR_STATUS_MARKERS = listOf(
@@ -90,7 +97,10 @@ private val MODEL_HUB_ERROR_STATUS_MARKERS = listOf(
  */
 internal fun modelHubHeaderPresentation(
     state: ModelHubUiState,
-    dismissedCompletedDownloadKey: String? = null
+    dismissedCompletedDownloadKey: String? = null,
+    // W9: callers that recompose on every download tick pass a cached status presentation so the
+    // trim/lowercase/marker scan below runs once per status value instead of per frame.
+    statusPresentation: ModelHubStatusPresentation = modelHubStatusPresentation(state.statusMessage)
 ): ModelHubHeaderPresentation {
     val downloadKey = state.downloadTaskId ?: state.downloadFileName
     val downloadCompleted = state.downloadStatus == DownloadStatus.DONE
@@ -98,7 +108,6 @@ internal fun modelHubHeaderPresentation(
         downloadKey != null &&
         downloadKey == dismissedCompletedDownloadKey
     val showDownloadSummary = state.downloadFileName != null && !summaryDismissed
-    val statusMessage = state.statusMessage?.trim()?.takeIf { it.isNotEmpty() }
 
     return ModelHubHeaderPresentation(
         downloadSummary = if (showDownloadSummary) {
@@ -108,10 +117,16 @@ internal fun modelHubHeaderPresentation(
         },
         downloadSummaryKey = downloadKey,
         canDismissDownloadSummary = showDownloadSummary && downloadCompleted && downloadKey != null,
-        statusMessage = statusMessage,
-        statusIsError = statusMessage?.let(::modelHubStatusMessageIsError) == true
+        statusMessage = statusPresentation.message,
+        statusIsError = statusPresentation.isError
     )
 }
+
+internal fun modelHubStatusPresentation(message: String?): ModelHubStatusPresentation =
+    ModelHubStatusPresentation(
+        message = message?.trim()?.takeIf { it.isNotEmpty() },
+        isError = message?.let(::modelHubStatusMessageIsError) == true
+    )
 
 internal fun modelHubStatusMessageIsError(message: String): Boolean {
     val normalized = message.trim().lowercase()
@@ -356,7 +371,14 @@ private fun ModelHubHeader(
         }
 
         var dismissedCompletedDownloadKey by rememberSaveable { mutableStateOf<String?>(null) }
-        val presentation = modelHubHeaderPresentation(state, dismissedCompletedDownloadKey)
+        val statusPresentation = remember(state.statusMessage) {
+            modelHubStatusPresentation(state.statusMessage)
+        }
+        val presentation = modelHubHeaderPresentation(
+            state = state,
+            dismissedCompletedDownloadKey = dismissedCompletedDownloadKey,
+            statusPresentation = statusPresentation
+        )
 
         presentation.downloadSummary?.let { summary ->
             var downloadDetailsOpen by rememberSaveable(

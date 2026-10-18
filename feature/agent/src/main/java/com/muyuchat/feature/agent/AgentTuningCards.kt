@@ -42,9 +42,22 @@ import com.muyuchat.core.advisor.AgentRecommendation
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 
+/**
+ * W9: stable projection for [SmartDebugCard]. Only the six values the card actually reads are
+ * passed, so runtime/progress updates that leave them unchanged can skip the card entirely.
+ */
+internal data class SmartDebugCardUi(
+    val preference: UserPreference,
+    val isBusy: Boolean,
+    val loadedModelName: String?,
+    val hasBenchmark: Boolean,
+    val hasRecommendation: Boolean,
+    val localStabilitySmokeSummary: String?
+)
+
 @Composable
 internal fun SmartDebugCard(
-    state: AgentUiState,
+    state: SmartDebugCardUi,
     onPreferenceChange: (UserPreference) -> Unit,
     onQuickDebug: () -> Unit,
     onStandardDebug: () -> Unit,
@@ -66,7 +79,7 @@ internal fun SmartDebugCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Science, contentDescription = "智能调试", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Default.Science, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text("智能调试", fontWeight = FontWeight.Bold)
                 }
                 Surface(
@@ -152,7 +165,7 @@ internal fun SmartDebugCard(
                 }
             }
             TextButton(onClick = onAgentInfo, modifier = Modifier.fillMaxWidth()) {
-                Text(if (state.benchmark == null || state.recommendation == null) "调参说明" else "调试解释")
+                Text(if (!state.hasBenchmark || !state.hasRecommendation) "调参说明" else "调试解释")
             }
             OutlinedButton(
                 onClick = { onStabilitySmoke?.invoke() },
@@ -182,7 +195,7 @@ internal fun CurrentModelReportCard(
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.Bolt, contentDescription = "体检", tint = MaterialTheme.colorScheme.primary)
+                Icon(Icons.Default.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 Text("当前模型体检", fontWeight = FontWeight.Bold)
             }
             Text(shortName(loadedModelName) ?: "尚未加载模型", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -472,9 +485,47 @@ private fun RuntimeStatusLine(label: String, value: String) {
     }
 }
 
+/** W9: stable copy for the recommendation card so runtime updates do not rebuild it. */
+internal data class RecommendationCardUi(
+    val riskLabel: String,
+    val explanation: String,
+    val contextText: String,
+    val threadsText: String,
+    val replyText: String,
+    val reason: String
+)
+
+internal fun recommendationCardUi(recommendation: AgentRecommendation): RecommendationCardUi =
+    RecommendationCardUi(
+        riskLabel = recommendation.risk.name,
+        explanation = recommendation.explanation,
+        contextText = "上下文 ${recommendation.tuningPlan.nCtx}",
+        threadsText = "线程 ${recommendation.tuningPlan.nThreads}",
+        replyText = "回复 ${recommendation.tuningPlan.nPredict}",
+        reason = recommendation.tuningPlan.reason
+    )
+
+/** W9: stable copy for one candidate row; [modelId] doubles as the list's stable key. */
+internal data class CandidateCardUi(
+    val modelId: String,
+    val title: String,
+    val specification: String,
+    val expectation: String,
+    val reason: String
+)
+
+internal fun candidateCardUi(candidate: AgentCandidate): CandidateCardUi =
+    CandidateCardUi(
+        modelId = candidate.model.id,
+        title = shortName(candidate.model.displayName) ?: "候选模型",
+        specification = "${sourceText(candidate.model.source)} · ${candidate.model.parametersB ?: "?"}B · ${candidate.model.quant ?: "未知量化"} · 匹配 ${candidate.score}",
+        expectation = "预计 ${candidate.expectedDecodeTpsRange} · ${candidate.memoryRisk}",
+        reason = candidate.reason
+    )
+
 @Composable
 internal fun RecommendationCard(
-    recommendation: AgentRecommendation,
+    ui: RecommendationCardUi,
     onApplyRecommendation: () -> Unit
 ) {
     Card(
@@ -490,19 +541,19 @@ internal fun RecommendationCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Tune, contentDescription = "推荐", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Default.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text("推荐参数", fontWeight = FontWeight.Bold)
                 }
-                RiskBadge(recommendation.risk.name)
+                RiskBadge(ui.riskLabel)
             }
-            Text(recommendation.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(ui.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StaticStatusTag("上下文 ${recommendation.tuningPlan.nCtx}")
-                StaticStatusTag("线程 ${recommendation.tuningPlan.nThreads}")
-                StaticStatusTag("回复 ${recommendation.tuningPlan.nPredict}")
+                StaticStatusTag(ui.contextText)
+                StaticStatusTag(ui.threadsText)
+                StaticStatusTag(ui.replyText)
             }
-            if (recommendation.tuningPlan.reason.isNotBlank()) {
-                Text(recommendation.tuningPlan.reason, style = MaterialTheme.typography.bodySmall)
+            if (ui.reason.isNotBlank()) {
+                Text(ui.reason, style = MaterialTheme.typography.bodySmall)
             }
             Button(
                 onClick = onApplyRecommendation,
@@ -561,7 +612,7 @@ private fun RiskBadge(label: String) {
 }
 
 @Composable
-internal fun CandidateCard(candidate: AgentCandidate) {
+internal fun CandidateCard(ui: CandidateCardUi) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -569,10 +620,10 @@ internal fun CandidateCard(candidate: AgentCandidate) {
         shape = RoundedCornerShape(8.dp)
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(shortName(candidate.model.displayName) ?: "候选模型", fontWeight = FontWeight.Bold)
-            Text("${sourceText(candidate.model.source)} · ${candidate.model.parametersB ?: "?"}B · ${candidate.model.quant ?: "未知量化"} · 匹配 ${candidate.score}")
-            Text("预计 ${candidate.expectedDecodeTpsRange} · ${candidate.memoryRisk}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(candidate.reason, style = MaterialTheme.typography.bodySmall)
+            Text(ui.title, fontWeight = FontWeight.Bold)
+            Text(ui.specification)
+            Text(ui.expectation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(ui.reason, style = MaterialTheme.typography.bodySmall)
         }
     }
 }

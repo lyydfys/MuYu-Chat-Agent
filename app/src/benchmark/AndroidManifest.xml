@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Benchmark-only manifest overlay for the `benchmark` build type.
+
+  Macrobenchmark refuses to measure a target that is not profileable by the shell, so this
+  overlay adds <profileable android:shell="true"/> for the benchmark variant only. It is never
+  merged into debug or release; production builds keep their existing manifest surface.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <profileable
+            android:shell="true"
+            tools:targetApi="29" />
+    </application>
+
+</manifest>
