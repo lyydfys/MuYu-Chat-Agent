@@ -1,8 +1,14 @@
 package com.muyuchat.feature.settings
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,11 +25,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
 internal fun ExpandableSettingsCard(
@@ -39,14 +49,24 @@ internal fun ExpandableSettingsCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         shape = RoundedCornerShape(8.dp)
     ) {
-        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(
+            modifier = Modifier
+                .padding(12.dp)
+                .animateContentSize(McaMotion.sizeChangePx),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             ExpandableSettingsHeader(
                 title = title,
                 summary = summary,
                 expanded = expanded,
                 onClick = { onExpandedChange(!expanded) }
             )
-            AnimatedVisibility(visible = expanded) {
+            // Size is owned by animateContentSize above; this only fades the expanded content.
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn(animationSpec = McaMotion.fade()),
+                exit = fadeOut(animationSpec = McaMotion.fade())
+            ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     HorizontalDivider()
                     content()
@@ -68,6 +88,7 @@ internal fun ExpandableSettingsInlineSection(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f), RoundedCornerShape(8.dp))
+            .animateContentSize(McaMotion.sizeChangePx)
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
@@ -77,7 +98,11 @@ internal fun ExpandableSettingsInlineSection(
             expanded = expanded,
             onClick = { onExpandedChange(!expanded) }
         )
-        AnimatedVisibility(visible = expanded) {
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(animationSpec = McaMotion.fade()),
+            exit = fadeOut(animationSpec = McaMotion.fade())
+        ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 content()
             }
@@ -92,13 +117,25 @@ private fun ExpandableSettingsHeader(
     expanded: Boolean,
     onClick: () -> Unit
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    // Draw-phase rotation: the arrow never re-composes while the spring runs.
+    val rotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = McaMotion.sizeChange,
+        label = "settings-expand-arrow"
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
             // Accessibility: the two-line header makes this row a full-width click target; keep it
             // at least 44dp tall without changing typography or horizontal density.
             .heightIn(min = 44.dp)
-            .clickable(onClick = onClick),
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick
+            )
+            .mcaPressScale(interactionSource),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -113,7 +150,7 @@ private fun ExpandableSettingsHeader(
         Icon(
             imageVector = Icons.Default.KeyboardArrowDown,
             contentDescription = if (expanded) "收起" else "展开",
-            modifier = Modifier.rotate(if (expanded) 180f else 0f)
+            modifier = Modifier.graphicsLayer { rotationZ = rotation }
         )
     }
 }

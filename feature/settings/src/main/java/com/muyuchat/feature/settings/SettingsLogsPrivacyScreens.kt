@@ -3,6 +3,7 @@ package com.muyuchat.feature.settings
 import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +40,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.telemetry.RuntimeMetrics
 import kotlinx.coroutines.launch
 
@@ -130,11 +132,15 @@ fun LogsApiScreen(
                 // W9-1: number formatting and KB conversion run once per metrics row, not on every
                 // recomposition of this page (the page also observes live runtime state).
                 val row = remember(log) { runtimeLogRowPresentation(log) }
-                InfoCard(
-                    title = row.title,
-                    primary = row.primary,
-                    secondary = row.secondary
-                )
+                Box(
+                    modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                ) {
+                    InfoCard(
+                        title = row.title,
+                        primary = row.primary,
+                        secondary = row.secondary
+                    )
+                }
             }
         }
         if (state.agentLogs.isNotEmpty()) {
@@ -147,11 +153,15 @@ fun LogsApiScreen(
             }
             items(visibleAgentLogs) { log ->
                 val primary = remember(log) { log.take(120) }
-                InfoCard(
-                    title = "智能调参",
-                    primary = primary,
-                    secondary = "完整记录只保存在本机，可按需导出。"
-                )
+                Box(
+                    modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                ) {
+                    InfoCard(
+                        title = "智能调参",
+                        primary = primary,
+                        secondary = "完整记录只保存在本机，可按需导出。"
+                    )
+                }
             }
         }
     }

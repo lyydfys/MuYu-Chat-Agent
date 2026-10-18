@@ -2,6 +2,11 @@
 
 package com.muyuchat.feature.modelhub
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,12 +32,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 
 @Composable
-internal fun ModelImportProgressCard(task: ModelImportTaskUi, onPause: (String) -> Unit, onResume: (String) -> Unit) {
-    CardBox {
+internal fun ModelImportProgressCard(
+    task: ModelImportTaskUi,
+    onPause: (String) -> Unit,
+    onResume: (String) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    CardBox(modifier = modifier) {
         Text(task.message, style = MaterialTheme.typography.bodyMedium)
         task.file?.let { Text(it, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis) }
         if (task.active) {
@@ -116,9 +127,9 @@ internal fun EmptyCard(title: String, body: String) {
 }
 
 @Composable
-internal fun CardBox(content: @Composable ColumnScope.() -> Unit) {
+internal fun CardBox(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         shape = RoundedCornerShape(18.dp)
@@ -170,7 +181,15 @@ internal fun ModelStoragePath(path: String) {
     if (path.isBlank()) return
     var expanded by rememberSaveable(path) { mutableStateOf(false) }
     TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起保存位置" else "查看保存位置") }
-    if (expanded) SelectionContainer {
-        Text(path, style = MaterialTheme.typography.bodySmall)
+    AnimatedVisibility(
+        visible = expanded,
+        enter = fadeIn(animationSpec = McaMotion.fade()) +
+            expandVertically(animationSpec = McaMotion.sizeChangePx),
+        exit = fadeOut(animationSpec = McaMotion.fade()) +
+            shrinkVertically(animationSpec = McaMotion.sizeChangePx)
+    ) {
+        SelectionContainer {
+            Text(path, style = MaterialTheme.typography.bodySmall)
+        }
     }
 }

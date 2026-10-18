@@ -2,6 +2,11 @@
 
 package com.muyuchat.feature.modelhub
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
@@ -33,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
@@ -87,7 +93,8 @@ internal fun RecommendedModelCard(
     onOpenLocalModel: (String) -> Unit = {},
     onVerifyLocalModel: (String) -> Unit = {},
     onLoadLocalChatModel: (ModelManifest) -> Unit = {},
-    onVerifyLocalChatModel: (ModelManifest) -> Unit = {}
+    onVerifyLocalChatModel: (ModelManifest) -> Unit = {},
+    modifier: Modifier = Modifier
 ) {
     val hasModelPage = !model.repoId.startsWith("pending/", ignoreCase = true)
     // W9: eligibility and installed-model lookups scan device/list data. Cache them per real input
@@ -144,7 +151,7 @@ internal fun RecommendedModelCard(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant
     }
-    CardBox {
+    CardBox(modifier = modifier) {
         Text(model.title, fontWeight = FontWeight.Bold, modifier = Modifier.fillMaxWidth())
         Text(
             shortDescription,
@@ -234,7 +241,13 @@ internal fun RecommendedModelCard(
         TextButton(onClick = { detailsExpanded = !detailsExpanded }) {
             Text(if (detailsExpanded) "收起介绍" else "完整介绍")
         }
-        if (detailsExpanded) {
+        AnimatedVisibility(
+            visible = detailsExpanded,
+            enter = fadeIn(animationSpec = McaMotion.fade()) +
+                expandVertically(animationSpec = McaMotion.sizeChangePx),
+            exit = fadeOut(animationSpec = McaMotion.fade()) +
+                shrinkVertically(animationSpec = McaMotion.sizeChangePx)
+        ) {
             Text(model.description, style = MaterialTheme.typography.bodySmall)
         }
         // 主操作只由"是否已安装"决定（决策函数刻意不含验证参数）；验证状态只决定次级诊断按钮。

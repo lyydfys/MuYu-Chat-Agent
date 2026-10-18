@@ -2,6 +2,7 @@
 
 package com.muyuchat.feature.agent
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,17 +29,21 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.advisor.AgentCandidate
 import com.muyuchat.core.advisor.AgentRecommendation
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 
@@ -569,6 +574,19 @@ internal fun RecommendationCard(
 // Preserve chip-equivalent density without exposing click semantics.
 @Composable
 internal fun StaticStatusTag(text: String, modifier: Modifier = Modifier) {
+    // Layout is driven only by the current label; the outgoing label is drawn in a matchParentSize
+    // overlay, so this cross-fade never changes the tag's measured size or the row geometry.
+    val outgoingLabel = remember { mutableStateOf<String?>(null) }
+    val outgoingAlpha = remember { Animatable(1f) }
+    val shownLabel = remember { mutableStateOf(text) }
+    LaunchedEffect(text) {
+        if (text == shownLabel.value) return@LaunchedEffect
+        outgoingLabel.value = shownLabel.value
+        shownLabel.value = text
+        outgoingAlpha.snapTo(1f)
+        outgoingAlpha.animateTo(0f, McaMotion.fade(160))
+        outgoingLabel.value = null
+    }
     Surface(
         modifier = modifier.heightIn(min = 32.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
@@ -583,6 +601,20 @@ internal fun StaticStatusTag(text: String, modifier: Modifier = Modifier) {
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            outgoingLabel.value?.let { previous ->
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .graphicsLayer { alpha = outgoingAlpha.value },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = previous,
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
     }
 }

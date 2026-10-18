@@ -5,8 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings as AndroidSettings
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -40,6 +42,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.mcaPressScale
 import kotlinx.coroutines.launch
 import java.net.URI
 
@@ -319,53 +322,10 @@ internal fun WebSearchDiagnosticCard(
             if (item.topSources.isNotEmpty()) {
                 HorizontalDivider()
                 item.topSources.forEach { source ->
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f), RoundedCornerShape(8.dp))
-                            .clickable {
-                                onOpenWebPage(source.url)
-                            }
-                            .padding(10.dp),
-                        verticalArrangement = Arrangement.spacedBy(3.dp)
-                    ) {
-                        Text(
-                            listOf(source.trustLabel, source.hostLabel)
-                                .filter { it.isNotBlank() }
-                                .joinToString(" · "),
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            source.title,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            source.url.removePrefix("https://").removePrefix("http://"),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            "点击在应用内查看",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        if (source.provider.isNotBlank()) {
-                            Text(
-                                source.provider,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        if (source.snippet.isNotBlank()) {
-                            Text(
-                                source.snippet,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
+                    DiagnosticSourceRow(
+                        source = source,
+                        onOpenWebPage = onOpenWebPage
+                    )
                 }
             }
             TextButton(
@@ -615,4 +575,67 @@ private fun Context.startFirstAvailable(vararg intents: Intent) {
         intent.resolveActivity(packageManager) != null
     } ?: intents.lastOrNull() ?: return
     startActivity(target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+}
+
+/**
+ * One clickable source card. The press scale reads the same interaction source the click uses, so
+ * the feedback stays draw-phase and adds no layout geometry.
+ */
+@Composable
+private fun DiagnosticSourceRow(
+    source: WebSearchDiagnosticSourceUiItem,
+    onOpenWebPage: (String) -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f), RoundedCornerShape(8.dp))
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current
+            ) {
+                onOpenWebPage(source.url)
+            }
+            .mcaPressScale(interactionSource)
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(
+            listOf(source.trustLabel, source.hostLabel)
+                .filter { it.isNotBlank() }
+                .joinToString(" · "),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Text(
+            source.title,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            source.url.removePrefix("https://").removePrefix("http://"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            "点击在应用内查看",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary
+        )
+        if (source.provider.isNotBlank()) {
+            Text(
+                source.provider,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+        if (source.snippet.isNotBlank()) {
+            Text(
+                source.snippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }

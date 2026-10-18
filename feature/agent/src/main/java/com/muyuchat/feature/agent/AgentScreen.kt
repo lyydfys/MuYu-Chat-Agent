@@ -16,7 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -54,7 +54,9 @@ import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.tuning.UserPreference
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.SmoothRightToLeftPage
+import com.muyuchat.core.designsystem.mcaEnterReveal
 
 private const val MAX_VISIBLE_BENCHMARK_HISTORY = 10
 internal const val MIN_CUSTOM_CONTEXT_LENGTH = 128
@@ -423,11 +425,17 @@ fun AgentScreen(
             }
 
             recommendationUi?.let { ui ->
-                item {
-                    RecommendationCard(
-                        ui = ui,
-                        onApplyRecommendation = onApplyRecommendation
-                    )
+                item(key = "agent-recommendation") {
+                    Box(
+                        modifier = Modifier
+                            .animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                            .mcaEnterReveal(index = 0)
+                    ) {
+                        RecommendationCard(
+                            ui = ui,
+                            onApplyRecommendation = onApplyRecommendation
+                        )
+                    }
                 }
             }
 
@@ -439,9 +447,15 @@ fun AgentScreen(
             }
 
             if (candidateUis.isNotEmpty()) {
-                item { SectionTitle("候选模型") }
-                items(candidateUis, key = { it.modelId }) { candidate ->
-                    CandidateCard(candidate)
+                item(key = "agent-candidates-header") { SectionTitle("候选模型") }
+                itemsIndexed(candidateUis, key = { _, candidate -> candidate.modelId }) { index, candidate ->
+                    Box(
+                        modifier = Modifier
+                            .animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                            .mcaEnterReveal(index = index)
+                    ) {
+                        CandidateCard(candidate)
+                    }
                 }
             }
 

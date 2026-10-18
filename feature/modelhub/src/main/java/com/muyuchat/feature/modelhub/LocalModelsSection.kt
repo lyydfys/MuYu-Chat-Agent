@@ -48,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 
@@ -132,7 +133,12 @@ internal fun LocalModelsSection(
         }
     LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(state.importTasks, key = { "import-${it.id}" }) { task ->
-            ModelImportProgressCard(task, onPauseImport, onResumeImport)
+            ModelImportProgressCard(
+                task = task,
+                onPause = onPauseImport,
+                onResume = onResumeImport,
+                modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+            )
         }
         if (!imageOnly) {
             item {
@@ -174,7 +180,8 @@ internal fun LocalModelsSection(
                                     onDelete(model)
                                 }
                             },
-                            onAttachVisionProjector = { onAttachVisionProjector(model) }
+                            onAttachVisionProjector = { onAttachVisionProjector(model) },
+                            modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
                         )
             }
         } else {
@@ -202,7 +209,8 @@ internal fun LocalModelsSection(
                             onSelect = { onSelectLocalImageModel(model.id) },
                             onVerify = { onVerifyLocalImageModel(model.id) },
                             onDelete = { onDeleteLocalImageModel(model.id) },
-                            onRemoveRecord = { onRemoveLocalImageModelRecord(model.id) }
+                            onRemoveRecord = { onRemoveLocalImageModelRecord(model.id) },
+                            modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
                         )
             }
         }
@@ -227,11 +235,12 @@ private fun LocalModelCard(
     onUnload: () -> Unit,
     onVerify: () -> Unit,
     onDelete: () -> Unit,
-    onAttachVisionProjector: () -> Unit
+    onAttachVisionProjector: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var confirmDelete by rememberSaveable(model.id) { mutableStateOf(false) }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
@@ -448,7 +457,8 @@ private fun LocalImageModelCard(
     onSelect: () -> Unit,
     onVerify: () -> Unit,
     onDelete: () -> Unit,
-    onRemoveRecord: () -> Unit
+    onRemoveRecord: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var confirmRemoval by remember { mutableStateOf(false) }
     if (confirmRemoval) {
@@ -472,7 +482,7 @@ private fun LocalImageModelCard(
         )
     }
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(10.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)

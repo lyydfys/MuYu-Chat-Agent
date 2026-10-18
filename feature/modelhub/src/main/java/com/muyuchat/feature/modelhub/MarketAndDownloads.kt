@@ -5,8 +5,13 @@ package com.muyuchat.feature.modelhub
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -64,6 +69,7 @@ import com.muyuchat.core.download.isImageModelCandidate
 import com.muyuchat.core.download.isLiteRtLmModelCandidate
 import com.muyuchat.core.download.isVisionModelCandidate
 import com.muyuchat.core.download.kindLabel
+import com.muyuchat.core.designsystem.McaMotion
 
 @Composable
 internal fun MarketSection(
@@ -95,12 +101,16 @@ internal fun MarketSection(
         if (state.hubModels.isNotEmpty()) {
             item { Text("已显示 ${state.hubModels.size}/${state.hubTotalCount} · 第 ${state.hubPage} 页", style = MaterialTheme.typography.bodySmall) }
             items(state.hubModels, key = { it.id }) { model ->
-                HubModelCard(
-                    model = model,
-                    enabled = !state.isBusy,
-                    onShowFiles = { onShowFiles(model) },
-                    onOpenPage = { onOpenPage(model.modelPageUrl) }
-                )
+                Box(
+                    modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                ) {
+                    HubModelCard(
+                        model = model,
+                        enabled = !state.isBusy,
+                        onShowFiles = { onShowFiles(model) },
+                        onOpenPage = { onOpenPage(model.modelPageUrl) }
+                    )
+                }
             }
             item {
                 Button(
@@ -135,7 +145,11 @@ internal fun RemoteFilesSection(
     }
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(state.importTasks, key = { "import-${it.id}" }) { task ->
-            ModelImportProgressCard(task, onPauseImport, onResumeImport)
+            Box(
+                modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+            ) {
+                ModelImportProgressCard(task, onPauseImport, onResumeImport)
+            }
         }
         item {
             Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
@@ -186,7 +200,11 @@ internal fun RemoteFilesSection(
             item { EmptyCard("没有匹配文件", "清除筛选或换一个文件名、路径、类型关键词。") }
         } else {
             items(visibleFiles, key = { it.path }) { file ->
-                RemoteFileCard(file = file, enabled = !state.isBusy, onDownload = { onDownload(file) })
+                Box(
+                    modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade())
+                ) {
+                    RemoteFileCard(file = file, enabled = !state.isBusy, onDownload = { onDownload(file) })
+                }
             }
         }
     }
@@ -299,7 +317,13 @@ internal fun DownloadProgressPanel(
                     }
                 }
             }
-            if (transferSummary.isNotEmpty() && state.downloadStatus == DownloadStatus.RUNNING) {
+            AnimatedVisibility(
+                visible = transferSummary.isNotEmpty() && state.downloadStatus == DownloadStatus.RUNNING,
+                enter = fadeIn(animationSpec = McaMotion.fade()) +
+                    expandVertically(animationSpec = McaMotion.sizeChangePx),
+                exit = fadeOut(animationSpec = McaMotion.fade()) +
+                    shrinkVertically(animationSpec = McaMotion.sizeChangePx)
+            ) {
                 Text(
                     transferSummary,
                     style = MaterialTheme.typography.labelSmall,
@@ -308,7 +332,13 @@ internal fun DownloadProgressPanel(
                     overflow = TextOverflow.Ellipsis
                 )
             }
-            if (state.downloadStatus == DownloadStatus.FAILED) {
+            AnimatedVisibility(
+                visible = state.downloadStatus == DownloadStatus.FAILED,
+                enter = fadeIn(animationSpec = McaMotion.fade()) +
+                    expandVertically(animationSpec = McaMotion.sizeChangePx),
+                exit = fadeOut(animationSpec = McaMotion.fade()) +
+                    shrinkVertically(animationSpec = McaMotion.sizeChangePx)
+            ) {
                 val failureText = remember(state.downloadFailureSource, state.statusMessage) {
                     listOfNotNull(state.downloadFailureSource?.label, state.statusMessage)
                         .joinToString("：").ifBlank { "下载失败，请查看详情后重试。" }

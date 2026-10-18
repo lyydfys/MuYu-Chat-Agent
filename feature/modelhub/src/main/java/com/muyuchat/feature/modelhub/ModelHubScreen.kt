@@ -2,13 +2,18 @@
 
 package com.muyuchat.feature.modelhub
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.fadeIn
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -43,7 +48,10 @@ import com.muyuchat.core.download.ModelScopeHubModel
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.modelstore.ModelManifest
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.SmoothRightToLeftPage
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberEnterVisibility
 
 private enum class ModelHubSection(val title: String) {
     LOCAL("本地"),
@@ -340,7 +348,10 @@ private fun ModelHubHeader(
     onPauseDownloads: () -> Unit,
     onResumeDownloads: () -> Unit
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    Column(
+        modifier = Modifier.animateContentSize(McaMotion.sizeChangePx),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -386,12 +397,17 @@ private fun ModelHubHeader(
             ) {
                 mutableStateOf(false)
             }
-            DownloadProgressPanel(
-                state = summary,
-                onShowDetails = { downloadDetailsOpen = true },
-                onPauseDownloads = onPauseDownloads,
-                onResumeDownloads = onResumeDownloads
-            )
+            AnimatedVisibility(
+                visibleState = rememberEnterVisibility(true),
+                enter = fadeIn(animationSpec = McaMotion.fade(180))
+            ) {
+                DownloadProgressPanel(
+                    state = summary,
+                    onShowDetails = { downloadDetailsOpen = true },
+                    onPauseDownloads = onPauseDownloads,
+                    onResumeDownloads = onResumeDownloads
+                )
+            }
             if (presentation.canDismissDownloadSummary) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -443,25 +459,40 @@ private fun ModelHubSegmentedTabs(
     ) {
         Row(modifier = Modifier.fillMaxWidth().padding(2.dp)) {
             ModelHubSection.entries.forEach { item ->
-                val active = selected == item
-                Surface(
-                    onClick = { onSection(item) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(46.dp),
-                    color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surface,
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
-                        Text(
-                            item.title,
-                            textAlign = TextAlign.Center,
-                            fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                            color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
+                ModelHubTab(
+                    item = item,
+                    active = selected == item,
+                    onSection = onSection
+                )
             }
+        }
+    }
+}
+
+@Composable
+private fun RowScope.ModelHubTab(
+    item: ModelHubSection,
+    active: Boolean,
+    onSection: (ModelHubSection) -> Unit
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    Surface(
+        onClick = { onSection(item) },
+        modifier = Modifier
+            .weight(1f)
+            .height(46.dp)
+            .mcaPressScale(interactionSource),
+        interactionSource = interactionSource,
+        color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+            Text(
+                item.title,
+                textAlign = TextAlign.Center,
+                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+            )
         }
     }
 }

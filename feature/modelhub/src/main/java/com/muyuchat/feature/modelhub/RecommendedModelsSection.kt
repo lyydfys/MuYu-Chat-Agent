@@ -22,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.modelstore.ModelManifest
@@ -111,6 +112,7 @@ internal fun RecommendedModelsSection(
                     val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
                     items(visibleModels, key = { "$key-${it.id}" }) { model ->
                         RecommendedModelCard(
+                            modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                             model = model,
                             deviceTotalRamBytes = state.deviceTotalRamBytes,
                             deviceAvailableRamBytes = state.deviceAvailableRamBytes,
@@ -156,6 +158,7 @@ internal fun RecommendedModelsSection(
                 val visibleModels = if (expanded) catalog.npuChat else collapsedRecommendationModels(catalog.npuChat)
                 items(visibleModels, key = { "$key-${it.id}" }) { model ->
                             RecommendedModelCard(
+                                modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                                 model = model,
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
                                 deviceAvailableRamBytes = state.deviceAvailableRamBytes,
@@ -202,6 +205,7 @@ internal fun RecommendedModelsSection(
                         val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
                         items(visibleModels, key = { "$key-${it.id}" }) { model ->
                             RecommendedModelCard(
+                                modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                                 model = model,
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
                                 deviceAvailableRamBytes = state.deviceAvailableRamBytes,
@@ -252,6 +256,7 @@ internal fun RecommendedModelsSection(
                 val visibleModels = if (expanded) catalog.cpuImage else collapsedRecommendationModels(catalog.cpuImage)
                 items(visibleModels, key = { "$key-${it.id}" }) { model ->
                     RecommendedModelCard(
+                        modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                         model = model,
                         deviceTotalRamBytes = state.deviceTotalRamBytes,
                         deviceAvailableRamBytes = state.deviceAvailableRamBytes,
@@ -295,6 +300,7 @@ internal fun RecommendedModelsSection(
                 val visibleModels = if (expanded) catalog.gpuImage else collapsedRecommendationModels(catalog.gpuImage)
                 items(visibleModels, key = { "$key-${it.id}" }) { model ->
                     RecommendedModelCard(
+                        modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                         model = model,
                         deviceTotalRamBytes = state.deviceTotalRamBytes,
                         deviceAvailableRamBytes = state.deviceAvailableRamBytes,
@@ -342,6 +348,7 @@ internal fun RecommendedModelsSection(
                         val visibleModels = if (expanded) models else collapsedRecommendationModels(models)
                         items(visibleModels, key = { "$key-${it.id}" }) { model ->
                             RecommendedModelCard(
+                                modifier = Modifier.animateItem(McaMotion.fade(), McaMotion.pageSlide, McaMotion.fade()),
                                 model = model,
                                 deviceTotalRamBytes = state.deviceTotalRamBytes,
                                 deviceAvailableRamBytes = state.deviceAvailableRamBytes,
