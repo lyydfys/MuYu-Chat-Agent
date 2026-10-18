@@ -5,9 +5,18 @@ Thanks for your interest in MCA.
 MCA is an early Android local-first AI workspace. The codebase changes quickly,
 so contributions should be small, focused, and easy to test.
 
+## Mandatory Project Contract
+
+Before changing code, read the [MCA architecture and maintainability hard lock](docs/architecture/MCA_PROJECT_HARD_LOCK.md).
+It defines required ownership and dependency boundaries, feature and data compatibility,
+UI preservation, verification, exceptions, and handoff evidence for maintainers and agents.
+Existing architecture debt must not expand, and passing a scoped check is not proof of
+complete production acceptance. Include the relevant evidence and unverified items with
+each contribution.
+
 ## Development Setup
 
-1. Install JDK 17.
+1. Install JDK 21 to run the complete verification toolchain (Java source targets remain defined by the build scripts).
 2. Install Android SDK, NDK, and CMake versions compatible with `gradle/libs.versions.toml`.
 3. Clone with submodules:
 

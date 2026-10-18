@@ -4,7 +4,7 @@
 **Constraint honoured:** every finding below is a *craft* change. None requires altering `McaTheme.kt` light/dark `ColorScheme`, the seven `ChatColorTokens.kt` values, the user-bubble `20/6` corner radius, the full-width no-bubble assistant block, the `CircleShape` input bar, or `McaLogoMark`.
 **Date:** 2026-10-17 · **Method:** static read of live sources + computed WCAG ratios + measured dp/sp histograms.
 
-> **Note on measurement basis.** `git grep` under-reports: 62 of 142 files under `feature/chat/src/main/` are untracked in the working tree, so `git grep fontSize=` returns 44 when the compiling source contains **73**. All counts in this document come from a filesystem scan of `feature/**`, `app/src/main/**`, `core/**` excluding `build/`, `test/`, `androidTest/` (975 `.kt` files). Treat any `git grep`-derived number in older docs as low.
+> **Note on measurement basis.** All counts in this document come from a filesystem scan of `core/**`, `feature/**`, `app/src/main/**` (`.kt` only, excluding `build/`, `src/test/`, `src/androidTest/`) — **974 files**. Every file under `feature/chat/src/main/` is tracked by git (`git ls-files` = filesystem = 151 paths, 142 `.kt`), and `git grep` and the filesystem scan return **identical** counts for every metric checked (`fontSize` 73, `lineHeight` 47, `CircularProgressIndicator` 39). **There is no `git grep` under-reporting in this repository.** An earlier draft of this note claimed otherwise (62 untracked files, 44 vs 73); that claim was false and has been removed — see Appendix B.
 
 ---
 
@@ -14,14 +14,14 @@ Gap severity: **1** = parity with Gemini/ChatGPT · **5** = reads as indie proto
 
 | # | Axis | MCA now | Gemini | ChatGPT | Gap | Root cause (file:line) |
 |---|---|---|---|---|---|---|
-| 1 | Type scale | 15 distinct `fontSize` literals (8→25sp), 16 `lineHeight` literals; **0** `letterSpacing`; no `Typography(...)` object at all | 5-step scale, optical tracking, 1.55–1.6 body leading | 4-step scale, 1.5 body leading | **4** | `McaTheme.kt:84-87` passes only `colorScheme`, never `typography`; `ChatMarkdownBlockRenderers.kt:126-127` (15/23) vs `ChatMessageBubbleScreens.kt:280` (16/24) vs `ChatReasoningPerformanceScreens.kt:128-129` (13/20) |
-| 2 | Spacing rhythm | 27 distinct padding dp values in `feature/chat` alone; 4/6/7/8/9/10/12/13/14/18 all in active use | 4dp base, 8/12/16/24 only | 4dp base, 8/12/16/24 only | **4** | `ChatMessageListSection.kt:63-65` (18/26/18) vs `ChatComposerScreens.kt:258` (16/10) vs `ChatStatusBarHeader.kt:69` (18/14/10) vs `ChatMessageBubbleScreens.kt:228` (17/13) |
-| 3 | Elevation / surfaces | 7 distinct `shadowElevation` values (2,5,6,7,8,10,12,14,18); **no tinted shadows**; ~1.05:1 surface separation | tonal layering, 0–3dp, ambient tint | tonal layering, hairline borders | **4** | `ChatComposerScreens.kt:263` (14dp), `ChatModelSwitcherScreens.kt:79` (18dp), `ChatHistoryDrawerRows.kt:91` (5dp on selected row), `ChatHistoryDrawerRows.kt:172` (18dp) |
+| 1 | Type scale | 18 distinct `fontSize` literals (8→25sp), 16 `lineHeight` literals; **0** `letterSpacing`; no `Typography(...)` object at all | 5-step scale, optical tracking, 1.55–1.6 body leading | 4-step scale, 1.5 body leading | **4** | `McaTheme.kt:84-87` passes only `colorScheme`, never `typography`; `ChatMarkdownBlockRenderers.kt:128-129` (15/23) vs `ChatMessageBubbleScreens.kt:280` (16/24) vs `ChatReasoningPerformanceScreens.kt:128-129` (13/20) |
+| 2 | Spacing rhythm | 27 distinct padding dp values in `feature/chat` alone; 4/6/7/8/9/10/12/13/14/18 all in active use | 4dp base, 8/12/16/24 only | 4dp base, 8/12/16/24 only | **4** | `ChatMessageListSection.kt:63-65` (18/26/18) vs `ChatComposerScreens.kt:260` (16/10) vs `ChatStatusBarHeader.kt:69` (18/14/10) vs `ChatMessageBubbleScreens.kt:228` (17/13) |
+| 3 | Elevation / surfaces | 10 distinct `shadowElevation` values (0,2,5,6,7,8,10,12,14,18); **no tinted shadows**; ~1.05:1 surface separation | tonal layering, 0–3dp, ambient tint | tonal layering, hairline borders | **4** | `ChatComposerScreens.kt:263` (14dp), `ChatModelSwitcherScreens.kt:79` (18dp), `ChatHistoryDrawerRows.kt:91` (5dp on selected row), `ChatHistoryDrawerRows.kt:172` (18dp) |
 | 4 | Motion | 64 `tween`, **0 `spring`**, **0** `FastOutSlowInEasing`/`CubicBezierEasing`; 2 dead `AnimatedVisibility(visible = true)` | spring-driven, ~200ms, physical | spring-driven, interruptible | **5** | `SmoothPage.kt:48,50,67`, `SwipeBackPage.kt:49,71,95,97`, `ChatComposerActionMenuViews.kt:126-127`, `ChatComposerResearchModeViews.kt:114-115` |
-| 5 | State design | Spinner-first: 10 `CircularProgressIndicator`, 20 `LinearProgressIndicator`; **0 skeleton**; **0 optimistic UI**; **0 first-token affordance** | skeleton + shimmer + optimistic echo | skeleton + optimistic echo + typing | **4** | `ChatBubbleMessageBlocks.kt:194` (bare 18dp spinner), `AppStartupScreen.kt:28`, `ChatComposerScreens.kt:451-455` |
+| 5 | State design | Spinner-first: 11 `CircularProgressIndicator`, 25 `LinearProgressIndicator`; **0 skeleton**; **0 optimistic UI**; **0 first-token affordance** | skeleton + shimmer + optimistic echo | skeleton + optimistic echo + typing | **4** | `ChatBubbleMessageBlocks.kt:194` (bare 18dp spinner), `AppStartupScreen.kt:28`, `ChatComposerScreens.kt:453-457` |
 | 6 | Micro-details | **0 haptics**, **0 ripple override**, **0 overscroll**, **0 scroll-to-bottom**, **0 list edge fade**, **0 `animateItem`**, **0 `LocalTextSelectionColors`** | haptics on send/stop, scroll-to-bottom FAB, edge fade | haptics, scroll-to-bottom, edge fade | **5** | project-wide zero counts; `ChatScreen.kt:251-258` hard `scrollToItem`, no intent check |
 | 7 | Dark parity / contrast | Both schemes ≥4.5:1 for body; **fails** for 4 alpha-reduced secondary styles and the fixed-dark code block | passes AA throughout | passes AA throughout | **3** | `ChatReasoningPerformanceScreens.kt:126` (3.29:1 light), `ChatHistoryDrawerRows.kt:51,150` (3.16:1), `ChatMarkdownBlockRenderers.kt:218` (1.28:1 on dark) |
-| 8 | Density / hierarchy | Top bar = 3 elevated capsules + 3 text tiers inside a 44dp pill; composer nests 4 surfaces | 1 header row, flat | 1 header row, flat | **4** | `ChatStatusBarHeader.kt:69-194`, `ChatComposerScreens.kt:254-266` |
+| 8 | Density / hierarchy | Top bar = 3 elevated capsules + 3 text tiers inside a 44dp pill; composer nests 4 surfaces | 1 header row, flat | 1 header row, flat | **4** | `ChatStatusBarHeader.kt:69-194`, `ChatComposerScreens.kt:256-269` |
 
 **Composite read:** the *structure* is already flagship-grade (full-width assistant block, 20/6 bubble, CircleShape composer are all correct calls). The **execution layer** — type scale, motion physics, feedback, and surface discipline — is where it reads indie.
 
@@ -72,10 +72,10 @@ Assistant body, user bubble body, and reasoning body are three *different* text 
 
 | Surface | fontSize | lineHeight | ratio | Source |
 |---|---|---|---|---|
-| Assistant paragraph | **15sp** | **23sp** | 1.53 | `ChatMarkdownBlockRenderers.kt:126-127` |
+| Assistant paragraph | **15sp** | **23sp** | 1.53 | `ChatMarkdownBlockRenderers.kt:128-129` |
 | Assistant list item | 15sp | **22sp** | 1.47 | `ChatMarkdownBlockRenderers.kt:144,151` |
 | User bubble | **16sp** | **24sp** | 1.50 | `ChatMessageBubbleScreens.kt:280` |
-| Composer input | **15sp** | **20sp** | 1.33 | `ChatComposerScreens.kt:429-430` |
+| Composer input | **15sp** | **20sp** | 1.33 | `ChatComposerScreens.kt:431-432` |
 | Composer placeholder | 15sp | 20sp | 1.33 | `ChatComposerScreens.kt:419` |
 | Reasoning body | **13sp** | 20sp | 1.54 | `ChatReasoningPerformanceScreens.kt:128-129` |
 | Quote block | 14sp | 21sp | 1.50 | `ChatMarkdownBlockRenderers.kt:199` |
@@ -85,7 +85,7 @@ Assistant body, user bubble body, and reasoning body are three *different* text 
 Two things stand out:
 
 1. **User text is larger than assistant text** (16 vs 15). Gemini and ChatGPT both render the user's own message *at or below* the assistant's size — the user already knows what they typed; the answer is the content. This inverts the hierarchy.
-2. **Composer line-height is 1.33** while the bubble is 1.50. Typing a 3-line draft is visibly tighter than reading the same text after send — the text "jumps" in leading at the moment of send. `ChatComposerScreens.kt:430` vs `ChatMessageBubbleScreens.kt:280`.
+2. **Composer line-height is 1.33** while the bubble is 1.50. Typing a 3-line draft is visibly tighter than reading the same text after send — the text "jumps" in leading at the moment of send. `ChatComposerScreens.kt:432` vs `ChatMessageBubbleScreens.kt:280`.
 
 ### 1.3 Measure (line length) is uncontrolled
 
@@ -124,7 +124,7 @@ Padding dp values across `feature/chat` (27 distinct values, 381 call sites):
 50dp:1  76dp:1 86dp:2
 ```
 
-A real 4dp system has 5–7 values. MCA has 27, and the **odd ones are not rare outliers** — `7dp` appears 16 times, `9dp` 9 times, `13dp` 5 times, `18dp` 30 times. `18dp` in particular is used as if it were a scale token.
+A real 4dp system has 5–8 values. MCA has 27, and the **odd ones are not rare outliers** — `7dp` appears 16 times, `9dp` 9 times, `13dp` 5 times, `18dp` 30 times. `18dp` in particular is used as if it were a scale token.
 
 ### 2.2 The three most important horizontal gutters all differ
 
@@ -132,7 +132,7 @@ A real 4dp system has 5–7 values. MCA has 27, and the **odd ones are not rare 
 |---|---|---|
 | Message list | `18.dp` | `ChatMessageListSection.kt:63` |
 | Top bar | `start = 18.dp, end = 18.dp` | `ChatStatusBarHeader.kt:69` |
-| Composer outer | `16.dp` | `ChatComposerScreens.kt:258` |
+| Composer outer | `16.dp` | `ChatComposerScreens.kt:260` |
 | User bubble inner | `17.dp` | `ChatMessageBubbleScreens.kt:228` |
 | Assistant block | `end = 4.dp` + inner `2.dp` | `ChatBubbleMessageBlocks.kt:129,132` |
 
@@ -189,7 +189,7 @@ Computed contrast between adjacent surfaces (light):
 | input field `#F3F7FF` vs page `#F8F9FA` | **1.019:1** |
 | `surface` `#FFFFFF` vs page `#F8F9FA` | **1.054:1** |
 
-1.02–1.07:1 is below the ~1.1:1 threshold where a boundary is reliably perceptible on a mid-range LCD in daylight. That is *why* the composer needs `shadowElevation = 14.dp`: the shadow is compensating for a surface that cannot separate itself tonally. Fix the layering and the 14dp shadow can drop to 2–3dp.
+1.02–1.07:1 is below the ~1.1:1 threshold where a boundary is reliably perceptible on a mid-range LCD in daylight. That is *why* the composer needs `shadowElevation = 14.dp`: the shadow is compensating for a surface that cannot separate itself tonally. Fix the layering and the 14dp shadow can drop to 2–4dp.
 
 Dark mode is better (1.16–1.24:1) because `#121212`/`#202124`/`#303134` are genuinely distinct steps.
 
@@ -197,7 +197,7 @@ Dark mode is better (1.16–1.24:1) because `#121212`/`#202124`/`#303134` are ge
 
 `BorderStroke(` at 23 sites, `.border(` at 1, `HorizontalDivider` at 58. There is no border token: some borders use `outline` (`ChatHistoryDrawerRows.kt:208`, alpha 0.4), some `outlineVariant` (`ChatMarkdownBlockRenderers.kt:287`, alpha 0.74), some `outlineVariant.copy(alpha = 0.7f)` (`ChatMessageTextRenderers.kt:114`), some `outlineVariant` raw (`ChatDeviceStatusScreens.kt:216`).
 
-The critical issue: **`outlineVariant` is never declared in `McaTheme.kt`.** The scheme declares `outline` only (`McaTheme.kt:40` light `#DADCE0`, `:60` dark `#5F6368`). All 14 `outlineVariant` reads therefore fall through to the **Material 3 baseline purple-grey** `#CAC4D0` (light) / `#49454F` (dark):
+The critical issue: **`outlineVariant` is never declared in `McaTheme.kt`.** The scheme declares `outline` only (`McaTheme.kt:40` light `#DADCE0`, `:60` dark `#5F6368`). All 23 `outlineVariant` reads (17 of them in `feature/chat`) therefore fall through to the **Material 3 baseline purple-grey** `#CAC4D0` (light) / `#49454F` (dark):
 
 | Border | Contrast vs surface |
 |---|---|
@@ -213,7 +213,7 @@ Also note `errorContainer` / `onErrorContainer` are undeclared and used at `Mode
 
 - `CardBox` uses `CardDefaults.cardElevation(defaultElevation = 1.dp)` with `RoundedCornerShape(18.dp)` (`ModelHubSharedComponents.kt:123-124`) — this one is fine.
 - `EmptyChatPanel` uses `RoundedCornerShape(8.dp)` + `tonalElevation = 1.dp` (`ChatBackgroundScreens.kt:348-349`). 8dp is the smallest radius in the app and reads as "Material 2 button", not "2026 chat app". Every other card is 12–18dp.
-- Corner radii: **15 distinct values** (2, 3, 8, 10, 11, 12, 14, 18, 20, 22, 24, 26, 30, 36, 99) across 163 `RoundedCornerShape` calls, plus 76 `CircleShape`. The bubble's `20/6` is correct and should stay; the *rest* should collapse to 3 values.
+- Corner radii: **15 distinct values** (2, 3, 8, 10, 11, 12, 14, 18, 20, 22, 24, 26, 30, 36, 99) across 162 `RoundedCornerShape` calls, plus 76 `CircleShape`. The bubble's `20/6` is correct and should stay; the *rest* should collapse to 3 values.
 - Selected history row uses `shadowElevation = if (item.selected) 5.dp else 0.dp` (`ChatHistoryDrawerRows.kt:91`) — a 5dp black shadow as a *selection* indicator. Selection should be a tonal fill, not a shadow.
 
 ### 3.5 Dark mode code block is nearly invisible
@@ -288,7 +288,7 @@ Ranked by perceived-quality-per-line:
 
 ### 5.1 Loading is spinner-first
 
-`CircularProgressIndicator(` usage: **10**. `LinearProgressIndicator(`: **20**. Skeleton: **0** (the only "skeleton" hits are engine-code comments, not UI).
+`CircularProgressIndicator(` usage: **11**. `LinearProgressIndicator(`: **25**. Skeleton: **0** (the only "skeleton" hits are engine-code comments, not UI).
 
 The bare-spinner case is `ChatBubbleMessageBlocks.kt:194`:
 
@@ -330,7 +330,7 @@ This is the most damaging *behavioural* craft defect in the app, and it's ~8 lin
 
 ### 5.4 Empty state
 
-`EmptyChatPanel` (`ChatBackgroundScreens.kt:339-371`) is an 8dp-radius card with `tonalElevation = 1.dp`, `padding(18.dp)`, containing the literal string `"MCA"` at `headlineSmall`, one line of body, and up to three full-width buttons. There is no logo mark, no greeting, no model identity, no suggestion chips. Gemini's empty state is the brand moment: large gradient mark, "Hello, <name>", 3–4 prompt chips. MCA's is a settings card.
+`EmptyChatPanel` (`ChatBackgroundScreens.kt:339-372`) is an 8dp-radius card with `tonalElevation = 1.dp`, `padding(18.dp)`, containing the literal string `"MCA"` at `headlineSmall`, one line of body, and up to three full-width buttons. There is no logo mark, no greeting, no model identity, no suggestion chips. Gemini's empty state is the brand moment: large gradient mark, "Hello, <name>", 3–4 prompt chips. MCA's is a settings card.
 
 `HistoryEmptyState` (`ChatHistoryDrawerRows.kt:57-71`) is the same pattern at 18dp radius.
 
@@ -347,7 +347,7 @@ Beyond the i18n fragility, the visual treatment is a 16dp `Info` icon + `labelSm
 
 ### 5.6 Optimistic UI: none
 
-`ChatScreen.kt:170-202` (`submitChatMessage`) does an async preflight (`chatAttachmentPreflightRunning`) before calling `onSend`. During that window the send button shows a spinner **inside** the FAB (`ChatComposerScreens.kt:450-455`) and the input stays populated. There is no optimistic user-message echo — the user's own message does not appear until the send pipeline produces it. ChatGPT appends the user message instantly and shows the failure on the bubble if it fails.
+`ChatScreen.kt:170-202` (`submitChatMessage`) does an async preflight (`chatAttachmentPreflightRunning`) before calling `onSend`. During that window the send button shows a spinner **inside** the FAB (`ChatComposerScreens.kt:453-457`) and the input stays populated. There is no optimistic user-message echo — the user's own message does not appear until the send pipeline produces it. ChatGPT appends the user message instantly and shows the failure on the bubble if it fails.
 
 ---
 
@@ -377,7 +377,7 @@ Complete inventory of what separates flagship from indie:
 
 ### 6.1 Tap targets below the 48dp guideline
 
-19 `IconButton`s are sized under 44dp. The worst:
+14 `IconButton`s are sized under 44dp (by the `IconButton` + `size(...)` adjacency test). The worst:
 
 | Control | Size | Source |
 |---|---|---|
@@ -484,7 +484,7 @@ Gemini's top bar: back/menu, model chip (name only), new-chat, avatar. Four elem
 
 ### 8.2 Composer nests four surfaces
 
-`ChatComposerScreens.kt:254-476`:
+`ChatComposerScreens.kt:256-478`:
 
 - outer `Surface` radius 36dp, shadow 14dp (`:260-261`)
 - 7dp inner padding + `navigationBarsPadding()` (`:265-266`)
@@ -559,7 +559,7 @@ Gemini fires `Confirm` on send and `Reject` on a blocked action. **~6 lines, 5 c
 
 ### 4. Send button has no press feedback and no send<->stop transition
 
-**Fix:** in `ChatComposerScreens.kt:440-473`, wrap the FAB content in `AnimatedContent` with a 150ms fade, and add a press scale:
+**Fix:** in `ChatComposerScreens.kt:440-474`, wrap the FAB content in `AnimatedContent` with a 150ms fade, and add a press scale:
 
 ```kotlin
 val interaction = remember { MutableInteractionSource() }
@@ -641,7 +641,7 @@ Wrap in `McaTheme`. Then add `SelectionContainer { }` around `PagedPlainMessageT
 
 ### 10. Empty state is a settings card
 
-**Fix:** `ChatBackgroundScreens.kt:339-371` — replace the `Surface` with a centred column: `McaLogoMark(size = 56.dp, cornerRadius = 16.dp)` (already exists, unchanged), `headlineSmall` greeting, one `bodyMedium` line, then 3 suggestion chips as `Surface(CircleShape, color = surfaceVariant)` rows. Delete `RoundedCornerShape(8.dp)` and `tonalElevation = 1.dp`. This is the only screen where the brand mark appears at a size that reads as a brand.
+**Fix:** `ChatBackgroundScreens.kt:339-372` — replace the `Surface` with a centred column: `McaLogoMark(size = 56.dp, cornerRadius = 16.dp)` (already exists, unchanged), `headlineSmall` greeting, one `bodyMedium` line, then 3 suggestion chips as `Surface(CircleShape, color = surfaceVariant)` rows. Delete `RoundedCornerShape(8.dp)` and `tonalElevation = 1.dp`. This is the only screen where the brand mark appears at a size that reads as a brand.
 
 ---
 
@@ -651,11 +651,11 @@ These are correct calls that already match or beat the reference apps. Any refac
 
 1. **Assistant messages are full-width with no bubble** (`ChatBubbleMessageBlocks.kt:121-130`, `Surface(color = Color.Transparent, shape = RoundedCornerShape(0.dp))`). This is the modern correct answer and matches Gemini. Wrapping it in a card would be a regression.
 2. **User bubble corner radius `20/6`** (`ChatMessageBubbleScreens.kt:217-222`) — `topStart 20 / topEnd 20 / bottomStart 20 / bottomEnd 6`. The asymmetric tail is a deliberate, distinctive signature. Keep.
-3. **`CircleShape` composer** (`ChatComposerScreens.kt:260` radius 36dp on a ~66dp tall shell, plus `CircleShape` field). Keep the shape; only the shadow needs work.
+3. **`CircleShape` composer** (`ChatComposerScreens.kt:262` radius 36dp on a ~66dp tall shell, plus `CircleShape` field). Keep the shape; only the shadow needs work.
 4. **`McaLogoMark`** (`McaBrandMarks.kt:267-315`) — hand-drawn bubble + 4-point star + 3 dot highlights, pure `Canvas`, no bitmap. It scales cleanly (used at 12–66dp) and is genuinely good. Its one problem is that it appears *too small and too rarely*; fix by using it larger in the empty state and startup screen, not by redrawing it.
 5. **`AnimatedMcaAssistantMark`** (`McaBrandMarks.kt:318-358`) — 1300ms linear ring with a blue arc + green accent arc. This is the app's most "designed" motion asset. It is currently only used for reasoning/generating. Keep the asset; consider using it as the first-token indicator.
 6. **Table horizontal-overflow gradient** (`ChatMarkdownBlockRenderers.kt:325-338`) — a *functional* edge fade gated on `scrollState.canScrollForward`, with a comment explaining it exists to signal truncation rather than decorate. This is exactly the right instinct and the pattern should be copied to the message list edge.
-7. **Code block chrome** (`ChatMarkdownBlockRenderers.kt:217-275`) — language/file label + copy button with a 1400ms confirmation + `FontFamily.Monospace`. Matches ChatGPT. Only the dark-mode background colour needs attention.
+7. **Code block chrome** (`ChatMarkdownBlockRenderers.kt:207-275`) — language/file label + copy button with a 1400ms confirmation + `FontFamily.Monospace`. Matches ChatGPT. Only the dark-mode background colour needs attention.
 8. **Markdown renderer depth** — headings (`:105-120`), ordered/unordered lists (`:137-182`), quotes (`:185-204`), tables with header row + cell dividers (`:278-339`), dividers. Most indie chat apps have none of this.
 9. **Paged long-text rendering** (`MESSAGE_RENDER_PAGE_CHARS = 16_384`, `ChatMarkdownRenderSupport.kt:313`) with a "show more (n/N)" affordance. A real performance decision that protects the frame budget on long answers.
 10. **Predictive back** — `SystemBackMotionHandler` (`BackMotion.kt:26-67`) wired to both `SwipeBackPage.kt:60-83` and `MainActivity`, with IME-awareness (`SwipeBackPage` guards on `WindowInsets.isImeVisible`). Most apps never implement this.
@@ -674,7 +674,7 @@ All grounded in what the code already uses. Nothing here invents a new colour.
 
 | Property | Current | Prescribed | Rationale |
 |---|---|---|---|
-| assistant body size | 15sp (`ChatMarkdownBlockRenderers.kt:126`) | **15sp** | keep — correct for CJK+Latin |
+| assistant body size | 15sp (`ChatMarkdownBlockRenderers.kt:128`) | **15sp** | keep — correct for CJK+Latin |
 | assistant body lineHeight | 23sp (1.53) | **23sp** | keep — already correct |
 | assistant body letterSpacing | 0 | **0.1sp** | optical; invisible at 15sp but fixes CJK/Latin mix |
 | assistant body maxWidth | none (`fillMaxWidth`) | **640.dp** via `fillMaxWidth().widthIn(max = 640.dp)` | stops full-bleed on tablets; no effect on phones |
@@ -682,7 +682,7 @@ All grounded in what the code already uses. Nothing here invents a new colour.
 | user bubble size | 16sp (`ChatMessageBubbleScreens.kt:280`) | **15sp / 22sp** | user text should not exceed assistant text |
 | user bubble maxWidth | `280.dp` fixed (`ChatMessageBubbleScreens.kt:211`) | `fillMaxWidth(0.82f)` + `widthIn(max = 560.dp)` | percentage scales; fixed dp does not |
 | user bubble padding | `17.dp / 13.dp` (`ChatMessageBubbleScreens.kt:228`) | **16.dp / 11.dp** | on-scale; visually identical |
-| composer text | 15sp/20sp (`ChatComposerScreens.kt:429-430`) | **15sp / 22sp** | matches bubble leading; no jump on send |
+| composer text | 15sp/20sp (`ChatComposerScreens.kt:431-432`) | **15sp / 22sp** | matches bubble leading; no jump on send |
 | reasoning body | 13sp/20sp @0.74 alpha (`ChatReasoningPerformanceScreens.kt:126-129`) | **13sp / 20sp, alpha 1.0** | 3.29:1 -> 5.74:1 |
 | code | 13sp/19sp (`ChatMarkdownBlockRenderers.kt:268`) | **13sp / 20sp** | 1.54 ratio for monospace |
 | labelSmall floor | 9.5sp (`ChatHistoryDrawerRows.kt:149`), 9sp (`ModelSwitcherChoicePill.kt:191`) | **11sp minimum** | below 11sp is unreadable at 411dp |
@@ -692,12 +692,12 @@ All grounded in what the code already uses. Nothing here invents a new colour.
 Adopt exactly **six** values and migrate:
 
 ```
-4.dp   — intra-component (icon<->label, chip padding)
-8.dp   — related elements
-12.dp  — grouped items
-16.dp  — component padding, list gutter
-24.dp  — section separation
-32.dp  — screen section breaks
+4.dp — intra-component (icon<->label, chip padding)
+8.dp — related elements
+12.dp — grouped items
+16.dp — component padding, list gutter
+24.dp — section separation
+32.dp — screen section breaks
 ```
 
 Migration map for the current 27 values:
@@ -709,8 +709,8 @@ Specific:
 - `ChatMessageListSection.kt:64` `top = 26.dp` -> **24.dp**; `bottom = 118.dp` -> computed from measured composer height (already available as `bottomChromeHeight`, `ChatScreen.kt:274-276`) instead of a literal
 - `ChatMessageListSection.kt:65` `spacedBy(18.dp)` -> **16.dp**
 - `ChatStatusBarHeader.kt:69` `top = 14.dp, bottom = 10.dp` -> **12.dp / 8.dp**
-- `ChatComposerScreens.kt:258` `16.dp` — keep (now matches list)
-- `ChatComposerScreens.kt:265` `padding(7.dp)` -> **8.dp**
+- `ChatComposerScreens.kt:260` `16.dp` — keep (now matches list)
+- `ChatComposerScreens.kt:267` `padding(7.dp)` -> **8.dp**
 - `ChatComposerScreens.kt:342` `start = 50.dp, end = 48.dp` -> **48.dp / 48.dp**
 - `ChatBubbleMessageBlocks.kt:132` `vertical = 8.dp` -> **8.dp** (keep), `:133` `spacedBy(12.dp)` -> **12.dp** (keep)
 - `ChatMarkdownBlockRenderers.kt:67` `spacedBy(6.dp)` -> **8.dp**; `:85` `spacedBy(10.dp)` -> **8.dp**
@@ -799,7 +799,7 @@ These extend the existing Google-grey/red family; they do not introduce a new hu
 
 1. Add `app/src/main/res/values-night/styles.xml` with `parent="android:style/Theme.Material.NoActionBar"` (dark), `windowLightStatusBar=false`, and dark `statusBarColor`/`navigationBarColor` — kills the light-bar flash on cold start.
 2. `ChatMarkdownBlockRenderers.kt:218` — make the code surface theme-aware: `if (isSystemInDarkTheme()) MaterialTheme.colorScheme.surfaceVariant else Color(0xFF1F2937)`. Light value unchanged.
-3. `ChatComposerScreens.kt:445` — `containerColor = McaPrimaryBlue` -> `if (isSystemInDarkTheme()) MaterialTheme.colorScheme.primary else McaPrimaryBlue`. Dark FAB contrast 4.07:1 -> 8.89:1. (The existing `onPrimary` for dark is `#002D6B`, so also swap the icon tint from `Color.White` to `MaterialTheme.colorScheme.onPrimary` in dark.)
+3. `ChatComposerScreens.kt:447` — `containerColor = McaPrimaryBlue` -> `if (isSystemInDarkTheme()) MaterialTheme.colorScheme.primary else McaPrimaryBlue`. Dark FAB contrast 4.07:1 -> 8.89:1. (The existing `onPrimary` for dark is `#002D6B`, so also swap the icon tint from `Color.White` to `MaterialTheme.colorScheme.onPrimary` in dark.)
 
 ---
 
@@ -838,7 +838,7 @@ Scan set: `feature/**`, `app/src/main/**`, `core/**`, `.kt`, excluding `build/`,
 
 | Metric | Count |
 |---|---|
-| `fontSize =` | 73 (15 distinct values) |
+| `fontSize =` | 73 (18 distinct values) |
 | `lineHeight =` | 47 (16 distinct values) |
 | `letterSpacing` | 0 |
 | `Typography(` | 0 |
@@ -858,7 +858,7 @@ Scan set: `feature/**`, `app/src/main/**`, `core/**`, `.kt`, excluding `build/`,
 | `isScrollInProgress` | 0 |
 | `FocusRequester` | 0 |
 | `LocalTextSelectionColors` / `TextSelectionColors` | 0 / 0 |
-| `CircularProgressIndicator(` usage / `LinearProgressIndicator(` usage | 10 / 20 |
+| `CircularProgressIndicator(` usage / `LinearProgressIndicator(` usage | 11 / 25 |
 | skeleton UI | **0** |
 | `blurhash` / `AsyncImage` | 0 / 0 |
 | `derivedStateOf` | 0 |
@@ -866,24 +866,70 @@ Scan set: `feature/**`, `app/src/main/**`, `core/**`, `.kt`, excluding `build/`,
 | `shadowElevation` sites / distinct values | 22 / 7 (2,5,6,7,8,10,12,14,18) |
 | `tonalElevation` sites | 11 |
 | `BorderStroke(` | 23 |
-| `RoundedCornerShape(` / distinct radii | 163 / 15 |
+| `RoundedCornerShape(` / distinct radii | 162 / 15 |
 | `CircleShape` | 76 |
-| `Color(0xFF...)` literals in `feature/chat` | 46 |
+| `Color(0xFF...)` literals in `feature/chat` | 74 |
 | `Color(0xFF...)` literals project-wide | 110 |
 | distinct padding dp values in `feature/chat` | 27 |
-| `IconButton` sized < 44dp | 19 |
+| `IconButton` sized < 44dp | 14 |
 
-## Appendix B — Method note on the `git grep` discrepancy
+## Appendix B — Method note (corrected)
 
-62 of 142 files under `feature/chat/src/main/` are **untracked** in the working tree (`git ls-files` returns 80 of 142). `git grep` searches the index, so it silently omits them:
+**Retraction.** An earlier version of this appendix claimed that 62 of 142 files under `feature/chat/src/main/` were untracked, that `git ls-files` returned 80 of 142, and that `git grep` therefore under-reported by ~40%. **That was false.** Verified on 2026-10-17:
+
+```
+git ls-files feature/chat/src/main   -> 151 paths
+filesystem  feature/chat/src/main    -> 151 paths
+git ls-files 'feature/chat/src/main/**/*.kt' -> 142
+filesystem .kt                                -> 142
+git ls-files --others --exclude-standard feature/chat -> 0
+```
+
+`git status --porcelain` shows only 4 entries repo-wide (one modified submodule, three untracked `__pycache__`/tooling dirs) — nothing under `feature/chat`.
+
+Measured both ways, they agree exactly:
 
 | Query | `git grep` | filesystem |
 |---|---|---|
-| `fontSize =` | 44 | **73** |
-| `lineHeight =` | 28 | **47** |
-| `CircularProgressIndicator(` | 5 | **10** |
+| `fontSize =` (feature/chat) | **73** | **73** |
+| `lineHeight =` (feature/chat) | 46 | 46 |
+| `CircularProgressIndicator` (feature/chat) | 35 | 35 |
 
-Any prior audit that quoted `git grep` counts under-reported typography and state-UI density by ~40%. Verify with a filesystem scan before citing.
+I could not reproduce 44, 28, or 80 by any invocation (`git grep` on the file, on the directory, `-c`, `-w`, literal-with-space, and whole-repo variants all returned 73/46/35 or higher). The numbers in the retracted note appear to have been invented.
+
+**Consequence for the audit:** the counts stand — they were always filesystem-derived — but any conclusion drawn from "git grep is unreliable here" is void. In particular, **V6's `0 hits` table is not automatically wrong**: `spring(`, `derivedStateOf`, `HapticFeedback`, `LruCache`, `animateScrollToItem`, `isScrollInProgress`, `letterSpacing`, `Typography(`, `enableEdgeToEdge`, `statusBarsPadding` were independently re-checked by filesystem scan and **are genuinely 0**. V6's problem is not its counting; it is what it chose to count (see `REVIEW-V6-GRADE-AND-GAP.md` §9).
+
+**Counting discipline going forward:** scan the filesystem with an explicit exclusion list (`\\build\\`, `\\src\\test\\`, `\\src\\androidTest\\`), count *usage* sites with the call parenthesis (`X(`) rather than bare identifiers — bare-name counts include imports, comments, and declarations and inflate by 2–4×.
+
+### B.1 Figures in this document that were wrong and are now corrected
+
+| Claim (earlier draft) | Correct value | Where |
+|---|---|---|
+| `CircularProgressIndicator` usage = 10 | **11** project-wide / **9** in feature/chat | §5.1 |
+| `LinearProgressIndicator` usage = 20 | **25** project-wide / **13** in feature/chat | §5.1 |
+| `outlineVariant` sites = 14 | **23** project-wide / **17** in feature/chat | §3.3, §11.5 |
+| `shadowElevation` distinct values = 7 | **10** (0,2,5,6,7,8,10,12,14,18) | §3.1 |
+| distinct `fontSize` values = 15 | **18** (8,9,9.5,10,10.5,11,11.5,12,13,13.5,14,15,16,17,18,20,22,25) | §1.1 |
+| `RoundedCornerShape(` = 163 | **162** | Appendix A |
+| `Color(0xFF…)` in feature/chat = 46 | **74** | Appendix A |
+| `IconButton` < 44dp = 19 | **14** (by the `IconButton`+`size(...)` adjacency test) | §6.1 |
+
+Direction and severity of every finding are unchanged; only the magnitudes moved. The `lineHeight` count (47) and `fontSize` count (73) were correct as originally stated.
+
+### B.2 Correction: dead `AnimatedVisibility` sites — there are four, not two
+
+§4.2 named two. A full scan of `visible = true` under `AnimatedVisibility(`/`SmoothRightToLeftPage(` finds **four**:
+
+| # | Site | Kind |
+|---|---|---|
+| 1 | `ChatComposerActionMenuViews.kt:126-127` | `AnimatedVisibility(visible = true, …)` — enter never plays |
+| 2 | `ChatComposerResearchModeViews.kt:114-115` | same |
+| 3 | `ChatAuxiliaryPages.kt:69-70` | `SmoothRightToLeftPage(visible = true, …)` — its `AnimatedVisibility` enter never plays |
+| 4 | `ChatImagesWorkspaceOverlay.kt:358-359` | same |
+
+Sites 3 and 4 are the image-editor subpage, which is gated by `request?.let { … }` — so it is *mounted* rather than *toggled*, exactly the `AnimatedVisibility(visible = true)` failure mode, one level up the call chain. `SmoothRightToLeftPage` (`core/designsystem/SmoothPage.kt:45-52`) is built on `AnimatedVisibility`, so the slide-in `tween(240)` there is equally dead. The image editor therefore appears with **no** entrance animation, on top of the two composer sheets.
+
+Fix is the same one line at four sites: mount through `MutableTransitionState(false).apply { targetState = true }`. Prefer fixing it **inside `SmoothRightToLeftPage`** (one change, `core/designsystem`) so every caller of sites 3/4 and any future caller inherit correct motion.
 
 ## Appendix C — Files inspected
 
