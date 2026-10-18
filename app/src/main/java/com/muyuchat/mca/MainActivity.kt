@@ -10,6 +10,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -19,11 +20,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.SaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muyuchat.core.benchmark.BenchmarkResult
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.McaTheme
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
@@ -39,6 +43,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 private const val PENDING_WORLD_BOOK_SCOPE_KEY = "pending_world_book_scope"
+
+/** Tab-overlay crossfade length. Inside the V9 motion window (180-220 ms), shared by every tab. */
+private const val TAB_SWITCH_FADE_MILLIS = 200
+
+/** Splash -> app handoff crossfade. Same window; the app takes over while the splash fades out. */
+private const val STARTUP_HANDOFF_FADE_MILLIS = 220
 
 class MainActivity : ComponentActivity() {
     private val startup: AppStartupViewModel by viewModels()
@@ -116,34 +126,42 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val startupState by startup.state.collectAsStateWithLifecycle()
-            val readyModel = startupState.model
-            if (readyModel == null) {
-                McaTheme {
-                    AppStartupScreen(startupState, onRetry = { startup.start() }, onSkipScan = { startup.skipModelDiscovery() })
-                }
-                return@setContent
-            }
-            val state by readyModel.uiState.collectAsStateWithLifecycle()
             McaTheme {
-                McaApp(
-                    state = state,
-                    onTab = viewModel::selectTab,
-                    onImport = { pendingModelImportTextOnly = it; importLauncher.launch(Unit) },
-                    onImportModelDirectory = { pendingModelImportTextOnly = it; modelDirectoryLauncher.launch(null) },
-                    onImportLocalImageModel = { localImageModelImportLauncher.launch(arrayOf("application/octet-stream", "application/zip", "application/x-zip-compressed", "*/*")) },
-                    onImportOfflineTranslation = { offlineTranslationImportLauncher.launch(null) },
-                    onImportAssistantCardFile = { pendingAssistantCardOwner = viewModel.captureContentImportOwner(); assistantCardImportLauncher.launch(Unit) },
-                    onImportWorldBookFile = { scope ->
-                        pendingWorldBookOwner = viewModel.captureContentImportOwner()
-                        pendingWorldBookImportScope = if (scope == WorldBookImportScope.CHAT) WorldBookScope.CHAT else if (scope == WorldBookImportScope.ASSISTANT) WorldBookScope.ASSISTANT else WorldBookScope.GLOBAL
-                        worldBookImportLauncher.launch(Unit)
-                    },
-                    onImportKnowledgeDocument = { id -> pendingKnowledgeBaseId = id; pendingKnowledgeDocumentOwner = viewModel.captureContentImportOwner(); knowledgeDocumentImportLauncher.launch(Unit) },
-                    onAttachVisionProjector = { id -> pendingVisionProjectorModelId = id; visionProjectorImportLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
-                    onExportDiagnostics = { diagnosticExportLauncher.launch("mca-diagnostic-${System.currentTimeMillis()}.json") },
-                    onExportChatSession = { id -> pendingChatExportSessionId = id; chatExportLauncher.launch(viewModel.chatSessionExportFileName(id)) },
-                    viewModel = viewModel
-                )
+                // V03: splash -> app handoff. Both surfaces live under the one McaTheme node, so the
+                // system-bar owner stays single while the startup surface crossfades out and the app
+                // crossfades in; neither branch is composed twice and the app's content lambda is the
+                // existing McaApp call.
+                Crossfade(
+                    targetState = startupState.model,
+                    animationSpec = McaMotion.fade(STARTUP_HANDOFF_FADE_MILLIS),
+                    modifier = Modifier.fillMaxSize(),
+                    label = "startup-to-app",
+                ) { readyModel ->
+                    if (readyModel == null) {
+                        AppStartupScreen(startupState, onRetry = { startup.start() }, onSkipScan = { startup.skipModelDiscovery() })
+                    } else {
+                        val state by readyModel.uiState.collectAsStateWithLifecycle()
+                        McaApp(
+                            state = state,
+                            onTab = viewModel::selectTab,
+                            onImport = { pendingModelImportTextOnly = it; importLauncher.launch(Unit) },
+                            onImportModelDirectory = { pendingModelImportTextOnly = it; modelDirectoryLauncher.launch(null) },
+                            onImportLocalImageModel = { localImageModelImportLauncher.launch(arrayOf("application/octet-stream", "application/zip", "application/x-zip-compressed", "*/*")) },
+                            onImportOfflineTranslation = { offlineTranslationImportLauncher.launch(null) },
+                            onImportAssistantCardFile = { pendingAssistantCardOwner = viewModel.captureContentImportOwner(); assistantCardImportLauncher.launch(Unit) },
+                            onImportWorldBookFile = { scope ->
+                                pendingWorldBookOwner = viewModel.captureContentImportOwner()
+                                pendingWorldBookImportScope = if (scope == WorldBookImportScope.CHAT) WorldBookScope.CHAT else if (scope == WorldBookImportScope.ASSISTANT) WorldBookScope.ASSISTANT else WorldBookScope.GLOBAL
+                                worldBookImportLauncher.launch(Unit)
+                            },
+                            onImportKnowledgeDocument = { id -> pendingKnowledgeBaseId = id; pendingKnowledgeDocumentOwner = viewModel.captureContentImportOwner(); knowledgeDocumentImportLauncher.launch(Unit) },
+                            onAttachVisionProjector = { id -> pendingVisionProjectorModelId = id; visionProjectorImportLauncher.launch(arrayOf("application/octet-stream", "*/*")) },
+                            onExportDiagnostics = { diagnosticExportLauncher.launch("mca-diagnostic-${System.currentTimeMillis()}.json") },
+                            onExportChatSession = { id -> pendingChatExportSessionId = id; chatExportLauncher.launch(viewModel.chatSessionExportFileName(id)) },
+                            viewModel = viewModel
+                        )
+                    }
+                }
             }
         }
     }
@@ -262,6 +280,11 @@ private fun McaApp(
         }
     }
 
+    // V03: one saveable holder for the four overlay tabs. The chat page is the always-composed base
+    // layer below them and is deliberately not disposed, so it needs no holder; each overlay tab
+    // keeps its rememberSaveable state across the crossfade disposal.
+    val tabStateHolder = rememberSaveableStateHolder()
+
     Scaffold { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             val assistantImageToolPermission = remember(
@@ -303,8 +326,11 @@ private fun McaApp(
                 ),
             )
 
-            SwipeBackPage(
+            CrossfadeTabPage(
                 visible = state.tab == AppTab.AGENT,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.AGENT.name,
+                label = "tab-agent",
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
@@ -337,8 +363,11 @@ private fun McaApp(
                 )
             }
 
-            SwipeBackPage(
+            CrossfadeTabPage(
                 visible = state.tab == AppTab.MODELS,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.MODELS.name,
+                label = "tab-models",
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
@@ -449,8 +478,11 @@ private fun McaApp(
                 )
             }
 
-            SwipeBackPage(
+            CrossfadeTabPage(
                 visible = state.tab == AppTab.API,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.API.name,
+                label = "tab-api",
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
@@ -463,8 +495,11 @@ private fun McaApp(
                 )
             }
 
-            SwipeBackPage(
+            CrossfadeTabPage(
                 visible = state.tab == AppTab.SETTINGS,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.SETTINGS.name,
+                label = "tab-settings",
                 onDismissStart = { if (appMenuOpen) appMenuOpen = true },
                 onDismiss = { onTab(AppTab.CHAT) }
             ) { pageModifier, closePage ->
@@ -514,4 +549,46 @@ private fun McaApp(
     }
 
     ConsumeImeBackHandler()
+}
+
+/**
+ * One top-level tab overlay with the shared tab crossfade.
+ *
+ * Layout/visibility contract: the overlay still fills the same Box slot it always did and still
+ * hosts the same [SwipeBackPage] + screen call; only the appearance transition changed from "outgoing
+ * page disappears, incoming page slides in" to a [Crossfade] driven by [McaMotion.fade]. The chat page
+ * is intentionally **not** wrapped: it is the always-composed base layer below these overlays, so its
+ * `ChatViewModel`, draft, scroll and focus state never leave composition on a tab switch.
+ *
+ * `SaveableStateHolder` keeps each overlay tab's `rememberSaveable` state across the disposal that
+ * ends the fade. Keeping hidden tabs permanently composed would preserve plain `remember` too, but
+ * would run their background effects and polling on every other tab -- not acceptable here.
+ */
+@Composable
+private fun CrossfadeTabPage(
+    visible: Boolean,
+    stateHolder: SaveableStateHolder,
+    tabKey: String,
+    label: String,
+    onDismissStart: () -> Unit,
+    onDismiss: () -> Unit,
+    content: @Composable (Modifier, () -> Unit) -> Unit,
+) {
+    Crossfade(
+        targetState = visible,
+        animationSpec = McaMotion.fade(TAB_SWITCH_FADE_MILLIS),
+        modifier = Modifier.fillMaxSize(),
+        label = label,
+    ) { shown ->
+        if (shown) {
+            stateHolder.SaveableStateProvider(tabKey) {
+                SwipeBackPage(
+                    visible = true,
+                    onDismissStart = onDismissStart,
+                    onDismiss = onDismiss,
+                    content = content,
+                )
+            }
+        }
+    }
 }

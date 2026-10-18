@@ -215,8 +215,94 @@ mca.streamingPrompt         流式场景的提示词（默认约 500 token 的�
 | `profileinstaller` 对生产冷启动的影响 | NOT_RUN | 未测量；必须在 Q01 冷启动 before/after 中确认 |
 | 性能收益/帧改善 | NOT_RUN | 没有任何原始测量 |
 
-## 7. 回退点
+## 7. UI 动效证据采集（`scripts/verify-ui-motion.ps1`）
+
+### 7.1 目的与边界
+
+把“动效是否真的在动”变成可复现的像素证据：
+
+```text
+adb screenrecord → pull mp4 → ffmpeg -vf fps=10 → PIL 相邻帧平均绝对差 → motion.json
+```
+
+- PASS 只表示：录制窗口内至少 `-MinMotionFrames` 帧的相邻帧平均差达到 `-MotionThreshold`，并且要求的动作确实打开了对应界面。
+- 它**不**证明动画曲线、时长、物理参数、视觉质量、全设备流畅度或 TalkBack/大字体表现；也不替代 Macrobenchmark 帧数据。
+- 录制窗口内任何系统 UI 变化（状态栏、输入法、通知）也可能计入差异；JSON 保存完整 timeline，复核者可以重新判定。
+- 本工具不修改生产代码；adb/ffmpeg/PIL 是外部工具。脚本会恢复并校验设备动画缩放。
+
+### 7.2 参数与用法
+
+```powershell
+# 默认：在 chat 界面录 drawer 开/关，动画缩放为 0 时直接 NOT_RUN
+.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage chat-drawer -Actions drawer
+
+# 临时把动画缩放置 1（必须在 finally 恢复原值；脚本会二次校验）
+.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage chat-menu -Actions menu -EnableAnimationScale
+
+# 多个动作：逗号分隔（powershell -File 也支持）或 PowerShell 数组
+.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage menu-model -Actions menu,model -EnableAnimationScale
+
+# 显式证据目录（默认在 artifacts/ui-motion/，该目录已在本地 git exclude 中）
+.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -OutDir artifacts/ui-motion/manual-pass -Actions drawer -EnableAnimationScale
+```
+
+`-Actions` 支持 `drawer`、`menu`、`model`、`newchat`、`send`；未知动作退出码 2。`send` 总会被移到最后一个：录制前先确认模型就绪，再点输入框、输入探测文本、确认发送按钮存在；如果模型未就绪（头部出现 `待加载`/`选择模型`/`加载中`/`需要重载`/`加载失败` 等），直接 **BLOCKED**，不录制、不污染输入框。`-Actions @()` 会录一段静止画面，这是有意的“无动效应判 FAIL”诊断，不是生产场景。
+
+### 7.3 判定与退出码
+
+| 场景 | 结果 | 退出码 | 说明 |
+|---|---|---|---|
+| `animator_duration_scale = 0` 且未加 `-EnableAnimationScale` | `NOT_RUN` | 3 | Compose 动画按设计停住；不录制、不伪造 PASS |
+| 动画缩放 0，加 `-EnableAnimationScale` | 继续测量 | — | 三个 scale 临时置 1，finally 恢复原值并二次读回校验 |
+| 至少 `-MinMotionFrames` 帧均值差 ≥ 阈值，动作界面被观测到 | `PASS` | 0 | 只证明“录制窗口内确实有运动” |
+| 无持续运动 / 动作界面未出现 / send 未产生生成 / 分析失败 / 缩放恢复失败 | `FAIL` | 1 | 不把失败写成 PASS |
+| 缺 adb/ffmpeg/Python+PIL、无设备、app 不在 chat、send 缺模型 fixture | `BLOCKED` | 3 | 环境或前置条件不满足 |
+| 未知 `-Actions`、输出目录不可创建 | 用法错误 | 2 | 参数在录制前拒绝 |
+| `-EnableAnimationScale` 且中途异常/用户中断 | 仍执行 finally 恢复 | — | 恢复结果写进 JSON；恢复失败时整体判 FAIL |
+
+恢复逻辑：保存 `window_animation_scale` / `transition_animation_scale` / `animator_duration_scale` 的原始字符串（含 `null`）；结束后逐项写回，先即时读回、再等 300ms 二次读回；任何不一致都会把本次 verdict 覆盖为 FAIL 并记录错误。自测期间发现并修复了一个 PowerShell 大小写不敏感变量冲突（局部 `$original` 覆盖了参数 `$Original`，只恢复第一个 scale）；修复后必须保留注释与二次校验，禁止改回同名变量。
+
+### 7.4 输出
+
+`<OutDir>/` 下：
+
+| 文件 | 内容 |
+|---|---|
+| `motion.json` | schema/verdict/exitCode/stage/HEAD/device/app/tools、动画缩放 before/effective/restore、动作观测、recording 路径+SHA256+bytes、帧数/尺寸、motionFrameCount/maxFrameDiff/p95/motionRanges/timeline |
+| `RUN.md` | 人类可读摘要、动作观测表、限制说明 |
+| `recording.mp4` | 原始 screenrecord 文件 |
+| `frames/` | ffmpeg 抽出的 PNG 帧（默认 10fps、原始分辨率） |
+| `screenrecord.log` / `ffmpeg.log` / `analysis.log` / `frame-analysis.json` | 原始工具日志与分析中间产物 |
+| `analyze-motion.py` | 本次运行实际使用的 PIL 分析器副本（可复查算法） |
+
+`motion.json` 中 `motion.timeline` 每项包含 `frame/timeMs/meanDiff/changedRatio/motion`；`motionRanges` 是连续运动帧的合并区间。`frames.count`、`motion.motionFrameCount`、`recording.sha256` 是复核的最小证据集。
+
+### 7.5 自测结果（2026-10-19，真机 f9d98aa3 / API 36 / 1440x3200）
+
+| 用例 | 命令要点 | 结果 |
+|---|---|---|
+| 动画缩放 0 | 默认 `-Actions drawer` | `NOT_RUN`，exit 3，无录制，缩放保持 0.0 |
+| 抽屉动效 | `-Actions drawer -EnableAnimationScale` | `PASS`，6 个运动帧，maxFrameDiff 25.61，录制/帧/JSON 齐全，缩放恢复 0.0/0.0/0.0 |
+| 菜单+模型动效 | `-Actions menu,model -EnableAnimationScale` | `PASS`，7 个运动帧，maxFrameDiff 12.63，两个动作 observed=true，缩放恢复 0.0/0.0/0.0 |
+| 静止画面 | 空 `-Actions` + `-EnableAnimationScale` | `FAIL`，0 个运动帧，maxFrameDiff 0.14，缩放恢复 0.0/0.0/0.0 |
+| send 缺 fixture | `-Actions send -EnableAnimationScale`（模型 `待加载`） | `BLOCKED`，exit 3，未录制、输入框无探测文本、缩放未变 |
+| 未知动作 | `-Actions bogus` | 用法错误，exit 2 |
+
+校准数据（同设备，10fps，1440x3200）：静止 chat 画面相邻帧均值差 p95≈0.03、max≈0.45；抽屉/菜单动画峰值实测约 12–90（与录制窗口和手势抖动有关）。默认阈值 `1.0`、最少 `2` 帧；更微妙的淡入淡出可降低阈值并同时看 `changedRatio`，必须在 JSON 中记录本次阈值。
+
+自测时 HEAD 已从任务描述的 `e964539a` 前进到 `9054004c`（motion 提交）；脚本每次运行都记录实际 `git rev-parse HEAD` 与 dirty/untracked 数量，不把旧基线写进证据。自测使用的是 0.2.4 生产包（`com.muyuchat.mca`），未改动 app 的动画缩放设计，也没有修改任何 Kotlin 源码。
+
+### 7.6 未覆盖（NOT_RUN）
+
+- 未测 60Hz/90Hz/120Hz 下的动画帧预算；本工具只看帧间像素差，不产出 FrameTiming 指标。
+- 未测字体缩放、TalkBack、横屏、分屏和系统动画缩放非 1（如 0.5/1.5）的组合。
+- 未做多设备对比；`PASS` 只属于本设备、本次构建、本次录制窗口。
+- 未验证 `send` 的真实流式动效（设备当前没有已加载聊天模型，按设计为 BLOCKED）。
+- 未证明任何动画“更高级/更顺滑”；视觉质量仍需真机录像 + 人工复核。
+
+## 8. 回退点
 
 - 删除 `:benchmark` 的 opt-in include 即回到原默认构建；该模块不被任何生产模块依赖。
 - 删除 app 的 `benchmark` build type 与 `profileinstaller` 依赖、删除六个模块的 `composeCompiler {}` 块、删除 `scripts/verify-ui-quality.ps1` 与本文档，即完全回到基线构建行为。
+- 删除 `scripts/verify-ui-motion.ps1` 与本节即移除动效测量入口；它不接入生产构建、不修改业务源码，`artifacts/ui-motion/` 下的自测证据可单独删除。
 - 以上操作都不触碰业务源码、数据库、协议或冻结视觉。
