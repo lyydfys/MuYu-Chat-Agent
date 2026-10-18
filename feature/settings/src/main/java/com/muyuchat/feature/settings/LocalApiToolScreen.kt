@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -75,7 +75,7 @@ fun LocalApiToolScreen(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { if (showApiDocs) showApiDocs = false else onBack() }) {
-                    Icon(Icons.Default.Close, contentDescription = "返回")
+                    Icon(Icons.Rounded.Close, contentDescription = "返回")
                 }
                 Column {
                     Text(if (showApiDocs) "API使用文档" else "本地 API", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -269,16 +269,16 @@ private fun ApiStatusCard(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "复制本机地址")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制本机地址")
                     Text("本机", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "复制局域网地址")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制局域网地址")
                     Text("局域网", modifier = Modifier.padding(start = 6.dp))
                 }
             }
             Button(onClick = onCopyKey, enabled = apiKey.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "复制 Key")
+                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制 Key")
                 Text("复制 API Key", modifier = Modifier.padding(start = 6.dp))
             }
         }

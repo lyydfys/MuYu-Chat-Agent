@@ -17,13 +17,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.UploadFile
-import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -152,7 +152,7 @@ internal fun LocalModelsSection(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("+ 导入 GGUF / LiteRT-LM / MNN 本地模型", fontWeight = FontWeight.Bold)
                 }
@@ -196,7 +196,7 @@ internal fun LocalModelsSection(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("+ 导入本地生图引擎包", fontWeight = FontWeight.Bold)
                 }
@@ -341,7 +341,7 @@ private fun LocalModelCard(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
                     Icon(
-                        imageVector = if (isLoaded) Icons.Default.Close else Icons.Default.PlayArrow,
+                        imageVector = if (isLoaded) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
@@ -361,7 +361,7 @@ private fun LocalModelCard(
                     shape = RoundedCornerShape(999.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
-                    Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     Text(if (isQairtRuntime) "重新诊断" else "校验", maxLines = 1, softWrap = false)
                 }
@@ -372,12 +372,12 @@ private fun LocalModelCard(
                     shape = RoundedCornerShape(999.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                 ) {
-                    Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
                 }
                 IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))
+                    Icon(Icons.Rounded.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))
                 }
             }
         }
@@ -547,7 +547,7 @@ private fun LocalImageModelCard(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
                         when {
@@ -564,12 +564,12 @@ private fun LocalImageModelCard(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text("校验", maxLines = 1)
                 }
                 IconButton(onClick = { confirmRemoval = true }, enabled = enabled) {
-                    Icon(Icons.Default.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))
+                    Icon(Icons.Rounded.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))
                 }
             }
         }

@@ -87,13 +87,13 @@ class ModelHubStatusAccessibilityContractTest {
         val cloud = sourceFile("CloudModelsSection.kt")
         val local = sourceFile("LocalModelsSection.kt")
 
-        assertTrue(cloud.contains("Icon(Icons.Default.Delete, contentDescription = cloudModelDeleteActionLabel(model))"))
-        assertTrue(cloud.contains("Icon(Icons.Default.Edit, contentDescription = null"))
+        assertTrue(cloud.contains("Icon(Icons.Rounded.Delete, contentDescription = cloudModelDeleteActionLabel(model))"))
+        assertTrue(cloud.contains("Icon(Icons.Rounded.Edit, contentDescription = null"))
         assertFalse(cloud.contains("contentDescription = \"删除云端模型\""))
 
-        assertTrue(local.contains("Icon(Icons.Default.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))"))
-        assertTrue(local.contains("Icon(Icons.Default.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))"))
-        assertTrue(local.contains("Icon(Icons.Default.CheckCircle, contentDescription = null"))
+        assertTrue(local.contains("Icon(Icons.Rounded.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))"))
+        assertTrue(local.contains("Icon(Icons.Rounded.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))"))
+        assertTrue(local.contains("Icon(Icons.Rounded.CheckCircle, contentDescription = null"))
         assertFalse(local.contains("contentDescription = \"删除本地模型\""))
         assertFalse(local.contains("contentDescription = \"删除本地图像生成引擎\""))
     }

@@ -19,11 +19,11 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -142,7 +142,7 @@ internal fun CloudModelEditorPage(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回云端模型")
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回云端模型")
                 }
                 Column {
                     Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -529,7 +529,7 @@ private fun CloudModelRow(
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Icon(
-                            imageVector = if (model.kind == "IMAGE") Icons.Default.Image else Icons.Default.PlayArrow,
+                            imageVector = if (model.kind == "IMAGE") Icons.Rounded.Image else Icons.Rounded.PlayArrow,
                             contentDescription = null,
                             modifier = Modifier.size(18.dp)
                         )
@@ -541,12 +541,12 @@ private fun CloudModelRow(
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(999.dp)
                     ) {
-                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("编辑", maxLines = 1)
                     }
                     IconButton(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = cloudModelDeleteActionLabel(model))
+                        Icon(Icons.Rounded.Delete, contentDescription = cloudModelDeleteActionLabel(model))
                     }
                 }
             }

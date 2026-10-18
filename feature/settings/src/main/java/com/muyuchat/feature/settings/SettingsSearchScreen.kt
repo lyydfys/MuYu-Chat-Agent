@@ -12,7 +12,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -389,7 +389,7 @@ fun SearchSettingsScreen(
                                 onSave(currentDraft())
                             }
                         ) {
-                            Icon(Icons.Default.Save, contentDescription = null)
+                            Icon(Icons.Rounded.Save, contentDescription = null)
                             Text("保存")
                         }
                     }

@@ -20,7 +20,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -343,7 +343,7 @@ internal fun WebSearchDiagnosticCard(
                     }
                 }
             ) {
-                Icon(Icons.Default.ContentCopy, contentDescription = "复制诊断")
+                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制诊断")
                 Text("复制诊断", modifier = Modifier.padding(start = 6.dp))
             }
         }

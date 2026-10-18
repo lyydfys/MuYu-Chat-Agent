@@ -15,9 +15,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -76,11 +76,11 @@ fun LogsApiScreen(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onRefreshLogs, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.Save, contentDescription = "刷新")
+                    Icon(Icons.Rounded.Save, contentDescription = "刷新")
                     Text("刷新", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(onClick = onRefreshDiagnostics, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Default.Save, contentDescription = "生成诊断")
+                    Icon(Icons.Rounded.Save, contentDescription = "生成诊断")
                     Text("生成诊断", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -98,7 +98,7 @@ fun LogsApiScreen(
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = "复制")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制")
                     Text("复制", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(
@@ -106,7 +106,7 @@ fun LogsApiScreen(
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.FileDownload, contentDescription = "导出")
+                    Icon(Icons.Rounded.FileDownload, contentDescription = "导出")
                     Text("导出", modifier = Modifier.padding(start = 6.dp))
                 }
             }

@@ -17,7 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -148,7 +148,7 @@ private fun ExpandableSettingsHeader(
             )
         }
         Icon(
-            imageVector = Icons.Default.KeyboardArrowDown,
+            imageVector = Icons.Rounded.KeyboardArrowDown,
             contentDescription = if (expanded) "收起" else "展开",
             modifier = Modifier.graphicsLayer { rotationZ = rotation }
         )

@@ -10,12 +10,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.FileDownload
-import androidx.compose.material.icons.filled.InstallMobile
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.InstallMobile
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -129,7 +129,7 @@ fun RuntimeScreen(
                             enabled = offlineTranslationDownloading || !offlineTranslationInstalling,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(if (offlineTranslationDownloading) Icons.Default.Close else Icons.Default.Download, contentDescription = null)
+                            Icon(if (offlineTranslationDownloading) Icons.Rounded.Close else Icons.Rounded.Download, contentDescription = null)
                             Text(
                                 if (offlineTranslationDownloading) "取消下载" else if (offlineStatus.downloadFailed) "重试下载" else "下载",
                                 modifier = Modifier.padding(start = 6.dp)
@@ -148,7 +148,7 @@ fun RuntimeScreen(
                         enabled = !offlineTranslationDownloading,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(if (offlineTranslationInstalling) Icons.Default.Close else Icons.Default.FileDownload, contentDescription = null)
+                        Icon(if (offlineTranslationInstalling) Icons.Rounded.Close else Icons.Rounded.FileDownload, contentDescription = null)
                         Text(if (offlineTranslationInstalling) "取消导入" else "本地导入", modifier = Modifier.padding(start = 6.dp))
                     }
                 }
@@ -448,7 +448,7 @@ private fun AppUpdateCard(
                     enabled = !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Icon(Icons.Rounded.Refresh, contentDescription = null)
                     Text("检查", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(
@@ -456,7 +456,7 @@ private fun AppUpdateCard(
                     enabled = hasUpdate && !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = null)
+                    Icon(Icons.Rounded.Download, contentDescription = null)
                     Text("下载", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -466,7 +466,7 @@ private fun AppUpdateCard(
                     enabled = readyToInstall && !verifying,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.InstallMobile, contentDescription = null)
+                    Icon(Icons.Rounded.InstallMobile, contentDescription = null)
                     Text("安装", modifier = Modifier.padding(start = 6.dp))
                 }
                 OutlinedButton(
@@ -474,7 +474,7 @@ private fun AppUpdateCard(
                     enabled = state.releaseUrl.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = null)
+                    Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
                     Text("打开 Release", modifier = Modifier.padding(start = 6.dp))
                 }
             }

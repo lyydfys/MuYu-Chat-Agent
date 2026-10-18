@@ -30,12 +30,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -94,7 +94,7 @@ internal fun MarketSection(
                     label = { Text("搜索模型") }
                 )
                 IconButton(onClick = { onSearchHubModels(true) }, enabled = !state.isBusy) {
-                    Icon(Icons.Default.Search, contentDescription = "搜索")
+                    Icon(Icons.Rounded.Search, contentDescription = "搜索")
                 }
             }
         }
@@ -153,7 +153,7 @@ internal fun RemoteFilesSection(
         }
         item {
             Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
-                Icon(Icons.Default.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(6.dp))
                 Text("导入本地推理引擎")
             }
@@ -171,7 +171,7 @@ internal fun RemoteFilesSection(
                     label = { Text("模型 ID 或链接") }
                 )
                 IconButton(onClick = onFetchRemoteFiles, enabled = !state.isBusy) {
-                    Icon(Icons.Default.Search, contentDescription = "查找远程推理文件")
+                    Icon(Icons.Rounded.Search, contentDescription = "查找远程推理文件")
                 }
             }
         }
@@ -187,7 +187,7 @@ internal fun RemoteFilesSection(
                     trailingIcon = {
                         if (fileFilter.isNotEmpty()) {
                             IconButton(onClick = { fileFilter = "" }) {
-                                Icon(Icons.Default.Close, contentDescription = "清除筛选")
+                                Icon(Icons.Rounded.Close, contentDescription = "清除筛选")
                             }
                         }
                     }
@@ -287,7 +287,7 @@ internal fun DownloadProgressPanel(
                     modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.ExpandMore,
+                        imageVector = Icons.Rounded.ExpandMore,
                         contentDescription = "查看下载详情",
                         modifier = Modifier.size(18.dp)
                     )
@@ -437,7 +437,7 @@ internal fun DownloadDetailsDialog(
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("模型下载诊断", downloadDiagnostics(state)))
             }) {
-                Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("复制诊断")
             }
@@ -569,7 +569,7 @@ private fun RemoteFileCard(file: RemoteModelFile, enabled: Boolean, onDownload: 
             Text("这是独立 LiteRT-LM 容器，不是 GGUF；下载后会按 LiteRT-LM 运行时注册。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Button(onClick = onDownload, enabled = enabled && isDownloadableModel, shape = RoundedCornerShape(999.dp)) {
-            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
             Text(
                 when {

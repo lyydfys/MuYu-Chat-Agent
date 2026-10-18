@@ -16,11 +16,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.OpenInBrowser
-import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.OpenInBrowser
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -62,7 +62,7 @@ private fun RowScope.VerifyLocalModelButton(
         shape = RoundedCornerShape(999.dp)
     ) {
         Icon(
-            Icons.Default.CheckCircle,
+            Icons.Rounded.CheckCircle,
             contentDescription = null,
             modifier = Modifier.size(18.dp)
         )
@@ -274,7 +274,7 @@ internal fun RecommendedModelCard(
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Icon(
-                        Icons.Default.Image,
+                        Icons.Rounded.Image,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
@@ -303,7 +303,7 @@ internal fun RecommendedModelCard(
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Icon(
-                        Icons.Default.PlayArrow,
+                        Icons.Rounded.PlayArrow,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
@@ -328,7 +328,7 @@ internal fun RecommendedModelCard(
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(
                         recommendationDownloadCtaLabel(canDownload = downloadAccess.canDownload)
@@ -339,7 +339,7 @@ internal fun RecommendedModelCard(
                 Text("文件")
             }
             IconButton(onClick = onOpenPage, enabled = hasModelPage) {
-                Icon(Icons.Default.OpenInBrowser, contentDescription = "打开页面")
+                Icon(Icons.Rounded.OpenInBrowser, contentDescription = "打开页面")
             }
         }
     }

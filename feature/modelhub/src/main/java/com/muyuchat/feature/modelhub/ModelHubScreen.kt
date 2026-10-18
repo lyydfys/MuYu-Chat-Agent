@@ -22,9 +22,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -359,7 +359,7 @@ private fun ModelHubHeader(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) {
-                    Icon(Icons.Default.Close, contentDescription = "返回聊天")
+                    Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
                 }
                 Column {
                     Text("模型管理", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -368,11 +368,11 @@ private fun ModelHubHeader(
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onRefreshLocal, enabled = !state.isBusy) {
-                    Icon(Icons.Default.Refresh, contentDescription = "刷新本地模型")
+                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新本地模型")
                 }
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
                     Icon(
-                        Icons.Default.Folder,
+                        Icons.Rounded.Folder,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.padding(9.dp).size(20.dp)

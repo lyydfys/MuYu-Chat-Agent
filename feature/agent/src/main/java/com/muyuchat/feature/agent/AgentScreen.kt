@@ -20,11 +20,11 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.AutoFixHigh
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.AutoFixHigh
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Speed
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -514,7 +514,7 @@ private fun AgentInfoPage(
         item {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回智能调参")
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回智能调参")
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(if (isGuide) "调参说明" else "调试解释", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -573,12 +573,12 @@ private fun AgentHeader(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "返回聊天")
+                    Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
                     Icon(
-                        Icons.Default.AutoFixHigh,
+                        Icons.Rounded.AutoFixHigh,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
@@ -593,18 +593,18 @@ private fun AgentHeader(
                 }
             }
             TextButton(onClick = onScan, enabled = !isBusy) {
-                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("体检")
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Button(onClick = onScan, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Default.AutoFixHigh, contentDescription = null)
+                Icon(Icons.Rounded.AutoFixHigh, contentDescription = null)
                 Text("体检", modifier = Modifier.padding(start = 6.dp))
             }
             OutlinedButton(onClick = onBenchmark, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Default.Speed, contentDescription = null)
+                Icon(Icons.Rounded.Speed, contentDescription = null)
                 Text("测速", modifier = Modifier.padding(start = 6.dp))
             }
         }
