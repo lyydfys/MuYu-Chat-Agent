@@ -314,6 +314,19 @@ internal fun McaLogoMark(
     }
 }
 
+/**
+ * Public entry point for surfaces outside `feature:chat` that need the MCA mark
+ * (startup/loading screens). Delegates to the same drawing so the brand never forks.
+ */
+@Composable
+public fun McaBrandLogo(
+    size: Dp,
+    cornerRadius: Dp = 10.dp,
+    modifier: Modifier = Modifier
+) {
+    McaLogoMark(size = size, cornerRadius = cornerRadius, modifier = modifier)
+}
+
 @Composable
 internal fun AnimatedMcaAssistantMark(
     isGenerating: Boolean,
