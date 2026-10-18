@@ -14,9 +14,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -91,7 +91,7 @@ internal fun ChatStatusBar(
             shadowElevation = 6.dp
         ) {
             IconButton(onClick = onOpenHistory) {
-                Icon(Icons.Default.Menu, contentDescription = "打开历史", modifier = Modifier.size(24.dp))
+                Icon(Icons.Rounded.Menu, contentDescription = "打开历史", modifier = Modifier.size(24.dp))
             }
         }
         Spacer(modifier = Modifier.width(12.dp))
@@ -171,7 +171,7 @@ internal fun ChatStatusBar(
                     }
                     if (!compactForLargeText) {
                         Icon(
-                            imageVector = Icons.Default.KeyboardArrowDown,
+                            imageVector = Icons.Rounded.KeyboardArrowDown,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
@@ -214,7 +214,7 @@ internal fun ChatStatusBar(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = onNewConversation, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
+                    Icon(Icons.Rounded.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
                 }
                 Box(
                     modifier = Modifier

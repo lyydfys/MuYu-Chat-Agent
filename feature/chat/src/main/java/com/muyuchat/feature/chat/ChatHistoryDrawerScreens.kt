@@ -42,11 +42,12 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.rounded.Clear
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Search
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -132,6 +133,8 @@ internal fun ChatHistoryDrawer(
     onNewConversation: () -> Unit,
     onOpenAppMenu: () -> Unit,
     onOpenImages: () -> Unit,
+    /** Opens the independent Agent workspace; the smart-tuning entry is unchanged elsewhere. */
+    onOpenAgentWorkspace: () -> Unit,
     onSelectConversation: (String) -> Unit,
     onBranchMixedConversation: (String, String) -> Unit,
     onDeleteConversation: (String) -> Unit,
@@ -277,7 +280,7 @@ internal fun ChatHistoryDrawer(
                                     },
                                     leadingIcon = {
                                         Icon(
-                                            Icons.Default.Search,
+                                            Icons.Rounded.Search,
                                             contentDescription = null,
                                             modifier = Modifier.size(20.dp)
                                         )
@@ -286,7 +289,7 @@ internal fun ChatHistoryDrawer(
                                         {
                                             IconButton(onClick = { query = "" }) {
                                                 Icon(
-                                                    Icons.Default.Clear,
+                                                    Icons.Rounded.Clear,
                                                     contentDescription = "清空搜索",
                                                     modifier = Modifier.size(20.dp)
                                                 )
@@ -309,7 +312,7 @@ internal fun ChatHistoryDrawer(
                                     modifier = Modifier.testTag("history.search.close")
                                 ) {
                                     Icon(
-                                        Icons.Default.Close,
+                                        Icons.Rounded.Close,
                                         contentDescription = "关闭搜索",
                                         modifier = Modifier.size(22.dp)
                                     )
@@ -343,7 +346,7 @@ internal fun ChatHistoryDrawer(
                                                 .testTag("history.search")
                                         ) {
                                             Icon(
-                                                Icons.Default.Search,
+                                                Icons.Rounded.Search,
                                                 contentDescription = "搜索历史",
                                                 modifier = Modifier.size(22.dp)
                                             )
@@ -364,7 +367,16 @@ internal fun ChatHistoryDrawer(
                 }
 
                 Spacer(modifier = Modifier.height(28.dp))
-                AppFeatureButton(icon = { Icon(Icons.Default.Image, null) }, text = "图片", onClick = onOpenImages)
+                AppFeatureButton(icon = { Icon(Icons.Rounded.Image, null) }, text = "图片", onClick = onOpenImages)
+                // Agent workspace sits directly below the image entry. The existing "recent" area,
+                // smart-tuning entry and image overlay behavior are unchanged.
+                AppFeatureButton(
+                    icon = { Icon(Icons.Rounded.AutoAwesome, null) },
+                    text = "Agent",
+                    onClick = onOpenAgentWorkspace,
+                    testTag = "drawer.agent_workspace",
+                    accessibilityLabel = "打开 Agent 工作区"
+                )
                 Spacer(modifier = Modifier.height(34.dp))
 
                 Text(
@@ -459,7 +471,7 @@ internal fun ChatHistoryDrawer(
                     modifier = Modifier.padding(horizontal = 18.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Default.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.background, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.background, modifier = Modifier.size(20.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "聊天",
@@ -611,13 +623,27 @@ private fun Modifier.edgeSwipeBack(onBack: () -> Unit): Modifier {
 }
 
 @Composable
-private fun AppFeatureButton(icon: @Composable () -> Unit, text: String, onClick: () -> Unit) {
+private fun AppFeatureButton(
+    icon: @Composable () -> Unit,
+    text: String,
+    onClick: () -> Unit,
+    testTag: String? = null,
+    accessibilityLabel: String? = null
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .then(
+                if (accessibilityLabel != null) {
+                    Modifier.semantics { contentDescription = accessibilityLabel }
+                } else {
+                    Modifier
+                }
+            )
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

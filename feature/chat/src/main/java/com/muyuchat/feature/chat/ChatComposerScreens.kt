@@ -34,17 +34,17 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.PhotoCamera
+import androidx.compose.material.icons.rounded.PhotoLibrary
+import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Stop
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -388,7 +388,7 @@ internal fun ChatInputBar(
                         modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
-                            Icons.Default.Close,
+                            Icons.Rounded.Close,
                             contentDescription = "退出聊天生图模式",
                             modifier = Modifier.size(16.dp),
                             tint = inputPlaceholderColor
@@ -472,7 +472,7 @@ internal fun ChatInputBar(
                         .clickable(enabled = !isGenerating) { showActionSheet = true },
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else McaPrimaryBlue)
+                    Icon(Icons.Rounded.Add, contentDescription = "更多操作", modifier = Modifier.size(24.dp), tint = if (isGenerating) inputPlaceholderColor else McaPrimaryBlue)
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Surface(
@@ -562,9 +562,9 @@ internal fun ChatInputBar(
                         ) { action ->
                             Icon(
                                 imageVector = when (action) {
-                                    ComposerPrimaryAction.Stop -> Icons.Default.Stop
-                                    ComposerPrimaryAction.GenerateImage -> Icons.Default.Image
-                                    else -> Icons.AutoMirrored.Filled.Send
+                                    ComposerPrimaryAction.Stop -> Icons.Rounded.Stop
+                                    ComposerPrimaryAction.GenerateImage -> Icons.Rounded.Image
+                                    else -> Icons.AutoMirrored.Rounded.Send
                                 },
                                 contentDescription = when (action) {
                                     ComposerPrimaryAction.Stop -> "停止"

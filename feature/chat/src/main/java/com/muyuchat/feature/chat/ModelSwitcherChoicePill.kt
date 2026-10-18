@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.rounded.Check
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -117,7 +117,7 @@ internal fun ModelChoicePill(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (model.loaded) {
-                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
+                Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
             } else {
                 Spacer(modifier = Modifier.size(17.dp))
             }

@@ -37,15 +37,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Replay
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -80,6 +80,8 @@ import com.muyuchat.core.engine.ChatGeneratedImageOrigin
 import com.muyuchat.core.engine.ChatImageToolContinuationStatus
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.designsystem.mcaPressScale
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 
@@ -98,6 +100,9 @@ internal fun AssistantActionRow(
 ) {
     val tint = MaterialTheme.colorScheme.onSurfaceVariant
     var menuOpen by remember { mutableStateOf(false) }
+    val regenerateInteraction = remember { MutableInteractionSource() }
+    val copyInteraction = remember { MutableInteractionSource() }
+    val moreInteraction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
@@ -107,10 +112,11 @@ internal fun AssistantActionRow(
             IconButton(
                 onClick = onRegenerate,
                 enabled = canRegenerate,
-                modifier = Modifier.size(48.dp)
+                interactionSource = regenerateInteraction,
+                modifier = Modifier.size(48.dp).mcaPressScale(regenerateInteraction, enabled = canRegenerate),
             ) {
                 Icon(
-                    Icons.Default.Replay,
+                    Icons.Rounded.Replay,
                     contentDescription = "重新生成",
                     modifier = Modifier.size(18.dp),
                     tint = tint.copy(alpha = if (canRegenerate) 0.78f else 0.32f)
@@ -119,10 +125,11 @@ internal fun AssistantActionRow(
         }
         IconButton(
             onClick = onCopy,
-            modifier = Modifier.size(48.dp)
+            interactionSource = copyInteraction,
+            modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction),
         ) {
             Icon(
-                Icons.Default.ContentCopy,
+                Icons.Rounded.ContentCopy,
                 contentDescription = "复制消息",
                 modifier = Modifier.size(18.dp),
                 tint = tint.copy(alpha = 0.78f)
@@ -131,10 +138,11 @@ internal fun AssistantActionRow(
         if (!readOnly) Box {
             IconButton(
                 onClick = { menuOpen = true },
-                modifier = Modifier.size(48.dp)
+                interactionSource = moreInteraction,
+                modifier = Modifier.size(48.dp).mcaPressScale(moreInteraction),
             ) {
                 Icon(
-                    Icons.Default.MoreVert,
+                    Icons.Rounded.MoreVert,
                     contentDescription = "更多消息操作",
                     modifier = Modifier.size(18.dp),
                     tint = tint.copy(alpha = 0.78f)
@@ -148,7 +156,7 @@ internal fun AssistantActionRow(
             ) {
                 DropdownMenuItem(
                     text = { Text("复制回答") },
-                    leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
+                    leadingIcon = { Icon(Icons.Rounded.ContentCopy, contentDescription = null) },
                     onClick = {
                         menuOpen = false
                         onCopy()
@@ -156,7 +164,7 @@ internal fun AssistantActionRow(
                 )
                 DropdownMenuItem(
                     text = { Text(if (pinned) "取消固定上下文" else "固定到上下文") },
-                    leadingIcon = { Icon(Icons.Default.PushPin, contentDescription = null) },
+                    leadingIcon = { Icon(Icons.Rounded.PushPin, contentDescription = null) },
                     enabled = canTogglePinned,
                     onClick = {
                         menuOpen = false
@@ -165,7 +173,7 @@ internal fun AssistantActionRow(
                 )
                 DropdownMenuItem(
                     text = { Text("重新生成") },
-                    leadingIcon = { Icon(Icons.Default.Replay, contentDescription = null) },
+                    leadingIcon = { Icon(Icons.Rounded.Replay, contentDescription = null) },
                     enabled = canRegenerate,
                     onClick = {
                         menuOpen = false
@@ -176,7 +184,7 @@ internal fun AssistantActionRow(
                     text = { Text("\u5220\u9664\u672c\u8f6e\u5bf9\u8bdd", color = MaterialTheme.colorScheme.error) },
                     leadingIcon = {
                         Icon(
-                            Icons.Default.Delete,
+                            Icons.Rounded.Delete,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.error
                         )
@@ -190,7 +198,7 @@ internal fun AssistantActionRow(
                     text = { Text("删除本条", color = MaterialTheme.colorScheme.error) },
                     leadingIcon = {
                         Icon(
-                            Icons.Default.Delete,
+                            Icons.Rounded.Delete,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.error
                         )
