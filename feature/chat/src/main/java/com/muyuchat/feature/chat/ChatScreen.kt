@@ -1,19 +1,16 @@
 package com.muyuchat.feature.chat
 
 import android.content.Context
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -45,7 +42,6 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
-import com.muyuchat.core.designsystem.SystemBackMotionHandler
 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
@@ -287,21 +283,11 @@ fun ChatScreen(
             }
     }
 
-    val historyBackEnabled = !WindowInsets.isImeVisible && (
-        drawerState.currentValue == DrawerValue.Open ||
-            drawerState.targetValue == DrawerValue.Open
-        )
-    SystemBackMotionHandler(
-        enabled = historyBackEnabled,
-        onProgress = {},
-        onCancel = {},
-        onBack = {
-            scope.launch { drawerState.close() }
-        }
-    )
-    BackHandler(enabled = historyBackEnabled) {
-        scope.launch { drawerState.close() }
-    }
+    // Predictive back is owned by Material3's ModalNavigationDrawer
+    // (NavigationDrawerKt.DrawerPredictiveBackHandler): it follows the gesture and animates the
+    // sheet's scale/translation itself. Registering a second OnBackPressedCallback here used to
+    // take the gesture away from it with an empty onProgress (the drawer stopped following the
+    // finger), so the drawer now has exactly one back owner.
     var bottomChromeHeightPx by remember { mutableStateOf(0) }
     val bottomChromeHeight = resolveChatComposerOverlapDp(
         with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
@@ -593,3 +579,4 @@ fun ChatScreen(
         onDismiss = { showNewConversationPicker = false }
     )
 }
+
