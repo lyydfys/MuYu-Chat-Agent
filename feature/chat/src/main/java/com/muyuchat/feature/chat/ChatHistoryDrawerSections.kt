@@ -8,6 +8,23 @@ internal data class HistorySection(
     val items: List<ChatHistoryItem>
 )
 
+internal fun filterHistoryItems(
+    items: List<ChatHistoryItem>,
+    query: String
+): List<ChatHistoryItem> {
+    val keyword = query.trim()
+    return if (keyword.isBlank()) {
+        items
+    } else {
+        items.filter { item ->
+            item.title.contains(keyword, ignoreCase = true) ||
+                item.displayName.contains(keyword, ignoreCase = true) ||
+                item.summary.contains(keyword, ignoreCase = true) ||
+                item.updatedAtText.contains(keyword, ignoreCase = true)
+        }
+    }
+}
+
 internal fun historySections(items: List<ChatHistoryItem>, query: String): List<HistorySection> {
     if (query.trim().isNotEmpty()) {
         return listOf(HistorySection("搜索结果", items))

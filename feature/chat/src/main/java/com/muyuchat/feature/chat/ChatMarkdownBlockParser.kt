@@ -53,9 +53,14 @@ internal sealed class MarkdownBlock {
 
 // P9/S5: private→internal（纯解析器/类型/只读常量；跨文件被 ChatChromeScreens 复合区引用）
 internal fun parseMarkdownBlocks(content: String, fullContent: String = content): List<MarkdownBlock> {
-    val completeCode = parseChatMarkdownSource(fullContent).filterIsInstance<ChatMarkdownSource.Code>()
+    val parsedContent = parseChatMarkdownSource(content)
+    val completeCode = if (content == fullContent) {
+        parsedContent.filterIsInstance<ChatMarkdownSource.Code>()
+    } else {
+        parseChatMarkdownSource(fullContent).filterIsInstance<ChatMarkdownSource.Code>()
+    }
     var codeIndex = 0
-    return parseChatMarkdownSource(content).flatMap { source ->
+    return parsedContent.flatMap { source ->
         when (source) {
             is ChatMarkdownSource.Code -> {
                 val complete = completeCode.getOrNull(codeIndex++)

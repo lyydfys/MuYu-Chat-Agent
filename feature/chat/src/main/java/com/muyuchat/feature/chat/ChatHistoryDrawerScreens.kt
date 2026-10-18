@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,10 +23,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Search
@@ -39,15 +44,23 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,22 +85,36 @@ internal fun ChatHistoryDrawer(
     onExportConversation: (String) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
+    var searchActive by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var renameTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var branchTarget by remember { mutableStateOf<ChatHistoryItem?>(null) }
     var renameText by remember { mutableStateOf("") }
     var clearAllRequested by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val searchFocusRequester = remember { FocusRequester() }
     val filteredHistory = remember(state.history, query) {
-        val keyword = query.trim()
-        if (keyword.isBlank()) {
-            state.history
-        } else {
-            state.history.filter { item ->
-                item.title.contains(keyword, ignoreCase = true) ||
-                    item.displayName.contains(keyword, ignoreCase = true) ||
-                    item.summary.contains(keyword, ignoreCase = true) ||
-                    item.updatedAtText.contains(keyword, ignoreCase = true)
-            }
+        filterHistoryItems(state.history, query)
+    }
+    // Keep the cached grouping date-aware so it still refreshes across midnight.
+    val groupedHistory = remember(filteredHistory, query, java.time.LocalDate.now()) {
+        historySections(filteredHistory, query)
+    }
+
+    fun closeSearch() {
+        query = ""
+        searchActive = false
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+    }
+
+    BackHandler(enabled = searchActive) { closeSearch() }
+
+    LaunchedEffect(searchActive) {
+        if (searchActive) {
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
         }
     }
 
@@ -98,7 +125,10 @@ internal fun ChatHistoryDrawer(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .edgeSwipeBack(onClose)
+                .edgeSwipeBack {
+                    closeSearch()
+                    onClose()
+                }
                 .background(MaterialTheme.colorScheme.background)
                 .navigationBarsPadding()
         ) {
@@ -108,26 +138,95 @@ internal fun ChatHistoryDrawer(
                     .padding(horizontal = 20.dp, vertical = 18.dp)
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "MCA",
-                        style = MaterialTheme.typography.headlineSmall.copy(fontSize = 25.sp),
-                        fontWeight = FontWeight.Black,
-                        modifier = Modifier.weight(1f)
-                    )
-                    Surface(
-                        color = MaterialTheme.colorScheme.surface,
-                        shape = CircleShape,
-                        shadowElevation = 8.dp
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    if (searchActive) {
+                        OutlinedTextField(
+                            value = query,
+                            onValueChange = { query = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .focusRequester(searchFocusRequester)
+                                .testTag("history.search.field"),
+                            placeholder = {
+                                Text(
+                                    "搜索历史",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Search,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            trailingIcon = if (query.isNotEmpty()) {
+                                {
+                                    IconButton(onClick = { query = "" }) {
+                                        Icon(
+                                            Icons.Default.Clear,
+                                            contentDescription = "清空搜索",
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                }
+                            } else {
+                                null
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium,
+                            shape = RoundedCornerShape(20.dp),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(
+                                onSearch = { keyboardController?.hide() }
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        IconButton(
+                            onClick = { closeSearch() },
+                            modifier = Modifier.testTag("history.search.close")
                         ) {
-                            IconButton(onClick = { }, modifier = Modifier.size(34.dp)) {
-                                Icon(Icons.Default.Search, contentDescription = "搜索", modifier = Modifier.size(22.dp))
-                            }
-                            IconButton(onClick = onOpenAppMenu, modifier = Modifier.size(34.dp)) {
-                                McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "关闭搜索",
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                    } else {
+                        Text(
+                            "MCA",
+                            style = MaterialTheme.typography.headlineSmall.copy(fontSize = 25.sp),
+                            fontWeight = FontWeight.Black,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            shape = CircleShape,
+                            shadowElevation = 8.dp
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(
+                                    onClick = { searchActive = true },
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .testTag("history.search")
+                                ) {
+                                    Icon(
+                                        Icons.Default.Search,
+                                        contentDescription = "搜索历史",
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = onOpenAppMenu,
+                                    modifier = Modifier
+                                        .size(34.dp)
+                                        .semantics { contentDescription = "打开应用菜单" }
+                                ) {
+                                    McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
+                                }
                             }
                         }
                     }
@@ -154,7 +253,7 @@ internal fun ChatHistoryDrawer(
                     } else if (filteredHistory.isEmpty()) {
                         item { HistoryEmptyState("没有找到匹配的对话。") }
                     } else {
-                        historySections(filteredHistory, query).forEach { section ->
+                        groupedHistory.forEach { section ->
                             item(key = "section-${section.title}") {
                                 HistorySectionHeader(section.title)
                             }

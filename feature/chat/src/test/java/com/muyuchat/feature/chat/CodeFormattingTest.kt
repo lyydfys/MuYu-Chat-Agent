@@ -68,4 +68,52 @@ class CodeFormattingTest {
         val source = "A literal ```pythonprint('hi') and 1*1=1 2*2=4"
         assertEquals(listOf(ChatMarkdownSource.Text(source)), parseChatMarkdownSource(source))
     }
+
+    @Test
+    fun equalContentKeepsParsedBlocksAndCompleteCodeCopy() {
+        val source = "Intro\n```kotlin file=\"sample.kt\"\nval answer = 42\n```\nAfter"
+
+        assertEquals(
+            listOf(
+                MarkdownBlock.Paragraph("Intro\n"),
+                MarkdownBlock.Code(
+                    language = "kotlin",
+                    code = "val answer = 42\n",
+                    fileName = "sample.kt",
+                    copyCode = "val answer = 42\n"
+                ),
+                MarkdownBlock.Paragraph("After")
+            ),
+            parseMarkdownBlocks(source)
+        )
+    }
+
+    @Test
+    fun truncatedDisplayContentStillCopiesCompleteCode() {
+        val visible = "Intro\n```kotlin\nval answer = 42"
+        val full = visible + "\n```\nAfter\n```python\nprint('next')\n```\nEnd"
+        val code = parseMarkdownBlocks(visible, full)
+            .filterIsInstance<MarkdownBlock.Code>()
+            .single()
+
+        assertEquals("val answer = 42", code.code)
+        assertEquals("val answer = 42\n", code.copyCode)
+    }
+
+    @Test
+    fun multipleCodeBlocksRetainSourceOrder() {
+        val source = "```kotlin filename=\"one.kt\"\nval one = 1\n```\n" +
+            "Between\n" +
+            "```python filename=\"two.py\"\nprint('two')\n```\n" +
+            "Last\n" +
+            "```json filename=\"three.json\"\n{\"three\": 3}\n```"
+        val codes = parseMarkdownBlocks(source).filterIsInstance<MarkdownBlock.Code>()
+
+        assertEquals(listOf("kotlin", "python", "json"), codes.map { it.language })
+        assertEquals(listOf("one.kt", "two.py", "three.json"), codes.map { it.fileName })
+        assertEquals(
+            listOf("val one = 1\n", "print('two')\n", "{\"three\": 3}\n"),
+            codes.map { it.copyCode }
+        )
+    }
 }

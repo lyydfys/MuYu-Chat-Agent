@@ -186,7 +186,12 @@ internal fun ChatStatusBar(
                 IconButton(onClick = onNewConversation, modifier = Modifier.size(38.dp)) {
                     Icon(Icons.Default.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
                 }
-                IconButton(onClick = onOpenAppMenu, modifier = Modifier.size(38.dp)) {
+                IconButton(
+                    onClick = onOpenAppMenu,
+                    modifier = Modifier
+                        .size(38.dp)
+                        .semantics { contentDescription = "打开应用菜单" }
+                ) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }
             }
