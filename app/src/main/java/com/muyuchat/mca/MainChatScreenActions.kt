@@ -1,10 +1,11 @@
 package com.muyuchat.mca
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import com.muyuchat.mca.presentation.toAppearance
 import com.muyuchat.mca.presentation.toAppearanceScope
 import com.muyuchat.mca.presentation.toLocalImagePreviewOptions
-import androidx.compose.runtime.saveable.rememberSaveable
 import com.muyuchat.feature.chat.AssistantEditorDraft
 import com.muyuchat.feature.chat.ChatContentActions
 import com.muyuchat.feature.chat.ChatConversationActions
@@ -12,6 +13,8 @@ import com.muyuchat.feature.chat.ChatGenerationActions
 import com.muyuchat.feature.chat.ChatImageActions
 import com.muyuchat.feature.chat.ChatScreenActions
 import com.muyuchat.feature.chat.ChatShellActions
+import com.muyuchat.feature.chat.ImageGenerationUiLoraSelection
+import com.muyuchat.feature.chat.ImageGenerationUiOptions
 import com.muyuchat.feature.chat.WorldBookImportScope
 
 /**
@@ -26,13 +29,32 @@ import com.muyuchat.feature.chat.WorldBookImportScope
  * `rememberSaveable` flags it only ever writes, plus the tab switch it calls. Passing the setters
  * keeps that state owned by `MainActivity`: the single-writer rule is intact and nothing is copied.
  *
- * It exists so the chat page has one named place to be wired from, which is the seam the chat
- * feature's own view model will attach to; until then the app remains the single writer.
+ * ## P03: one stable bundle instead of 96 fresh lambdas per frame
+ *
+ * The chat page receives this bundle through `ChatRoute`/`ChatViewModel`. Rebuilding it every
+ * composition also rebuilt `ChatViewModel.screenActions` (its identity check is `!==`), so a
+ * streaming frame re-created ninety-six lambdas even though none of the covered intents changed.
+ * [rememberMainChatScreenActions] now builds the bundle once per (viewModel, host) pair and keeps
+ * only the **host callbacks** up to date:
+ *
+ * - Host callbacks (tab switch, import/export launchers, menu setters) are published to
+ *   [MainChatScreenActionHost] in a `SideEffect`, i.e. only after a successful composition, and
+ *   every wrapper reads the host field **at invocation time**. A lambda that ran during composition
+ *   could see a half-published bundle; an event handler cannot run before the frame is applied.
+ * - The only state-dependent intent, `onGenerateImagePrompt`, now resolves the current LoRA
+ *   snapshot from the owner (`viewModel.uiState.value.localImageLoras`) when the user triggers it,
+ *   exactly like the rest of the business validation that already lives behind the owner. No UI
+ *   state is captured, frozen, or copied into the action bundle.
+ * - Availability/nullability shape does not change: the three nullable translation/token-measure
+ *   capabilities are always the same non-null owner methods, so a stable bundle cannot hide or
+ *   invent an action.
+ *
+ * Nothing here writes business state, starts work, or renders. The side effect only publishes the
+ * latest already-created callbacks; it executes no business action.
  */
 @Composable
-internal fun mainChatScreenActions(
+internal fun rememberMainChatScreenActions(
     viewModel: MainViewModel,
-    state: MainUiState,
     onExportChatSession: (String) -> Unit,
     onImportAssistantCardFile: () -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
@@ -43,13 +65,58 @@ internal fun mainChatScreenActions(
     setAppMenuOpen: (Boolean) -> Unit,
     setStartModelsInRecommended: (Boolean) -> Unit,
     setStartSettingsInWebSearch: (Boolean) -> Unit,
+): ChatScreenActions {
+    val host = remember { MainChatScreenActionHost() }
+    SideEffect {
+        host.onExportChatSession = onExportChatSession
+        host.onImportAssistantCardFile = onImportAssistantCardFile
+        host.onImportKnowledgeDocument = onImportKnowledgeDocument
+        host.onImportLocalImageModel = onImportLocalImageModel
+        host.onImportWorldBookFile = onImportWorldBookFile
+        host.requestModelImport = requestModelImport
+        host.onTab = onTab
+        host.setAppMenuOpen = setAppMenuOpen
+        host.setStartModelsInRecommended = setStartModelsInRecommended
+        host.setStartSettingsInWebSearch = setStartSettingsInWebSearch
+    }
+    return remember(viewModel, host) { mainChatScreenActions(viewModel, host) }
+}
+
+/**
+ * The latest host callbacks, published after each successful composition.
+ *
+ * Holds callbacks only -- no screen state, no business owner, no ability to write state. The
+ * wrappers in [mainChatScreenActions] read these fields when an intent fires, so a rebuilt caller
+ * lambda never leaves a stale sink behind an action.
+ */
+internal class MainChatScreenActionHost {
+    var onExportChatSession: (String) -> Unit = {}
+    var onImportAssistantCardFile: () -> Unit = {}
+    var onImportKnowledgeDocument: (String) -> Unit = {}
+    var onImportLocalImageModel: () -> Unit = {}
+    var onImportWorldBookFile: (WorldBookImportScope) -> Unit = {}
+    var requestModelImport: () -> Unit = {}
+    var onTab: (AppTab) -> Unit = {}
+    var setAppMenuOpen: (Boolean) -> Unit = {}
+    var setStartModelsInRecommended: (Boolean) -> Unit = {}
+    var setStartSettingsInWebSearch: (Boolean) -> Unit = {}
+}
+
+/**
+ * Builds the bundle once; every host-callback wrapper reads [host] at invocation time and every
+ * owner intent is a direct `viewModel` reference. The one state-dependent intent resolves the
+ * current owner snapshot when it runs (see the class comment above).
+ */
+internal fun mainChatScreenActions(
+    viewModel: MainViewModel,
+    host: MainChatScreenActionHost,
 ): ChatScreenActions = ChatScreenActions(
         conversation = ChatConversationActions(
             onClearHistory = viewModel::clearChatHistory,
             onDeleteConversation = viewModel::deleteChatSession,
             onDeleteLastTurn = viewModel::deleteLastConversationTurn,
             onDeleteMessage = viewModel::deleteMessageAt,
-            onExportConversation = onExportChatSession,
+            onExportConversation = { sessionId -> host.onExportChatSession(sessionId) },
             onRenameConversation = viewModel::renameChatSession,
             onSelectConversation = viewModel::selectChatSession,
             onTogglePinConversation = viewModel::toggleChatSessionPinned,
@@ -109,12 +176,12 @@ internal fun mainChatScreenActions(
                 },
             onSelectAssistant = viewModel::selectAssistant,
             onImportAssistantCard = viewModel::importAssistantCard,
-            onImportAssistantCardFile = onImportAssistantCardFile,
+            onImportAssistantCardFile = { host.onImportAssistantCardFile() },
             onDeleteWorldBook = viewModel::deleteWorldBook,
-            onImportWorldBookFile = onImportWorldBookFile,
+            onImportWorldBookFile = { scope -> host.onImportWorldBookFile(scope) },
             onCreateKnowledgeBase = { name -> viewModel.createKnowledgeBase(name) },
             onDeleteKnowledgeBase = viewModel::deleteKnowledgeBase,
-            onImportKnowledgeDocument = onImportKnowledgeDocument,
+            onImportKnowledgeDocument = { knowledgeBaseId -> host.onImportKnowledgeDocument(knowledgeBaseId) },
             onSetKnowledgeBaseSelected = viewModel::setKnowledgeBaseSelected,
             onDeleteAssistantMemory = viewModel::deleteAssistantMemory,
             onUpsertAssistantMemory = viewModel::upsertAssistantMemory,
@@ -148,7 +215,7 @@ internal fun mainChatScreenActions(
             onImportImageLibraryBackup = viewModel::importImageLibraryBackup,
             onCancelImageLibraryBackup = viewModel::cancelImageLibraryBackup,
             onImportImageLora = viewModel::importLocalImageLora,
-            onImportImageModel = onImportLocalImageModel,
+            onImportImageModel = { host.onImportLocalImageModel() },
             onImportImageTextualInversion = viewModel::importLocalImageTextualInversion,
             onImportImageUpscaler = viewModel::importLocalImageUpscaler,
             onSelectImageModel = viewModel::selectImageGenerationModel,
@@ -159,57 +226,13 @@ internal fun mainChatScreenActions(
             onRecreateImageAsset = viewModel::recreateImageAsset,
             onRetryImageGeneration = viewModel::retryImageGeneration,
             onUseImageAsset = viewModel::useImageAsset,
-            onGenerateImagePrompt = generateImage@{ prompt, uiOptions ->
-                    val loras = uiOptions.loras.mapNotNull { selection ->
-                        state.localImageLoras
-                            .firstOrNull { adapter -> adapter.id == selection.id }
-                            ?.toPrepared(selection.multiplier)
-                    }
-                    if (loras.size != uiOptions.loras.size) {
-                        viewModel.reportMissingLocalImageLoraSelection()
-                        return@generateImage false
-                    }
-                    viewModel.generateImageAsset(
+            onGenerateImagePrompt = { prompt, uiOptions ->
+                    submitChatImageFromUi(
                         prompt = prompt,
-                        inputDraft = LocalImageInputDraft(
-                            taskMode = LocalImageTaskMode.fromWireName(uiOptions.taskMode.wireName),
-                            inputImageReference = uiOptions.inputImageUri,
-                            maskImageReference = uiOptions.maskImageUri,
-                            controlImageReference = uiOptions.controlImageUri,
-                            strength = uiOptions.strength,
-                            controlStrength = uiOptions.controlStrength
-                        ),
-                        options = LocalImageGenerationOptions(
-                            negativePrompt = uiOptions.negativePrompt,
-                            width = uiOptions.width,
-                            height = uiOptions.height,
-                            steps = uiOptions.steps,
-                            seed = uiOptions.seed,
-                            cfgScale = uiOptions.cfgScale,
-                            sampleMethod = uiOptions.sampleMethod,
-                            clipSkip = uiOptions.clipSkip,
-                            batchCount = uiOptions.batchCount,
-                            loras = loras,
-                            vaeTiling = uiOptions.vaeTileSize?.let { tileSize ->
-                                LocalImageVaeTilingOptions(
-                                    tileSize = tileSize,
-                                    overlap = uiOptions.vaeTileOverlap ?: 0.5
-                                )
-                            },
-                            textualInversionIds = uiOptions.textualInversionIds,
-                            ultraFix = uiOptions.ultraFix?.let { request ->
-                                LocalImageUltraFixOptions(
-                                    targetWidth = request.targetWidth,
-                                    targetHeight = request.targetHeight,
-                                    strength = request.strength,
-                                    inversionSteps = request.inversionSteps,
-                                    refinementSteps = request.refinementSteps,
-                                    tileSize = request.tileSize,
-                                    overlap = request.overlap,
-                                )
-                            },
-                            preview = uiOptions.toLocalImagePreviewOptions()
-                        )
+                        uiOptions = uiOptions,
+                        currentLocalLoras = { viewModel.uiState.value.localImageLoras },
+                        onMissingLocalImageLora = viewModel::reportMissingLocalImageLoraSelection,
+                        submit = viewModel::generateImageAsset
                     )
                 },
             onContinueAssistantImageTurn = viewModel::continueAssistantImageTurn,
@@ -220,24 +243,24 @@ internal fun mainChatScreenActions(
             onMeasureImagePromptTokens = viewModel::measureImagePromptTokens,
         ),
         shell = ChatShellActions(
-            onAppMenuOpenChange = setAppMenuOpen,
+            onAppMenuOpenChange = { open -> host.setAppMenuOpen(open) },
             onDismissStatusMessage = viewModel::clearStatusMessage,
-            onOpenModels = { setStartModelsInRecommended(false); onTab(AppTab.MODELS) },
+            onOpenModels = { host.setStartModelsInRecommended(false); host.onTab(AppTab.MODELS) },
             onOpenRecommendedModels = {
-                    setStartModelsInRecommended(true)
-                    onTab(AppTab.MODELS)
+                    host.setStartModelsInRecommended(true)
+                    host.onTab(AppTab.MODELS)
                 },
             onOpenSettings = {
-                    setStartSettingsInWebSearch(false)
-                    onTab(AppTab.SETTINGS)
+                    host.setStartSettingsInWebSearch(false)
+                    host.onTab(AppTab.SETTINGS)
                 },
-            onOpenAgent = { onTab(AppTab.AGENT) },
-            onOpenApi = { onTab(AppTab.API) },
+            onOpenAgent = { host.onTab(AppTab.AGENT) },
+            onOpenApi = { host.onTab(AppTab.API) },
             onOpenWebSearchSettings = {
-                    setStartSettingsInWebSearch(true)
-                    onTab(AppTab.SETTINGS)
+                    host.setStartSettingsInWebSearch(true)
+                    host.onTab(AppTab.SETTINGS)
                 },
-            onImportChatModel = requestModelImport,
+            onImportChatModel = { host.requestModelImport() },
             onBrowserTaskEvent = viewModel::onBrowserTaskEvent,
             onOpenBrowserTask = viewModel::startBrowserTask,
             onSelectWebSearchResearchMode = viewModel::selectWebSearchResearchModeForNextTurn,
@@ -248,3 +271,93 @@ internal fun mainChatScreenActions(
             onCancelOfflineTranslationDownload = viewModel::cancelOfflinePromptTranslationDownload,
         ),
     )
+
+/**
+ * Validates the currently selected LoRA ids against the owner's current catalog.
+ *
+ * Returns the prepared adapters in the exact order of [selections], or `null` when any selection is
+ * no longer present. The old inline block did the same `mapNotNull` + size comparison; keeping it a
+ * pure function is what lets the action test prove the latest-snapshot behavior without a
+ * `MainViewModel`.
+ */
+internal fun resolvePreparedChatImageLoras(
+    availableLoras: List<LocalImageLoraRecord>,
+    selections: List<ImageGenerationUiLoraSelection>,
+): List<LocalImagePreparedLora>? {
+    val prepared = selections.mapNotNull { selection ->
+        availableLoras
+            .firstOrNull { adapter -> adapter.id == selection.id }
+            ?.toPrepared(selection.multiplier)
+    }
+    return prepared.takeIf { it.size == selections.size }
+}
+
+/**
+ * The body of the `onGenerateImagePrompt` intent.
+ *
+ * The old lambda captured the state of the frame that built it. Here the LoRA snapshot is read
+ * through [currentLocalLoras] when the intent fires, i.e. from the real owner's latest committed
+ * state; validation, failure reporting, argument mapping and the returned submission result are the
+ * ones the inline lambda had.
+ */
+internal fun submitChatImageFromUi(
+    prompt: String,
+    uiOptions: ImageGenerationUiOptions,
+    currentLocalLoras: () -> List<LocalImageLoraRecord>,
+    onMissingLocalImageLora: () -> Unit,
+    submit: (String, LocalImageInputDraft, LocalImageGenerationOptions) -> Boolean,
+): Boolean {
+    // The old inline block only read the catalog inside `mapNotNull`, i.e. never for an empty
+    // selection list. Keep that: no selection means no owner-state read at all.
+    val loras = if (uiOptions.loras.isEmpty()) {
+        emptyList<LocalImagePreparedLora>()
+    } else {
+        resolvePreparedChatImageLoras(currentLocalLoras(), uiOptions.loras)
+    }
+    if (loras == null) {
+        onMissingLocalImageLora()
+        return false
+    }
+    return submit(
+        prompt,
+        LocalImageInputDraft(
+            taskMode = LocalImageTaskMode.fromWireName(uiOptions.taskMode.wireName),
+            inputImageReference = uiOptions.inputImageUri,
+            maskImageReference = uiOptions.maskImageUri,
+            controlImageReference = uiOptions.controlImageUri,
+            strength = uiOptions.strength,
+            controlStrength = uiOptions.controlStrength
+        ),
+        LocalImageGenerationOptions(
+            negativePrompt = uiOptions.negativePrompt,
+            width = uiOptions.width,
+            height = uiOptions.height,
+            steps = uiOptions.steps,
+            seed = uiOptions.seed,
+            cfgScale = uiOptions.cfgScale,
+            sampleMethod = uiOptions.sampleMethod,
+            clipSkip = uiOptions.clipSkip,
+            batchCount = uiOptions.batchCount,
+            loras = loras,
+            vaeTiling = uiOptions.vaeTileSize?.let { tileSize ->
+                LocalImageVaeTilingOptions(
+                    tileSize = tileSize,
+                    overlap = uiOptions.vaeTileOverlap ?: 0.5
+                )
+            },
+            textualInversionIds = uiOptions.textualInversionIds,
+            ultraFix = uiOptions.ultraFix?.let { request ->
+                LocalImageUltraFixOptions(
+                    targetWidth = request.targetWidth,
+                    targetHeight = request.targetHeight,
+                    strength = request.strength,
+                    inversionSteps = request.inversionSteps,
+                    refinementSteps = request.refinementSteps,
+                    tileSize = request.tileSize,
+                    overlap = request.overlap,
+                )
+            },
+            preview = uiOptions.toLocalImagePreviewOptions()
+        )
+    )
+}

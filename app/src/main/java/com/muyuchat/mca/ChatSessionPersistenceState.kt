@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import com.muyuchat.core.engine.ChatMessage
+import com.muyuchat.core.engine.Role
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.sync.Mutex
 
@@ -36,7 +37,10 @@ internal fun List<ChatSessionRecord>.upsertSessionFor(
         assistantSnapshot: AssistantConversationSnapshot? = null,
         replaceAssistantSnapshot: Boolean = false,
         modelMode: String? = null,
-        modelId: String? = null
+        modelId: String? = null,
+        // 显式时间输入：高频流式 commit 必须在进入 CAS reducer 之前取好时间，
+        // 避免 reducer 内隐式读时钟导致重试不确定性（硬锁 §6）。
+        occurredAt: Long = System.currentTimeMillis()
     ): List<ChatSessionRecord> {
         if (messages.isEmpty()) return this
         val existing = firstOrNull { it.id == sessionId }
@@ -50,11 +54,18 @@ internal fun List<ChatSessionRecord>.upsertSessionFor(
             }
         val record = ChatSessionRecord(
             id = sessionId,
-            title = if (existing?.manualTitle == true) existing.title else messages.chatTitle(),
+            // 标题只由「第一条 USER 消息」决定。流式期间追加的是 ASSISTANT 消息，
+            // 首条用户消息不可能变化，因此直接复用已有标题，避免每个 token 重跑
+            // chatTitle() 的 4 次 Regex 构造与行扫描。首条用户消息被编辑时仍会重算。
+            title = when {
+                existing?.manualTitle == true -> existing.title
+                existing != null && existing.messages.hasSameFirstUserMessageAs(messages) -> existing.title
+                else -> messages.chatTitle()
+            },
             messages = messages,
             pinned = existing?.pinned ?: false,
             manualTitle = existing?.manualTitle ?: false,
-            updatedAt = System.currentTimeMillis(),
+            updatedAt = occurredAt,
             projectId = existing?.projectId,
             assistantId = existing?.assistantId ?: assistantId,
             assistantSnapshot = if (replaceAssistantSnapshot) {
@@ -70,6 +81,21 @@ internal fun List<ChatSessionRecord>.upsertSessionFor(
         )
         return (listOf(record) + filterNot { it.id == sessionId }).sortedForHistory()
     }
+
+/**
+ * 标题只由「第一条 USER 消息」决定（见 `chatTitle()`）。
+ * 流式期间追加的是 ASSISTANT 消息，首条用户消息不会变化，因此可以安全复用已有标题；
+ * 首条用户消息被编辑（id 或 content 变化）时返回 false，调用方会重新计算标题。
+ */
+private fun List<ChatMessage>.hasSameFirstUserMessageAs(other: List<ChatMessage>): Boolean {
+    val mine = firstOrNull { it.role == Role.USER }
+    val theirs = other.firstOrNull { it.role == Role.USER }
+    return when {
+        mine == null && theirs == null -> true
+        mine == null || theirs == null -> false
+        else -> mine.id == theirs.id && mine.content == theirs.content
+    }
+}
 
 /** R3/C3-S5：`MainUiState.currentChatModelId()` 顶层化（纯函数，体逐字等价）。 */
 internal fun MainUiState.currentChatModelId(): String? =

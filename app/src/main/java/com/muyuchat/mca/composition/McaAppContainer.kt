@@ -320,6 +320,9 @@ internal class McaAppContainer(internal val application: Application) {
             activeSessionId = { store.current.activeChatSessionId },
             hasAssistantMessage = { store.current.messages.any { it.role == Role.ASSISTANT } },
             commit = { batch, isStillCurrent ->
+            // 在进入 CAS reducer 之前取一次时间：reducer 可能因竞争重试，
+            // 但同一次 commit 必须使用同一个 occurredAt（硬锁 §6 纯 reducer）。
+            val occurredAt = System.currentTimeMillis()
             store.update { state ->
                 if (!isStillCurrent()) {
                     state
@@ -347,7 +350,8 @@ internal class McaAppContainer(internal val application: Application) {
                             messages = updated,
                             assistantId = state.selectedAssistantId,
                             modelMode = state.selectedChatBackend.bindingValue(),
-                            modelId = state.currentChatModelId()
+                            modelId = state.currentChatModelId(),
+                            occurredAt = occurredAt
                         )
                     )
                 }

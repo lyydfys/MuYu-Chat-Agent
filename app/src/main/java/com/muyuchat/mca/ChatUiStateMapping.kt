@@ -168,6 +168,11 @@ import kotlinx.coroutines.withContext
  * 三个**纯派生**改为在函数内计算（原本也是每次组合重算，语义不变）：
  * `activeChatSession`、`chatVisionCapability`、`generationHistoryInputUris`。
  *
+ * **P02：低频目录投影复用**。assistants / localModels / images / files / imageJobs /
+ * worldBooks / knowledgeBases / imageLoras / textualInversions / upscalers / contextSummary
+ * 经 [ChatUiProjectionCache] 按真实依赖做进程内单条复用：未变输入返回同一实例，依赖变化时
+ * 仍调用原来的映射函数。各域的依赖清单见 `ChatUiProjectionCache.kt` 的 Key 注释。
+ *
  * 非 @Composable：已核对原块内**无任何 Composable 专属调用**。
  *
  * 行为等值：逐字段来源未改；仅去掉 `viewModel.` 前缀（改为参数调用）并把上述派生内联。
@@ -179,7 +184,13 @@ internal fun buildChatUiState(
     imageGenerationHistoryById: Map<String, ImageGenerationHistoryMetadata?>,
     assistantImageToolPermission: ChatImageToolPermissionUiState,
     preparedImageUi: Map<String, PreparedLocalImageUi>,
-    generationParamsForChatModel: (String) -> GenerationParams
+    generationParamsForChatModel: (String) -> GenerationParams,
+    /**
+     * P02d/e/f/g：低频目录投影的单条复用缓存。默认使用进程级实例；测试注入独立实例，
+     * 以便断言"未变输入复用同一实例、每个依赖字段变化都失效"。缓存只复用纯映射结果，
+     * 不改变任何字段来源。
+     */
+    projectionCache: ChatUiProjectionCache = sharedChatUiProjectionCache
 ): ChatUiState {
     val chatVisionCapability = state.chatVisionCapability()
     val generationHistoryInputUris = retainedGenerationImageContentReferences(
@@ -189,7 +200,13 @@ internal fun buildChatUiState(
         jobInputDrafts = state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }
     )
     val activeChatSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
-    val imageCreatedAtFormatter = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
+    val contextSummaryProjection = projectionCache.contextSummary(state, activeChatSession) {
+        ChatContextSummaryProjection(
+            models = buildContextSummaryModelOptions(state),
+            history = buildContextSummaryHistoryItems(state),
+            canUndo = canUndoContextSummaryFor(state)
+        )
+    }
     return ChatUiState(
                     pendingImageTranslationDraft = state.pendingChatImageTranslationDraft,
                     pendingImageActionDraft = state.pendingChatImageActionDraft,
@@ -202,7 +219,11 @@ internal fun buildChatUiState(
                     },
                     messages = state.messages,
                     history = buildChatHistoryItems(state, sessionPresentations, timestampLocale),
-                    localModels = buildLocalChatModelChoices(state, generationParamsForChatModel),
+                    localModels = projectionCache.localModels(state, generationParamsForChatModel) { modelParams ->
+                        buildLocalChatModelChoices(state) { modelId ->
+                            modelParams[modelId] ?: generationParamsForChatModel(modelId)
+                        }
+                    },
                     imageModels = buildList {
                         addAll(
                             state.localImageModels
@@ -296,91 +317,26 @@ internal fun buildChatUiState(
                     // B45/S2: selector rows are gated on preparedImageUi; until every local row is
                     // prepared, an empty dropdown must read as loading, never as "暂无本地生图模型".
                     imageModelsLoading = state.localImageModels.any { model -> preparedImageUi[model.path] == null },
-                    assistants = buildAssistantUiItems(state),
-                    worldBooks = buildWorldBookUiItems(state),
-                    knowledgeBases = buildKnowledgeBaseUiItems(state),
+                    assistants = projectionCache.assistants(state) { buildAssistantUiItems(state) },
+                    worldBooks = projectionCache.worldBooks(state) { buildWorldBookUiItems(state) },
+                    knowledgeBases = projectionCache.knowledgeBases(state) { buildKnowledgeBaseUiItems(state) },
                     statusMessage = state.statusMessage,
                     selectedAssistantId = state.selectedAssistantId,
                     generationHistoryInputUris = generationHistoryInputUris,
-                    images = state.images.map { image ->
-                        val generation = imageGenerationHistoryById[image.id]
-                        val sourceGeneration = generation?.takeIf { it.sourceGenerationAvailable }
-                        val executionFacets = sourceGeneration?.executionFacets()
-                        ImageAssetUiItem(
-                            id = image.id,
-                            name = image.name,
-                            uriString = image.uriString,
-                            source = image.source,
-                            prompt = image.prompt,
-                            createdAtText = imageCreatedAtFormatter.format(java.util.Date(image.createdAt)),
-                            createdAtMillis = image.createdAt,
-                            sizeText = formatAssetBytes(image.sizeBytes),
-                            width = image.width,
-                            height = image.height,
-                            sizeBytes = image.sizeBytes,
-                            upscaleTargetScale = generation?.upscaleHistory?.lastOrNull()?.targetScale,
-                            generationDetails = generation?.displayDetails().orEmpty(),
-                            generationPrompt = sourceGeneration?.requestPrompt.orEmpty(),
-                            generationModelId = sourceGeneration?.modelId.orEmpty(),
-                            generationModelName = sourceGeneration?.modelName.orEmpty(),
-                            generationTaskMode = sourceGeneration?.inputDraft?.taskMode?.wireName.orEmpty(),
-                            generationOperation = sourceGeneration?.operationFacet()?.wireName.orEmpty(),
-                            generationSampler = sourceGeneration?.options?.sampleMethod.orEmpty(),
-                            generationRuntime = executionFacets?.runtimeLabel.orEmpty(),
-                            generationDevice = executionFacets?.deviceLabel.orEmpty(),
-                            parameterShareJson = sourceGeneration?.toShareJson().orEmpty(),
-                            generationPreset = sourceGeneration?.let { metadata ->
-                                ImageGenerationUiPreset(
-                                    prompt = metadata.requestPrompt,
-                                    taskMode = ImageGenerationUiTaskMode.entries.firstOrNull { mode ->
-                                        mode.wireName == metadata.inputDraft.taskMode.wireName
-                                    },
-                                    negativePrompt = metadata.options.negativePrompt,
-                                    width = metadata.options.width,
-                                    height = metadata.options.height,
-                                    steps = metadata.options.steps,
-                                    cfgScale = metadata.options.cfgScale,
-                                    seed = metadata.options.seed,
-                                    sampleMethod = metadata.options.sampleMethod,
-                                    clipSkip = metadata.options.clipSkip,
-                                    batchCount = metadata.options.batchCount,
-                                    vaeTileSize = metadata.options.vaeTiling?.tileSize,
-                                    vaeTileOverlap = metadata.options.vaeTiling?.overlap,
-                                    loras = metadata.loras.map { selection ->
-                                        ImageGenerationUiLoraSelection(
-                                            id = selection.id,
-                                            multiplier = selection.multiplier
-                                        )
-                                    },
-                                    textualInversionIds = metadata.options.textualInversionIds,
-                                    strength = metadata.inputDraft.strength,
-                                    controlStrength = metadata.inputDraft.controlStrength,
-                                    ultraFix = metadata.options.ultraFix?.let { ultraFix ->
-                                        com.muyuchat.feature.chat.ImageGenerationUiUltraFixOptions(
-                                            targetWidth = ultraFix.targetWidth,
-                                            targetHeight = ultraFix.targetHeight,
-                                            strength = ultraFix.strength,
-                                            inversionSteps = ultraFix.inversionSteps,
-                                            refinementSteps = ultraFix.refinementSteps,
-                                            tileSize = ultraFix.tileSize,
-                                            overlap = ultraFix.overlap
-                                        )
-                                    }
-                                )
-                            },
-                            favorite = image.favorite,
-                            canRecreate = sourceGeneration?.canRecreate() == true
-                        )
+                    images = projectionCache.images(state, imageGenerationHistoryById, timestampLocale) {
+                        projectImageAssetItems(state, imageGenerationHistoryById, timestampLocale)
                     },
                     imageLibraryBackup = imageLibraryBackupUiState(state),
-                    imageLoras = buildImageLoraUiItems(state),
+                    imageLoras = projectionCache.imageLoras(state) { buildImageLoraUiItems(state) },
                     imageLoraImporting = state.localImageLoraImporting,
                     imageLoraMessage = state.localImageLoraMessage,
-                    imageTextualInversions = buildImageTextualInversionUiItems(state),
+                    imageTextualInversions = projectionCache.textualInversions(state) {
+                        buildImageTextualInversionUiItems(state)
+                    },
                     imageTextualInversionImporting = state.localImageTextualInversionLoading ||
                         state.localImageTextualInversionImporting,
                     imageTextualInversionMessage = state.localImageTextualInversionMessage,
-                    imageUpscalers = buildImageUpscalerUiItems(state),
+                    imageUpscalers = projectionCache.upscalers(state) { buildImageUpscalerUiItems(state) },
                     selectedImageUpscalerId = state.selectedLocalImageUpscalerId,
                     imageUpscalerImporting = state.localImageUpscalerImporting,
                     imageUpscalerMessage = state.localImageUpscalerMessage,
@@ -400,8 +356,10 @@ internal fun buildChatUiState(
                         )
                     },
                     deferGenerationImageGrantRelease = state.deferGenerationImageGrantRelease,
-                    files = buildFileAssetUiItems(state, timestampLocale),
-                    imageJobs = buildImageGenerationUiJobs(state),
+                    files = projectionCache.files(state, timestampLocale) {
+                        buildFileAssetUiItems(state, timestampLocale)
+                    },
+                    imageJobs = projectionCache.imageJobs(state) { buildImageGenerationUiJobs(state) },
                     activeConversationId = state.activeChatSessionId,
                     conversationReadOnly = activeChatSession?.let { session ->
                         session.mixedAssistantHistory || session.assistantId == null ||
@@ -418,9 +376,9 @@ internal fun buildChatUiState(
                     contextCompressionThresholdPercent = state.contextCompressionThresholdPercent,
                     contextCompressionPending = state.contextCompressionPending,
                     contextSummaryModelSelection = state.contextSummaryModelSelection,
-                    contextSummaryModels = buildContextSummaryModelOptions(state),
-                    contextSummaryHistory = buildContextSummaryHistoryItems(state),
-                    canUndoContextSummary = canUndoContextSummaryFor(state),
+                    contextSummaryModels = contextSummaryProjection.models,
+                    contextSummaryHistory = contextSummaryProjection.history,
+                    canUndoContextSummary = contextSummaryProjection.canUndo,
                     selectedModelId = if (state.selectedChatBackend == ChatBackend.CLOUD) {
                         state.selectedCloudChatModelId?.let { MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + it }
                     } else {
@@ -485,4 +443,87 @@ internal fun buildChatUiState(
                     visionCapabilityDetail = chatVisionCapability.detail,
                     visionCapabilityReady = chatVisionCapability.ready
     )
+}
+
+
+/**
+ * P02f：图片库行映射（逐字段与拆分前一致）。缓存键由 `ChatUiProjectionCache.images` 按
+ * `images + generationHistoryById + locale/timezone` 管理；本函数只在 miss 时执行。
+ */
+private fun projectImageAssetItems(
+    state: MainUiState,
+    imageGenerationHistoryById: Map<String, ImageGenerationHistoryMetadata?>,
+    timestampLocale: java.util.Locale
+): List<ImageAssetUiItem> {
+    val imageCreatedAtFormatter = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
+    return state.images.map { image ->
+        val generation = imageGenerationHistoryById[image.id]
+        val sourceGeneration = generation?.takeIf { it.sourceGenerationAvailable }
+        val executionFacets = sourceGeneration?.executionFacets()
+        ImageAssetUiItem(
+            id = image.id,
+            name = image.name,
+            uriString = image.uriString,
+            source = image.source,
+            prompt = image.prompt,
+            createdAtText = imageCreatedAtFormatter.format(java.util.Date(image.createdAt)),
+            createdAtMillis = image.createdAt,
+            sizeText = formatAssetBytes(image.sizeBytes),
+            width = image.width,
+            height = image.height,
+            sizeBytes = image.sizeBytes,
+            upscaleTargetScale = generation?.upscaleHistory?.lastOrNull()?.targetScale,
+            generationDetails = generation?.displayDetails().orEmpty(),
+            generationPrompt = sourceGeneration?.requestPrompt.orEmpty(),
+            generationModelId = sourceGeneration?.modelId.orEmpty(),
+            generationModelName = sourceGeneration?.modelName.orEmpty(),
+            generationTaskMode = sourceGeneration?.inputDraft?.taskMode?.wireName.orEmpty(),
+            generationOperation = sourceGeneration?.operationFacet()?.wireName.orEmpty(),
+            generationSampler = sourceGeneration?.options?.sampleMethod.orEmpty(),
+            generationRuntime = executionFacets?.runtimeLabel.orEmpty(),
+            generationDevice = executionFacets?.deviceLabel.orEmpty(),
+            parameterShareJson = sourceGeneration?.toShareJson().orEmpty(),
+            generationPreset = sourceGeneration?.let { metadata ->
+                ImageGenerationUiPreset(
+                    prompt = metadata.requestPrompt,
+                    taskMode = ImageGenerationUiTaskMode.entries.firstOrNull { mode ->
+                        mode.wireName == metadata.inputDraft.taskMode.wireName
+                    },
+                    negativePrompt = metadata.options.negativePrompt,
+                    width = metadata.options.width,
+                    height = metadata.options.height,
+                    steps = metadata.options.steps,
+                    cfgScale = metadata.options.cfgScale,
+                    seed = metadata.options.seed,
+                    sampleMethod = metadata.options.sampleMethod,
+                    clipSkip = metadata.options.clipSkip,
+                    batchCount = metadata.options.batchCount,
+                    vaeTileSize = metadata.options.vaeTiling?.tileSize,
+                    vaeTileOverlap = metadata.options.vaeTiling?.overlap,
+                    loras = metadata.loras.map { selection ->
+                        ImageGenerationUiLoraSelection(
+                            id = selection.id,
+                            multiplier = selection.multiplier
+                        )
+                    },
+                    textualInversionIds = metadata.options.textualInversionIds,
+                    strength = metadata.inputDraft.strength,
+                    controlStrength = metadata.inputDraft.controlStrength,
+                    ultraFix = metadata.options.ultraFix?.let { ultraFix ->
+                        com.muyuchat.feature.chat.ImageGenerationUiUltraFixOptions(
+                            targetWidth = ultraFix.targetWidth,
+                            targetHeight = ultraFix.targetHeight,
+                            strength = ultraFix.strength,
+                            inversionSteps = ultraFix.inversionSteps,
+                            refinementSteps = ultraFix.refinementSteps,
+                            tileSize = ultraFix.tileSize,
+                            overlap = ultraFix.overlap
+                        )
+                    }
+                )
+            },
+            favorite = image.favorite,
+            canRecreate = sourceGeneration?.canRecreate() == true
+        )
+    }
 }

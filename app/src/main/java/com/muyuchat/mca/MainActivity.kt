@@ -288,13 +288,18 @@ private fun McaApp(
                     offlineTranslationDownloadProgress = state.offlineTranslationDownloadProgress, appMenuOpen = appMenuOpen,
                 ),
                 modifier = Modifier.fillMaxSize(),
-                actions = mainChatScreenActions(
-                    viewModel = viewModel, state = state, onTab = onTab,
-                    setAppMenuOpen = { appMenuOpen = it }, setStartModelsInRecommended = { startModelsInRecommended = it },
-                    setStartSettingsInWebSearch = { startSettingsInWebSearch = it }, onExportChatSession = onExportChatSession,
-                    onImportAssistantCardFile = onImportAssistantCardFile, onImportKnowledgeDocument = onImportKnowledgeDocument,
-                    onImportLocalImageModel = onImportLocalImageModel, onImportWorldBookFile = onImportWorldBookFile,
+                actions = rememberMainChatScreenActions(
+                    viewModel = viewModel,
+                    onExportChatSession = onExportChatSession,
+                    onImportAssistantCardFile = onImportAssistantCardFile,
+                    onImportKnowledgeDocument = onImportKnowledgeDocument,
+                    onImportLocalImageModel = onImportLocalImageModel,
+                    onImportWorldBookFile = onImportWorldBookFile,
                     requestModelImport = { modelImportDialogOpen = true },
+                    onTab = onTab,
+                    setAppMenuOpen = { appMenuOpen = it },
+                    setStartModelsInRecommended = { startModelsInRecommended = it },
+                    setStartSettingsInWebSearch = { startSettingsInWebSearch = it },
                 ),
             )
 
