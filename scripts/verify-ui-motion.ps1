@@ -468,12 +468,26 @@ try {
             & $adb -s $DeviceSerial shell am start -n ($PackageName + '/com.muyuchat.mca.MainActivity') 2>&1 | Out-Null
         }
     }
-    $surface = Wait-ForChatSurface -Adb $adb -Serial $DeviceSerial -TimeoutMs 25000
+    $surface = Wait-ForChatSurface -Adb $adb -Serial $DeviceSerial -TimeoutMs 60000
     if (-not $surface) {
         Stop-MotionRun -Status 'BLOCKED' -Reason (
             "chat surface is not foreground for package $PackageName; open the MCA chat screen " +
             'or omit -NoLaunch so the script can launch it'
         )
+    }
+
+    # The first launch after an update can take well over 20 s (data migration + first full
+    # composition). Require the chat chrome to be stable across two dumps before reading
+    # coordinates, otherwise the taps land on the launch surface and the run fails for the
+    # wrong reason.
+    for ($stabilize = 0; $stabilize -lt 30; $stabilize++) {
+        $probe = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial -RemoteDumpPath '/sdcard/mca-motion-ui.xml'
+        if (Test-UiMarker -Raw $probe -Kind 'desc' -Value '打开历史') {
+            Start-Sleep -Milliseconds 500
+            $probe2 = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial -RemoteDumpPath '/sdcard/mca-motion-ui.xml'
+            if (Test-UiMarker -Raw $probe2 -Kind 'desc' -Value '打开历史') { break }
+        }
+        Start-Sleep -Milliseconds 600
     }
 
     # --- plan actions (resolve selectors before recording) ------------------------------------
