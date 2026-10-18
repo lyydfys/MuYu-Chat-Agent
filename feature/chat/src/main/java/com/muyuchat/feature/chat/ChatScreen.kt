@@ -1,5 +1,8 @@
 package com.muyuchat.feature.chat
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import android.content.Context
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -149,6 +152,7 @@ fun ChatScreen(
     val onOpenRecommendedModels = actions.shell.onOpenRecommendedModels
     val onOpenSettings = actions.shell.onOpenSettings
     val onOpenAgent = actions.shell.onOpenAgent
+    val onOpenAgentWorkspace = actions.shell.onOpenAgentWorkspace
     val onOpenApi = actions.shell.onOpenApi
     val onOpenWebSearchSettings = actions.shell.onOpenWebSearchSettings
     val onImportChatModel = actions.shell.onImportChatModel
@@ -283,11 +287,19 @@ fun ChatScreen(
             }
     }
 
-    // Predictive back is owned by Material3's ModalNavigationDrawer
-    // (NavigationDrawerKt.DrawerPredictiveBackHandler): it follows the gesture and animates the
-    // sheet's scale/translation itself. Registering a second OnBackPressedCallback here used to
-    // take the gesture away from it with an empty onProgress (the drawer stopped following the
-    // finger), so the drawer now has exactly one back owner.
+    // Material3 1.4 exposes DrawerPredictiveBackHandler, but ModalNavigationDrawer does not wire
+    // it automatically: with no callback of our own, the system back gesture closed the whole
+    // activity while the drawer was open (verified on device). The drawer therefore owns back
+    // again and closes with Material3's own animated DrawerState.close(). Finger-following
+    // predictive back for the sheet would require replacing ModalNavigationDrawer with a custom
+    // predictive sheet, which changes the frozen drawer geometry and is not done here.
+    val historyBackEnabled = !WindowInsets.isImeVisible && (
+        drawerState.currentValue == DrawerValue.Open ||
+            drawerState.targetValue == DrawerValue.Open
+        )
+    BackHandler(enabled = historyBackEnabled) {
+        scope.launch { drawerState.close() }
+    }
     var bottomChromeHeightPx by remember { mutableStateOf(0) }
     val bottomChromeHeight = resolveChatComposerOverlapDp(
         with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
@@ -309,6 +321,12 @@ fun ChatScreen(
                 onOpenImages = {
                     showImages = true
                     scope.launch { drawerState.close() }
+                },
+                onOpenAgentWorkspace = {
+                    scope.launch {
+                        drawerState.close()
+                        onOpenAgentWorkspace()
+                    }
                 },
                 onSelectConversation = { id ->
                     onSelectConversation(id)
@@ -579,4 +597,5 @@ fun ChatScreen(
         onDismiss = { showNewConversationPicker = false }
     )
 }
+
 
