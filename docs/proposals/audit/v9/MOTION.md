@@ -27,9 +27,13 @@ uses the same damping/stiffness as `McaPageMotion.enterSlide`, asserted by
   view model, draft, scroll and focus are never disposed. Startup screen crossfades into the app
   in 220 ms.
 - **History drawer**: content staggers in when the sheet crosses ~15 % visibility (`key(epoch)` +
-  `mcaEnterReveal`), with a short window so scrolling does not replay it. Predictive back is owned
-  by Material3's `DrawerPredictiveBackHandler`; the old duplicate `OnBackPressedCallback` with an
-  empty `onProgress` was removed (`59437209`).
+  `mcaEnterReveal`), with a short window so scrolling does not replay it. The drawer owns back via
+  a `BackHandler` that calls `DrawerState.close()` (`2fcc66c5`). Material3 1.4 does ship
+  `DrawerPredictiveBackHandler`, but `ModalNavigationDrawer` does **not** wire it automatically:
+  on device, removing our callback made a back gesture exit the activity to the previous app
+  (recorded in `artifacts/ui-quality/r2/r4-back.mp4`). A finger-following predictive sheet would
+  require replacing `ModalNavigationDrawer` with a custom predictive container, which changes the
+  frozen drawer geometry, so it is deliberately out of scope for this slice.
 - **Chat surfaces**: search/title swap animates size through `McaMotion.sizeChangePx`; gallery rows
   use `animateItem`; the image preview scales 0.96→1 with a fade and finishes before dismissing.
 - **Modules**: settings/modelhub/agent lists use `animateItem`; expandable rows animate height;
@@ -73,3 +77,10 @@ introduced by the motion slices. The only geometry animation is an explicit expa
 - Release APKs must be produced by `scripts/release.ps1`, which passes
   `-Pmca.keepNativeSymbols=false`. A manual `assembleRelease` keeps native DWARF and inflates the
   APK (211.8 MB vs the stripped artifact), but does not change runtime behaviour.
+- **Startup readiness (round 4 device measurement, build 0.2.4):** activity first frame 420 ms,
+  but the chat surface appeared at ~22 s on the first launch after an update and ~8.7 s on the
+  following cold start. This is the launch-screen duration users actually see and is the next
+  performance target; the launch surface itself is already animated and phase-accurate.
+- Device verification of the restored drawer back handler is pending a build window: the parallel
+  agent session runs `scripts/release.ps1`, whose `gradlew --stop` terminates concurrent builds in
+  this shared checkout.
