@@ -22,11 +22,11 @@ $env:MCA_INCLUDE_BENCHMARK = 'true'
 the local debug key, and uses `applicationIdSuffix = ".benchmark"` so its data cannot collide with a
 real install.
 
-## Required target manifest (currently missing)
+## Required target manifest
 
-Macrobenchmark requires the target app to be *profileable* on API 29+. Add
-`app/src/benchmark/AndroidManifest.xml` (benchmark build type only; the production manifest must not
-be edited):
+Macrobenchmark requires the target app to be *profileable* on API 29+. The harness relies on
+`app/src/benchmark/AndroidManifest.xml` (benchmark build type only; the production manifest is not
+edited), which is now committed:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -38,9 +38,19 @@ be edited):
 </manifest>
 ```
 
-This file is outside the write scope of the measurement slice that added this module; without it
-`connectedBenchmarkAndroidTest` will fail with a "not profileable" configuration error rather than
-produce a number.
+Without it `connectedBenchmarkAndroidTest` fails with a "not profileable" configuration error
+rather than producing a number.
+
+## Known device restriction (BLOCKED, not FAIL)
+
+Some OEM ROMs (observed: Xiaomi HyperOS/MIUI) reject the first install of a new package from
+`adb` with `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user` unless *Install via USB* is
+enabled in developer options and confirmed on-device. That blocks both `com.muyuchat.mca.benchmark`
+and the benchmark test APK, so `:benchmark:connectedBenchmarkAndroidTest` cannot start.
+
+Report this as **BLOCKED**, never as a benchmark FAIL: no measurement ran. Until the device is
+unblocked, collect performance evidence with the update-in-place path instead (release APK of
+`com.muyuchat.mca` + `am start -W` + `dumpsys gfxinfo` + `scripts/verify-ui-motion.ps1`).
 
 ## Prepare the device
 
@@ -82,7 +92,7 @@ Instrumentation arguments:
 | Argument | Default | Meaning |
 |---|---|---|
 | `mca.iterations` | `10` | measured iterations (V9 7.5 wants ≥10 for stable scenes) |
-| `mca.compilationMode` | `default` | `default`, `partial`, `full`, `none`, `ignore`; never compare across modes |
+| `mca.compilationMode` | `default` | `default`, `partial`, `full`, `none`; never compare across modes (`ignore` stays out: it is still an experimental Macrobenchmark API) |
 | `mca.generationTimeoutMs` | `180000` | upper bound for one streaming response |
 | `mca.streamingPrompt` | ~500-token Chinese prose request | prompt used by the streaming scenario |
 

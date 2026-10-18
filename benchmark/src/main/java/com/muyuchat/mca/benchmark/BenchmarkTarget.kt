@@ -66,8 +66,11 @@ internal object BenchmarkArguments {
         ?: DEFAULT_STREAMING_PROMPT
 
     /**
-     * `default` (fresh-install-like partial compile), `full`, `none`, `ignore` or `partial`.
+     * `default` (fresh-install-like partial compile), `full`, `none` or `partial`.
      * Anything else is rejected instead of silently measuring a different compile state.
+     * (`CompilationMode.Ignore` is intentionally not exposed: it is still an experimental
+     * Macrobenchmark API and opt-in annotations in a measurement harness hide real compile
+     * state differences, which is exactly what this argument exists to control.)
      */
     fun compilationMode(): CompilationMode = when (
         arguments.getString("mca.compilationMode")?.trim()?.lowercase() ?: "default"
@@ -76,9 +79,8 @@ internal object BenchmarkArguments {
         "partial" -> CompilationMode.Partial(baselineProfileMode = BaselineProfileMode.Disable)
         "full" -> CompilationMode.Full()
         "none" -> CompilationMode.None()
-        "ignore" -> CompilationMode.Ignore()
         else -> error(
-            "Unknown -e mca.compilationMode value; expected default|partial|full|none|ignore."
+            "Unknown -e mca.compilationMode value; expected default|partial|full|none."
         )
     }
 
