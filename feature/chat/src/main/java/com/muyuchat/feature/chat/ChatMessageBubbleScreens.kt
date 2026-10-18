@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +56,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
 internal fun MessageBubble(
@@ -206,6 +209,10 @@ private fun UserMessageBubble(
         Color.White.copy(alpha = 0.72f)
     }
     val copyableContent = displayInputWithoutAttachment(message.content)
+    // Press feedback for the message action buttons; drawn in graphicsLayer, no layout change and
+    // the 48dp touch target stays exactly as before.
+    val pinInteraction = remember { MutableInteractionSource() }
+    val copyInteraction = remember { MutableInteractionSource() }
     val visibleImageAttachments by produceState(
         initialValue = message.imageAttachments.takeIf { it.size <= 1 }.orEmpty(),
         key1 = message.imageAttachments
@@ -295,7 +302,14 @@ private fun UserMessageBubble(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (!readOnly) {
-                IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
+                IconButton(
+                    onClick = onTogglePinned,
+                    enabled = canTogglePinned,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .mcaPressScale(pinInteraction, enabled = canTogglePinned),
+                    interactionSource = pinInteraction
+                ) {
                     Icon(Icons.Default.PushPin,
                         contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
                         modifier = Modifier.size(18.dp),
@@ -305,7 +319,8 @@ private fun UserMessageBubble(
             if (copyableContent.isNotBlank()) {
             IconButton(
                 onClick = onCopy,
-                modifier = Modifier.size(48.dp)
+                modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction),
+                interactionSource = copyInteraction
             ) {
                 Icon(
                     Icons.Default.ContentCopy,

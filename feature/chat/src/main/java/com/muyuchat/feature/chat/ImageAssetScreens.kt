@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -22,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -36,6 +38,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.mcaPressScale
 
 // P9/S23：从 ImageWorkspaceScreens.kt 等值移出的图库资产簇（瓦片 + 预览浮层）。
 // 原样逐字迁移，未做行为改动；2 个跨区入口按协议提升 internal。
@@ -53,6 +56,8 @@ internal fun ImageAssetTile(
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
     val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 384)
+    val tileInteraction = remember { MutableInteractionSource() }
+    val favoriteInteraction = remember { MutableInteractionSource() }
     Box(
         modifier = modifier
             .testTag("image.asset.${image.id}")
@@ -65,7 +70,12 @@ internal fun ImageAssetTile(
                     Modifier
                 }
             )
-            .combinedClickable(onClick = onOpen, onLongClick = onLongPress)
+            .mcaPressScale(tileInteraction)
+            .combinedClickable(
+                interactionSource = tileInteraction,
+                onClick = onOpen,
+                onLongClick = onLongPress
+            )
     ) {
         bitmap?.let { loadedBitmap ->
             Image(
@@ -89,6 +99,7 @@ internal fun ImageAssetTile(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .size(48.dp)
+                    .mcaPressScale(favoriteInteraction)
             ) {
                 Surface(
                     modifier = Modifier
@@ -101,7 +112,11 @@ internal fun ImageAssetTile(
                     },
                     shape = CircleShape
                 ) {}
-                IconButton(onClick = onToggleFavorite, modifier = Modifier.fillMaxSize()) {
+                IconButton(
+                    onClick = onToggleFavorite,
+                    modifier = Modifier.fillMaxSize(),
+                    interactionSource = favoriteInteraction
+                ) {
                     Icon(
                         Icons.Default.Favorite,
                         contentDescription = "取消收藏",

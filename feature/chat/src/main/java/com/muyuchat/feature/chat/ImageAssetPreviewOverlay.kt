@@ -2,8 +2,11 @@ package com.muyuchat.feature.chat
 
 import android.content.ClipData
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +49,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -70,6 +75,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
 
 /**
  * T2B22-T1（b 工位）拆片：ImageAssetPreviewOverlay（@Composable internal）自
@@ -121,10 +128,41 @@ internal fun ImageAssetPreviewOverlay(
         mutableStateOf(emptySet<ImageGenerationPresetField>())
     }
     val sourceUpscaleRunning = upscaleJob?.running == true && upscaleJob.sourceImageId == image.id
+    // Full-screen preview entrance/exit: one progress value drives alpha and the 0.96 -> 1 scale
+    // inside a graphicsLayer, so no animated value is read during composition. Closing plays to the
+    // end before the host is told to remove the preview.
+    val entryProgress = remember { Animatable(0f) }
+    var previewClosing by remember { mutableStateOf(false) }
+    val closeInteraction = remember { MutableInteractionSource() }
+    val favoriteInteraction = remember { MutableInteractionSource() }
+    val moreInteraction = remember { MutableInteractionSource() }
+    val recreateInteraction = remember { MutableInteractionSource() }
+    LaunchedEffect(Unit) {
+        entryProgress.animateTo(1f, McaMotion.contentEnter)
+    }
+    val dismissWithMotion: () -> Unit = {
+        if (!previewClosing) {
+            previewClosing = true
+            scope.launch {
+                entryProgress.animateTo(0f, McaMotion.fade(millis = 150))
+                onDismiss()
+            }
+        }
+    }
+    // The workspace registers its own back handler; this later, preview-only callback wins while
+    // the overlay is composed and gives Back the same played-out close as the X button.
+    BackHandler(enabled = !previewClosing) { dismissWithMotion() }
     Box(
         modifier = modifier
             .testTag("image.preview.${image.id}")
             .fillMaxSize()
+            .graphicsLayer {
+                val progress = entryProgress.value
+                alpha = progress
+                val scale = 0.96f + 0.04f * progress
+                scaleX = scale
+                scaleY = scale
+            }
             .background(Color.Black.copy(alpha = 0.92f))
     ) {
         Row(
@@ -134,8 +172,12 @@ internal fun ImageAssetPreviewOverlay(
                 .padding(horizontal = 16.dp, vertical = 18.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                IconButton(onClick = onDismiss) {
+            Surface(
+                color = Color.White.copy(alpha = 0.13f),
+                shape = CircleShape,
+                modifier = Modifier.mcaPressScale(closeInteraction)
+            ) {
+                IconButton(onClick = dismissWithMotion, interactionSource = closeInteraction) {
                     Icon(Icons.Default.Close, contentDescription = "关闭预览", tint = Color.White)
                 }
             }
@@ -149,8 +191,15 @@ internal fun ImageAssetPreviewOverlay(
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold
             )
-            Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                IconButton(onClick = { onSetFavorite(!image.favorite) }) {
+            Surface(
+                color = Color.White.copy(alpha = 0.13f),
+                shape = CircleShape,
+                modifier = Modifier.mcaPressScale(favoriteInteraction)
+            ) {
+                IconButton(
+                    onClick = { onSetFavorite(!image.favorite) },
+                    interactionSource = favoriteInteraction
+                ) {
                     Icon(
                         if (image.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         contentDescription = if (image.favorite) "取消收藏" else "收藏图片",
@@ -160,8 +209,15 @@ internal fun ImageAssetPreviewOverlay(
             }
             Spacer(modifier = Modifier.width(8.dp))
             Box {
-                Surface(color = Color.White.copy(alpha = 0.13f), shape = CircleShape) {
-                    IconButton(onClick = { showActionsMenu = true }) {
+                Surface(
+                    color = Color.White.copy(alpha = 0.13f),
+                    shape = CircleShape,
+                    modifier = Modifier.mcaPressScale(moreInteraction)
+                ) {
+                    IconButton(
+                        onClick = { showActionsMenu = true },
+                        interactionSource = moreInteraction
+                    ) {
                         Icon(Icons.Default.MoreVert, contentDescription = "更多图片操作", tint = Color.White)
                     }
                 }
@@ -329,7 +385,12 @@ internal fun ImageAssetPreviewOverlay(
                     if (image.canRecreate) {
                         TextButton(
                             onClick = onRecreate,
-                            enabled = recreateEnabled
+                            enabled = recreateEnabled,
+                            modifier = Modifier.mcaPressScale(
+                                recreateInteraction,
+                                enabled = recreateEnabled
+                            ),
+                            interactionSource = recreateInteraction
                         ) {
                             Text("按原参数再生成", color = Color.White)
                         }

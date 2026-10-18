@@ -1,7 +1,9 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,6 +25,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +46,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
 internal fun ChatStatusBar(
@@ -62,6 +66,9 @@ internal fun ChatStatusBar(
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    // Press weight for the model capsule; drawn in graphicsLayer so the 48dp/56dp header geometry,
+    // the API pill and the model text metrics are untouched.
+    val modelCapsuleInteraction = remember { MutableInteractionSource() }
     val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
     // Large-font accessibility adaptation, not a default-style change: the API state is information
     // and must never be dropped just because the header is tight. Only the pill padding tightens at
@@ -96,11 +103,15 @@ internal fun ChatStatusBar(
                         contentDescription = "选择模型"
                         role = SemanticsRole.Button
                     }
-                    .clickable {
+                    .clickable(
+                        interactionSource = modelCapsuleInteraction,
+                        indication = LocalIndication.current
+                    ) {
                         focusManager.clearFocus(force = true)
                         keyboardController?.hide()
                         modelMenuExpanded = true
-                    },
+                    }
+                    .mcaPressScale(modelCapsuleInteraction),
                 color = MaterialTheme.colorScheme.surface,
                 shape = CircleShape,
                 shadowElevation = 5.dp

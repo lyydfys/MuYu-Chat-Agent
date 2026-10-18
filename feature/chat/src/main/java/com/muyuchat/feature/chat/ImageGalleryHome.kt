@@ -32,6 +32,7 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.McaMotion
 
 // P9/S28：从 ImageWorkspaceScreens.kt 等值移出的图库首页（图片网格与空态）。
 // 原样逐字迁移，未做行为改动；跨区入口按协议提升 internal。
@@ -422,7 +423,16 @@ internal fun ImageGalleryHome(
             }
         } else {
             items(images.chunked(3), key = { row -> row.joinToString("-") { it.id } }) { row ->
-                Row(horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                // Row keys are stable per chunk, so animateItem covers grid add/remove/reorder
+                // without touching the 3-column geometry or the 3dp gutter.
+                Row(
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = McaMotion.contentEnter,
+                        placementSpec = McaMotion.pageSlide,
+                        fadeOutSpec = McaMotion.fade(millis = 140)
+                    ),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp)
+                ) {
                     row.forEach { image ->
                         ImageAssetTile(
                             image = image,

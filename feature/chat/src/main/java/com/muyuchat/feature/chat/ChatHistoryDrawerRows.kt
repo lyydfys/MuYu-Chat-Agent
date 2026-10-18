@@ -1,8 +1,10 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
 internal fun HistorySectionHeader(title: String, modifier: Modifier = Modifier) {
@@ -81,6 +84,8 @@ internal fun HistoryRow(
     modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val rowInteraction = remember { MutableInteractionSource() }
+    val menuInteraction = remember { MutableInteractionSource() }
     Surface(
         color = if (item.selected) {
             MaterialTheme.colorScheme.surface
@@ -94,7 +99,13 @@ internal fun HistoryRow(
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 36.dp)
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = rowInteraction,
+                indication = LocalIndication.current,
+                onClick = onClick
+            )
+            // Press weight only; the 36dp row height, radius and content are unchanged.
+            .mcaPressScale(rowInteraction)
     ) {
         Row(
             modifier = Modifier.padding(start = 8.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
@@ -154,7 +165,8 @@ internal fun HistoryRow(
             Box {
                 IconButton(
                     onClick = { menuExpanded = true },
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp).mcaPressScale(menuInteraction),
+                    interactionSource = menuInteraction
                 ) {
                     Icon(
                         Icons.Default.MoreVert,

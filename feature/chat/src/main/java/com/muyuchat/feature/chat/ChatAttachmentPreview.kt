@@ -3,6 +3,7 @@ package com.muyuchat.feature.chat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,6 +31,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.mcaPressScale
 
 // P9/S17：从 ChatChromeScreens.kt 等值移出的消息气泡/参数弹窗/助手块簇。
 // 原样逐字迁移，未做行为改动；入口原即 internal，双向扫描按协议处理。
@@ -45,6 +47,7 @@ internal fun AttachmentPreview(
     val name = remember(input) { extractAttachmentName(input) } ?: return
     val isImageAttachment = remember(input) { hasImageAttachmentMarker(input) }
     val imageAttachmentCount = remember(input) { chatImageAttachmentMarkerCount(input) }
+    val removeInteraction = remember { MutableInteractionSource() }
     val statusColor = if (visionCapabilityReady) McaPrimaryBlue else MaterialTheme.colorScheme.error
     val containerColor = if (isImageAttachment) {
         if (visionCapabilityReady) McaInputIconSurface.copy(alpha = 0.92f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.44f)
@@ -126,7 +129,11 @@ internal fun AttachmentPreview(
                     }
                 }
             }
-            IconButton(onClick = onRemove, modifier = Modifier.size(30.dp)) {
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.size(30.dp).mcaPressScale(removeInteraction),
+                interactionSource = removeInteraction
+            ) {
                 Icon(
                     Icons.Default.Close,
                     contentDescription = "移除附件",

@@ -9,13 +9,13 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -78,7 +78,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatImageAttachment
@@ -90,6 +89,8 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
 
 // P9/S13：从 ChatChromeScreens.kt 等值移出的输入区簇（附件助手 + 输入栏 + composer 状态/菜单）。
 // 原样逐字迁移，未做行为改动；双向跨区入口按协议提升 internal（4 随迁函数 + 保留区 2 项）。
@@ -100,21 +101,13 @@ import androidx.compose.runtime.setValue
  */
 private val composerRowEnter =
     fadeIn(animationSpec = tween(durationMillis = 140)) + expandVertically(
-        animationSpec = spring(
-            dampingRatio = ChatMotion.ROW_DAMPING_RATIO,
-            stiffness = ChatMotion.ROW_STIFFNESS,
-            visibilityThreshold = IntSize.VisibilityThreshold
-        ),
+        animationSpec = McaMotion.sizeChangePx,
         expandFrom = Alignment.Top
     )
 
 private val composerRowExit =
     fadeOut(animationSpec = tween(durationMillis = 90)) + shrinkVertically(
-        animationSpec = spring(
-            dampingRatio = ChatMotion.ROW_DAMPING_RATIO,
-            stiffness = ChatMotion.ROW_STIFFNESS,
-            visibilityThreshold = IntSize.VisibilityThreshold
-        ),
+        animationSpec = McaMotion.sizeChangePx,
         shrinkTowards = Alignment.Top
     )
 
@@ -527,6 +520,7 @@ internal fun ChatInputBar(
                     imagePromptMode -> ComposerPrimaryAction.GenerateImage
                     else -> ComposerPrimaryAction.Send
                 }
+                val sendInteraction = remember { MutableInteractionSource() }
                 FloatingActionButton(
                     onClick = {
                         if (sendFabEnabled) {
@@ -542,7 +536,9 @@ internal fun ChatInputBar(
                     shape = CircleShape,
                     modifier = Modifier
                         .size(40.dp)
-                        .semantics { if (!sendFabEnabled) disabled() }
+                        .mcaPressScale(sendInteraction, enabled = sendFabEnabled)
+                        .semantics { if (!sendFabEnabled) disabled() },
+                    interactionSource = sendInteraction
                 ) {
                     if (attachmentPreflightRunning && !isGenerating) {
                         CircularProgressIndicator(

@@ -1,10 +1,16 @@
 package com.muyuchat.feature.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ExperimentalAnimationApi
+import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -28,7 +34,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -52,6 +58,8 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -60,6 +68,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -74,6 +85,24 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaEnterReveal
+import kotlinx.coroutines.delay
+
+/** Fraction of the drawer sheet that must be on screen before the content reveal starts. */
+private const val HISTORY_DRAWER_REVEAL_TRIGGER = 0.15f
+
+/** Window after an open during which newly composed rows may still join the stagger. */
+private const val HISTORY_DRAWER_REVEAL_WINDOW_MILLIS = 700L
+
+/**
+ * Plain (non-snapshot) gate read from placement callbacks, so tracking the drawer's slide does not
+ * invalidate composition. Snapshot state is written only on a real closed -> open crossing.
+ */
+private class DrawerRevealGate {
+    var armed = false
+    var opened = false
+}
 
 /**
  * History-row motion for pin/unpin reorders, deletes and search filtering. The same calm spring is
@@ -95,7 +124,7 @@ private val historyRowRemoveSpec: FiniteAnimationSpec<Float> = tween(durationMil
 
 // P9/S11：从 ChatChromeScreens.kt 等值移出的历史抽屉（会话列表）簇。
 // 原样逐字迁移，未做行为改动；无新增提升（ChatHistoryDrawer 原即 internal）。
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalAnimationApi::class)
 @Composable
 internal fun ChatHistoryDrawer(
     state: ChatUiState,
@@ -130,6 +159,41 @@ internal fun ChatHistoryDrawer(
     val groupedHistory = remember(filteredHistory, query, java.time.LocalDate.now()) {
         historySections(filteredHistory, query)
     }
+    // M3 keeps ModalNavigationDrawer's sheet composed while closed, so "first composition" is not
+    // the open moment. Placement callbacks below track the sheet actually sliding on screen; the
+    // epoch only changes on a real closed -> open crossing, one snapshot write per open and none
+    // while the drawer sits closed, so the closed state produces no animation or extra composition.
+    var revealEpoch by remember { mutableIntStateOf(0) }
+    var revealActive by remember { mutableStateOf(false) }
+    val revealGate = remember { DrawerRevealGate() }
+    val revealTracker: (LayoutCoordinates) -> Unit = remember {
+        { coordinates ->
+            val width = coordinates.size.width
+            if (width > 0) {
+                // 0 = fully closed (sheet starts one width off screen), 1 = fully open.
+                val visibleFraction = 1f + coordinates.positionInRoot().x / width
+                if (visibleFraction <= 0.03f) {
+                    // Re-arm only after the sheet is effectively parked off screen; this also
+                    // discards the pre-anchor closed offset that could look partly visible.
+                    revealGate.armed = true
+                    revealGate.opened = false
+                } else if (
+                    revealGate.armed &&
+                    !revealGate.opened &&
+                    visibleFraction >= HISTORY_DRAWER_REVEAL_TRIGGER
+                ) {
+                    revealGate.opened = true
+                    revealActive = true
+                    revealEpoch += 1
+                }
+            }
+        }
+    }
+    LaunchedEffect(revealEpoch) {
+        if (revealEpoch == 0) return@LaunchedEffect
+        delay(HISTORY_DRAWER_REVEAL_WINDOW_MILLIS)
+        revealActive = false
+    }
 
     fun closeSearch() {
         query = ""
@@ -152,7 +216,12 @@ internal fun ChatHistoryDrawer(
     }
 
     ModalDrawerSheet(
-        modifier = Modifier.fillMaxSize(),
+        // Track the sheet surface itself (full-screen width, existing Modifier.fillMaxSize()):
+        // closed it sits exactly one width off screen and open it reaches x == 0, so the visible
+        // fraction below is direction-agnostic and needs no hard-coded drawer width.
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned(revealTracker),
         drawerContainerColor = MaterialTheme.colorScheme.background
     ) {
         Box(
@@ -170,95 +239,124 @@ internal fun ChatHistoryDrawer(
                     .padding(horizontal = 20.dp, vertical = 18.dp)
             ) {
                 Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    if (searchActive) {
-                        OutlinedTextField(
-                            value = query,
-                            onValueChange = { query = it },
-                            modifier = Modifier
-                                .weight(1f)
-                                .focusRequester(searchFocusRequester)
-                                .testTag("history.search.field"),
-                            placeholder = {
-                                Text(
-                                    "搜索历史",
-                                    style = MaterialTheme.typography.bodyMedium
+                    // Title <-> search is the same two rows as before, cross-faded while the shared
+                    // row height animates with McaMotion.sizeChangePx. Final geometry is unchanged:
+                    // the animated container takes the full row width and each mode keeps its
+                    // original fillMaxWidth/weight structure.
+                    AnimatedContent(
+                        targetState = searchActive,
+                        modifier = Modifier.weight(1f),
+                        transitionSpec = {
+                            (fadeIn(animationSpec = McaMotion.fade(millis = 140)) togetherWith
+                                fadeOut(animationSpec = McaMotion.fade(millis = 100))).using(
+                                SizeTransform(
+                                    clip = false,
+                                    sizeAnimationSpec = { _, _ -> McaMotion.sizeChangePx }
                                 )
-                            },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.Search,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            },
-                            trailingIcon = if (query.isNotEmpty()) {
-                                {
-                                    IconButton(onClick = { query = "" }) {
-                                        Icon(
-                                            Icons.Default.Clear,
-                                            contentDescription = "清空搜索",
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                    }
-                                }
-                            } else {
-                                null
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyMedium,
-                            shape = RoundedCornerShape(20.dp),
-                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                            keyboardActions = KeyboardActions(
-                                onSearch = { keyboardController?.hide() }
                             )
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        IconButton(
-                            onClick = { closeSearch() },
-                            modifier = Modifier.testTag("history.search.close")
-                        ) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "关闭搜索",
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                    } else {
-                        Text(
-                            "MCA",
-                            style = MaterialTheme.typography.headlineSmall.copy(fontSize = 25.sp),
-                            fontWeight = FontWeight.Black,
-                            modifier = Modifier.weight(1f)
-                        )
-                        Surface(
-                            color = MaterialTheme.colorScheme.surface,
-                            shape = CircleShape,
-                            shadowElevation = 8.dp
-                        ) {
+                        },
+                        label = "history-search-mode"
+                    ) { active ->
+                        if (active) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                IconButton(
-                                    onClick = { searchActive = true },
+                                OutlinedTextField(
+                                    value = query,
+                                    onValueChange = { query = it },
                                     modifier = Modifier
-                                        .size(48.dp)
-                                        .focusRequester(searchButtonFocusRequester)
-                                        .testTag("history.search")
+                                        .weight(1f)
+                                        .focusRequester(searchFocusRequester)
+                                        .testTag("history.search.field"),
+                                    placeholder = {
+                                        Text(
+                                            "搜索历史",
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Default.Search,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    },
+                                    trailingIcon = if (query.isNotEmpty()) {
+                                        {
+                                            IconButton(onClick = { query = "" }) {
+                                                Icon(
+                                                    Icons.Default.Clear,
+                                                    contentDescription = "清空搜索",
+                                                    modifier = Modifier.size(20.dp)
+                                                )
+                                            }
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.bodyMedium,
+                                    shape = RoundedCornerShape(20.dp),
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(
+                                        onSearch = { keyboardController?.hide() }
+                                    )
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                IconButton(
+                                    onClick = { closeSearch() },
+                                    modifier = Modifier.testTag("history.search.close")
                                 ) {
                                     Icon(
-                                        Icons.Default.Search,
-                                        contentDescription = "搜索历史",
+                                        Icons.Default.Close,
+                                        contentDescription = "关闭搜索",
                                         modifier = Modifier.size(22.dp)
                                     )
                                 }
-                                IconButton(
-                                    onClick = onOpenAppMenu,
-                                    modifier = Modifier
-                                        .size(48.dp)
-                                        .semantics { contentDescription = "打开应用菜单" }
+                            }
+                        } else {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "MCA",
+                                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = 25.sp),
+                                    fontWeight = FontWeight.Black,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surface,
+                                    shape = CircleShape,
+                                    shadowElevation = 8.dp
                                 ) {
-                                    McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        IconButton(
+                                            onClick = { searchActive = true },
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .focusRequester(searchButtonFocusRequester)
+                                                .testTag("history.search")
+                                        ) {
+                                            Icon(
+                                                Icons.Default.Search,
+                                                contentDescription = "搜索历史",
+                                                modifier = Modifier.size(22.dp)
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = onOpenAppMenu,
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .semantics { contentDescription = "打开应用菜单" }
+                                        ) {
+                                            McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -276,6 +374,7 @@ internal fun ChatHistoryDrawer(
                 )
                 Spacer(modifier = Modifier.height(12.dp))
 
+                var nextRevealIndex = 0
                 LazyColumn(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -287,34 +386,60 @@ internal fun ChatHistoryDrawer(
                         item { HistoryEmptyState("没有找到匹配的对话。") }
                     } else {
                         groupedHistory.forEach { section ->
+                            val sectionRevealIndex = nextRevealIndex
                             item(key = "section-${section.title}") {
-                                HistorySectionHeader(
-                                    section.title,
-                                    modifier = Modifier.animateItem(
-                                        fadeInSpec = historyRowAppearSpec,
-                                        placementSpec = historyRowPlacementSpec,
-                                        fadeOutSpec = historyRowRemoveSpec
+                                // Recreated per drawer-open epoch so mcaEnterReveal replays from zero
+                                // without rebuilding the LazyColumn itself (scroll position stays).
+                                key(revealEpoch) {
+                                    HistorySectionHeader(
+                                        section.title,
+                                        modifier = Modifier
+                                            .animateItem(
+                                                fadeInSpec = historyRowAppearSpec,
+                                                placementSpec = historyRowPlacementSpec,
+                                                fadeOutSpec = historyRowRemoveSpec
+                                            )
+                                            // Filtering keeps the existing animateItem movement
+                                            // only: the stagger is off whenever a query narrows
+                                            // the list, so no two displacements stack.
+                                            .mcaEnterReveal(
+                                                index = sectionRevealIndex,
+                                                animate = revealActive && query.isBlank()
+                                            )
                                     )
-                                )
+                                }
                             }
-                            items(section.items, key = { it.id }) { item ->
-                                HistoryRow(
-                                    item = item,
-                                    onClick = { onSelectConversation(item.id) },
-                                    onRename = {
-                                        renameTarget = item
-                                        renameText = item.title
-                                    },
-                                    onTogglePin = { onTogglePinConversation(item.id) },
-                                    onBranch = { branchTarget = item },
-                                    onDelete = { deleteTarget = item },
-                                    modifier = Modifier.animateItem(
-                                        fadeInSpec = historyRowAppearSpec,
-                                        placementSpec = historyRowPlacementSpec,
-                                        fadeOutSpec = historyRowRemoveSpec
+                            nextRevealIndex += 1
+                            itemsIndexed(
+                                items = section.items,
+                                key = { _, item -> item.id }
+                            ) { itemIndex, item ->
+                                val rowRevealIndex = sectionRevealIndex + 1 + itemIndex
+                                key(revealEpoch) {
+                                    HistoryRow(
+                                        item = item,
+                                        onClick = { onSelectConversation(item.id) },
+                                        onRename = {
+                                            renameTarget = item
+                                            renameText = item.title
+                                        },
+                                        onTogglePin = { onTogglePinConversation(item.id) },
+                                        onBranch = { branchTarget = item },
+                                        onDelete = { deleteTarget = item },
+                                        modifier = Modifier
+                                            .animateItem(
+                                                fadeInSpec = historyRowAppearSpec,
+                                                placementSpec = historyRowPlacementSpec,
+                                                fadeOutSpec = historyRowRemoveSpec
+                                            )
+                                            .mcaEnterReveal(
+                                                index = rowRevealIndex,
+                                                animate = revealActive && query.isBlank()
+                                            )
                                     )
-                                )
+                                }
                             }
+                            nextRevealIndex += section.items.size
                         }
                     }
                 }
