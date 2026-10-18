@@ -6,6 +6,9 @@ import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.Image
@@ -71,6 +74,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatImageAttachment
@@ -111,9 +115,20 @@ internal fun ResearchModeFloatingCapsule(
     ) {
         val capsuleWidth = 128.dp
         val startPadding = minOf(252.dp, maxWidth - capsuleWidth - 12.dp).coerceAtLeast(12.dp)
+        // This capsule is only composed while it is open, so `visible = true` on the first frame is
+        // a dead animation. Entering from an explicit hidden state lets the spring actually play.
+        val capsuleVisibility = remember { MutableTransitionState(initialState = false) }
+        capsuleVisibility.targetState = true
         AnimatedVisibility(
-            visible = true,
-            enter = fadeIn(tween(120)) + slideInHorizontally(tween(160), initialOffsetX = { -it / 4 }),
+            visibleState = capsuleVisibility,
+            enter = fadeIn(tween(120)) + slideInHorizontally(
+                animationSpec = spring(
+                    dampingRatio = ChatMotion.SURFACE_DAMPING_RATIO,
+                    stiffness = ChatMotion.SURFACE_STIFFNESS,
+                    visibilityThreshold = IntOffset.VisibilityThreshold
+                ),
+                initialOffsetX = { -it / 4 }
+            ),
             exit = fadeOut(tween(100)),
             modifier = Modifier
                 .padding(start = startPadding)

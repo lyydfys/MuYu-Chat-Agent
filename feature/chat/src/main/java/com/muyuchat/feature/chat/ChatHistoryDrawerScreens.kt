@@ -1,6 +1,10 @@
 package com.muyuchat.feature.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -65,10 +69,29 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+
+/**
+ * History-row motion for pin/unpin reorders, deletes and search filtering. The same calm spring is
+ * used as the message list so the two lists feel like one product; no scroll logic lives here, so
+ * there is nothing to fight with ChatScrollCoordinator.
+ */
+private val historyRowAppearSpec: FiniteAnimationSpec<Float> =
+    spring(
+        dampingRatio = ChatMotion.CONTROL_DAMPING_RATIO,
+        stiffness = ChatMotion.CONTROL_STIFFNESS
+    )
+private val historyRowPlacementSpec: FiniteAnimationSpec<IntOffset> =
+    spring(
+        dampingRatio = ChatMotion.ITEM_DAMPING_RATIO,
+        stiffness = ChatMotion.ITEM_STIFFNESS,
+        visibilityThreshold = IntOffset.VisibilityThreshold
+    )
+private val historyRowRemoveSpec: FiniteAnimationSpec<Float> = tween(durationMillis = 140)
 
 // P9/S11：从 ChatChromeScreens.kt 等值移出的历史抽屉（会话列表）簇。
 // 原样逐字迁移，未做行为改动；无新增提升（ChatHistoryDrawer 原即 internal）。
@@ -265,7 +288,14 @@ internal fun ChatHistoryDrawer(
                     } else {
                         groupedHistory.forEach { section ->
                             item(key = "section-${section.title}") {
-                                HistorySectionHeader(section.title)
+                                HistorySectionHeader(
+                                    section.title,
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = historyRowAppearSpec,
+                                        placementSpec = historyRowPlacementSpec,
+                                        fadeOutSpec = historyRowRemoveSpec
+                                    )
+                                )
                             }
                             items(section.items, key = { it.id }) { item ->
                                 HistoryRow(
@@ -277,7 +307,12 @@ internal fun ChatHistoryDrawer(
                                     },
                                     onTogglePin = { onTogglePinConversation(item.id) },
                                     onBranch = { branchTarget = item },
-                                    onDelete = { deleteTarget = item }
+                                    onDelete = { deleteTarget = item },
+                                    modifier = Modifier.animateItem(
+                                        fadeInSpec = historyRowAppearSpec,
+                                        placementSpec = historyRowPlacementSpec,
+                                        fadeOutSpec = historyRowRemoveSpec
+                                    )
                                 )
                             }
                         }

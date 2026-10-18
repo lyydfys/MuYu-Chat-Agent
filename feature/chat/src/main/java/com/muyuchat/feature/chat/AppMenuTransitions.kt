@@ -28,6 +28,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -267,8 +268,14 @@ internal fun SmoothRightToLeftPage(
     onDismiss: () -> Unit,
     content: @Composable (Modifier, () -> Unit) -> Unit
 ) {
+    // Start from the hidden state so the enter transition also runs when a caller composes the
+    // page only at the moment it opens (`request?.let { SmoothRightToLeftPage(visible = true) }`).
+    // Passing the raw flag to AnimatedVisibility leaves currentState == targetState == true on that
+    // first composition, which silently skips the entry animation and hard-cuts the page in.
+    val pageVisibility = remember { MutableTransitionState(initialState = false) }
+    pageVisibility.targetState = visible
     AnimatedVisibility(
-        visible = visible,
+        visibleState = pageVisibility,
         enter = appMenuPageEnter(),
         exit = ExitTransition.None
     ) {
@@ -337,4 +344,31 @@ private fun appMenuPageEnter() = slideInHorizontally(
     animationSpec = tween(durationMillis = 240),
     initialOffsetX = { it }
 ) + fadeIn(animationSpec = tween(durationMillis = 140))
+
+/**
+ * Chat-scoped spring language shared by the composer, message list and page chrome.
+ *
+ * These are springs rather than fixed tweens so interrupted gestures and reverse transitions
+ * continue from the current velocity instead of restarting from a fixed curve. Values are tuned by
+ * perceived settle time (roughly 0.2-0.35s), not by raw duration. Compose runs every animation
+ * with the platform MotionDurationScale, so the system "remove animations" setting still collapses
+ * these to their end state. No infinite/repeating decoration is part of this language.
+ */
+internal object ChatMotion {
+    /** Floating composer surfaces (action menu, research capsule): physical, never wobbly. */
+    const val SURFACE_DAMPING_RATIO = 0.78f
+    const val SURFACE_STIFFNESS = 460f
+
+    /** Small controls (send/stop glyph, status chip text): quick with a hint of elasticity. */
+    const val CONTROL_DAMPING_RATIO = 0.72f
+    const val CONTROL_STIFFNESS = 560f
+
+    /** Composer rows entering/leaving: height settles without overshooting the IME edge. */
+    const val ROW_DAMPING_RATIO = 0.86f
+    const val ROW_STIFFNESS = 420f
+
+    /** Lazy list placement: heavily damped so long travel never shows a bounce. */
+    const val ITEM_DAMPING_RATIO = 0.92f
+    const val ITEM_STIFFNESS = 380f
+}
 

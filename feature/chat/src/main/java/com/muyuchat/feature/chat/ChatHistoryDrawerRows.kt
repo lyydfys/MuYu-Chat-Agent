@@ -43,10 +43,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 
 @Composable
-internal fun HistorySectionHeader(title: String) {
+internal fun HistorySectionHeader(title: String, modifier: Modifier = Modifier) {
     Text(
         title,
-        modifier = Modifier.padding(top = 10.dp, bottom = 5.dp, start = 8.dp),
+        modifier = modifier.padding(top = 10.dp, bottom = 5.dp, start = 8.dp),
         style = MaterialTheme.typography.labelLarge.copy(fontSize = 11.sp, lineHeight = 14.sp),
         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
         fontWeight = FontWeight.SemiBold
@@ -77,7 +77,8 @@ internal fun HistoryRow(
     onRename: () -> Unit,
     onTogglePin: () -> Unit,
     onBranch: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     Surface(
@@ -90,7 +91,7 @@ internal fun HistoryRow(
         tonalElevation = 0.dp,
         shadowElevation = if (item.selected) 5.dp else 0.dp,
         border = null,
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 36.dp)
             .clickable(onClick = onClick)

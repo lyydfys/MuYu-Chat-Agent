@@ -1,9 +1,20 @@
-<resources xmlns:android="http://schemas.android.com/apk/res/android">
+<resources xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Launch window colours must match the runtime McaTheme scheme (McaTheme.kt):
+         status bar and navigation bar = background (#F8F9FA). Keeping both equal to the
+         runtime background preserves the original launch seam and the StartupThemeContractTest
+         contract; the navigation-bar *icon* appearance is still synced at the first frame.
+         Everything here is only visible before the first Compose frame and behind the
+         system bars on API 26-34; on API 35+ the platform enforces edge-to-edge and
+         ignores statusBarColor/navigationBarColor. -->
     <style name="Theme.MuYuChatAgent" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowBackground">#F8F9FA</item>
         <item name="android:windowLightStatusBar">true</item>
         <item name="android:navigationBarColor">#F8F9FA</item>
         <item name="android:statusBarColor">#F8F9FA</item>
+        <!-- API 27+; ignored by older platforms. Matches
+             WindowCompat.isAppearanceLightNavigationBars = true in McaTheme. -->
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
     </style>
 </resources>

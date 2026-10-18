@@ -63,6 +63,11 @@ internal fun ChatStatusBar(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
+    // Large-font accessibility adaptation, not a default-style change: the API state is information
+    // and must never be dropped just because the header is tight. Only the pill padding tightens at
+    // large font scale; at the default scale these values are exactly the previous 8/4 dp.
+    val apiBadgeHorizontalPadding = if (compactForLargeText) 5.dp else 8.dp
+    val apiBadgeVerticalPadding = if (compactForLargeText) 2.dp else 4.dp
     val cacheEvidence = cacheEvidenceLabel(state.stats).takeIf { state.hasReadyLocalModelForHeader() }
     val modelSubtitle = state.modelHeaderSubtitle()
     Row(
@@ -109,6 +114,8 @@ internal fun ChatStatusBar(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = displayModelName(state.selectedModelName) ?: "选择模型",
+                            // Only the large-font layout gets a second line so the name stays
+                            // readable instead of clipping; the default layout keeps one line.
                             maxLines = if (compactForLargeText) 2 else 1,
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp, lineHeight = 15.sp),
@@ -132,19 +139,26 @@ internal fun ChatStatusBar(
                             )
                         }
                     }
+                    // The API pill is state, not chrome, so it stays at every font scale. At large
+                    // font scale it only tightens its padding; the dropdown chevron below is a
+                    // decorative affordance (the whole capsule already exposes "选择模型" as a
+                    // button), so it is the only element that yields space there.
+                    Surface(
+                        color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        shape = CircleShape
+                    ) {
+                        Text(
+                            text = "API",
+                            modifier = Modifier.padding(
+                                horizontal = apiBadgeHorizontalPadding,
+                                vertical = apiBadgeVerticalPadding
+                            ),
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                     if (!compactForLargeText) {
-                        Surface(
-                            color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                            shape = CircleShape
-                        ) {
-                            Text(
-                                text = "API",
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                                color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
                         Icon(
                             imageVector = Icons.Default.KeyboardArrowDown,
                             contentDescription = null,

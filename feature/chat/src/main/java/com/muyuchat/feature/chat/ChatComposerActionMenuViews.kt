@@ -6,6 +6,9 @@ import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.Image
@@ -71,6 +74,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatImageAttachment
@@ -123,10 +127,19 @@ internal fun CompactInputActionMenu(
                 .matchParentSize()
                 .clickable(onClick = onDismiss)
         )
+        // This sheet is only composed while it is open, so `visible = true` on the first frame
+        // suppressed the entry animation. Start from an explicit hidden state so the spring-settled
+        // slide shared with the other composer surfaces can actually play.
+        val menuVisibility = remember { MutableTransitionState(initialState = false) }
+        menuVisibility.targetState = true
         AnimatedVisibility(
-            visible = true,
+            visibleState = menuVisibility,
             enter = fadeIn(tween(120)) + slideInHorizontally(
-                animationSpec = tween(180),
+                animationSpec = spring(
+                    dampingRatio = ChatMotion.SURFACE_DAMPING_RATIO,
+                    stiffness = ChatMotion.SURFACE_STIFFNESS,
+                    visibilityThreshold = IntOffset.VisibilityThreshold
+                ),
                 initialOffsetX = { -it / 5 }
             ),
             exit = fadeOut(tween(100)),

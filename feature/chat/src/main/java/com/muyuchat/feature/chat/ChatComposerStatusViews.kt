@@ -4,8 +4,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.Image
@@ -154,13 +156,25 @@ internal fun WebSearchStatusChip(
                 tint = if (active) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = message,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            // Capsule status text changes (search started -> sources found, etc.) cross-fade with a
+            // spring instead of hard-swapping. Crossfade draws alpha in the graphics layer, so no
+            // animation value is read during composition.
+            Crossfade(
+                targetState = message,
+                animationSpec = spring(
+                    dampingRatio = ChatMotion.CONTROL_DAMPING_RATIO,
+                    stiffness = ChatMotion.CONTROL_STIFFNESS
+                ),
+                label = "webSearchStatusCapsule"
+            ) { statusText ->
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
     }
 }

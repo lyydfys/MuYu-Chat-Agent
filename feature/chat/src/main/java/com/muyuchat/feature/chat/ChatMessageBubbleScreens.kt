@@ -86,15 +86,19 @@ internal fun MessageBubble(
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit,
-    canCopyMessage: () -> Boolean
+    canCopyMessage: () -> Boolean,
+    modifier: Modifier = Modifier
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val isUser = message.role == Role.USER
 
+    // `modifier` carries the LazyColumn item animation (appearance/move/removal springs) and is
+    // applied to the item's root node. Static layout is unchanged: fillMaxWidth plus the same
+    // horizontal arrangement as before.
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
     ) {
         if (isUser) {

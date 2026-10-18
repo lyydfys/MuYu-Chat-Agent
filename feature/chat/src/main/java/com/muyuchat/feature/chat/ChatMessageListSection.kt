@@ -1,5 +1,9 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,8 +36,31 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.engine.Role
+
+/**
+ * Message-list item motion: spring fade for appearing/removed rows, damped spring for placement.
+ *
+ * The placement spring never overshoots. Compose's LazyLayoutItemAnimator treats the scroll the
+ * list consumed as a delta it must not animate (LazyLayoutItemAnimation.applyScrollOffset) and only
+ * animates genuine data-change offsets, so the ChatScrollCoordinator's follow scroll keeps owning
+ * scroll geometry. In follow mode item motion therefore contributes alpha only, never a second
+ * displacement, and the first layout of a restored conversation does not fade in either.
+ */
+private val chatMessageAppearSpec: FiniteAnimationSpec<Float> =
+    spring(
+        dampingRatio = ChatMotion.CONTROL_DAMPING_RATIO,
+        stiffness = ChatMotion.CONTROL_STIFFNESS
+    )
+private val chatMessagePlacementSpec: FiniteAnimationSpec<IntOffset> =
+    spring(
+        dampingRatio = ChatMotion.ITEM_DAMPING_RATIO,
+        stiffness = ChatMotion.ITEM_STIFFNESS,
+        visibilityThreshold = IntOffset.VisibilityThreshold
+    )
+private val chatMessageRemoveSpec: FiniteAnimationSpec<Float> = tween(durationMillis = 140)
 
 @Composable
 internal fun ChatMessageListSection(
@@ -194,7 +221,12 @@ internal fun ChatMessageListSection(
                     },
                     canTogglePinned = !state.isGenerating && !state.conversationReadOnly,
                     onDeleteLastTurn = { actionDispatcher.deleteLastTurn(row.identity) },
-                    canCopyMessage = { actionDispatcher.isCurrent(row.identity) }
+                    canCopyMessage = { actionDispatcher.isCurrent(row.identity) },
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = chatMessageAppearSpec,
+                        placementSpec = chatMessagePlacementSpec,
+                        fadeOutSpec = chatMessageRemoveSpec
+                    )
                 )
             }
             state.browserTask?.takeIf { task ->
@@ -205,7 +237,14 @@ internal fun ChatMessageListSection(
             }?.let { task ->
                 item(key = task.taskId) {
                     Column(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        modifier = Modifier
+                            .animateItem(
+                                fadeInSpec = chatMessageAppearSpec,
+                                placementSpec = chatMessagePlacementSpec,
+                                fadeOutSpec = chatMessageRemoveSpec
+                            )
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
