@@ -5,7 +5,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 
 /**
  * Structural contract for [SmoothRightToLeftPage].
@@ -70,18 +69,5 @@ class SmoothPageStructureContractTest {
         )
     }
 
-    private fun smoothPageSource(): String {
-        val relative = "src/main/java/com/muyuchat/core/designsystem/SmoothPage.kt"
-        val workingDirectory = System.getProperty("user.dir") ?: "."
-        var directory = File(workingDirectory).absoluteFile
-        while (true) {
-            val candidates = listOf(
-                File(directory, relative),
-                File(directory, "core/designsystem/$relative")
-            )
-            candidates.firstOrNull { it.isFile }?.let { return it.readText() }
-            directory = directory.parentFile ?: break
-        }
-        throw AssertionError("SmoothPage.kt was not found while walking up from $workingDirectory")
-    }
+    private fun smoothPageSource(): String = designSystemSource("SmoothPage.kt")
 }

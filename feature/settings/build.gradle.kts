@@ -38,6 +38,8 @@ composeCompiler {
 dependencies {
     implementation(project(":core:engine"))
     implementation(project(":core:telemetry"))
+    // Shared motion language (McaMotion / mcaPressScale) used by the settings surfaces.
+    implementation(project(":core:designsystem"))
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.tooling.preview)
