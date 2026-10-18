@@ -22,7 +22,10 @@ class ChatMotionContractTest {
         val menu = source("AppMenuTransitions.kt")
         assertTrue(swipe.contains("durationMillis = 260"))
         assertTrue(swipe.contains("durationMillis = 180"))
-        assertTrue(swipe.contains("durationMillis = 160"))
+        // Predictive-back progress must not allocate a coroutine per frame, and both the cancel
+        // snap-back and the dismiss completion settle through springs rather than fixed tweens.
+        assertTrue(swipe.contains("Channel<Float>(Channel.CONFLATED)"))
+        assertTrue(swipe.contains("spring("))
         assertTrue(menu.contains("durationMillis = 240"))
         assertTrue(menu.contains("durationMillis = 140"))
         assertTrue(menu.contains("durationMillis = 180"))
