@@ -1,9 +1,9 @@
-﻿<resources>
+<resources xmlns:android="http://schemas.android.com/apk/res/android">
     <style name="Theme.MuYuChatAgent" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
+        <item name="android:windowBackground">#F8F9FA</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:navigationBarColor">#FAFAFA</item>
-        <item name="android:statusBarColor">#FAFAFA</item>
+        <item name="android:navigationBarColor">#F8F9FA</item>
+        <item name="android:statusBarColor">#F8F9FA</item>
     </style>
 </resources>
-

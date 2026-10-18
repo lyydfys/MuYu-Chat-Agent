@@ -1,7 +1,7 @@
 {
   "title": "MCA APK 16 KB Page-Size Alignment Audit",
-  "apk_path": "artifacts\\releases\\rc-repro\\MCA-v0.2.4-arm64-v8a.apk",
-  "apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+  "apk_path": "artifacts\\releases\\ui-v9-final2\\MCA-v0.2.4-arm64-v8a.apk",
+  "apk_sha256": "11d6bca94e64efe4d45d50ed6e11acbf9dedcc046469ad7695620c42bb213cc2",
   "target_page_size_bytes": 16384,
   "rule_scope": "Android-loadable ABI ELF64 libraries; Hexagon ELF32 DSP companions are reported separately and exempt",
   "total_binaries_scanned": 94,

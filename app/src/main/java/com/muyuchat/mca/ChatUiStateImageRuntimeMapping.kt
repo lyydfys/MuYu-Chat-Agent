@@ -63,19 +63,20 @@ internal fun buildImageUpscalerUiItems(state: MainUiState): List<ImageUpscalerUi
 internal fun buildFileAssetUiItems(
     state: MainUiState,
     timestampLocale: java.util.Locale
-): List<FileAssetUiItem> =
-    state.files.map { file ->
+): List<FileAssetUiItem> {
+    val createdAtFormatter = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
+    return state.files.map { file ->
         FileAssetUiItem(
             id = file.id,
             name = file.name,
             mimeType = file.mimeType,
             preview = file.preview,
-            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
-                .format(java.util.Date(file.createdAt)),
+            createdAtText = createdAtFormatter.format(java.util.Date(file.createdAt)),
             sizeText = formatAssetBytes(file.sizeBytes),
             truncated = file.truncated
         )
     }
+}
 
 internal fun buildImageGenerationUiJobs(state: MainUiState): List<ImageGenerationUiJob> =
     state.imageJobs.map { job ->

@@ -77,7 +77,7 @@ internal fun saveAssistantProfileFor(
     memorySummaryInterval: Int,
     webSearchEnabled: Boolean,
     fileContextEnabled: Boolean
-) {
+): Boolean {
     val cleanName = name.trim().take(36).ifBlank { "未命名助手" }
     val cleanAvatar = avatar.trim().take(4)
     val cleanTag = tag.trim().take(24)
@@ -90,7 +90,7 @@ internal fun saveAssistantProfileFor(
     if (rejectWhileConversationMutationInProgress() || state.isGenerating ||
         hasActiveAssistantImageExecution(state.activeChatSessionId)) {
         showStatus("请先结束当前角色请求，再保存角色卡。")
-        return
+        return false
     }
     val now = System.currentTimeMillis()
     val existing = id?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
@@ -191,6 +191,7 @@ internal fun saveAssistantProfileFor(
     } else if (shouldSelectAssistant) {
         applyAssistantDefaultModel(assistant)
     }
+    return true
 }
 
 internal fun deleteAssistantFor(

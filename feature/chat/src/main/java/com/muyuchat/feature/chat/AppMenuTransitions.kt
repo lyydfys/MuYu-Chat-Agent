@@ -71,7 +71,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -172,6 +171,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -216,7 +216,6 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
@@ -258,7 +257,6 @@ import java.time.format.DateTimeFormatter
 import java.util.Calendar
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
@@ -328,7 +326,7 @@ internal fun SmoothRightToLeftPage(
 
             val pageModifier = Modifier
                 .fillMaxSize()
-                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .graphicsLayer { translationX = offsetX.value }
 
             content(pageModifier, ::closeWithDrawerMotion)
         }

@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +26,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,6 +50,72 @@ private enum class ModelHubSection(val title: String) {
     RECOMMENDED("推荐"),
     MARKET("广场"),
     FILES("文件")
+}
+
+internal data class ModelHubHeaderPresentation(
+    val downloadSummary: ModelHubUiState?,
+    val downloadSummaryKey: String?,
+    val canDismissDownloadSummary: Boolean,
+    val statusMessage: String?,
+    val statusIsError: Boolean
+)
+
+private val MODEL_HUB_ERROR_STATUS_MARKERS = listOf(
+    "失败",
+    "错误",
+    "异常",
+    "无法",
+    "不可用",
+    "不兼容",
+    "未通过",
+    "缺失",
+    "缺少",
+    "损坏",
+    "超时",
+    "拒绝",
+    "未找到",
+    "重试",
+    "failed",
+    "error"
+)
+
+/**
+ * Derives the model-hub header presentation without changing the authoritative download state.
+ *
+ * The download summary deliberately clears [ModelHubUiState.statusMessage] in its display copy:
+ * a later status/error belongs in its own card and must stay visible even while the completed or
+ * failed download summary remains on screen. Dismissing a completed summary only suppresses that
+ * local presentation for the current task key; it never rewrites [DownloadStatus] or download
+ * identity/progress.
+ */
+internal fun modelHubHeaderPresentation(
+    state: ModelHubUiState,
+    dismissedCompletedDownloadKey: String? = null
+): ModelHubHeaderPresentation {
+    val downloadKey = state.downloadTaskId ?: state.downloadFileName
+    val downloadCompleted = state.downloadStatus == DownloadStatus.DONE
+    val summaryDismissed = downloadCompleted &&
+        downloadKey != null &&
+        downloadKey == dismissedCompletedDownloadKey
+    val showDownloadSummary = state.downloadFileName != null && !summaryDismissed
+    val statusMessage = state.statusMessage?.trim()?.takeIf { it.isNotEmpty() }
+
+    return ModelHubHeaderPresentation(
+        downloadSummary = if (showDownloadSummary) {
+            state.copy(statusMessage = null)
+        } else {
+            null
+        },
+        downloadSummaryKey = downloadKey,
+        canDismissDownloadSummary = showDownloadSummary && downloadCompleted && downloadKey != null,
+        statusMessage = statusMessage,
+        statusIsError = statusMessage?.let(::modelHubStatusMessageIsError) == true
+    )
+}
+
+internal fun modelHubStatusMessageIsError(message: String): Boolean {
+    val normalized = message.trim().lowercase()
+    return normalized.isNotEmpty() && MODEL_HUB_ERROR_STATUS_MARKERS.any(normalized::contains)
 }
 
 @Composable
@@ -287,24 +355,39 @@ private fun ModelHubHeader(
             }
         }
 
-        state.statusMessage?.let { message ->
-            if (state.downloadFileName == null) {
-                StatusMessageCard(message = message, isError = state.downloadStatus == DownloadStatus.FAILED)
-            }
-        }
-        if (state.downloadFileName != null) {
-            var downloadDetailsOpen by rememberSaveable(state.downloadTaskId ?: "download-task") {
+        var dismissedCompletedDownloadKey by rememberSaveable { mutableStateOf<String?>(null) }
+        val presentation = modelHubHeaderPresentation(state, dismissedCompletedDownloadKey)
+
+        presentation.downloadSummary?.let { summary ->
+            var downloadDetailsOpen by rememberSaveable(
+                summary.downloadTaskId ?: summary.downloadFileName ?: "download-task"
+            ) {
                 mutableStateOf(false)
             }
             DownloadProgressPanel(
-                state = state,
+                state = summary,
                 onShowDetails = { downloadDetailsOpen = true },
                 onPauseDownloads = onPauseDownloads,
                 onResumeDownloads = onResumeDownloads
             )
+            if (presentation.canDismissDownloadSummary) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        onClick = {
+                            presentation.downloadSummaryKey?.let { dismissedCompletedDownloadKey = it }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp)
+                    ) {
+                        Text("收起已完成摘要", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
             if (downloadDetailsOpen) {
                 DownloadDetailsDialog(
-                    state = state,
+                    state = summary,
                     onDismiss = { downloadDetailsOpen = false },
                     onOpenLocalModels = {
                         downloadDetailsOpen = false
@@ -313,7 +396,11 @@ private fun ModelHubHeader(
                     onResumeDownloads = onResumeDownloads
                 )
             }
-        } else if (state.isBusy) {
+        }
+        presentation.statusMessage?.let { message ->
+            StatusMessageCard(message = message, isError = presentation.statusIsError)
+        }
+        if (presentation.downloadSummary == null && state.isBusy) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 

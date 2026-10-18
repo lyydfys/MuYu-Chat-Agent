@@ -24,8 +24,12 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -35,7 +39,7 @@ import com.muyuchat.core.engine.Role
 internal fun ChatMessageListSection(
     listState: LazyListState,
     state: ChatUiState,
-    bottomChromeHeight: Dp,
+    composerOverlap: Dp,
     onOpenRecommendedModels: () -> Unit,
     onImportChatModel: () -> Unit,
     onOpenQuickStart: () -> Unit,
@@ -52,16 +56,46 @@ internal fun ChatMessageListSection(
     onDeleteMessage: (Int) -> Unit,
     onTogglePinMessage: (String) -> Unit,
     onDeleteLastTurn: () -> Unit,
+    onMessageIntent: ((ChatMessageIntent) -> Unit)?,
     onBrowserTaskEvent: (BrowserTaskEvent) -> Unit,
+    nestedScrollConnection: NestedScrollConnection,
     modifier: Modifier = Modifier
 ) {
-    Box(modifier = modifier) {
+    val latestState = rememberUpdatedState(state)
+    val latestOnDeleteMessage = rememberUpdatedState(onDeleteMessage)
+    val latestOnRegenerate = rememberUpdatedState(onRegenerate)
+    val latestOnDeleteLastTurn = rememberUpdatedState(onDeleteLastTurn)
+    val latestOnMessageIntent = rememberUpdatedState(onMessageIntent)
+    val actionDispatcher = remember {
+        ChatMessageIntentDispatcher(
+            currentMessages = { latestState.value.messages },
+            activeConversationId = { latestState.value.activeConversationId },
+            onIntent = { latestOnMessageIntent.value },
+            legacyOnDeleteMessage = { latestOnDeleteMessage.value(it) },
+            legacyOnRegenerate = { latestOnRegenerate.value() },
+            legacyOnDeleteLastTurn = { latestOnDeleteLastTurn.value() }
+        )
+    }
+    val messageRows = remember(state.messages, state.activeConversationId) {
+        chatMessageRows(state.messages, state.activeConversationId)
+    }
+    val lastAssistantIndex = messageRows.indexOfLast { row -> row.message.role == Role.ASSISTANT }
+    val characterCardHtml = remember(state.assistants, state.selectedAssistantId) {
+        state.assistants.any { assistant ->
+            assistant.id == state.selectedAssistantId && assistant.characterCardImported
+        }
+    }
+
+    Box(modifier = modifier.nestedScroll(nestedScrollConnection)) {
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = 18.dp),
-            contentPadding = PaddingValues(top = 26.dp, bottom = 118.dp),
+            contentPadding = PaddingValues(
+                top = 26.dp,
+                bottom = resolveChatListBottomPaddingDp(composerOverlap),
+            ),
             verticalArrangement = Arrangement.spacedBy(18.dp)
         ) {
             if (state.messages.isEmpty()) {
@@ -75,11 +109,11 @@ internal fun ChatMessageListSection(
                     )
                 }
             }
-            val lastAssistantIndex = state.messages.indexOfLast { it.role == Role.ASSISTANT }
             itemsIndexed(
-                items = state.messages,
-                key = { index, message -> "${message.role.name}:${message.createdAt}:$index" }
-            ) { index, message ->
+                items = messageRows,
+                key = { _, row -> row.identity }
+            ) { index, row ->
+                val message = row.message
                 val generatedImageRequest = message.generatedImageRequest
                 val generatedImageJob = generatedImageRequest?.let { request ->
                     chatGeneratedImageJob(
@@ -106,9 +140,7 @@ internal fun ChatMessageListSection(
                     message = message,
                     readOnly = state.conversationReadOnly,
                     browserSessionId = state.activeConversationId,
-                    characterCardHtml = state.assistants.any { assistant ->
-                        assistant.id == state.selectedAssistantId && assistant.characterCardImported
-                    },
+                    characterCardHtml = characterCardHtml,
                     onOpenBrowserTask = onOpenBrowserTask,
                     generatedImageRequest = generatedImageRequest,
                     generatedImageJob = generatedImageJob,
@@ -155,11 +187,14 @@ internal fun ChatMessageListSection(
                     } else {
                         null
                     },
-                    onRegenerate = onRegenerate,
-                    onDelete = { onDeleteMessage(index) },
-                    onTogglePinned = { onTogglePinMessage(message.id) },
+                    onRegenerate = { actionDispatcher.regenerate(row.identity) },
+                    onDelete = { actionDispatcher.delete(row.identity) },
+                    onTogglePinned = {
+                        if (actionDispatcher.isCurrent(row.identity)) onTogglePinMessage(message.id)
+                    },
                     canTogglePinned = !state.isGenerating && !state.conversationReadOnly,
-                    onDeleteLastTurn = onDeleteLastTurn
+                    onDeleteLastTurn = { actionDispatcher.deleteLastTurn(row.identity) },
+                    canCopyMessage = { actionDispatcher.isCurrent(row.identity) }
                 )
             }
             state.browserTask?.takeIf { task ->
@@ -220,7 +255,7 @@ internal fun ChatMessageListSection(
         }
         ChatDeviceStatusOverlay(
             state = state,
-            modifier = Modifier.matchParentSize().padding(bottom = bottomChromeHeight)
+            modifier = Modifier.matchParentSize().padding(bottom = composerOverlap)
         )
     }
 }

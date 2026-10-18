@@ -12,6 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -25,7 +26,7 @@ internal fun String.containsHanScriptForTranslationUi(): Boolean =
         Character.UnicodeScript.of(codePoint) == Character.UnicodeScript.HAN
     }
 
-private fun loadImageBitmap(
+internal fun loadImageBitmap(
     context: Context,
     uriString: String,
     maxDimensionPx: Int? = null
@@ -55,6 +56,31 @@ private fun loadImageBitmap(
     decode(BitmapFactory.Options().apply { inSampleSize = sampleSize })
 }.getOrNull()
 
+internal suspend fun loadChatImageBitmap(
+    context: Context,
+    uriString: String,
+    maxDimensionPx: Int? = null,
+    revisionKey: Any? = null,
+    useCache: Boolean = true
+): Bitmap? {
+    val appContext = context.applicationContext ?: context
+    if (!useCache) {
+        return withContext(Dispatchers.IO) {
+            loadImageBitmap(appContext, uriString, maxDimensionPx)
+        }
+    }
+    return try {
+        ChatImageBitmapStore.load(appContext, uriString, maxDimensionPx, revisionKey)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        // Cache policy or metadata failure must never remove the image path.
+        withContext(Dispatchers.IO) {
+            loadImageBitmap(appContext, uriString, maxDimensionPx)
+        }
+    }
+}
+
 @Composable
 internal fun rememberChatImageBitmap(
     context: Context,
@@ -67,9 +93,7 @@ internal fun rememberChatImageBitmap(
     key2 = maxDimensionPx,
     key3 = revisionKey
 ) {
-        value = withContext(Dispatchers.IO) {
-            loadImageBitmap(context.applicationContext, uriString, maxDimensionPx)
-        }
+        value = loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey)
     }
 
 // P9/S4: private→internal（纯工具；跨文件被 ImageWorkspaceScreens 复合区引用）

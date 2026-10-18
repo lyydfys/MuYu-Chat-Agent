@@ -9,8 +9,11 @@ import com.muyuchat.mca.presentation.WorldBookImportOutcome
 import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
 import com.muyuchat.mca.presentation.withKnowledgeLibraryChange
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -167,13 +170,17 @@ internal fun persistFilesFor(
     uiStateStore: UiStateStore,
     scope: CoroutineScope,
     files: List<FileAssetRecord>
-) {
-    scope.launch(Dispatchers.IO) {
-        runCatching { chatSessionStore.saveFiles(files) }
-            .onFailure { error ->
-                uiStateStore.update {
-                    it.copy(statusMessage = "文件库保存失败：${error.message}")
-                }
+): Deferred<Result<Unit>> =
+    scope.async(Dispatchers.IO) {
+        try {
+            chatSessionStore.saveFiles(files)
+            Result.success(Unit)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            uiStateStore.update {
+                it.copy(statusMessage = "文件库保存失败：${error.message}")
             }
+            Result.failure(error)
+        }
     }
-}

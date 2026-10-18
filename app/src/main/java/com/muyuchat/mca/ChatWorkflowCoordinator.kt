@@ -10,6 +10,7 @@ import com.muyuchat.core.engine.ContextCompressionTrigger
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.localContextWindowAdmission
+import com.muyuchat.feature.chat.ChatMessageIdentity
 import com.muyuchat.mca.presentation.withGenerationProgressCleared
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -37,9 +38,17 @@ internal class ChatWorkflowCoordinator(
      * Calculates message indices for the last turn, updates UI state, cancels/removes pending
      * image tasks, updates session summaries, and commits durable mutation preserving reusable native prefix.
      */
-    fun deleteLastConversationTurn(chatSessionId: String? = null): Boolean {
+    fun deleteLastConversationTurn(
+        chatSessionId: String? = null,
+        expectedTarget: ChatMessageIdentity? = null
+    ): Boolean {
         val state = store.state.value
         if (rejectWhileConversationMutationInProgress()) return false
+        if (expectedTarget != null) {
+            val targetIndex = expectedTarget.resolveIndex(state.messages, state.activeChatSessionId)
+            val lastAssistant = state.messages.indexOfLast { it.role == Role.ASSISTANT }
+            if (targetIndex == null || targetIndex != lastAssistant) return false
+        }
         if (!state.canWriteToActiveAssistantSession()) return false
         if (state.isGenerating) {
             showStatus("请先停止当前生成，再删除本轮对话")

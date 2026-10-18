@@ -11,6 +11,7 @@ import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.mca.presentation.KnowledgeLibraryPort
 import com.muyuchat.mca.presentation.knowledgeLibrarySnapshot
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -135,7 +136,7 @@ internal class AssistantProfileCoordinator(
         memorySummaryInterval: Int,
         webSearchEnabled: Boolean,
         fileContextEnabled: Boolean
-    ) = saveAssistantProfileFor(
+    ): Boolean = saveAssistantProfileFor(
         store = store,
         assistantStore = assistantStore,
         application = application,
@@ -323,7 +324,12 @@ internal class AssistantProfileCoordinator(
     fun applyAssistantDefaultModel(assistant: AssistantRecord) =
         applyAssistantDefaultModelFor(store, showStatus, selectCloudChatModel, loadModel, assistant)
 
-    fun upsertAssistantMemory(assistantId: String, id: String?, memoryScope: String, content: String) =
+    fun upsertAssistantMemory(
+        assistantId: String,
+        id: String?,
+        memoryScope: String,
+        content: String
+    ): Deferred<Boolean> =
         upsertAssistantMemoryFor(store, scope, chatSessionStore, showStatus, markLocalConversationContextInvalid, assistantId, id, memoryScope, content)
 
     fun deleteAssistantMemory(assistantId: String, id: String) =

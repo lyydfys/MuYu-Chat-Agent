@@ -229,6 +229,38 @@ private fun McaApp(
     val assistantAppearance = selectedAssistant?.appearance?.takeUnless { it.isDefault }
     val sessionAppearance = activeChatSession?.appearanceOverride
     val effectiveChatAppearance = resolveChatAppearance(sessionAppearance, assistantAppearance, state.globalChatAppearance)
+    val agentTuningTrials = remember(state.benchmark) {
+        state.benchmark?.toTuningTrialItems().orEmpty()
+    }
+    val agentBenchmarkHistory = remember(state.benchmarkHistory, timestampLocale) {
+        state.benchmarkHistory.map { record ->
+            val params = runCatching { org.json.JSONObject(record.paramsJson) }.getOrNull()
+            BenchmarkHistoryItem(
+                timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale)
+                    .format(java.util.Date(record.time)),
+                modelName = record.modelName ?: "unknown",
+                decodeTps = record.result.decodeTps,
+                ttftMs = record.result.ttftMs,
+                nCtx = params?.optInt("n_ctx") ?: 0,
+                nThreads = params?.optInt("n_threads") ?: 0,
+                stable = record.result.stable
+            )
+        }
+    }
+    val agentDecisionHistory = remember(state.agentLogs, timestampLocale) {
+        state.agentLogs.take(10).map { log ->
+            val rec = runCatching { org.json.JSONObject(log.recommendationJson) }.getOrNull()
+            val name = rec?.optJSONObject("recommended")?.optJSONObject("model")
+                ?.optString("displayName").orEmpty()
+            val risk = rec?.optString("risk").orEmpty()
+            AgentDecisionItem(
+                timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale)
+                    .format(java.util.Date(log.time)),
+                title = if (log.userConfirmed) "已应用参数" else "自动建议",
+                detail = "${name.ifBlank { "无推荐模型" }} · 风险 ${risk.ifBlank { "unknown" }}"
+            )
+        }
+    }
 
     Scaffold { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
@@ -276,19 +308,8 @@ private fun McaApp(
                         deviceProfile = state.deviceProfile,
                         recommendation = state.agentRecommendation,
                         benchmark = state.benchmark,
-                        tuningTrials = state.benchmark?.toTuningTrialItems().orEmpty(),
-                        benchmarkHistory = state.benchmarkHistory.map { record ->
-                            val params = runCatching { org.json.JSONObject(record.paramsJson) }.getOrNull()
-                            BenchmarkHistoryItem(
-                                timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale).format(java.util.Date(record.time)),
-                                modelName = record.modelName ?: "unknown",
-                                decodeTps = record.result.decodeTps,
-                                ttftMs = record.result.ttftMs,
-                                nCtx = params?.optInt("n_ctx") ?: 0,
-                                nThreads = params?.optInt("n_threads") ?: 0,
-                                stable = record.result.stable
-                            )
-                        },
+                        tuningTrials = agentTuningTrials,
+                        benchmarkHistory = agentBenchmarkHistory,
                         preference = state.preference, isBusy = state.busy, statusMessage = state.statusMessage,
                         loadedModelName = state.loadedModelName, lastAutoTuningSummary = state.lastAutoTuningSummary,
                         localStabilitySmokeSummary = state.localStabilitySmokeSummary, params = state.params,
@@ -296,16 +317,7 @@ private fun McaApp(
                         verification = state.verification, engineLifecycle = state.engineLifecycle, tuningJobState = state.tuningJobState,
                         reloadRequired = state.reloadRequired, pending = state.pendingProfile, rollback = state.rollbackProfile,
                         etaSeconds = state.tuningEtaSeconds, phase = state.tuningPhase, candidateProgress = state.tuningCandidateProgress,
-                        agentDecisionHistory = state.agentLogs.take(10).map { log ->
-                            val rec = runCatching { org.json.JSONObject(log.recommendationJson) }.getOrNull()
-                            val name = rec?.optJSONObject("recommended")?.optJSONObject("model")?.optString("displayName").orEmpty()
-                            val risk = rec?.optString("risk").orEmpty()
-                            AgentDecisionItem(
-                                timeText = java.text.SimpleDateFormat("HH:mm:ss", timestampLocale).format(java.util.Date(log.time)),
-                                title = if (log.userConfirmed) "已应用参数" else "自动建议",
-                                detail = "${name.ifBlank { "无推荐模型" }} · 风险 ${risk.ifBlank { "unknown" }}"
-                            )
-                        }
+                        agentDecisionHistory = agentDecisionHistory
                     ),
                     onScan = viewModel::scanAgent, onPreferenceChange = viewModel::updateAgentPreference,
                     onApplyRecommendation = viewModel::applyAgentRecommendation, onBenchmark = viewModel::runAgentBenchmark,

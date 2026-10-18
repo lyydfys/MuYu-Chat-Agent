@@ -144,7 +144,7 @@ internal fun ReasoningModePill(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .height(38.dp)
+            .heightIn(min = 48.dp)
             .clickable(onClick = onClick),
         color = if (selected) {
             if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)

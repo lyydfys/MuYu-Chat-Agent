@@ -68,6 +68,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
@@ -104,12 +107,18 @@ internal fun ChatDeviceStatusOverlay(
     var temperatureSample by remember { mutableStateOf<ChatDeviceTemperatureSample?>(null) }
     var lastSampleAtMs by remember { mutableStateOf(0L) }
     var clockMs by remember { mutableStateOf(0L) }
-    LaunchedEffect(context) {
-        while (true) {
-            memorySample = context.readChatDeviceMemorySample()
-            temperatureSample = readChatDeviceTemperatureSample(context)
-            lastSampleAtMs = System.currentTimeMillis()
-            delay(5_000L)
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(context, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                // Refresh immediately on every foreground entry, then keep the compact ball's
+                // necessary memory indicator current. Page overlays never cancel inference,
+                // downloads, Local API, or background persistence.
+                memorySample = context.readChatDeviceMemorySample()
+                temperatureSample = readChatDeviceTemperatureSample(context)
+                lastSampleAtMs = System.currentTimeMillis()
+                delay(5_000L)
+            }
         }
     }
     // Only ticks while the panel is open, and only the panel reads this clock, so the
@@ -159,7 +168,11 @@ internal fun ChatDeviceStatusOverlay(
     BoxWithConstraints(modifier = modifier) {
         val shortSide = minOf(maxWidth, maxHeight)
         val ballSize = floatingDeviceStatusBallSize(sizeDp, shortSide.value)
-        val ballTier = floatingDeviceStatusBallTier(ballSize.value)
+        val fontScale = LocalDensity.current.fontScale
+        val ballTier = floatingDeviceStatusBallTierForFontScale(
+            tier = floatingDeviceStatusBallTier(ballSize.value),
+            fontScale = fontScale,
+        )
         val edge = 12.dp
         if (maxWidth < ballSize + edge * 2 || maxHeight < ballSize + edge * 2) return@BoxWithConstraints
         val density = LocalDensity.current

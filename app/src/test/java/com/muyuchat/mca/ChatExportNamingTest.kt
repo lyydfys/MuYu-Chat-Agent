@@ -129,6 +129,16 @@ class ChatExportNamingTest {
             "{\"prompt\":\"a cat\",\"steps\":20}",
             "1×1=1 2×2=4 3×3=9",
             "生成一个网页\n```html\n<div>Hello</div>\n```",
+            "中文标题：导出 😀",
+            "特殊 # 标题 `代码` [链接](https://example.com/a:b?c=d)",
+            "a\u0000b\u001Fc\u007Fd",
+            "CON",
+            "con",
+            "COM1",
+            "LPT9",
+            "fun 中文函数() = 1",
+            "SELECT * FROM 用户",
+            "😀".repeat(40),
         )
         val roles = listOf(Role.USER, Role.ASSISTANT, Role.SYSTEM)
         var compared = 0
@@ -167,7 +177,7 @@ class ChatExportNamingTest {
             compared++
         }
 
-        assertEquals(true, compared >= 66)
+        assertEquals(true, compared >= 90)
     }
 
     /** Verbatim copy of the pre-extraction `MainViewModel.List<ChatMessage>.chatTitle`. */
@@ -180,7 +190,7 @@ class ChatExportNamingTest {
             .map { it.trim() }
             .firstOrNull { line ->
                 line.isNotBlank() &&
-                    !isUnsafeChatTitleLine(line) &&
+                    !originalIsUnsafeChatTitleLine(line) &&
                     !line.startsWith("【上传文件：") &&
                     !line.startsWith("【上传图片：") &&
                     !line.startsWith("（文件较大")
@@ -242,5 +252,120 @@ class ChatExportNamingTest {
     fun `unfenced code calls and multiplication rows never become export title`() {
         assertEquals("chat", safeChatExportTitle("console.log(\"hello\")\nreturn value;"))
         assertEquals("chat", safeChatExportTitle("1×1=1 2×2=4 3×3=9"))
+    }
+    // ---- P02a: immutable patterns preserve the original derivation ---------------------
+
+    @Test
+    fun `export filename derivation matches the original rules across unicode and code titles`() {
+        val samples = listOf(
+            null,
+            "",
+            "中文标题：导出 😀 / 路径",
+            "特殊 # 标题 `代码` [链接](https://example.com/a:b?c=d)",
+            "a\u0000b\u001Fc\u007Fd",
+            "```kotlin\nfun 中文函数() = 1\n```",
+            "fun 中文函数() = 1",
+            "SELECT * FROM 用户",
+            "const value = 42",
+            "curl https://example.com",
+            "1×1=1 2×2=4 3×3=9",
+            "1＋2＝3",
+            "CON",
+            "con",
+            "PrN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "LPT9",
+            "CON.",
+            "😀".repeat(40) + "\n" + "后续中文"
+        )
+
+        samples.forEach { sample ->
+            assertEquals(
+                "filename diverged for ${sample?.take(48)}",
+                originalSafeChatExportTitle(sample),
+                safeChatExportTitle(sample)
+            )
+        }
+    }
+
+    @Test
+    fun `windows reserved names keep the original case and prefix behavior`() {
+        assertEquals("chat-CON", safeChatExportTitle("CON"))
+        assertEquals("chat-con", safeChatExportTitle("con"))
+        assertEquals("chat-PrN", safeChatExportTitle("PrN"))
+        assertEquals("chat-COM1", safeChatExportTitle("COM1"))
+        assertEquals("chat-LPT9", safeChatExportTitle("LPT9"))
+        assertEquals("chat-CON", safeChatExportTitle("CON."))
+    }
+
+    @Test
+    fun `unicode title limits keep the original utf16 length behavior`() {
+        val raw = "😀".repeat(40) + "中文"
+
+        assertEquals(originalSafeChatExportTitle(raw), safeChatExportTitle(raw))
+        assertEquals(48, safeChatExportTitle(raw).length)
+    }
+
+    /** Verbatim copy of the original filename derivation, including its per-call Regex creation. */
+    private fun originalSafeChatExportTitle(raw: String?): String {
+        val source = raw.orEmpty()
+        val titleSource = source
+            .lineSequence()
+            .map(String::trim)
+            .firstOrNull { line -> line.isNotBlank() && !originalIsUnsafeChatTitleLine(line) }
+            ?: ""
+        val cleaned = titleSource
+            .replace(Regex("[\\u0000-\\u001F\\u007F]"), " ")
+            .replace(Regex("[\\\\/:*?\"<>|]"), " ")
+            .replace(Regex("[`*_#>\\[\\]()]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trim('.', ' ')
+            .take(48)
+            .trim('.', ' ')
+
+        val value = cleaned.ifBlank { "chat" }
+        return if (value.uppercase() in ORIGINAL_WINDOWS_RESERVED_NAMES) "chat-$value" else value
+    }
+
+    /** Verbatim copy of the original code-shaped-line predicate with per-call Regex creation. */
+    private fun originalIsUnsafeChatTitleLine(value: String): Boolean {
+        val line = value.trim()
+        if (line.isBlank()) return true
+        if (line.startsWith("```") || line.startsWith("<!DOCTYPE", ignoreCase = true)) return true
+        if (line.startsWith("<html", ignoreCase = true) || line.startsWith("</html", ignoreCase = true)) return true
+        if (line.startsWith("{") || line.startsWith("[") || line.endsWith("};")) return true
+        if (line.startsWith("#include") || line.startsWith("import ") || line.startsWith("from ")) return true
+        if (Regex("(?i)^(?:def|class|fun|function|const|let|var|val|public|private|protected|return|if|else|for|while|try|catch|SELECT|INSERT|UPDATE|CREATE)\\b")
+                .containsMatchIn(line)
+        ) return true
+        if (Regex(
+                "(?i)^(?:console\\.(?:log|warn|error|info)|System\\.out\\.println|println|print|printf)\\s*\\("
+            ).containsMatchIn(line)
+        ) return true
+        if (Regex(
+                "^(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*)\\s*(?:=|\\+=|-=|\\*=|/=|:=)\\s*.+"
+            ).containsMatchIn(line)
+        ) return true
+        if (Regex(
+                "(?i)^(?:#!|\\$\\s+|>\\s+(?:adb|curl|python|pip|npm|gradle|java)|(?:adb|curl|python|pip|npm|gradle)\\s+)"
+            ).containsMatchIn(line)
+        ) return true
+        if (Regex("^<[/!]?\\s*[A-Za-z][^>]*>$").containsMatchIn(line)) return true
+        if (Regex("^\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+(?:\\s+\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+)*$")
+                .containsMatchIn(line)
+        ) return true
+        if (line.contains("</") || line.contains("=>") || line.contains("{ ") || line.contains(";")) return true
+        return line.count { it == '{' || it == '}' || it == '(' || it == ')' } >= 2
+    }
+
+    private companion object {
+        val ORIGINAL_WINDOWS_RESERVED_NAMES = setOf(
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        )
     }
 }

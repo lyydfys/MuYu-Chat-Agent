@@ -149,7 +149,7 @@ internal fun WebSearchSourceDetailCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                IconButton(onClick = onClose, modifier = Modifier.size(30.dp)) {
+                IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
                     Icon(
                         Icons.Default.Close,
                         contentDescription = "收起来源详情",

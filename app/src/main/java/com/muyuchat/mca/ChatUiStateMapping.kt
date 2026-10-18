@@ -189,6 +189,7 @@ internal fun buildChatUiState(
         jobInputDrafts = state.imageJobs.mapNotNull { job -> job.spec?.inputDraft }
     )
     val activeChatSession = state.chatSessions.firstOrNull { it.id == state.activeChatSessionId }
+    val imageCreatedAtFormatter = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
     return ChatUiState(
                     pendingImageTranslationDraft = state.pendingChatImageTranslationDraft,
                     pendingImageActionDraft = state.pendingChatImageActionDraft,
@@ -311,8 +312,7 @@ internal fun buildChatUiState(
                             uriString = image.uriString,
                             source = image.source,
                             prompt = image.prompt,
-                            createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
-                                .format(java.util.Date(image.createdAt)),
+                            createdAtText = imageCreatedAtFormatter.format(java.util.Date(image.createdAt)),
                             createdAtMillis = image.createdAt,
                             sizeText = formatAssetBytes(image.sizeBytes),
                             width = image.width,

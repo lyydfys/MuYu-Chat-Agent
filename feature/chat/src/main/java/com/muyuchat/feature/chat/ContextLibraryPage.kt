@@ -287,7 +287,7 @@ internal fun ContextLibraryPage(
             .navigationBarsPadding()
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
             }
             Column(modifier = Modifier.weight(1f)) {

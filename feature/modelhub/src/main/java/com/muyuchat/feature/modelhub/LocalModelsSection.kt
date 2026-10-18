@@ -210,6 +210,12 @@ internal fun LocalModelsSection(
     }
 }
 
+internal fun localModelDeleteActionLabel(displayName: String): String =
+    "删除本地模型：${displayName.trim().ifBlank { "未命名模型" }}"
+
+internal fun localImageModelDeleteActionLabel(displayName: String): String =
+    "删除本地图像生成引擎：${displayName.trim().ifBlank { "未命名模型" }}"
+
 @Composable
 private fun LocalModelCard(
     model: ModelManifest,
@@ -361,8 +367,8 @@ private fun LocalModelCard(
                     Spacer(Modifier.width(4.dp))
                     Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
                 }
-                IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除本地模型")
+                IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))
                 }
             }
         }
@@ -553,7 +559,7 @@ private fun LocalImageModelCard(
                     Text("校验", maxLines = 1)
                 }
                 IconButton(onClick = { confirmRemoval = true }, enabled = enabled) {
-                    Icon(Icons.Default.Delete, contentDescription = "删除本地图像生成引擎")
+                    Icon(Icons.Default.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))
                 }
             }
         }

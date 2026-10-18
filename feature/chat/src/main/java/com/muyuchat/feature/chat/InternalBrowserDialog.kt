@@ -251,7 +251,7 @@ private fun InternalBrowserContent(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { goBack() }, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = { goBack() }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
             }
             Column(modifier = Modifier.weight(1f)) {
@@ -260,7 +260,7 @@ private fun InternalBrowserContent(
                 Text(currentUrl, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
             }
-            IconButton(onClick = { searchExpanded = !searchExpanded }, modifier = Modifier.size(38.dp)) {
+            IconButton(onClick = { searchExpanded = !searchExpanded }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Search, contentDescription = "搜索网页")
             }
             IconButton(
@@ -270,9 +270,9 @@ private fun InternalBrowserContent(
                     } else {
                         requestNavigation(currentUrl, userInitiated = true)
                     }
-                }, modifier = Modifier.size(38.dp)
+                }, modifier = Modifier.size(48.dp)
             ) { Icon(Icons.Default.Refresh, contentDescription = "刷新网页") }
-            IconButton(onClick = { close() }, modifier = Modifier.size(40.dp)) {
+            IconButton(onClick = { close() }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "关闭网页")
             }
         }
@@ -283,10 +283,10 @@ private fun InternalBrowserContent(
                 Text(it, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            IconButton(onClick = { webView?.zoomOut() }, modifier = Modifier.size(32.dp)) {
+            IconButton(onClick = { webView?.zoomOut() }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.ZoomOut, contentDescription = "缩小网页")
             }
-            IconButton(onClick = { webView?.zoomIn() }, modifier = Modifier.size(32.dp)) {
+            IconButton(onClick = { webView?.zoomIn() }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.ZoomIn, contentDescription = "放大网页")
             }
         }

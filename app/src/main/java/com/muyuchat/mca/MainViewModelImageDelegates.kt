@@ -21,8 +21,11 @@ fun MainViewModel.useFileAsset(fileId: String) =
 fun MainViewModel.deleteFileAsset(fileId: String) =
     localImageLibraryAndModelCoordinator.deleteFileAsset(fileId)
 
-fun MainViewModel.clearFileLibrary() =
-    localImageLibraryAndModelCoordinator.clearFileLibrary()
+fun MainViewModel.clearFileLibrary() {
+    launchSettingsCleanup(SettingsCleanupOperation.FILE_LIBRARY) {
+        localImageLibraryAndModelCoordinator.clearFileLibrary()
+    }
+}
 
 fun MainViewModel.importLocalImageLora(uriString: String) =
     localImageLibraryAndModelCoordinator.importLocalImageLora(uriString)

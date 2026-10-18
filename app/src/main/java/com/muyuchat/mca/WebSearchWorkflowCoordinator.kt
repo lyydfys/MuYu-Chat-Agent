@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 
 /**
  * R4-S24: 网络检索配置、测试与意图守卫整族下沉协调器。
@@ -16,6 +17,21 @@ internal class WebSearchWorkflowCoordinator(
     private val terminalPort: ChatTerminalSettlementPort,
     private val scope: CoroutineScope
 ) {
+    private val operationLock = Any()
+    private var activeOperationJob: Job? = null
+
+    private fun launchExclusive(start: () -> Job?): Job? = synchronized(operationLock) {
+        if (activeOperationJob?.isActive == true) return null
+        val job = start() ?: return null
+        activeOperationJob = job
+        job.invokeOnCompletion {
+            synchronized(operationLock) {
+                if (activeOperationJob === job) activeOperationJob = null
+            }
+        }
+        job
+    }
+
     /** 委托持久化联网检索配置。 */
     fun saveWebSearchConfig(
         enabled: Boolean,
@@ -43,7 +59,7 @@ internal class WebSearchWorkflowCoordinator(
     }
 
     /** 委托执行联网检索配置测试（使用当前存储配置）。 */
-    fun testWebSearchConfig(query: String) {
+    fun testWebSearchConfig(query: String): Job? = launchExclusive {
         runWebSearchConfigTest(port = port, scope = scope, query = query)
     }
 
@@ -59,7 +75,7 @@ internal class WebSearchWorkflowCoordinator(
         triggerMode: String,
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
+    ): Job? = launchExclusive {
         runWebSearchConfigTest(
             port = port,
             scope = scope,
@@ -77,7 +93,7 @@ internal class WebSearchWorkflowCoordinator(
     }
 
     /** 委托执行联网检索配置测试（使用指定配置）。 */
-    fun testWebSearchConfig(query: String, config: WebSearchConfig) {
+    fun testWebSearchConfig(query: String, config: WebSearchConfig): Job? = launchExclusive {
         runWebSearchConfigTest(
             port = port,
             scope = scope,
@@ -97,7 +113,7 @@ internal class WebSearchWorkflowCoordinator(
         triggerMode: String,
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
+    ): Job? = launchExclusive {
         runWebSearchPreflight(
             port = port,
             scope = scope,
@@ -126,7 +142,7 @@ internal class WebSearchWorkflowCoordinator(
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
         allowPublicCheckSourceForProtocolTest: Boolean = false
-    ) {
+    ): Job? = launchExclusive {
         runWebSearchTurnTest(
             port = port,
             scope = scope,
@@ -149,7 +165,7 @@ internal class WebSearchWorkflowCoordinator(
         query: String,
         config: WebSearchConfig,
         allowPublicCheckSourceForProtocolTest: Boolean = false
-    ) {
+    ): Job? = launchExclusive {
         runWebSearchTurnTest(
             port = port,
             scope = scope,

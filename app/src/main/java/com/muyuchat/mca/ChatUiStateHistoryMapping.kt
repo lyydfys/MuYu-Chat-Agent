@@ -7,31 +7,141 @@ import com.muyuchat.feature.chat.ContextSummaryModelOption
 import com.muyuchat.feature.chat.ContextSummaryUiItem
 import com.muyuchat.feature.chat.KnowledgeBaseUiItem
 import com.muyuchat.feature.chat.WorldBookUiItem
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
-/** 由 ChatUiStateMapping.kt 平移的纯映射块（同包拆分，无行为变化）。 */
+/**
+ * 由 ChatUiStateMapping.kt 平移的纯映射块（同包拆分，无行为变化）。
+ *
+ * 历史行只缓存纯展示结果，不持有业务状态。缓存键包含所有会改变该行的显式输入；
+ * 原始 updatedAt 即使格式化文本未变也参与键，避免伪造命中。每次投影都会裁掉当前
+ * 会话快照中已不存在的 id，因此删除会话会释放对应缓存，缓存总量不超过当前历史行数。
+ */
+internal class ChatHistoryRowProjector {
+    private val rowsBySessionId = HashMap<String, CachedChatHistoryRow>()
+
+    @Synchronized
+    fun project(
+        chatSessions: List<ChatSessionRecord>,
+        activeChatSessionId: String?,
+        sessionPresentations: Map<String, AssistantSessionPresentation>,
+        timestampLocale: Locale,
+        timestampTimeZone: TimeZone
+    ): List<ChatHistoryItem> {
+        val updatedAtFormatter = SimpleDateFormat("MM-dd HH:mm", timestampLocale).apply {
+            timeZone = timestampTimeZone.clone() as TimeZone
+        }
+        val timeZoneSnapshot = timestampTimeZone.snapshot()
+        val items = chatSessions.map { session ->
+            val presentation = sessionPresentations[session.id]
+            val selected = session.id == activeChatSessionId
+            val dependencies = ChatHistoryRowDependencies(
+                title = session.title,
+                displayName = presentation?.name ?: session.title,
+                summary = presentation?.summary.orEmpty(),
+                assistantId = presentation?.assistantId,
+                updatedAt = session.updatedAt,
+                timestampLocale = timestampLocale,
+                timestampTimeZone = timeZoneSnapshot.copy(
+                    offsetAtUpdatedAt = timestampTimeZone.getOffset(session.updatedAt)
+                ),
+                messageCount = session.messages.size,
+                pinned = session.pinned,
+                manualTitle = session.manualTitle,
+                selected = selected,
+                mixedAssistantHistory = session.mixedAssistantHistory
+            )
+            val cached = rowsBySessionId[session.id]
+            if (cached?.dependencies == dependencies) {
+                cached.item
+            } else {
+                val item = ChatHistoryItem(
+                    id = session.id,
+                    title = session.title,
+                    displayName = dependencies.displayName,
+                    summary = dependencies.summary,
+                    assistantId = dependencies.assistantId,
+                    updatedAtText = updatedAtFormatter.format(Date(session.updatedAt)),
+                    updatedAtMillis = session.updatedAt,
+                    messageCount = dependencies.messageCount,
+                    pinned = session.pinned,
+                    selected = selected,
+                    mixedAssistantHistory = session.mixedAssistantHistory
+                )
+                rowsBySessionId[session.id] = CachedChatHistoryRow(dependencies, item)
+                item
+            }
+        }
+        val currentSessionIds = chatSessions.mapTo(HashSet(chatSessions.size)) { it.id }
+        rowsBySessionId.keys.retainAll(currentSessionIds)
+        return items
+    }
+}
+
+private val sharedChatHistoryRowProjector = ChatHistoryRowProjector()
 
 internal fun buildChatHistoryItems(
     state: MainUiState,
     sessionPresentations: Map<String, AssistantSessionPresentation>,
-    timestampLocale: java.util.Locale
-): List<ChatHistoryItem> =
-    state.chatSessions.map { session ->
-        val presentation = sessionPresentations[session.id]
-        ChatHistoryItem(
-            id = session.id,
-            title = session.title,
-            displayName = presentation?.name ?: session.title,
-            summary = presentation?.summary.orEmpty(),
-            assistantId = presentation?.assistantId,
-            updatedAtText = java.text.SimpleDateFormat("MM-dd HH:mm", timestampLocale)
-                .format(java.util.Date(session.updatedAt)),
-            updatedAtMillis = session.updatedAt,
-            messageCount = session.messages.size,
-            pinned = session.pinned,
-            selected = session.id == state.activeChatSessionId,
-            mixedAssistantHistory = session.mixedAssistantHistory
-        )
-    }
+    timestampLocale: Locale
+): List<ChatHistoryItem> = projectChatHistoryItems(
+    state = state,
+    sessionPresentations = sessionPresentations,
+    timestampLocale = timestampLocale,
+    timestampTimeZone = TimeZone.getDefault(),
+    rowProjector = sharedChatHistoryRowProjector
+)
+
+internal fun projectChatHistoryItems(
+    state: MainUiState,
+    sessionPresentations: Map<String, AssistantSessionPresentation>,
+    timestampLocale: Locale,
+    timestampTimeZone: TimeZone,
+    rowProjector: ChatHistoryRowProjector
+): List<ChatHistoryItem> = rowProjector.project(
+    chatSessions = state.chatSessions,
+    activeChatSessionId = state.activeChatSessionId,
+    sessionPresentations = sessionPresentations,
+    timestampLocale = timestampLocale,
+    timestampTimeZone = timestampTimeZone
+)
+
+private data class ChatHistoryRowDependencies(
+    val title: String,
+    val displayName: String,
+    val summary: String,
+    val assistantId: String?,
+    val updatedAt: Long,
+    val timestampLocale: Locale,
+    val timestampTimeZone: ChatHistoryTimeZoneSnapshot,
+    val messageCount: Int,
+    val pinned: Boolean,
+    val manualTitle: Boolean,
+    val selected: Boolean,
+    val mixedAssistantHistory: Boolean
+)
+
+private data class ChatHistoryTimeZoneSnapshot(
+    val id: String,
+    val rawOffset: Int,
+    val dstSavings: Int,
+    val usesDaylightTime: Boolean,
+    val offsetAtUpdatedAt: Int = 0
+)
+
+private fun TimeZone.snapshot(): ChatHistoryTimeZoneSnapshot = ChatHistoryTimeZoneSnapshot(
+    id = id,
+    rawOffset = rawOffset,
+    dstSavings = dstSavings,
+    usesDaylightTime = useDaylightTime()
+)
+
+private data class CachedChatHistoryRow(
+    val dependencies: ChatHistoryRowDependencies,
+    val item: ChatHistoryItem
+)
 
 internal fun buildAssistantUiItems(state: MainUiState): List<AssistantUiItem> =
     state.assistants.map { assistant ->

@@ -51,10 +51,21 @@ data class SettingsUiState(
     val persistentPrefixCacheEnabled: Boolean = true,
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
+    val cleanupBusy: SettingsCleanupBusyUiState = SettingsCleanupBusyUiState(),
     val statusMessage: String? = null,
     val appUpdate: AppUpdateSettingsUiState = AppUpdateSettingsUiState(),
     val webSearch: WebSearchSettingsUiState = WebSearchSettingsUiState()
 )
+
+data class SettingsCleanupBusyUiState(
+    val chatHistory: Boolean = false,
+    val imageLibrary: Boolean = false,
+    val fileLibrary: Boolean = false,
+    val persistentPrefixCache: Boolean = false
+) {
+    val any: Boolean
+        get() = chatHistory || imageLibrary || fileLibrary || persistentPrefixCache
+}
 
 data class AppUpdateSettingsUiState(
     val autoCheckEnabled: Boolean = true,
@@ -89,6 +100,7 @@ data class WebSearchSettingsUiState(
     val realSearchProviderLabel: String = "",
     val backupProviders: List<WebSearchBackupProviderUiState> = emptyList(),
     val statusMessage: String? = null,
+    val operationBusy: Boolean = false,
     val diagnostics: List<WebSearchDiagnosticUiItem> = emptyList()
 )
 

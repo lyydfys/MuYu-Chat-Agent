@@ -413,7 +413,8 @@ fun SearchSettingsScreen(
                     WebSearchTestStatusPanel(
                         statusMessage = state.statusMessage,
                         latestDiagnostic = state.diagnostics.firstOrNull(),
-                        configured = state.configured
+                        configured = state.configured,
+                        busy = state.operationBusy
                     )
                     OutlinedTextField(
                         value = testQuery,
@@ -424,15 +425,24 @@ fun SearchSettingsScreen(
                     )
                     Button(
                         onClick = { onPreflight(currentDraft()) },
+                        enabled = !state.operationBusy,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text("网络预检")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(onClick = { onTest(testQuery, currentDraft()) }, modifier = Modifier.weight(1f)) {
+                        Button(
+                            onClick = { onTest(testQuery, currentDraft()) },
+                            enabled = !state.operationBusy,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Text("测试当前填写")
                         }
-                        Button(onClick = { onTestTurn(testQuery, currentDraft(), false) }, modifier = Modifier.weight(1f)) {
+                        Button(
+                            onClick = { onTestTurn(testQuery, currentDraft(), false) },
+                            enabled = !state.operationBusy,
+                            modifier = Modifier.weight(1f)
+                        ) {
                             Text("闭环自检")
                         }
                     }
@@ -447,6 +457,7 @@ fun SearchSettingsScreen(
                                 testQuery = WEB_SEARCH_RESEARCH_CHECK_QUERY
                                 onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, currentDraft().copy(researchMode = "DEEP"), false)
                             },
+                            enabled = !state.operationBusy,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text("研究闭环自检")
@@ -457,6 +468,7 @@ fun SearchSettingsScreen(
                                     applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
                                     onTestTurn(WEB_SEARCH_PUBLIC_CHECK_QUERY, publicCheckDraft(deepResearch = false), true)
                                 },
+                                enabled = !state.operationBusy,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Text("协议自检")
@@ -466,6 +478,7 @@ fun SearchSettingsScreen(
                                     applyPublicCheckDraft(WEB_SEARCH_RESEARCH_CHECK_QUERY, deepResearch = true)
                                     onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, publicCheckDraft(deepResearch = true), true)
                                 },
+                                enabled = !state.operationBusy,
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Text("研究协议自检")
@@ -486,7 +499,7 @@ fun SearchSettingsScreen(
                         )
                         TextButton(
                             onClick = onClearDiagnostics,
-                            enabled = state.diagnostics.isNotEmpty(),
+                            enabled = state.diagnostics.isNotEmpty() && !state.operationBusy,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text("清空记录")

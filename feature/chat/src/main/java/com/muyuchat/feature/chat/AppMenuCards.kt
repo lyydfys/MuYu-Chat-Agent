@@ -263,6 +263,10 @@ import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
 
+// Text alpha values match CompactInputActionRow's existing disabled treatment.
+private const val APP_MENU_DISABLED_TITLE_ALPHA = 0.58f
+private const val APP_MENU_DISABLED_SUBTITLE_ALPHA = 0.62f
+
 @Composable
 internal fun AppMenuCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
@@ -284,6 +288,16 @@ internal fun AppMenuRow(
     onClick: () -> Unit
 ) {
     val rowContentColor = contentColor ?: MaterialTheme.colorScheme.onSurface
+    val titleColor = if (enabled) {
+        rowContentColor
+    } else {
+        rowContentColor.copy(alpha = APP_MENU_DISABLED_TITLE_ALPHA)
+    }
+    val subtitleColor = if (enabled) {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = APP_MENU_DISABLED_SUBTITLE_ALPHA)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -292,14 +306,19 @@ internal fun AppMenuRow(
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(modifier = Modifier.size(34.dp), contentAlignment = Alignment.Center) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .alpha(if (enabled) 1f else APP_MENU_DISABLED_TITLE_ALPHA),
+            contentAlignment = Alignment.Center
+        ) {
             icon()
         }
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 title,
-                color = rowContentColor,
+                color = titleColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 16.sp, lineHeight = 18.sp),
@@ -308,13 +327,15 @@ internal fun AppMenuRow(
             subtitle.takeIf { it.isNotBlank() }?.let { detail ->
                 Text(
                     detail,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = subtitleColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall.copy(fontSize = 12.sp, lineHeight = 15.sp)
                 )
             }
         }
-        Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (enabled) {
+            Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }

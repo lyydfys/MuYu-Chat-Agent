@@ -10,6 +10,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.feature.settings.AppUpdateSettingsUiState
 import com.muyuchat.feature.settings.SettingsUiState
+import com.muyuchat.feature.settings.SettingsCleanupBusyUiState
 import com.muyuchat.feature.settings.WebSearchBackupProviderUiState
 import com.muyuchat.feature.settings.WebSearchDiagnosticSourceUiItem
 import com.muyuchat.feature.settings.WebSearchDiagnosticUiItem
@@ -48,6 +49,12 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     persistentPrefixCacheEnabled = persistentPrefixCacheEnabled,
     persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
     persistentPrefixCacheBytes = persistentPrefixCacheBytes,
+    cleanupBusy = SettingsCleanupBusyUiState(
+        chatHistory = settingsOperations.cleanup == SettingsCleanupOperation.CHAT_HISTORY,
+        imageLibrary = settingsOperations.cleanup == SettingsCleanupOperation.IMAGE_LIBRARY,
+        fileLibrary = settingsOperations.cleanup == SettingsCleanupOperation.FILE_LIBRARY,
+        persistentPrefixCache = settingsOperations.cleanup == SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE
+    ),
     statusMessage = statusMessage,
     appUpdate = AppUpdateSettingsUiState(
         autoCheckEnabled = appUpdate.autoCheckEnabled,
@@ -93,6 +100,7 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
             )
         },
         statusMessage = webSearchStatusMessage ?: statusMessage,
+        operationBusy = settingsOperations.webSearch != null,
         diagnostics = webSearchDiagnostics.map { record ->
             WebSearchDiagnosticUiItem(
                 createdAtText = java.text.SimpleDateFormat("MM-dd HH:mm:ss", java.util.Locale.getDefault())

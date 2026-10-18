@@ -103,7 +103,7 @@ internal fun ModelChoicePill(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 44.dp)
+            .heightIn(min = 48.dp)
             .clickable(enabled = enabled, onClick = onClick),
         color = if (model.loaded) {
             if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)

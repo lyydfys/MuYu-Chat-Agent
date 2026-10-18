@@ -111,7 +111,7 @@ internal fun McaAppMenuPage(
             .navigationBarsPadding()
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose, modifier = Modifier.size(42.dp)) {
+            IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "关闭")
             }
             Spacer(modifier = Modifier.weight(1f))
@@ -169,7 +169,7 @@ internal fun McaAppMenuPage(
                     },
                     title = displayModelName(state.selectedModelName) ?: "未加载模型",
                     subtitle = "${"%.1f".format(state.stats.decodeTps)} token/s · ${state.stats.backend.uppercase()} 后端",
-                    onClick = {}
+                    onClick = onOpenModels
                 )
                 AppMenuRow(
                     icon = { Icon(Icons.Default.NetworkWifi, null) },

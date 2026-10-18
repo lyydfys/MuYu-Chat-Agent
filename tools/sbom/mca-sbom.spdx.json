@@ -2,25 +2,25 @@
   "SPDXID": "SPDXRef-DOCUMENT",
   "creationInfo": {
     "comment": "provenance=repository-input; scan=offline-static; staticFallbackPackages=5; apk=bound",
-    "created": "2026-10-09T07:58:38Z",
+    "created": "2026-10-18T05:13:45Z",
     "creators": [
       "Tool: MCA-SBOM-Generator-2.0.0",
       "Organization: MuYuChat Engineering Team"
     ]
   },
   "dataLicense": "CC0-1.0",
-  "documentNamespace": "https://muyuchat.com/spdxdocs/mca-34da6dc2e7996912c7061c2cd7bc328fccf34079166d1decd63162290a00f2fd",
+  "documentNamespace": "https://muyuchat.com/spdxdocs/mca-a2ce14ebac27dc2ab6e404f671df441e2f241bdf9daaff80d710debe408d96e4",
   "files": [
     {
       "SPDXID": "SPDXRef-File-api-local-build.gradle.kts",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "9fa2a9da97e450d525548ba9fd7c2f20466aad71"
+          "checksumValue": "db0408c7f78943d70c9b43bf6f6f85658c0d6939"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "223b973824b98eb2c9e8045264db41f8172a7c6b0dc462a3d9556c9a9f71caa2"
+          "checksumValue": "1451f8c71009be47e2914ae783de2119da5d25964199f5d8c7ece51a7eb48bf8"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -80,11 +80,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "26a383fa845f3aef67a30063a66a86439231651a"
+          "checksumValue": "7463be66fe35912c36b040cd1d1ce07eb791c1ef"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a736b38a72f41396d8ef089c54daa13c9b2e32402163172eab9c40562b1d1919"
+          "checksumValue": "fd10e849f38014654949bb70f6e8de350ec264317430018a14410ca00c5cb540"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -112,11 +112,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "27c77b2cbbc0c693090c2ac048914043a02be8c4"
+          "checksumValue": "43b7492bda22803b60fc64724582a40166db76a9"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ef5942adbad5a9c894ff7db70a189f78e1b58e6b8ae2a13e7c062ef2d86f60d1"
+          "checksumValue": "73627156a7c01547833326aebc63cd2a9de07722ee3d6b07e1b13910f57781e1"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -144,11 +144,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "bee1ad783ff693e568eda85016812ed63b42f995"
+          "checksumValue": "0b3fc7a3c29a295397bdd7c03e057ef16b9d20fd"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "14e555c1f6b42c5b1752bc4cd61c2771fdd4a8258289d5919b5d7ada6c600d73"
+          "checksumValue": "ba4ad7494d612c6a7069d60301b2036191e39337bc0f293136c4e0f20cfd9c82"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -240,11 +240,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d88c53c6ffa52490a48e1a4574282d17f6b62ceb"
+          "checksumValue": "351cb28b426ef14302645a7dfde9033781183cb3"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "dc1a1a97c90d60ca7227413881c824b8fbc61394d661c7abe491badef533cee4"
+          "checksumValue": "7aad9d45890449e56484ecf4980657e2f59879db2442a389c7911ac1e7398473"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -256,11 +256,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "0758bccb57d9e3f9c3efd48fe849dde9a186fb33"
+          "checksumValue": "ac602130b830ff3854f21664303ea9dc6a2549ea"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "164ba3f66f22b51dc5cc27d15ccf6a9a1b11a4f20d9c99eadb88ba4072cf2ab5"
+          "checksumValue": "0263a746bede9d7da0439ca598ffbf41f9928489cf6ae8009a66a60a89fc5052"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -272,11 +272,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "80fe29bf0f486dceb27a0c43c2853a700a36b8c6"
+          "checksumValue": "e57659ab85f2c19793b00610dc04c3cc57c177b0"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "5dfeba085fe75c9e74a7337f682dd327a5ab790063321e440e665c407ad05d20"
+          "checksumValue": "9be2db27f7aca548efc2844e919b274b39a1c6f07510dae6ee2accb48e733ad8"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -336,11 +336,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "288d6777895f4edcd0ebcf4dfe1afe131a36ed6b"
+          "checksumValue": "3b9e2509aa03c2c09d735b45e7764cd64f1fc574"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d5c0960d7793b588f37b690dacabe95e2ac43420cebd7661b5c1a728b2d8baed"
+          "checksumValue": "658e56da559bf9bab3c63a4d120100a5aa5e0b988b5f4d8742b802cb3908a409"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -384,11 +384,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "df707fd5aba1f2e26bb790826c016b507fd1972a"
+          "checksumValue": "96d59eda8114c8de0bceebec5018ff153bb3cb5a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "18e17d36763acb6ed85eebc682466ec9cd9cae0254382aaf51dff838e41787ef"
+          "checksumValue": "9acb41dcbed3424ee1f12196ef7335435ab9957e6023193439c558153138c99d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -416,11 +416,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "925b813a7ed16c0c66935a2fb352740f1fca9769"
+          "checksumValue": "27a978c691c4c57a1383e0b4f8cd050991ba2479"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "340ad16308ae84726e7b54a224f8dbe2fb2d6c00c4efc1aa9d2caf5bde2105bf"
+          "checksumValue": "55d9bafcb3b824ae3e415069ddbb61373bf9dbb35773f763672a9dddd4af93a5"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -432,11 +432,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c747da10743de32b70552fa368ca912fb6b24729"
+          "checksumValue": "ea79d8ab5ce916605efc2b887754e5785d0876c2"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "49e2ae04cb0e59bef15800d02798fa42e0c6cef43a42bfe74ac03f410ccd0ea8"
+          "checksumValue": "bae7ce666368571c9c0ece3814bf31396e0c33f74c304f6a190fb55a632d0c62"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -448,11 +448,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "1a6259b307bdc79365c4bb52f1cd601c0a3b0acb"
+          "checksumValue": "aeb8c0f17f67d45612793204587667e361769a60"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "7ee825108ec2a7db7d3142598228c884ea327d33e09ad6f479eac81884dc157f"
+          "checksumValue": "b7d3663287b397545a39ea056ee614c4a67d3b57f7a9eae66bed41e87861bbbd"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -480,11 +480,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "31097c069d5bb73616e9c92ae38eabe334ee0f75"
+          "checksumValue": "d58823eb256a6be7b825e71e006c3f2d4ea5de7d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "909da93d942a33a222fb4c53b3969654876bdeebf770c00337d5ef31c97ff8b3"
+          "checksumValue": "7e1f2361ed4e463cca41b62b312af1816589098fff1e506ae22dcacc7566923b"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -496,11 +496,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "24ecf73564b46ce9344c1b3551435ff15d09462b"
+          "checksumValue": "60754fd50198c8858fb3926c649817acc5496b15"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "bd66eb21558cdb79c4fe65ba5806cb4126988481174f870f101f49c60f56ee75"
+          "checksumValue": "4af72adb5a8972ea96c038ae9ae1acfc8c416474edd46ef5a1275241112b282d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -864,11 +864,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "0fe31f3ce3c08623ec9be174f515d23dac26208b"
+          "checksumValue": "9cd5b53da1e289631c0dca714bdeba67c542565e"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d0b6e3315935a1cff315c4d2cae6a87497dc470cb5fab0ac3ad77db4ed2a115c"
+          "checksumValue": "26bbc1f4b5d34ad17b9b3b976461fc8619a31fcf0b741eebec1755e3cd3acf53"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1024,11 +1024,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f8d0d261464a30becdacc6b3a564504d8f879e29"
+          "checksumValue": "e907fff074c1c8a38dd25532d0b22e553f8a5609"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "2446b56f5bdffbf4a6c977c9b16a55eef46679b9560d66064fffd9e3750ae6ff"
+          "checksumValue": "58f3cfec5c80c4b2517ef4972e248bec29255e7316c8ef4be40460be1ed82c5a"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1072,11 +1072,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d5238a8495909c8fc7c1f1fbc9e753defd984196"
+          "checksumValue": "3989e2c279f57140528d92329a7877d799da0acd"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b19e53ece34f1db6eb7af58dd5d6653b868bee62c482998cb6870a93f048bb84"
+          "checksumValue": "7c165b0c0a24c245c57e542db556cfa2f8eb569e541d910a4e760649fd210b77"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1088,11 +1088,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "46323b81970338a3d9429be90db34510c00ccb56"
+          "checksumValue": "e88c87dd1bf9fd2bcced3f471fb1f3c04367805d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "fa8886fef048c29bc9ed53f09e72470d94aeff07cdbe3149b7784104a23d2603"
+          "checksumValue": "9288eeaf30fcb5522916b4d30611842feddeee34ffcebcf55c50e0748a5416fa"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1232,11 +1232,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "a383cba3fa841f34088c5665b7c8d8bdf68e00d3"
+          "checksumValue": "c2cc8a891d4d462eb99fc300f779dbda7fe5a2ef"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "3ee99863627a354390851be891f5734a082df13a5eb81873e9fa0a2cc6b49dc7"
+          "checksumValue": "4894d3f5150cb3eeea84fec595e1ada8355d708fb2b146aaa58c6a1d66a1b10d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1408,11 +1408,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "60d25a7802561f2c9cf7a6df5248e7dd5f803150"
+          "checksumValue": "72ca1fc4dc49ab4d828aa92c5a8bd0e0f956eb83"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "e12b1a19fd863ddc35ccf2f8f0b7f62b413e99dbf968a8df76abe049456640af"
+          "checksumValue": "a09d4ab5b47c79eb72f9ef77333a5babd3eedcb02e87ce526b950d732e35811c"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1504,11 +1504,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "24ce8ec4c87be5c91b5d81ba9eac289fe09ce7d5"
+          "checksumValue": "715506d61ba676dc1e8e47e2c28a23b33c50094f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ad7c3e21a08788fc75f6f18d46ce41459c0983da83e789b2f3435ab86d99f14c"
+          "checksumValue": "e60375f0f4359e7dffa37c0f4d46819689e278e59b71bea935f559348b7bdaed"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1520,11 +1520,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "8986580ff863aa60d8e0750eafecf2abee6e4bbc"
+          "checksumValue": "8ce6836d9f5bc838a3bdf7526590137a5476d7b1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "561165050a68f3a9814e575b7d1d39ca076e9a0a0d2a05223fa88cfc9cd0323b"
+          "checksumValue": "f3b0553227c979d925c1c9e0b46e2ce165469a612dd2e0b387bbf09d0f9038a9"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1616,11 +1616,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b7475cf78bac2906784b4a272ce264e67d323e4d"
+          "checksumValue": "425bff614ae99c2f33a52c1f1f8844c8c3cb9bf1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "9db88121ad7b53263f2717441bfd4aa60a27dbc6b926affdc8a9a506c44aa758"
+          "checksumValue": "fe684d63afd08079352da4a0f8b5f9c536d0c45e5f62c5ac4118de9771257515"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -1984,11 +1984,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "57299da277a782c68743504a93af9baf602b03e3"
+          "checksumValue": "9f0269adbfaa27afc6c4a4668060ab918554f659"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "634a683a4aaf40d3f2e92d20ea75f99b1e274f9a2742d7fac9a16a97cddf0614"
+          "checksumValue": "9d54ff536cf58b50f6ddd7ef785c63fbedf02f734d2a1a150b84d280e9723b23"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2016,11 +2016,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "e29516e57fb3a42d1dc7ba59ad0175ed01827045"
+          "checksumValue": "1db59f9c1cf6519c3ec797983fc4ae5c7d447a48"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "bf074e953fb24f6485ac53328a02799d5b717234a29c7b7110527b27cb3823ac"
+          "checksumValue": "dd84c4ddf2c8f9130f43e9ee445029a1df46b72e89806392398d391006e99efa"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2112,11 +2112,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "9e143b27d2eb830dc208544bb8a19afe77b4895f"
+          "checksumValue": "de7914105a22e67fabde38d41b3f614629af71c0"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "e323bb6ac5a6633af4734ace2fb3dc4cb091dac6d6a9660fa7864a59d782d98a"
+          "checksumValue": "035a7ea1d763e095c20272914ae8d0aaa8742b6eedd38918c8ad7761740fe34d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2416,11 +2416,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "78b7ef0764c9dee9055a5979622473086d30c315"
+          "checksumValue": "7455dc9504b2b8d3551fcbb94ce31fb51e67efe9"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "790c664c6d8b2040d32ecb21888ebc6019ed0e6f841a75734aed6453caf698aa"
+          "checksumValue": "ffd6bba02a7e9c2d5ef55d8e3fb2fa4fdec5f8b4fb4ce2c19e4ff148f86b8ef1"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2432,11 +2432,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "262af87304ee2dc42caa1c9c9c24f17e9a5378aa"
+          "checksumValue": "0aef3e61e03e18fa304130a40725b8b1b72e3b59"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "7b444ad1716ee66f5ff8522344b775a87fe0d4eba6744e79ac632fb896215d0f"
+          "checksumValue": "53c6de62fce7f40a44478af27fa88ef9495f59b5fa9e106e48ccfcd79ca9dc39"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2448,11 +2448,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "5dc9161a016d1b5ccfcbd814ccbabd1a539c2e41"
+          "checksumValue": "8abc821f1819bd95c3197126b1308e2330369b06"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d73c13d205254a0584557e948b688d77e7c5b2f23ec3c9d2eaa671a34b80fd2b"
+          "checksumValue": "13138ec417456b6e6f512795ea5ea4ccfb466737f40514de210ef3565bc64fc3"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -2480,11 +2480,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b96c2fa2ab44502d0dc9d0260ef1b1fe1137ecaa"
+          "checksumValue": "99b73e0c2c95861d5c2705238a164a3dfc5e1f4c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "da045e1ac92c55e0f5ccebce4894c3d2b2875c21ac78e97b8c6e24ca25325a40"
+          "checksumValue": "b7bce1eca58e4557fced832b137c873cd15cf208832f54c59f0c72795e8302e8"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -3056,11 +3056,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "917eb95e61a41078889a01662c42cbec003cbb05"
+          "checksumValue": "4ce3545992450256190ae6839ab856c1bf1e5763"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "aeda72ae6a24415abb3751183e73c8cb85c0fd904a437ed8c451833ba486351d"
+          "checksumValue": "7680784008d7f25064b1ef708cc46742b17fed5dcd6116deec3fbcf836e8b54b"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -3792,11 +3792,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "8216edff69330aabea4cbd36a3e52f7b15aa7f16"
+          "checksumValue": "03c41e823d7ae6ab0e42efee92d440518c285049"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "f085c5ac72100bc89f9e29b42d97b6fc07f8f18cd20cbaf182a4dae06bd16e17"
+          "checksumValue": "702bcd8820bc04c8069c3148870504db24cce378e90f0196f4b7c0f947aa01c4"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -3856,11 +3856,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c98aaaebf4d0c5765baa7265d9068e54a88a24d3"
+          "checksumValue": "cd1f3b34c2eb69423507fc1ea8d9ef5e4590ef4c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ab5c82163aad74ef156da7cc5f8fbb9da818bdace7e8db4857346efbcbbd76c5"
+          "checksumValue": "242d970e49c94f9ced1594cb26dc70e45330f4c6cd7dc5faacf160cf9bf0927f"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -3920,11 +3920,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "9bf369f2b10a15dc933a118e763aae49d58bb07f"
+          "checksumValue": "95633fcd863c25572e89836d2017f8122939430d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "69dc628aafd02bcd09ce567d0c7ecfad56c98bc3e6178337f69b869b0469f4b2"
+          "checksumValue": "04440ce4f18f2d42f8334e8ab0ca771c89cec9e7058004645fb5cc30f9da2a9f"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -4256,11 +4256,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f02a136112a269ea4156683b7eca32bae842bb8c"
+          "checksumValue": "cf2f9778d15a098f7488181e3a6bc33f38729642"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "676fd8e8ae166f0db7e0f3d7f3dcac802051efce285ccfab04649d97303543e3"
+          "checksumValue": "87c870215ad13842fc50e854d5eafbe74e45e0a065a321f5b0d8c55fae49e47e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -4864,11 +4864,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "322ed0a8845d2989f426639976ccf13cce7e67b2"
+          "checksumValue": "4d6ca9aaa9da534a62a7022cec39a63ce53caed1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "1970f2e22b833e5c9fd49ad7723c212ed625e0ee391332b01ae690e1e8b5ef3e"
+          "checksumValue": "641d454b7eee098d0580b414079aedcf57c8df450d86695678493c9edd061df8"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -5392,11 +5392,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "55c5bf913b452d1cd42cdfac6e8b7bcd41c61432"
+          "checksumValue": "af31570ea0539a7a9e6c7244ac0ef903365148bc"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "846ac3bfef93c6ee43d28a524e833673efd366c0aa779e4dd4945fef51df5380"
+          "checksumValue": "2815b125a129f5cdce03740f680324e892292bf19f878c002d1fb99fc10e1162"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -5488,11 +5488,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "17324f6d2691e504cf3d7aab00b738667785429d"
+          "checksumValue": "54861a8d961441ad1d673e6581f8b9612eb2ae70"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c681a8f221eaed78b6a71f8f67f54e11594980aad7974aa9369ce83384be640b"
+          "checksumValue": "f3b90ea9ab8c6685b04a158030171c96de79a0909897ce6d54f7e11f0a84753e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6640,11 +6640,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "65877ac358481ef799f9f554bf86b1cbe3719968"
+          "checksumValue": "874fe5c47fa345c27e161fc438cb9566a5be179e"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "0e95a7193bee647be6a5c965af70b7eab579e0e163e236b1c75eba3d6dea03e8"
+          "checksumValue": "2c456f4f06960fde7bc52ff2612d15805e12fadca35f5efbcbdee465499b79a1"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6656,11 +6656,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c6d3ba92bd5d810daa70d982946ca35486a3b956"
+          "checksumValue": "d95c36d7c38fecf32aecbe2d024fba2667aa8993"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "7b9ed040c69ec3083740f4f769fd38dbe50400a2f2e82fa9b4e36a0599bebe41"
+          "checksumValue": "9ab28ab3da38a685b2521c11642d9f2ce3ea8d043caecfbb2e846c4d314f3277"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6688,11 +6688,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "6ecb211f69744d798f9678f112468a41a7448a4d"
+          "checksumValue": "b10f2aa3acf45be7dd0660b13bfc54b5d48f2e92"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "fbcb40dfc52096c0ba3a0e6d2d02102fc4c170854e8309ef7e3def34f775e9f9"
+          "checksumValue": "05a6ef2ed316cd9749540ca11d14f9a801de554f2fa2d061b3569a1b27430176"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6704,11 +6704,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "3d8976438b4759f0338f3d3aee6c73550134a8cf"
+          "checksumValue": "f46a53899a99e98f6b4e52b8f5914c136371d92c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b3c6e1aa0d40f9485a6438a13336a7c265001aa4ec24ef000e6ecd89ff0a55aa"
+          "checksumValue": "1e10857dc947705f6cb9ca283b65dbe3c61b5138798ac77709b135af2e44de64"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6720,11 +6720,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "8203e807b1e79c6a7aa22f9bf30a305bb9244fc5"
+          "checksumValue": "e81631f44addb19460855f6e4b0771380f917c1a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "6b8650d013d4bba83e4b60ae434828d30144ad760cd2bc78b70015e57daf570b"
+          "checksumValue": "40a91c35b8b50594468ccd8bcf022e9c31ba855332a32af95cd345cdc8c2a24e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6768,11 +6768,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "42e1c098db3a3442f0304609f2f53793ea6d2a62"
+          "checksumValue": "91fa9cae9811142bd37c4daec476d4ea8970bc8c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "47da09ed5783c2b573e937e4b16019b2c8cd04d477aca0c01528684892608d21"
+          "checksumValue": "1d8b5b2241302b99cf7da768d72e96e13d0bcf28f9ee954ae093f744ff7d0b84"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6864,11 +6864,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "346bc043ec5d2eab46f7bb55dcff593d256e91c8"
+          "checksumValue": "3a4b71d06a3d27cbdf3470ac38af19177eaaea85"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "e4203fe9c6571758fd4cbd5d8363509b7705d1bf4ab3481f71da1ac378c7d89a"
+          "checksumValue": "261527beb89c9cc37e9282f6be2186d9aed89adda7368e3bb8f437ec95783773"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -6928,11 +6928,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f8152d78d8b1c4156cc23df815f39257012ff619"
+          "checksumValue": "a641c4248e8f77078906aac647f5ebc702b3d955"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "019762d1a044cbcfad486106ff06594a81a92a774ed6bc345411dae367c520ce"
+          "checksumValue": "6ed56a2574c1c537487fd9c29d0f30c0391341220e36a5de0885a062909242ab"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -9648,11 +9648,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "24728e3d8292376f32923aa8afe39108aaebec53"
+          "checksumValue": "0bfbd0c9bd846b371a1cd28545d3393fb7b3eabb"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "860689bf27f9066682f6d61945ee5fc3e28eabaf528bb10d51607daf32f7d753"
+          "checksumValue": "39b73fce3f83f9e0639270a70270b544c50fa29557c8c879d0ab4ceac565e536"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -9968,11 +9968,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d08caf56cc0996fd67083eeecfbad745a598f9c5"
+          "checksumValue": "6fd19fc756d2b62cc3ff5319a896e3f5dddbcf30"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "f34bc7358e62e0b2d9bc3f9092bfb29f70f49b88dd40247df3460028d00ef81a"
+          "checksumValue": "8f5ac647f76d58d2259a9498e9f2276bfe2bdb23ff784c9c2fd5b6739285e6dd"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10076,22 +10076,6 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
-      "SPDXID": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-adapter-LocalApiFacadeAdapter.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "3ff6a9b74a7cee93490713458091cd5a72a0ba7a"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "149c34a201fb45b4f2baeffb1b829c769b6a63058d284612459e2acda97ed9c1"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "app/src/main/java/com/muyuchat/mca/adapter/LocalApiFacadeAdapter.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
       "SPDXID": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorAssembly.kt",
       "checksums": [
         {
@@ -10128,15 +10112,31 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "a5449eef8347d94a6fca7a357c26bfc003ea7050"
+          "checksumValue": "76dca94a290b1cb2f8d57c3004019919bea88fac"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "e28845aa66d9e4f5950fcc9b79d222888d430ec68960ccb3d6ae3a0569a8ae91"
+          "checksumValue": "71ac94e38bd31b6ba448a6746045f486faa18a3cb0670052fbe82157414521e8"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "app/src/main/java/com/muyuchat/mca/composition/MainCoordinatorHostAdapter.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainRuntimeAssembly.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "1b92cdcdfa820ced08a2faafa7b346a66ab74925"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "70d1b82fc7711cab915170ae516bc9246aded8b6d9022ea88196eacec3495ae6"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "app/src/main/java/com/muyuchat/mca/composition/MainRuntimeAssembly.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -10160,11 +10160,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "12b2e7a0f0cc98461d4b4eddf08f94e9a2ed4603"
+          "checksumValue": "444dfbd840f52abd19ce830ed89689e149fc3804"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "2c050859cb997ef15ccce04c8e3ee78227ee13ec877d4e85857108d8d335be22"
+          "checksumValue": "cc2f3b0e082d83537bbbfa4363bebb5e66dad0df0806b26e24656fe97adc4961"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10176,11 +10176,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "a6bc80ddb660dfc7efde3697ca287f3c1a6b0cc1"
+          "checksumValue": "eb271bdceaba4337f1cada3ff0ef0ea2cb70db23"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "36661482bc910249e9a4d7725e8a3bc4544361a8b4aa3c7b36472414cb244ba9"
+          "checksumValue": "a20bb8c8960638f6e7f41a6fc028231a503532964b5eaab0a7bd58a653de3a28"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10256,11 +10256,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "5db5639b55896763cb439a82a6a998d8d1067546"
+          "checksumValue": "11dc560b1e3adc625399da4ceeb4bf3602eea6d7"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d67dd1b5041908b944681fa78e85f873222bdd0b2672c0826451b8ce8eee3367"
+          "checksumValue": "d65df18a1193d15d3513612d652e6815cb8acab1099faeaf2aa8d6f28d4203d5"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10272,11 +10272,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "e30d3f142d4b39c0bddab9461c2510bef9353a6e"
+          "checksumValue": "036b53f3de0595aad0a97705549f4c80516cf98f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "6f74561ddf1ce3c4d554121b4790ad26253b4ad5c23c4c5ef11fc930722a90d5"
+          "checksumValue": "35d68e5b7bc4ac933bea14692d5d2ca83d5412786c28e7c5ffb9d99f1b4ce47d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10304,47 +10304,15 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "dd20755085716f659a4ce484d8ad9bf08782df24"
+          "checksumValue": "9a9cdb72d37c0eed51052f95c262434c6cc5fbb3"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b5e36a31659252f7a1dda5b03a2f429ba8be8032220cadabd143b6bfe0c4420b"
+          "checksumValue": "57ab89926ff988951914db778f6326ce3fa2a0a6f7f8ec35eee3ede6bab10d19"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "app/src/main/java/com/muyuchat/mca/facade/ImageGenerationFacade.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ModelLifecycleFacade.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "f68764feaf2ceeea2050e08f193947ca858502a0"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "9b170eb44abf7152a2cfb79c3e98f67f7e6547abeb2481faa7f4c4afb5eaa2e0"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "app/src/main/java/com/muyuchat/mca/facade/ModelLifecycleFacade.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-RuntimeFacade.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "2ba7710692dc76bdcd4f615d1c6bb9f811a79197"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "f50380a478d99126799b407d59cebd30a1ea7e6b38738905caf48a774e9c1a55"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "app/src/main/java/com/muyuchat/mca/facade/RuntimeFacade.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -10400,11 +10368,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c0be9b8b92bffe95723b53af5820155d2da87ca0"
+          "checksumValue": "a644bc2e71e2aaec593988140e1a3778fd62cb79"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "8f127a7c8bf3f863f4450a784a22489024a6395d3d5da0f5b5d75804207e6007"
+          "checksumValue": "55649da540a76de4b5cdfb37806550c51411050cda75fadd2e22f141254954ca"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10528,11 +10496,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "4ef66f4b30d907ab21b9ca6fb78a9cc0694d7e46"
+          "checksumValue": "34ce747863820b005b73138df4554c576eb4dfce"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "fffba4ed9d62e4353f128444bc60b074b4575a8655e0983917d15c26c7cf8521"
+          "checksumValue": "1733ab577a7daa3b68bc0b0d185ef4f673a63bdcd78d58f71890b04eddbe8c02"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10544,11 +10512,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "59eae141578b2a46428f356d8da76c4ccfb9ff4f"
+          "checksumValue": "880f72bc261bb80670cbda7157b88fe4e85102b0"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "646d0779780b422886d68211b5a71991a3d8ff81a47c9f8a14dafde2b4e7a381"
+          "checksumValue": "76cedd3150be720c4ff01e8341d0fcd1b726d029cbc48ca7d284f9fdcec30349"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10576,11 +10544,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "47bd6311472e2f485edf6339c0b248571b78097e"
+          "checksumValue": "5ba49385b985d4f09537ce9a80f33cd58492a00a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a0874447b70120be7875a64bd763a11b6739e90759fc908425386c6b36ebd74f"
+          "checksumValue": "b6375d932089493b67a9c028e243636ae88161fc4d2cd2a231b9ddf166b25054"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -10748,6 +10716,22 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-app-src-main-res-values-night-styles.xml",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "55bfb262eba26252f821060b8fbdd0cc226117ba"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "580651dc13b1c679ece5caf8fc00c1b5aa895ec8ea60111d946fffa825b09e43"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "app/src/main/res/values-night/styles.xml",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-app-src-main-res-values-strings.xml",
       "checksums": [
         {
@@ -10768,11 +10752,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "5d977fa4d54b11b97229a88f263f2e84c06e4daa"
+          "checksumValue": "4c7a7f0c2627cf9cc7c7f232db7b7cc005b0d498"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "5ebd70ae6ca8b3fc8fbcb48b2f77c575e6c8b0270816a57187a94ff14b2cc517"
+          "checksumValue": "b13739e95defaeb4af82c6e79db498fed1ef6fa48b5652d4adaa87c31bdb54c7"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -11696,11 +11680,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "12955cdf73cd9b38918d09e019c87dabe2482bc2"
+          "checksumValue": "d6e2a144252a277f21561b453bd439e94ad3010c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b8b8a7114b1ee2f87e36f01aca2552e0d6d7d1969dbf5a1e3e9636c0846492e6"
+          "checksumValue": "36f4c1eff33db8a6132e2d5fda1b2a8ea0ec037f95c5956782880077ca92bc23"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -11728,111 +11712,15 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "682a4276b1f8becb12a2c4db78e3606a69810617"
+          "checksumValue": "88fb68b1995e1f0779a11db374f54150cd9c163f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "2880fd058a1c1625238917f045b8dfc9e80799f066b5266024633f9a6abcc226"
+          "checksumValue": "990105371d6aba620b26445865ba0ba1595999c79b42df2844186c58a99cc3b3"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatExecutionOwner.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "0736986e8c738e2cc9dc446b6a175651ab9189bd"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "fd362e25e3a92b2da97aa3eb8e560fce83da475e50160ffa60db3bd7efc7eaf7"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatGenerationMetrics.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "92a7478bc7bb142968932e25b575d8a0bf937e9a"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "41bb5e767c750432a6f9f04fb5e1fe7f399481827b2f5ddbbe4c029ca58f75ad"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatMessageTypes.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "95b2d9a493d0f4bfb3c1c04226885758f4735c17"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "6cb4d339f58f34cf0349ff0ca92367f10eca50e05409dff6f8363907bbf2c7df"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatProgressTypes.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "3b285f857d8edaf92a15731fe538603a4b6e5675"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "2730cfa802f5c936028620a3a52d850ab9252d12183aae0f6601cd3936521cea"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatRequestTypes.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "6b5bfd74352e21ccaa56b0a9c4b7dcd91217f1f7"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "731414612faa6fe6c53552dbc700bba6134ca252d5d15acedfca7c64e48598b1"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatRuntimeParamTypes.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "1b143f9ea749b2b8fad46639d4e9f155318035b3"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "083cf1d8b5d1ff0e51e6598ea29e163d2096864cf103d04bf80eea8c702883e6"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ChatToolingTypes.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -11881,22 +11769,6 @@
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ContextWindowAdmission.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "ba4430c01b918f272bf6b11923e5990ca119b89a"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "c5ca9d889c1d36c1aeac8adbab01dfda69c1066ab42d4d327a6bcdd5f60212c7"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/ContextWindowBudget.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -12028,22 +11900,6 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "a8324480e09a721de328664132d7699ff22fb38a"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "36d30a7845d974b58d46ab591e17adfceb7c8c79d122173cf3e7bb06b30450c1"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/JsonStringList.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
       "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtGenerationSupport.kt",
       "checksums": [
         {
@@ -12080,31 +11936,15 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "21b0b8514b6187800e51a127633bb9df9164b306"
+          "checksumValue": "acc3dd163aada1f73f7b8bc7e1b33f2a9f6e973d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "29deb7dd4098ac74acdccbfcf4f510fd2e64178ce24b7428839ddd985afe9c6e"
+          "checksumValue": "027cd9e59e944bfdf5a935f2b9d3fe689e1b3595091ad79df8a8079e71fdfb00"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/LiteRtLmVisionCapability.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "dd8e7e37afe3f0eb3f514c4cdb2c0b2101eb7bff"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "c9c3293fb2a85ebe396f22fcceb2b90fa699b9e97c11cdb3e8ad7c3641cd163c"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/LlamaAdvancedParams.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -12256,11 +12096,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "e5117d20b298fc4f174f4d27733bc56903276e49"
+          "checksumValue": "bd6ee6520b73787ff9c8ac0995c6a9521231eec2"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "07b74942e88fe509d047287529ed1f3709e638caa93479355c1287f281faaf9a"
+          "checksumValue": "0f9588ee3a6227294417139dabc0057a0e69d99c0a114b03c467478fc7505c56"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -12304,11 +12144,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b3d6af738b14c4d2725f533373d29388db3b5aa7"
+          "checksumValue": "6ca5a70ad72aa6f5ee0d1593fe6753b95e21ad51"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b9d8c65823b52265575df0728ec996fe9a342b5ad0a03f0b50d8a6780192da6b"
+          "checksumValue": "bf79ae5a1275e47715de784527ed0276a3e3449bb84452ff9a9b4c7b2a1f574f"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -12384,11 +12224,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b71a1b4369c347c8fe08c414728f8a81a490ae9c"
+          "checksumValue": "297ef75ebeda9c4910f37dbd9bab341b71bcda40"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "5142c11cc8853dc411b53bece4c2648956557739c0d6736dd36c4745f0e31036"
+          "checksumValue": "4e531055faef5a997159ccb52ce5b551841967900d433b25e44ac07e1997029b"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -12400,11 +12240,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f17f64fbbec95620b97418cd1a1dd8f5ba610e30"
+          "checksumValue": "5426db7d39e32d1eb044e6749f13d70253533667"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "9a6ba69dc46bcdc5c28e03340c6efc1cf57b7423064859f13f5233a1bf8e0725"
+          "checksumValue": "ad2579ce327e2f5fda0e6cdf50a72bd12a0f1dbbd41d9b639cbd61d85ae05f77"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -12768,11 +12608,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "eaf29304e1c3c31269990ad7889d97a55944fe1a"
+          "checksumValue": "19549110132f2de0e5af23b6c403a98441eed03d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "21b3d082738749240be4edef60fc7c9640cce9a44cac7ab47bf0eda4f2152c23"
+          "checksumValue": "e9dd82c9318a030f88c1d3cef6c8572bdb15e48b7c7468b15a00635109712ee1"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -12812,38 +12652,6 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "5d481c34401dd0ba34ca39f86460c45db90b2097"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "46318adba3b1eea36ca7fef0f86cf25f03b777613201da9d222aa3b009e3443b"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/TextUtilities.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "f381fe9b6a59fb68e6d9839117e166ea3f5bf282"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "c2e2dc132514ce4cc86d9527b5260bae50339946faacfbf2fbc991ea920a424d"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/VisionAttachmentDedup.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
       "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionBindingState.kt",
       "checksums": [
         {
@@ -12860,243 +12668,19 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
+      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VlmContentDedup.kt",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "70145e81cb8962e2dba62d8b81e492a309ef9b83"
+          "checksumValue": "3a3472d4906040a676eacf0e63cb5900dac8eca4"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ab592b50461fe2d5fe526ee61b8dcb68546a28bcfd73c54fe3174922101691d3"
+          "checksumValue": "ba52314964b8355fd746ae8077138660ff57810a2b730adf471ab3b66d84e101"
         }
       ],
       "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/CallbackEvent.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "0537dd125b759840f9a8705cdfa21322a3899409"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "9ca235ead3c84255a904c5aaccab7d2e8bfd41a71f5751f3bbf78672e10fc0ce"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/ErrorEnvelope.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "2d8e2e08e741264bc11d44a944bc0851373205ff"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "bfdf0841b225a92d969d50c2edf9d42bc1295f0403133c92b8d3a442e2029155"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/RequestIdentity.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "2a26cc67eb35532b9bf13e020580505d4cf6d545"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "97d87706066e84ef87e10aa4ced3375dc68b383da9c2da2cb8ae3ca4e93c7144"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/RequestState.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "5256af3836f72091601c12dad92b1f66bf0624c0"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "103c9cf5c3d69b796fc402b60a154bae450eac23cc73195ee3e7cc638e29713e"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/RequestStateMachine.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "ebf87c4cb1fc9b9b61c2b9ffd3952e67aaa3ef9c"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "f7b09a348fefc978c6cada2f45e2cf7cb6b7303f1aba5e82b5b9155d6e38ceb2"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/RuntimeEpoch.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "69111f0c7fd1fe954e50d1d98a7c007bda014324"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "d1ea21e7b13fa9642fdf8c160b237373bbe7ec08d54a93de39df687b3981e849"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/SessionGeneration.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "a79480de123a59ac113dd5804085f47c7f13fc9d"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "6a263c9bc9edbc1f0c1312df9cab623a4caf3ae9eea0720459d66ab5c0d69c2d"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/ErrorCatalogEntry.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "b774c12a6c908f3f66a93fafc0d6c551a1c76211"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "af9b063fdd7ae9197023dfe4f000b09687a11986d33f2a1f94b95fcba1c005f5"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/ErrorCatalogRegistry.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "bb656f1c3ced65f299f3aa6abc8294314c30531b"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "418d5d9de6c3e7972513d8b0c0f35eb713c9225f7d90996d94e18cfad0fd7d5a"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/ModelCapabilityErrorCatalog.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "42f423fa4397ada42a8fc086d945d9163abb033e"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "87017cd15804525a13c29d1f12648d75e91ea352f3ac0c46712a874a7a80f49e"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/RequestExecutionErrorCatalog.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "ed5ae3098764fb79b9e76a6c3abf8de5b0e81638"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "16dd3be737d0cd7b0bc0405b6f7f2372f756fa661f529f25bcc26b4797a15988"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/RuntimeNativeErrorCatalog.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "4b849eaea2166c6de0ab49252bf6cfc628f7bac8"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "19ac1daa7d9a037275bf87d8c45f5faf4ffcdc02c6a14f04fdad41ed03bb5f42"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/StableErrorCode.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "62dc69ec1f8fb52bd6fd7e8a5328c183ec6b9594"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "b061951b786f7c95ad6f023b574b6d40878ecc5364f8074b3f0133adbf43be3d"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/StorageNetworkErrorCatalog.kt",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "56239ca784b6d11a44fe71cbc06785e36ca8f36c"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "95fc5eb2d53b8c012b25fc669d6c6b0a27ca3e41fbd680bb78a274ddcb050c07"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/contract/error/ValidationErrorCatalog.kt",
+      "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/VlmContentDedup.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -13120,11 +12704,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b5542acd5ea4366cfec289167d87481ebaba6a51"
+          "checksumValue": "6fa029c1531c91f1501b497f8f9e2e069e7adad3"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "34046a37e82c212557cc47b870908581f3eb467057cfaa525c424e365d1ba233"
+          "checksumValue": "815f282615f16462ff016e53e64ddd2c72c81f53633d80084288654e0778fc31"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -13168,11 +12752,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f32e092066c077f9b74ee50812f63c6bdf32e1dc"
+          "checksumValue": "ceeb758b584a3bcdcfb721b46d87308b8476f8ab"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "27c6f8870fdf55249246a7076b7b867f3c3da72355b5ab748ea500d17deabe36"
+          "checksumValue": "2e2d80a3dd0cfa7c1d6aedeed1fab7d1765acb2b74412b9bcc16330ae8567b36"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -13248,15 +12832,511 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d86d0c6ef90bf064526f238598705154dedb396f"
+          "checksumValue": "dac23390b0a5ca9e5f626b5e08ac80e26504c30a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a11732d171b283518c41b5d6628a3fd6c6215b5d9cdcdfdc811053ebe7ad008b"
+          "checksumValue": "821c3b7a2384cd1c98a7fe74e20fca14c496b5bcfa66351219503213e3ce5513"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/engine/src/main/java/com/muyuchat/core/engine/runtime/RuntimeSupervisor.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-build.gradle.kts",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "e59ea748495e4954d295c01bc28d9ae16d28442f"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "425a909034306b36b2529996f2fb649486dc8447c0e96c9623ccf58f525cb988"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/build.gradle.kts",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-AndroidManifest.xml",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "4fe145633dab803f8e1ad9508063891b257c37e2"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "343d5be1ac17cdd45d1a2f2ddc616c509290e655869125a9422a96d88aa66066"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/AndroidManifest.xml",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "0736986e8c738e2cc9dc446b6a175651ab9189bd"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "fd362e25e3a92b2da97aa3eb8e560fce83da475e50160ffa60db3bd7efc7eaf7"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatGenerationMetrics.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "92a7478bc7bb142968932e25b575d8a0bf937e9a"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "41bb5e767c750432a6f9f04fb5e1fe7f399481827b2f5ddbbe4c029ca58f75ad"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatMessageTypes.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "8c21864b02d1426bd501936c44df58b202baa191"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "e70385c1f76deef15eaa976e6b8b3ed987b6908746408464f7f0118b1f38c788"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatProgressTypes.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "3b285f857d8edaf92a15731fe538603a4b6e5675"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2730cfa802f5c936028620a3a52d850ab9252d12183aae0f6601cd3936521cea"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatRequestTypes.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "6b5bfd74352e21ccaa56b0a9c4b7dcd91217f1f7"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "731414612faa6fe6c53552dbc700bba6134ca252d5d15acedfca7c64e48598b1"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatRuntimeParamTypes.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "1b143f9ea749b2b8fad46639d4e9f155318035b3"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "083cf1d8b5d1ff0e51e6598ea29e163d2096864cf103d04bf80eea8c702883e6"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ChatToolingTypes.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "ba4430c01b918f272bf6b11923e5990ca119b89a"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "c5ca9d889c1d36c1aeac8adbab01dfda69c1066ab42d4d327a6bcdd5f60212c7"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/ContextWindowBudget.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "f0cf0d080461f82994ad3dd700514a69ee72545d"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2a49d345d9aace95113140e08d3ad215c33ef6dcb521b2bbba91ef0be6bd6c74"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/JsonStringList.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "dd8e7e37afe3f0eb3f514c4cdb2c0b2101eb7bff"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "c9c3293fb2a85ebe396f22fcceb2b90fa699b9e97c11cdb3e8ad7c3641cd163c"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/LlamaAdvancedParams.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LocalChatExecutionContext.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "11ce36f020ce94298125268b5981ac3de217522c"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "c4aa25da69889a6ced65e4697f1889b13469095d933cfd156f3d5c63a5203324"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/LocalChatExecutionContext.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "5d481c34401dd0ba34ca39f86460c45db90b2097"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "46318adba3b1eea36ca7fef0f86cf25f03b777613201da9d222aa3b009e3443b"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/TextUtilities.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "21cd3e11ecf07e31e1b08ff7956b2320574a2096"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1617074a56d3988db817ad8bb7a9e3f06dcf4c6f769ae45b612beff7b83157e2"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/VisionAttachmentDedup.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionImageLimits.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "3b5bf48064d712a4eacc3bcf439625d433862fbf"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9746a1cba8eb32996d581ec7541004ceaa514485ce4368ef4c0ae2125b081d80"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/VisionImageLimits.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "70145e81cb8962e2dba62d8b81e492a309ef9b83"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "ab592b50461fe2d5fe526ee61b8dcb68546a28bcfd73c54fe3174922101691d3"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/CallbackEvent.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "0537dd125b759840f9a8705cdfa21322a3899409"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9ca235ead3c84255a904c5aaccab7d2e8bfd41a71f5751f3bbf78672e10fc0ce"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/ErrorEnvelope.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-InferenceContractFacade.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "75c4f3e680536e3380f4637890ddfda8fb4a3669"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "11908285593fb4de6254c0c830754f6d73208644f63fa9ef09dadb4f983cadbf"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/InferenceContractFacade.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "2d8e2e08e741264bc11d44a944bc0851373205ff"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "bfdf0841b225a92d969d50c2edf9d42bc1295f0403133c92b8d3a442e2029155"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/RequestIdentity.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "2a26cc67eb35532b9bf13e020580505d4cf6d545"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "97d87706066e84ef87e10aa4ced3375dc68b383da9c2da2cb8ae3ca4e93c7144"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/RequestState.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "5256af3836f72091601c12dad92b1f66bf0624c0"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "103c9cf5c3d69b796fc402b60a154bae450eac23cc73195ee3e7cc638e29713e"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/RequestStateMachine.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "ebf87c4cb1fc9b9b61c2b9ffd3952e67aaa3ef9c"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f7b09a348fefc978c6cada2f45e2cf7cb6b7303f1aba5e82b5b9155d6e38ceb2"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/RuntimeEpoch.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "69111f0c7fd1fe954e50d1d98a7c007bda014324"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "d1ea21e7b13fa9642fdf8c160b237373bbe7ec08d54a93de39df687b3981e849"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/SessionGeneration.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "a79480de123a59ac113dd5804085f47c7f13fc9d"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "6a263c9bc9edbc1f0c1312df9cab623a4caf3ae9eea0720459d66ab5c0d69c2d"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/ErrorCatalogEntry.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "b774c12a6c908f3f66a93fafc0d6c551a1c76211"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "af9b063fdd7ae9197023dfe4f000b09687a11986d33f2a1f94b95fcba1c005f5"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/ErrorCatalogRegistry.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "bb656f1c3ced65f299f3aa6abc8294314c30531b"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "418d5d9de6c3e7972513d8b0c0f35eb713c9225f7d90996d94e18cfad0fd7d5a"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/ModelCapabilityErrorCatalog.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "42f423fa4397ada42a8fc086d945d9163abb033e"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "87017cd15804525a13c29d1f12648d75e91ea352f3ac0c46712a874a7a80f49e"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/RequestExecutionErrorCatalog.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "ed5ae3098764fb79b9e76a6c3abf8de5b0e81638"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "16dd3be737d0cd7b0bc0405b6f7f2372f756fa661f529f25bcc26b4797a15988"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/RuntimeNativeErrorCatalog.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "4b849eaea2166c6de0ab49252bf6cfc628f7bac8"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "19ac1daa7d9a037275bf87d8c45f5faf4ffcdc02c6a14f04fdad41ed03bb5f42"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/StableErrorCode.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "62dc69ec1f8fb52bd6fd7e8a5328c183ec6b9594"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "b061951b786f7c95ad6f023b574b6d40878ecc5364f8074b3f0133adbf43be3d"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/StorageNetworkErrorCatalog.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "56239ca784b6d11a44fe71cbc06785e36ca8f36c"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "95fc5eb2d53b8c012b25fc669d6c6b0a27ca3e41fbd680bb78a274ddcb050c07"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/inference-contract/src/main/java/com/muyuchat/core/engine/contract/error/ValidationErrorCatalog.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -13728,11 +13808,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "bd912887cf6ada220f3d40a61487cf4c53e2f26f"
+          "checksumValue": "dcb60fe5d4910d5ab4d99782ef43189ea711d13b"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "8c1cf8a3c3dd524acfe4b97c0028f67563db376d567d8741e553ed18977f5313"
+          "checksumValue": "2b334ef85c116a77684d9604c4ff9e5ceb588f048d0344a7fde93cd26665e5d3"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -14924,15 +15004,47 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.cpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "43ad784f80648261a2ec60eb19273e7bbb7e569e"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1aabd518b654d26a11e1a9ff452a3a954ea91e08a4f0bfa86ffb97a07111fd5c"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_chat_completion.cpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.hpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "27e2e7cfa3372e7119e1264782a954b0240ec730"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "1eedaa0c14645b00d331b382548d8b8a6c04f8385231f21d8a985ed67bc66bb5"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_chat_completion.hpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-entries.cpp",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "fffc5914ff06837ec9cf4b44e32ea2d18b2ca707"
+          "checksumValue": "d248253f423ebbfb8d514e5381d5cfc4ee131536"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ff9fb8a6c92b69fb7866836714838f460046e61d294873a9e05e4b36f17a74ea"
+          "checksumValue": "1131ede68ddab74038adb1229c9fff2c41409bec6a5c406d0d180000b9792a51"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -14953,6 +15065,38 @@
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/native/src/main/cpp/mca/mnn/mnn_chat_jni_guards.hpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-jni-prelude.hpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "11ce3d433f6ca1ea2d52a6bace50c88e22403606"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "6a2421315eb4e45f3b31630c1c99ed7615f21909211f58f80b063535b34ac349"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_chat_jni_prelude.hpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-lifecycle-entries.cpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "406072ddb963e1e08b1179b1e3c420b8e710a85d"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "e005d836a895cc9a2d3eb4ba98d363abeec96fb0cec5c08383b7de4d464d1b83"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_chat_lifecycle_entries.cpp",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -15164,15 +15308,47 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-entries.cpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "e4f081a4240f07845424a8a9151720755b586dca"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "130d13eceec2e1f87f43c8826393dcab697a04c98343c8bb5ece8fed18b15213"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate_entries.cpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-request.hpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "6a83a9221d2c66592de7f6768df4c45ec9819066"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "9846963128fe363042220157de5c4d4faaf2796b5c40643c5d4745c544748d97"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_generate_request.hpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate.cpp",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c51e703e4a2476b274d29050911ba5dcf1eaa4b3"
+          "checksumValue": "4e7ac651d7d9163c7e3f5b48e0bb3d8abc41bfa2"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "85ca6325c77fc49e9e119bcd1d7d8b406bda027ee9d61ffd157a3bf1012ef095"
+          "checksumValue": "6b77527a52089f10d7f4b7f02ab4b8bccdc431aaf395223d9ce314fd606c47ad"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -15193,6 +15369,22 @@
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_internal.hpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-jni-prelude.hpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "48e4a4a4f9e1bd1ff12e79ebd596a20f2635fe3c"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "22fe4566dba6e5493a092c89d35d20be668e7e004e09d4cc286ace1dde574ec4"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_jni_prelude.hpp",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -15244,15 +15436,31 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-tokenize-entries.cpp",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "f5ad3d079400547bcd78f015833ddb774517a0b9"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "bc7fea72ec87010f286f7ba541fa8352c362724692b77ff19e43692bcf87f166"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "core/native/src/main/cpp/mca/mnn/mnn_diffusion_tokenize_entries.cpp",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-tokenize.cpp",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "07f72691bb0926cdeca8e92cb798eae25ad09b65"
+          "checksumValue": "fccf5ae7618f04973a5fe4a05c777bf09e0449fd"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "9dffb514b3edf0a0e55339441c73dae4fb8419c2e8952353a662f05c657df836"
+          "checksumValue": "a5bcdf7ec4a3b92cfe0f8d112f497026d5efb89e501919a4db7f75939ac6d247"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -15632,11 +15840,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d720b907c96275d909f2df5499dee3e42918fa2e"
+          "checksumValue": "6ac5307ab49a4a45dafe46bb7e1aa398587df97e"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "1288a4d03dcfa28dac42972f96c358cc8aca89b4c105c4fd6eb630b50531aaf0"
+          "checksumValue": "57cf1e8fd4edf88291b6516c0c4109af198203beb00fa2de2dc236fc8a1ff2c0"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -17616,11 +17824,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "3b725b9dae4481a6a75393e237210300927feff2"
+          "checksumValue": "93557706c47963a2690824997a3652770da62062"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "cfe4dadd0dde7655f42710899d3c25c032b5191c206785967c406d937ff0585b"
+          "checksumValue": "df446f2f8f8651f725f51754898839223111c69c00b4ef9f83649d770ad72b9b"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -17712,11 +17920,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "7c3257b7f389100447e335d8ad44c9223bea9366"
+          "checksumValue": "08de769ab0d3f5fe6e36ffdc73a39656b17d59cb"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d3a0acb9ff510985daecdcbffe12e15d3ce65889b1390fa04c0775119ee1eeee"
+          "checksumValue": "0d3792c58696581324ec8df6874f7f8bbf287ceb27d15b9f6342d012f65f4ab2"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -18396,246 +18604,6 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-crispasr-env.h",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "96a07e365ffed6eb7cc88327bc1a6e6ca8d46fbc"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "52f41e7d2c57d735e767d84bcd274b952be28454a2fad51c28fe041c43c4a838"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/crispasr_env.h",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-internal.hpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "c34712fcbad81a948de29ca2c3e8b7e34d6e7909"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "df1c249d11f24b0d1a221ef5a893c4e468fa5ef26d2ce8ed88f852b08bf4f3f0"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader_internal.hpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-mmap.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "cd0c0c73891c8a6f493cbba1d819ba8b6cda07e5"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "4f2c1e3400be387ad831abf9b9c6ecc2a4c8ee8fcb4dd442e0b18d5f653985bb"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader_mmap.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-split.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "5c630f9b19ad2c5f1c23af4dbed555cd42c503a5"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "873ffaf535c26932396abc4d195f6fc9a763bb6ea38ccf638db0f6694a02bf30"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader_split.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-weights.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "5a7b98327478cf7985ab949e35fc8c1e1d18235e"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "27c1a62a93dfb0153b71db6bbf93ea456184e96ce766e8e100dc1ac0ad4ea348"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader_weights.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "c5931224df11117d6aa2caea40bdb3b33339d754"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "035a90068f95cf3fbf8adc01da114f2bcddfcc593c027761908d9d6d3bf4acd2"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.h",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "42cb1f4babc298a3d6da3d4a50f93d911f683b1f"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "3fd685dc62f5df39bbca1e7f5c75b6785736d3f2164f6fca43318fe0e266ddd7"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gguf_loader.h",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-gpu-backend-pref.h",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "692d3460b766d8c491af45229d850f59dbf3af4f"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "4e9da7e77d4c04badad818914c433285675e43e568ed69c6a98330a4e180cc06"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/gpu_backend_pref.h",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-core-sentencepiece.h",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "d38a65f66fbb8e19e959c105f821f3cecac60a2b"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "1f380270c2e954a01459694c7f3f47591f0bb66600996b9ef14243d2d52c1d32"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/core/sentencepiece.h",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-graphs.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "18d41162a8ef32ff34224393b62839dfa7e7d2f4"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "d255829297b20196c48d4e8ffe7d29adc9094778144f9c05bc4512aaaa166721"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100_graphs.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-internal.hpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "25939b4f8543f9e65498e176d90444278e805f0f"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "c7021e3cb9ac8062d9f3b09a837cca1869353d1ca47f60266e3305765415037d"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100_internal.hpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-tokenizer.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "0cde676f533edcfb328b5d9f3bb8d6e0a5d70448"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "1f79ac77c91198dd63f7d101e23fd11a1d749a996f0ac461501bc66a8d1705eb"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100_tokenizer.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-translate.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "106764f8902f18669d056adee6b57866f7a1d7ac"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "b465d15edcf6abfeb52df88fb9430c5eec233373c81078652490bc942a5844d2"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100_translate.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.cpp",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "dd86b045442da8b79805a9ae6a26d8a6f78963c9"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "0547f6ba0aa112b8f075fa068efc3091cbd89b5c3b16cc36514ff85c4ae3a5a4"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100.cpp",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
-      "SPDXID": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.h",
-      "checksums": [
-        {
-          "algorithm": "SHA1",
-          "checksumValue": "27857d2d3e8ca7cc13051263548ccdad49689e08"
-        },
-        {
-          "algorithm": "SHA256",
-          "checksumValue": "0d6556e96f0f00c79c23af4965fec71c709387c441a9af605d15ffe67f2a6b2d"
-        }
-      ],
-      "copyrightText": "NOASSERTION",
-      "fileName": "core/native/src/main/cpp/translation/m2m100.h",
-      "licenseConcluded": "NOASSERTION"
-    },
-    {
       "SPDXID": "SPDXRef-File-core-native-src-main-java-com-muyuchat-core-nativebridge-NativeLlamaBridge.kt",
       "checksums": [
         {
@@ -18720,11 +18688,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "01a8217f2b7419db147dafa26a6b6a9da7d42987"
+          "checksumValue": "368c44a74d11bcecb62693a659e715dab5b1b01c"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a0231e1eda309a18d49d77f0fbe64cf70b3f8f0054263a0396a990ffc6835492"
+          "checksumValue": "98b5968bca0d87bd8af8e93796d4cc01afdfe05258369ef3d260b8a14f7cb754"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20018,11 +19986,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "eb141859f350ba3600e3703a4f0d0a35f04d9be1"
+          "checksumValue": "d37071baf11d127f1cc22c221b00a5ec44eac38a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "393168aff1aebcdaadcae63421d0fd3aeb90e969520dc7515ad0c22354399e47"
+          "checksumValue": "3d9c945bc2e594b6b54020372a2182677a1acda7355212423602b4a0320ba4cf"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20066,11 +20034,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "20c6da8e5d306436ce73d1260a0ae29dd75e38d4"
+          "checksumValue": "3e2bc9d1c45f2f6d480daece35f85054adc36a29"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a56db8cf970ca4789c334bd91f30ec921c7976845de5b4797850d38f206dad79"
+          "checksumValue": "6c77089b8108cd082b786eaa807a5554818f21048d7c488e09c3539e44fd3d3a"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20094,15 +20062,31 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentPageDerivedState.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "fa3ca497f48f2d7040e73b5e96da1b6c9f379343"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "c8b98d386198099056086795887330e13b2f9eea700fce6dd68474c1f5b50345"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/agent/src/main/java/com/muyuchat/feature/agent/AgentPageDerivedState.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentScreen.kt",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "1616e20bde6f5c0c5005d28146445daa571bb071"
+          "checksumValue": "345ff5af793a263500d89b9ba824c917199c403d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "06cc6382349bba3d6425a64b64fb0484b257cd69afe88b33f3488e771851eef8"
+          "checksumValue": "9c714539b5d75788997eab8be0145bdba1db2f19d0a143d2e89fad3e01cd4891"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20114,11 +20098,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "8cba5c9dd4669e25e68a25273f0fdac9992d98dc"
+          "checksumValue": "201f9258e929c0ee11acfd487d508aedc0748592"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c1318dd56f42f14965a486bf7e9dff0f55575e053259d363565aa8740a28b4a7"
+          "checksumValue": "93b47ab27e0c9bf4a5d1d39e39ff0b695c5ff0f5d95d95e912c24f77e85c1041"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20130,11 +20114,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f3ba8dc79225e03ea61f9c63a32d86b7095b2022"
+          "checksumValue": "c0f07bb6a43e3e5671368c6a38b76c43e0bae9dd"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "bc18798efaad279d8e7e465b6dd85dd5f216ef6f4d002903c774bdb3786d34f7"
+          "checksumValue": "e77904e52546126bb86c14b538dee95b0083908762968661be2bea474a0e3b44"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20162,11 +20146,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "4bac86fb90c497db7f3e2a0ab0d05eef9418cc82"
+          "checksumValue": "a0182fecbe8acfda96280763b837f82803d96395"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d147f128794b21f488f1e0a7d554f455c8ff235ff875650561abb1d8ca7b9e10"
+          "checksumValue": "f978ed8f35525566e1f1db430edf5fd38fa9180d8c2ecbe7dfba7ab3dd5bb899"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20194,11 +20178,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "8dad014a9e2890734e4265cb067272fbbb7d1d1f"
+          "checksumValue": "de186481cd9cf3fa403289f2a4a8171ee435ff47"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "62c86e6ca09e97645ff49e06540e34a7e12a1d014917a2f3df242c464a7e3e8a"
+          "checksumValue": "2dc0b7888ea55ed6cf6c66755c00b0fd962bb50014b29b5b51b945f5ae151d19"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20242,11 +20226,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "7be25162bc58b635b9d40291f3fbf158a3716ed7"
+          "checksumValue": "2d19911df07aa1bb0dfd8f8ce452c04f28454849"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "e0c9460ccbbbb659bd8fc2bab139fd0d438d45c04784f511e959bb7c2fc48c50"
+          "checksumValue": "14a1e6779a13ef39e2efe63be291989a8d8be92e6a898a648c9e4a718c9beaa8"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20258,11 +20242,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "fc04cdf46e3436366df58b0738ac366059f85b84"
+          "checksumValue": "836a8eb651a18ba6703e6deb2cd2570ba79765a6"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "85375d9bfc500e7a8d29d2b60b6f19a521536d4e16daa567884992a82f09316b"
+          "checksumValue": "b849ac0928e69567421ab0d5d136314dc1fe89c38d5d059afa90ea8cc5bcec59"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20274,11 +20258,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b2a7c0120933df353a41451d5c29f44a7de6815a"
+          "checksumValue": "3974784a5a38b7f504d1b30a8ab130f04ddae6f9"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "48c2934cb13a2f8600c5819b2156ba8d4098b6795b19ea6bfec2165064b67e6b"
+          "checksumValue": "f2d27d519abb8237f0b8dfdcf92bb4eda2645637ab0222d18422a979ad5b7ad9"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20386,11 +20370,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "0295e408a38a304c22b730c4030a9191fc22b062"
+          "checksumValue": "a2db4bef3e24e2edf11c8d9e0333564d7c523bec"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ce9aa56d9383586fff9505222ad0f87a057855374447740dc38ab4bebc7886da"
+          "checksumValue": "1a11bbbce6c235f27abbff81e1f06399b2ce1fc177058874b7f5bd4c6ca39fae"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20402,11 +20386,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "bc4b37c798ab17bac50d2dabdd30df04fbe7e074"
+          "checksumValue": "cf36b585ca02c540dbcdf6b9d0e95bb57baba440"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "f5f502c2d9bf00052fafd2992b8295456f3170dcdc2e8659819fcf9f220abb9e"
+          "checksumValue": "0ac73883e40679c456a4d20990eaf7acb4ad2abfd40fbfde60cc61d5c5f2dc86"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20418,11 +20402,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "afdc69312d5e332748c263a247e28bf631a18dce"
+          "checksumValue": "bce1645170315318f0bca02cd9b8ad6962a65814"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "93b9ac8a5a06dfc8adaeba3932e3692173993115cf485c3b3454a5080597c10a"
+          "checksumValue": "c898d94ed7d2e902205390152472bab2fb4900cf32cbe52409e88a3ad4b4deb5"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20466,11 +20450,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "df44a109577731e414383cc923b3b1a56ab63600"
+          "checksumValue": "e6df00bb7a56c3bd0bb295cf80711f197cfea6a9"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b35e505684e102e5b3a004d096be819745b4c05cffc0517a68fde8d12c90398c"
+          "checksumValue": "b0a27e86560f95438afdcdde4fdb56b8e7f207d383109cb0dd8b2cec80d72a56"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20546,11 +20530,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "960d8f116b077255fe46633fa352f108b933650e"
+          "checksumValue": "15f3b755962d676d75c83174499e10e5bb01edc6"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "32a5575bdc137559a0eca1678d644561e8974d6f37fee98c740889b9b4b28d88"
+          "checksumValue": "9a7e6b21b76d05950728c76106ef660c6c768bea103d65c2746673b2d0bdb5b2"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20562,11 +20546,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "49007178ff494a647eab1dbb2f7fe42b202eb7fa"
+          "checksumValue": "9637e85a2d6f2b56cc923ecb7f57aa6375530283"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "15a5893df60ab331a8f3ba755e9659bee472b0b5644f405fd77dd828813a66a6"
+          "checksumValue": "c98c3d13d4256aff9cc30aab9810fb2a1fc7716bfbb9c881d63d3a424988c737"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20578,11 +20562,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "2c312688ba1966f57d9bd24605af8c8021b0f320"
+          "checksumValue": "2c8d9b7f7111ec4c145bbc9f773d5e4f44db505a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "96d6b42fdae25518f6dc606d701e7a166ed4927381bd8746bbeceac4d36d7dfb"
+          "checksumValue": "122d397ce0902d4a5dec4ee9e2f3f4cd638fe23d43c76a4596217584b59ef33a"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20674,11 +20658,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d58143a98bd7b60b8b2a517899706b8ce2f47646"
+          "checksumValue": "e762ceb7ed659f66239d562bfa16aedc83c75247"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c90f46d6849e08f48b7b93cf6278fbbae74c616779619ada014e2ad18a6b7743"
+          "checksumValue": "dfd8af026869b229732bdbbbc135b8347a39fc5f47d7de3b24230a24ba2d9ede"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20818,11 +20802,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "0d602fe6c12b2e87d94ed94be2c13e80cd0ebdec"
+          "checksumValue": "567561072e2d3cb293787080aa308445f1113cda"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "ae33bc885dc4db674a67c7230269f90094c2e8a75cb3684861d2f6ae02bbbb61"
+          "checksumValue": "9cfe1c076dba89a8ea17b3c9db906c70a6af1ac74bf5ec917256cf5e7b1db302"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20834,11 +20818,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "dd0934cf0f1d84ae631aec1113b6615781fde862"
+          "checksumValue": "5fef79a1a202a5bb7ec9f39106b4f67309c69c28"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "77c5ce8140294b22f830e008680922a5c4bb725a08990fc5dee4ad158ac46e3a"
+          "checksumValue": "2733d579fec793309084ff226956491bb81ba328bf5b775150443e39ba2ed9a0"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20850,11 +20834,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f0f50b97d0aca507304cd09927d42ed59b737212"
+          "checksumValue": "e9cc0e64cdf0ad9fd5280fd035a1e0c50669c4fc"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c0c7ba51efac38e7f756ecd19bed8bdd1a25c45ad8d096d351a9e6fe9e3eadce"
+          "checksumValue": "aa6fcc5ab24261c1b8a5a9d6f0c865802d29628faedeefe6060d4a7b76f621c9"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -20891,6 +20875,38 @@
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageAttachmentSubmission.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageBitmapStore.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "f7548a383aac4c5bfa85c75eb5d3416ac009498b"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "2c5446a65aa974cdcf9c0ffa4b4929e28c99b11132b902f9cdeadf7eab2746d2"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageBitmapStore.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageCacheCore.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "12e28be0f880f2ec9fd6e32c81037ee14a9a3cde"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "0da8699b25bb1743a7972cfefd3acbb7958336e3742a3b374bcfc15b2bce8b6b"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatImageCacheCore.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -21010,11 +21026,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "296950101bbb0e22e9a26444ddbdf8844a430f0d"
+          "checksumValue": "55389e6942e07f1a76382b532e1e2330974e254a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "72155fe78fa497055fe52df6d31ef06992a0af001a8f36589c8a0df5b1b6eca8"
+          "checksumValue": "ca5fce14929e4dba8c535d2143063ba16b793aa0c261ddaa1ac51f0bd5097c84"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21074,11 +21090,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "c3fac60ef4bad6663c174fbb3a23bb7defb33003"
+          "checksumValue": "efbc7d372801d7a811b0dad799ea164c48941cb1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "73c913f27e3d386bc42ffd21ab37cc6c7217bb890be415f89d236a1cb842e796"
+          "checksumValue": "2e50aeb435e8c49b983d12aa11b2eb060f6b86c698ef51a763ccd4edcc8388e2"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21086,15 +21102,31 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageIdentity.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "ce724155620fe06c3909d6981eae8c5ca03033d4"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "04066b53773fc8f362f8bff14d563485c93269970f694bdecc98bd6006515d60"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatMessageIdentity.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageListSection.kt",
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "48659cf5d95139544397c502bb319332ea1e158f"
+          "checksumValue": "4299f6b9b41c84bc90fe6af97127f81b902cf10f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "0631daf2ba559d8b2cdcfc49e8778cfaecccea30461c058f04b7d24af3a3b17d"
+          "checksumValue": "e4d907ce7c1f9a3d2418ee6562acda8f070054f763cfe7d4ea972470b628084c"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21170,11 +21202,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "dfb05435328938a548f223e5d3102e16a4e4e708"
+          "checksumValue": "2d0540316be4d43bd1a0c8bd80d15493d84e5ca3"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "5aaa2dfaea02bf35da28dadfbdd036c499ce207c0a4519d8f888edbe5264e72e"
+          "checksumValue": "0f2c0a5930bd040137f0799f4a7b34ddc1efd0e21eedbaba9db93305c2022006"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21186,11 +21218,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "27a709d26966a2c2d3771d8d58fa2b3e04d4e1ee"
+          "checksumValue": "ae198dd19656f8356e95379d2efedc140006b87d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "121307104649a3f3a7d8a7742768623ba293f99aa8d6f08cbd2e42376fe47995"
+          "checksumValue": "7f27be3834935e9b8671a775cab9247fe57e24cc59b668e1d155405777db330c"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21202,11 +21234,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "7694da0d4b07b2465c221114a4afd8a2914af7cf"
+          "checksumValue": "db203577a0dd3e708df6a98b4c8f10cc383ab72a"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "6138c18f96900918f17fe2f6061adc754256f784d51ffe6d84bf57b007a9089c"
+          "checksumValue": "7e7450b777288be2be3f12888db4010d943af18de489a40c6c6ba37db4d0c063"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21262,6 +21294,22 @@
       "licenseConcluded": "NOASSERTION"
     },
     {
+      "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScrollCoordinator.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "24fc617b920f7cc382c437b97d7ee386dbdccad4"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "23f7c7e8945c24f7f442f4d492fd30620f2becdff2d7cf9a0d66e4ae321f4307"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScrollCoordinator.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
       "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatShellDialogs.kt",
       "checksums": [
         {
@@ -21298,11 +21346,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "96fcf47b55f43ff1393ad9004cc159398b49947a"
+          "checksumValue": "ba42e603239f0ee69224842b3ab19bad0041d5f1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "860a70f30620366b2fc8ec6fe062e3fe013ec8d3bf91a38cbdf536a7f70e5114"
+          "checksumValue": "70805eb8c9ff3e23677bafd377906b0707f5d782431084328f6034915232ef89"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21330,15 +21378,31 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "cc293c297e215ebba885903f00008207cb86dd70"
+          "checksumValue": "ac361f13611e55569d0a10f65440ec0ffa583214"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "dd4465fd24c586e40ba2257980e019233563d66da777f4d3c79a7ea1886f9302"
+          "checksumValue": "47e117e79105edf60d6099a0ea4bbbf458385b6ce435ff61263963608b556ab1"
         }
       ],
       "copyrightText": "NOASSERTION",
       "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatViewModel.kt",
+      "licenseConcluded": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatViewportContract.kt",
+      "checksums": [
+        {
+          "algorithm": "SHA1",
+          "checksumValue": "3c3e243ad0a0840adc47ae3325a2eca2fb9b306b"
+        },
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "11c6a7a524ff66ea0c6c25b51abc627ada6a74952a5fc45e16d2514f92092ca8"
+        }
+      ],
+      "copyrightText": "NOASSERTION",
+      "fileName": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatViewportContract.kt",
       "licenseConcluded": "NOASSERTION"
     },
     {
@@ -21362,11 +21426,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "4797dcbe2963105dc446c336ff427ccf3e07d3e6"
+          "checksumValue": "c98dbcb4245343493e671264412a2fc2caae05c3"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "b164c7ff90cb3def67f653cc88405d0173e9946d3f25a11c6a46a924a14bf5f2"
+          "checksumValue": "cfe628a81ebcd46ef9567a6fa120776f5afc6abe994655e7830aa74dc0b5c840"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21378,11 +21442,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "28620ea3798f12c61978b7293d77205a88d8c4c2"
+          "checksumValue": "3590ae4c204d17e8d941ee5aa276209f2498ae6e"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d64dfc9f2def7dc8036ef92bb2c4b8b5cb225e3698b42f6484d0b39e47ded915"
+          "checksumValue": "3db23e87489ea28acf4a9181d062400349054ff985755ac943bc92ffd8b7adee"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -21394,11 +21458,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "6ede5d55158d2e136feb3d4d70cc31fd871b09a5"
+          "checksumValue": "5c7e75ac068b6b85a594804660b6a82753e6ddfa"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "a5296f72030211bc5d38af92605b5efc0fe42f9639a4ff9f795db2ddd7cb7d75"
+          "checksumValue": "8c89c5b60992a6d2e3b2f0feedca6f569c1989d07edee911fa75f5d3db14197d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22242,11 +22306,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "a6612233cc3301a718807e98ef3eafc307e6d2d5"
+          "checksumValue": "9d722a6a82efe4de4a710b70f1f0b359cb125d66"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "9598e78303d229dddb0bac3fbfc5dc077bd8987676384f6262ca2b144c271c69"
+          "checksumValue": "278626d4017788ebbf3db7a9b80a4a0a83c8a9160318db06ecc09988a170d64b"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22338,11 +22402,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "2bce5a36f80af9d50f2f95c11f357d40d50f1bd7"
+          "checksumValue": "e81dc3f38088f2fd4b2932e87c3061e67fd85401"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "00ecf04077a3554318115941d62a727bd7f7d912d36b4e035db74ca2f898c517"
+          "checksumValue": "cceb0b53c38f3523f4425243eab19996694f54566d9b9ab1843b0bbb5f31fe00"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22354,11 +22418,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "b6ece67c77634e6aebe46b7f3959de0b7a9056e0"
+          "checksumValue": "1fe8fc7d3b6a3034b50210f9f90c30fd22832b3d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "27fb951a5b267187013026246132290153f17a8dd98f4e25bddb8a5dcff5647d"
+          "checksumValue": "2f32bec30b3da8ff83baa64ffc243eed426f7345d80956f077afcc5f6361277d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22402,11 +22466,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "9589b99dd3788ab228904394b211eaaec88a147a"
+          "checksumValue": "27e5a7d602f8e5b57137b69714fd876618554320"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "66d9488fb92294f014b0b84fe142152390d7cefa481a894d22ba8d704cd226a2"
+          "checksumValue": "57bdda11a3effc4d6861f71aff84a9734273661d8e3645d10edc1846f99a3b49"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22594,11 +22658,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "14e2842f25e27eb1c3ea5475d0e524316b592b28"
+          "checksumValue": "f21f5dd5b5898201969f59733a5d15b5d0e4493f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "9e6bd5e2c3a7eca7c6e08fe76bf42df9b37e0643b3da05421d15f9ff43c78309"
+          "checksumValue": "80d9f5f8a1996b14b8b7ea4d26aff87c28a934516d353a55736213fac8095f5e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22610,11 +22674,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "9fae1faa5ec2d8aa26625765f371c8c06b4cf100"
+          "checksumValue": "d5521c036b353126ce3722818b36e8f28c8ffb59"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "73eda0dba81663c5d28b9d4393491fdda13807a85abc601153d075a1ea24629d"
+          "checksumValue": "13af39df7287f0a00e3aa6ae3c7095e76fc86268f5dfe61d11c2f1fa3954488e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22626,11 +22690,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "3eb4a6f8e11d56d918cf81511a1ccac90926f500"
+          "checksumValue": "e99d53325bb3bd282387efbc31c699b995a652cc"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "f6192d3afece369d0582a7a3d8c72d8952a01326ce2a3f1a56bc3f6b754c74fd"
+          "checksumValue": "75b15fdca81b307e668da5a7d97ae9fc09d7483c0bef76588738f91234186e4d"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22642,11 +22706,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f22f02db5bd3fb668ba5113d95373d2d4390cb5d"
+          "checksumValue": "363751381861e15692669136927a047aac9f8c78"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "d6feac8a0643dae5c1ad155e4c3289ad6c54ead94fe2193a2ce69028510a7b3a"
+          "checksumValue": "872263b2579eb6b77d26fc261948320f465e34e6ac3535add8fb7d24fac612c7"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22754,11 +22818,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "cd410c42277c569740e50fec4c73088ea771b295"
+          "checksumValue": "8fde4e8a793259a8f24205a3691c574561ef2a3f"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c4c08b0d5f8505531dda1fb30713ff96000bf6bd86ceb231fb9c606267efe174"
+          "checksumValue": "a4f1d052e5ef4feb4d7f45698260b6f01012bcf9e978d564b49deab908512add"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22818,11 +22882,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "2e091f8670b6e5f3fb16f36e7da490982abb371c"
+          "checksumValue": "0d01c097d40e20a3b48a15003395e6045b364360"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "8c7a9d7e942c66a83ab359f44c4636b0df7b03e8a2c40c0378a81f407720aeb4"
+          "checksumValue": "7cae652ff59ff9bcec64eef628b3f47418d97dde42d5502ab43e7190f90df6fa"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22834,11 +22898,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "7d2165e78a51c4eff56db123c61bceba6e3c9bc9"
+          "checksumValue": "323c8efe34426e2e606bdd48e62f1afa0ae78d10"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "5f1b0e1214cbb9d282d394f24036812e2251f9991120c34ee2260c13f096bd58"
+          "checksumValue": "cd98e5381bea46175853e8edfb14f8a83f7bbee66b303226ed71328ff6b6f4c0"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22850,11 +22914,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "63ae79a1653230fb260946cd57f1a04ddd48fb9d"
+          "checksumValue": "afc8dd21bad58719461824897a2c0eef1d29600d"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c2857d618bcc7ba696c9be1ccab8192e41a8f45fa55931f0330da82667669ddd"
+          "checksumValue": "b15e5c056b5d8ac9c966216eb3e0765d7d706bc081cee91d35d57cb2e618552e"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22866,11 +22930,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "f27376ded9fbd665b71205552a085e347316fd31"
+          "checksumValue": "77999220333f076d45823abf5f330ff71e4deeb2"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "c796c890d3af7ae439b480f3c707fcad361887b3029e150e0d8e22a38246bd40"
+          "checksumValue": "18776b79701cbfc0f65cd995123184f47ba27c67fc6cd2eaafbc9de0ab78be96"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22882,11 +22946,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "d154c0caee5945cb0edd2c6724d2b7ed9b2d766d"
+          "checksumValue": "c5070a1f5ff88c9268ac18db308c80c15b996e2e"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "2f2a9db36344b297b523b1a4e4afee419b79a1a77e63fcd490a8c8499e0c9c1d"
+          "checksumValue": "ae4e6dda5a66a5bebcfba3818ac5e1e83d3201f3763c8c9e8271774e0a0844ed"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -22914,11 +22978,11 @@
       "checksums": [
         {
           "algorithm": "SHA1",
-          "checksumValue": "fa3af30ae033b579fe3af59e73e52656c0e9a8ae"
+          "checksumValue": "b1354dd51620a62caa5893d7c11577ad7eaf19d1"
         },
         {
           "algorithm": "SHA256",
-          "checksumValue": "85877736a1fe9a4b6253f7ff328e9acee195cc4812b345031a5d5844371536c6"
+          "checksumValue": "9c14f2dd960345c48157835b95aeaec58ab89f6222b58e348e6ad9d00dc43c64"
         }
       ],
       "copyrightText": "NOASSERTION",
@@ -25040,7 +25104,7 @@
       "name": "androidx-lifecycle-lifecycle-runtime-compose",
       "originator": "Organization: Google LLC",
       "primaryPackagePurpose": "LIBRARY",
-      "sourceInfo": "app/build.gradle.kts; core/designsystem/build.gradle.kts",
+      "sourceInfo": "app/build.gradle.kts; core/designsystem/build.gradle.kts; feature/agent/build.gradle.kts; feature/chat/build.gradle.kts; feature/settings/build.gradle.kts",
       "supplier": "Organization: Google LLC",
       "versionInfo": "2.10.0"
     },
@@ -25069,7 +25133,7 @@
       "name": "androidx-lifecycle-lifecycle-runtime-ktx",
       "originator": "Organization: Google LLC",
       "primaryPackagePurpose": "LIBRARY",
-      "sourceInfo": "app/build.gradle.kts",
+      "sourceInfo": "app/build.gradle.kts; feature/chat/build.gradle.kts; feature/settings/build.gradle.kts",
       "supplier": "Organization: Google LLC",
       "versionInfo": "2.10.0"
     },
@@ -25393,7 +25457,7 @@
       "name": "kotlinx-coroutines",
       "originator": "Organization: JetBrains s.r.o.",
       "primaryPackagePurpose": "LIBRARY",
-      "sourceInfo": "api/local/build.gradle.kts; app/build.gradle.kts; core/benchmark/build.gradle.kts; core/download/build.gradle.kts; core/engine/build.gradle.kts",
+      "sourceInfo": "api/local/build.gradle.kts; app/build.gradle.kts; core/benchmark/build.gradle.kts; core/download/build.gradle.kts; core/engine/build.gradle.kts; feature/chat/build.gradle.kts; feature/settings/build.gradle.kts",
       "supplier": "Organization: JetBrains s.r.o.",
       "versionInfo": "1.9.0"
     },
@@ -25575,10 +25639,10 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514"
+          "checksumValue": "11d6bca94e64efe4d45d50ed6e11acbf9dedcc046469ad7695620c42bb213cc2"
         }
       ],
-      "comment": "provenance=repository-input; artifact=APK; bytes=181360536; abi=arm64-v8a; variation=abi=arm64-v8a;versionCode=8;versionName=0.2.4",
+      "comment": "provenance=repository-input; artifact=APK; bytes=181397400; abi=arm64-v8a; variation=abi=arm64-v8a;versionCode=8;versionName=0.2.4",
       "copyrightText": "NOASSERTION",
       "description": "Final MCA Android APK artifact bound by SHA256 and byte size.",
       "downloadLocation": "NOASSERTION",
@@ -25596,7 +25660,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageFileName": "MCA-v0.2.4-arm64-v8a.apk",
       "primaryPackagePurpose": "APPLICATION",
-      "sourceInfo": "abi=arm64-v8a; apkPath=artifacts/releases/rc-repro/MCA-v0.2.4-arm64-v8a.apk; apkSha256=298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514; variation=abi=arm64-v8a;versionCode=8;versionName=0.2.4",
+      "sourceInfo": "abi=arm64-v8a; apkPath=artifacts/releases/ui-v9-final2/MCA-v0.2.4-arm64-v8a.apk; apkSha256=11d6bca94e64efe4d45d50ed6e11acbf9dedcc046469ad7695620c42bb213cc2; variation=abi=arm64-v8a;versionCode=8;versionName=0.2.4",
       "supplier": "Organization: MuYuChat MCA Team",
       "versionInfo": "0.2.4+8"
     },
@@ -25605,7 +25669,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "cf81228a402fe76433a5054d24033b39ff93c6b263d67232b91bc83a5495ef1f"
+          "checksumValue": "9c2f91056ae572b4a6a06f012521142fd2cc9252a3f0c4c204e6919e7b16be56"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:app; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -26216,10 +26280,10 @@
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-WorldBookOwnership.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-WorldBookResolver.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-WorldBookStore.kt",
-        "SPDXRef-File-app-src-main-java-com-muyuchat-mca-adapter-LocalApiFacadeAdapter.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorAssembly.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorHost.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorHostAdapter.kt",
+        "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainRuntimeAssembly.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainViewModelPortFactory.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-McaAppContainer.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-McaAppContainerApiParts.kt",
@@ -26231,8 +26295,6 @@
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-FacadeOutcomeReadModel.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ImageExecutionGate.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ImageGenerationFacade.kt",
-        "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ModelLifecycleFacade.kt",
-        "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-RuntimeFacade.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-presentation-BenchmarkAndFormatPresentation.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-presentation-ChatAppearanceMapping.kt",
         "SPDXRef-File-app-src-main-java-com-muyuchat-mca-presentation-ChatContextOperations.kt",
@@ -26258,6 +26320,7 @@
         "SPDXRef-File-app-src-main-res-mipmap-anydpi-v26-ic-launcher-round.xml",
         "SPDXRef-File-app-src-main-res-mipmap-anydpi-v26-ic-launcher.xml",
         "SPDXRef-File-app-src-main-res-values-colors.xml",
+        "SPDXRef-File-app-src-main-res-values-night-styles.xml",
         "SPDXRef-File-app-src-main-res-values-strings.xml",
         "SPDXRef-File-app-src-main-res-values-styles.xml",
         "SPDXRef-File-app-src-main-res-xml-backup-rules.xml",
@@ -26270,7 +26333,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "71f77591f515de0ed5ebb10f3d9c8dca97feaf5c"
+        "packageVerificationCodeValue": "f3b5106f74a859f2c9dadf339578417aa49defba"
       },
       "primaryPackagePurpose": "APPLICATION",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=app/build.gradle.kts; gradleProject=:app",
@@ -26282,7 +26345,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "04a9b64fd5a32d346dce61f2a6104dbd1b90a084579a44ec17edd524f827ab0a"
+          "checksumValue": "4532902e2d1a2aadc918e74544cb4a10bfb6bce94a5c63bc198b95249854ad8c"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:api:local; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -26339,7 +26402,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "a17810e8c363814cf0d8d88d4d6316f92a5a98ea"
+        "packageVerificationCodeValue": "03578438150da2c031016b8797e8a66a41fbc394"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=api/local/build.gradle.kts; gradleProject=:api:local",
@@ -26580,7 +26643,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "50ec484fcc042767bc484baab8dd6ec01a72245932478f402280dc68c02e7ca1"
+          "checksumValue": "89f37ce151b3cf062d6177183ee38c6073fb7a4fd07ab508dd013107139f03ce"
         }
       ],
       "comment": "provenance=static-fallback; gradleProject=:core:engine; appVersion=0.2.4+8; versionInfoCompatibility=static-fallback; checksumScope=canonical-file-set",
@@ -26599,16 +26662,9 @@
         "SPDXRef-File-core-engine-build.gradle.kts",
         "SPDXRef-File-core-engine-src-main-AndroidManifest.xml",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatExecutionOwner.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextCompressionPolicy.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextSummarizationService.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextWindowAdmission.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-DeviceClockContextProvider.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-GenerationParameterApplication.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-GenerationStopTargetAdmission.kt",
@@ -26617,11 +26673,9 @@
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-GenieXChatRunnerLoad.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-GenieXModelSupport.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-GenieXTextSupport.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtGenerationSupport.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtLmChatRunner.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtLmVisionCapability.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LlamaCppRuntimeParameterAdapter.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LocalChatRunner.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LocalChatRunnerContract.kt",
@@ -26666,24 +26720,8 @@
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-RuntimeParameters.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-SaturatingArithmetic.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-StreamingStopFilter.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionBindingState.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
-        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt",
+        "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VlmContentDedup.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-runtime-BackendRuntimeOwner.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-runtime-CallbackRouter.kt",
         "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-runtime-EngineSessionOwner.kt",
@@ -26701,12 +26739,78 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "386f6b4fb1229c694e6a3104e55e02af04ed9bb0"
+        "packageVerificationCodeValue": "cab3b0289743108ef70bae2a2602785ee001e90a"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=core/engine/build.gradle.kts; gradleProject=:core:engine",
       "supplier": "Organization: MuYuChat MCA Team",
       "versionInfo": "1.0.0-sgrade"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-mca-core-inference-contract",
+      "checksums": [
+        {
+          "algorithm": "SHA256",
+          "checksumValue": "f6b364c43170ef883ccce18fe2559accf4dd3fd7c798e4b78bfcfd40bcd12e9d"
+        }
+      ],
+      "comment": "provenance=repository-input; gradleProject=:core:inference-contract; appVersion=0.2.4+8; checksumScope=canonical-file-set",
+      "copyrightText": "NOASSERTION",
+      "description": "MCA Gradle module :core:inference-contract; source snapshot is build.gradle.kts plus src/main.",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "OTHER",
+          "referenceLocator": "mca:gradle-project::core:inference-contract",
+          "referenceType": "mca-gradle-project"
+        }
+      ],
+      "filesAnalyzed": true,
+      "hasFiles": [
+        "SPDXRef-File-core-inference-contract-build.gradle.kts",
+        "SPDXRef-File-core-inference-contract-src-main-AndroidManifest.xml",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LocalChatExecutionContext.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionImageLimits.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-InferenceContractFacade.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
+        "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt"
+      ],
+      "licenseConcluded": "Apache-2.0",
+      "licenseDeclared": "Apache-2.0",
+      "name": "mca-core-inference-contract",
+      "originator": "Organization: MuYuChat MCA Team",
+      "packageVerificationCode": {
+        "packageVerificationCodeExcludedFiles": [],
+        "packageVerificationCodeValue": "e6058493c63859c865bb4ba9b5fda1c3fb48ecd0"
+      },
+      "primaryPackagePurpose": "LIBRARY",
+      "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=core/inference-contract/build.gradle.kts; gradleProject=:core:inference-contract",
+      "supplier": "Organization: MuYuChat MCA Team",
+      "versionInfo": "0.2.4+8"
     },
     {
       "SPDXID": "SPDXRef-Package-mca-core-modelstore",
@@ -26775,7 +26879,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "9212ae34b38da78a4cc0ec164f8d7761da704366735b1bb401e0310d064fc2b7"
+          "checksumValue": "820a79713de110ea9650f7c2a1f76354ba366b08067d1189f5ee1ec6633d84d2"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:core:sd-native; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -26851,7 +26955,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "708378038e2c00b6d50da23ba1ad70e6c277b33e"
+        "packageVerificationCodeValue": "923f8be97619958f8a55f3e113a9f6df18ff9d32"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=core/sd-native/build.gradle.kts; gradleProject=:core:sd-native",
@@ -26957,7 +27061,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "2bbbb3c16272decb6ccbe5cf121ced35f486c79dda0d0b840ba52d9697bbb64f"
+          "checksumValue": "a199d5d0243f48a1413e755fa96c58775c1207a7dfbdb4b95d6584fe49145ec4"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:feature:agent; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -26978,6 +27082,7 @@
         "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentAdvancedParams.kt",
         "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentDebugAndHardwareCards.kt",
         "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentFormattingAndStateExtensions.kt",
+        "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentPageDerivedState.kt",
         "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentScreen.kt",
         "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentTuningCards.kt"
       ],
@@ -26987,7 +27092,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "ab3946f9d40b100f60875450bdbb0876acaa21e3"
+        "packageVerificationCodeValue": "f955110cd454608e92df168c5064b9615471e4d3"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=feature/agent/build.gradle.kts; gradleProject=:feature:agent",
@@ -26999,7 +27104,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "bd693d8ec70a38a060b915ae73a8d1b305b043428765ec3a030a68f66ba42db4"
+          "checksumValue": "f346e674537fdbee51c073ffde9ce846d9045a449ac2cfe1374b9410f9d3def9"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:feature:chat; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -27063,6 +27168,8 @@
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatHistoryDrawerSections.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageActionUiModels.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageAttachmentSubmission.kt",
+        "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageBitmapStore.kt",
+        "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageCacheCore.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageGenerationSupport.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImagesWorkspaceBindings.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImagesWorkspaceEffects.kt",
@@ -27075,6 +27182,7 @@
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMarkdownRenderSupport.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMarkdownSource.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageBubbleScreens.kt",
+        "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageIdentity.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageListSection.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageTextRenderers.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatModelSwitcherScreens.kt",
@@ -27086,11 +27194,13 @@
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScreenDialogs.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScreenHeadTypes.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScreenImageGenerationCardMapping.kt",
+        "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScrollCoordinator.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatShellDialogs.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatSlashCommandCatalog.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatStatusBarHeader.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatUiItemModels.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatViewModel.kt",
+        "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatViewportContract.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatWebSearchMessageViews.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatWebSearchTraceScreens.kt",
         "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ContextLibraryPage.kt",
@@ -27174,7 +27284,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "280ab4cee136efd798e44a96702b99c18f550112"
+        "packageVerificationCodeValue": "6fe8dd26d8e06c7e1e4e24b9340693649e6c0b51"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=feature/chat/build.gradle.kts; gradleProject=:feature:chat",
@@ -27186,7 +27296,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "c1bfc2e26283ea33406a9b56a60e44756092366161bee4fc7525c7cae307d696"
+          "checksumValue": "e50ca5c814c853554e11603c2cca3626ac513e3aabccd62b52900df49c12781e"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:feature:modelhub; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -27221,7 +27331,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "a94c5092ff92596c50bb16cea8db20682bd69b7a"
+        "packageVerificationCodeValue": "7a9d694ff8558f25bbb7ac155c9c44516e7ade45"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=feature/modelhub/build.gradle.kts; gradleProject=:feature:modelhub",
@@ -27233,7 +27343,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "011ba448ad66b21965d80459c7e6e96f90b9af8431602410b2203978d85c80ab"
+          "checksumValue": "c16fcabd9899d65274cbf3b4a355ab43a709a065f882d7ee86894c2d8aa50dfe"
         }
       ],
       "comment": "provenance=repository-input; gradleProject=:feature:settings; appVersion=0.2.4+8; checksumScope=canonical-file-set",
@@ -27267,7 +27377,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "4e77741cbe0b67329b86034c1f93d77110f4e06e"
+        "packageVerificationCodeValue": "31a03f0363259386db943539008ccbe9a2d45a65"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=feature/settings/build.gradle.kts; gradleProject=:feature:settings",
@@ -27279,7 +27389,7 @@
       "checksums": [
         {
           "algorithm": "SHA256",
-          "checksumValue": "9eadcf2393a93fb9ca86b521670986e03d94dbbea3cdeb1e7eb28ecbd337f0b8"
+          "checksumValue": "7e0dcb9a9fa3be959448ba998d0942c529f3d69ad7ed82db523eb06eaca4ab99"
         }
       ],
       "comment": "provenance=static-fallback; gradleProject=:core:native; appVersion=0.2.4+8; versionInfoCompatibility=static-fallback; checksumScope=canonical-file-set",
@@ -27372,8 +27482,12 @@
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-backend-predicates.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-bundle-config.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-bundle-config.hpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.cpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-entries.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-jni-guards.hpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-jni-prelude.hpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-lifecycle-entries.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-session-internal.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-session.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-clip-encode.cpp",
@@ -27387,11 +27501,15 @@
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-asset-contract.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-assets.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-assets.hpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-entries.cpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-request.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-internal.hpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-jni-prelude.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-pipeline.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-pipeline.hpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-state.cpp",
+        "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-tokenize-entries.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-tokenize.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-engine.cpp",
         "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-engine.hpp",
@@ -27589,21 +27707,6 @@
         "SPDXRef-File-core-native-src-main-cpp-textual-inversion-conditioning.cpp",
         "SPDXRef-File-core-native-src-main-cpp-textual-inversion-conditioning.hpp",
         "SPDXRef-File-core-native-src-main-cpp-translation-LICENSE.CrispASR-MIT.txt",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-crispasr-env.h",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-internal.hpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-mmap.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-split.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-weights.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.h",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-gpu-backend-pref.h",
-        "SPDXRef-File-core-native-src-main-cpp-translation-core-sentencepiece.h",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-graphs.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-internal.hpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-tokenizer.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-translate.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.cpp",
-        "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.h",
         "SPDXRef-File-core-native-src-main-java-com-muyuchat-core-nativebridge-NativeLlamaBridge.kt",
         "SPDXRef-File-core-native-src-main-java-com-muyuchat-core-nativebridge-NativeMnnBridge.kt",
         "SPDXRef-File-core-native-src-main-java-com-muyuchat-core-nativebridge-NativeMnnDiffusionBridge.kt",
@@ -27615,7 +27718,7 @@
       "originator": "Organization: MuYuChat MCA Team",
       "packageVerificationCode": {
         "packageVerificationCodeExcludedFiles": [],
-        "packageVerificationCodeValue": "1573985e2337698205edee317c0851102c5682c4"
+        "packageVerificationCodeValue": "d57aec8735fb1a7cfcfb32fce97c90028996983c"
       },
       "primaryPackagePurpose": "LIBRARY",
       "sourceInfo": "appVersionCode=8; appVersionName=0.2.4; buildFile=core/native/build.gradle.kts; gradleProject=:core:native",
@@ -31549,11 +31652,6 @@
       "spdxElementId": "SPDXRef-Package-mca-android-app"
     },
     {
-      "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-adapter-LocalApiFacadeAdapter.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-android-app"
-    },
-    {
       "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorAssembly.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-android-app"
@@ -31565,6 +31663,11 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainCoordinatorHostAdapter.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-android-app"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-composition-MainRuntimeAssembly.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-android-app"
     },
@@ -31620,16 +31723,6 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ImageGenerationFacade.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-android-app"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-ModelLifecycleFacade.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-android-app"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-app-src-main-java-com-muyuchat-mca-facade-RuntimeFacade.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-android-app"
     },
@@ -31755,6 +31848,11 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-app-src-main-res-values-colors.xml",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-android-app"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-app-src-main-res-values-night-styles.xml",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-android-app"
     },
@@ -32139,7 +32237,7 @@
       "spdxElementId": "SPDXRef-Package-mca-api-local"
     },
     {
-      "relatedSpdxElement": "SPDXRef-Package-mca-core-engine",
+      "relatedSpdxElement": "SPDXRef-Package-mca-core-inference-contract",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-api-local"
     },
@@ -32549,36 +32647,6 @@
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
     {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
       "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextCompressionPolicy.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
@@ -32590,11 +32658,6 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextWindowAdmission.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
@@ -32639,11 +32702,6 @@
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
     {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
       "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtGenerationSupport.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
@@ -32655,11 +32713,6 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LiteRtLmVisionCapability.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
@@ -32884,92 +32937,12 @@
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
     {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
       "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VisionBindingState.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
     {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-core-engine"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt",
+      "relatedSpdxElement": "SPDXRef-File-core-engine-src-main-java-com-muyuchat-core-engine-VlmContentDedup.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
@@ -33039,6 +33012,11 @@
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
     },
     {
+      "relatedSpdxElement": "SPDXRef-Package-mca-core-inference-contract",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-core-engine"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-Package-mca-core-modelstore",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
@@ -33052,6 +33030,161 @@
       "relatedSpdxElement": "SPDXRef-Package-mca-native-common",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-core-engine"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-build.gradle.kts",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-AndroidManifest.xml",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatGenerationMetrics.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatMessageTypes.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatProgressTypes.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRequestTypes.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatRuntimeParamTypes.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ChatToolingTypes.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-ContextWindowBudget.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-JsonStringList.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LlamaAdvancedParams.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-LocalChatExecutionContext.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-TextUtilities.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionAttachmentDedup.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-VisionImageLimits.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-CallbackEvent.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-ErrorEnvelope.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-InferenceContractFacade.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestIdentity.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestState.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RequestStateMachine.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-RuntimeEpoch.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-SessionGeneration.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogEntry.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ErrorCatalogRegistry.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ModelCapabilityErrorCatalog.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RequestExecutionErrorCatalog.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-RuntimeNativeErrorCatalog.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StableErrorCode.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-StorageNetworkErrorCatalog.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-inference-contract-src-main-java-com-muyuchat-core-engine-contract-error-ValidationErrorCatalog.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-core-inference-contract"
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-modelstore-build.gradle.kts",
@@ -33624,6 +33757,11 @@
       "spdxElementId": "SPDXRef-Package-mca-feature-agent"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentPageDerivedState.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-agent"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-feature-agent-src-main-java-com-muyuchat-feature-agent-AgentScreen.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-feature-agent"
@@ -33660,6 +33798,11 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-Package-androidx-compose-ui-ui-tooling-preview",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-agent"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-androidx-lifecycle-lifecycle-runtime-compose",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-feature-agent"
     },
@@ -33934,6 +34077,16 @@
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageBitmapStore.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageCacheCore.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatImageGenerationSupport.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
@@ -33994,6 +34147,11 @@
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageIdentity.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatMessageListSection.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
@@ -34049,6 +34207,11 @@
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatScrollCoordinator.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatShellDialogs.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
@@ -34070,6 +34233,11 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatViewModel.kt",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-feature-chat-src-main-java-com-muyuchat-feature-chat-ChatViewportContract.kt",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
     },
@@ -34489,6 +34657,21 @@
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
     },
     {
+      "relatedSpdxElement": "SPDXRef-Package-androidx-lifecycle-lifecycle-runtime-compose",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-androidx-lifecycle-lifecycle-runtime-ktx",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-kotlinx-coroutines",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-chat"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-Package-mca-core-designsystem",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-feature-chat"
@@ -34690,6 +34873,21 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-Package-androidx-compose-ui-ui-tooling-preview",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-settings"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-androidx-lifecycle-lifecycle-runtime-compose",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-settings"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-androidx-lifecycle-lifecycle-runtime-ktx",
+      "relationshipType": "DEPENDS_ON",
+      "spdxElementId": "SPDXRef-Package-mca-feature-settings"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-kotlinx-coroutines",
       "relationshipType": "DEPENDS_ON",
       "spdxElementId": "SPDXRef-Package-mca-feature-settings"
     },
@@ -35089,12 +35287,32 @@
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.cpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-completion.hpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-entries.cpp",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-jni-guards.hpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-jni-prelude.hpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-chat-lifecycle-entries.cpp",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
@@ -35164,12 +35382,27 @@
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
     {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-entries.cpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate-request.hpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-generate.cpp",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-internal.hpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-jni-prelude.hpp",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
@@ -35185,6 +35418,11 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-state.cpp",
+      "relationshipType": "CONTAINS",
+      "spdxElementId": "SPDXRef-Package-mca-native-common"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-mca-mnn-mnn-diffusion-tokenize-entries.cpp",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },
@@ -36170,81 +36408,6 @@
     },
     {
       "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-LICENSE.CrispASR-MIT.txt",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-crispasr-env.h",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-internal.hpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-mmap.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-split.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader-weights.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gguf-loader.h",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-gpu-backend-pref.h",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-core-sentencepiece.h",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-graphs.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-internal.hpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-tokenizer.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100-translate.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.cpp",
-      "relationshipType": "CONTAINS",
-      "spdxElementId": "SPDXRef-Package-mca-native-common"
-    },
-    {
-      "relatedSpdxElement": "SPDXRef-File-core-native-src-main-cpp-translation-m2m100.h",
       "relationshipType": "CONTAINS",
       "spdxElementId": "SPDXRef-Package-mca-native-common"
     },

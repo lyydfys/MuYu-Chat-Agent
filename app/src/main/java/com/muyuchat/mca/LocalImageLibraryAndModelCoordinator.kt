@@ -5,6 +5,7 @@ import android.net.Uri
 import com.muyuchat.mca.composition.McaAppContainer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 
 /**
  * Result of settling the active local image model selection against installed models.
@@ -89,11 +90,14 @@ internal class LocalImageLibraryAndModelCoordinator(
         )
     }
 
-    fun clearFileLibrary() {
-        clearFileLibraryFor(
+    fun clearFileLibrary(): Job? {
+        return clearFileLibraryFor(
             store = store,
+            scope = scope,
             showStatus = showStatus,
-            persistFiles = persistFiles
+            persistFiles = { files ->
+                persistFilesFor(container.chatSessionStore, store, scope, files).await()
+            }
         )
     }
 

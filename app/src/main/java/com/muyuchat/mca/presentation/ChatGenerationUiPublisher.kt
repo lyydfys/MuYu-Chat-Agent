@@ -21,6 +21,8 @@ import com.muyuchat.mca.activateContextSummaryCandidate
 import com.muyuchat.mca.withReplyGenerationMetrics
 import kotlinx.coroutines.flow.StateFlow
 
+private const val STREAM_CHUNK_STATS_INTERVAL_NANOS = 100_000_000L
+
 // The named publications a running chat generation writes into MainUiState.
 //
 // Why this exists: startGeneration carried twenty-odd `_updateUiState { … }` sites whose
@@ -59,8 +61,12 @@ internal class ChatGenerationUiPublisher(
     private val generationRunId: Long,
     private val uiState: StateFlow<MainUiState>,
     // R3/S27: 写入经调用方注入的具名更新（同 run 门控语义不变）。
-    private val updateUiState: (transform: (MainUiState) -> MainUiState) -> Unit
+    private val updateUiState: (transform: (MainUiState) -> MainUiState) -> Unit,
+    // Virtual-time tests can replace this clock; production stays on the monotonic clock.
+    private val monotonicClock: () -> Long = System::nanoTime
 ) {
+
+    private var lastStreamChunkStatsPublishedAtNanos: Long? = null
 
     private fun updateGenerationUi(transform: (MainUiState) -> MainUiState) {
         if (!chatRuns.matches(generationRunId)) return
@@ -108,8 +114,22 @@ internal class ChatGenerationUiPublisher(
         }
     }
 
-    /** stream Chunk events: the running stats plus the DECODE stage entry. */
+    /**
+     * stream Chunk events: the running stats plus the DECODE stage entry.
+     *
+     * The first stats write for a run is immediate. Later display-only stats writes are skipped
+     * while the same run published one less than [STREAM_CHUNK_STATS_INTERVAL_NANOS] ago; phase,
+     * persistence, refusal and terminal publications never use this gate.
+     */
     fun publishStreamChunkStats(stats: RuntimeStats) {
+        if (!chatRuns.matches(generationRunId)) return
+        val nowNanos = monotonicClock()
+        val lastPublishedAtNanos = lastStreamChunkStatsPublishedAtNanos
+        if (lastPublishedAtNanos != null &&
+            nowNanos - lastPublishedAtNanos < STREAM_CHUNK_STATS_INTERVAL_NANOS
+        ) {
+            return
+        }
         updateGenerationUi {
             it.copy(
                 stats = stats
@@ -120,6 +140,7 @@ internal class ChatGenerationUiPublisher(
                 stats = stats
             )
         }
+        lastStreamChunkStatsPublishedAtNanos = nowNanos
     }
 
     /** stream Persist events: byte-level KV serialization progress. */

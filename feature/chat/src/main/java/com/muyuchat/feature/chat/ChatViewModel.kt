@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -157,7 +158,8 @@ class ChatViewModel(
 
     fun deleteAssistant(assistantId: String) = capabilities.content.onDeleteAssistant(assistantId)
 
-    fun saveAssistant(draft: AssistantEditorDraft) = capabilities.content.onSaveAssistant(draft)
+    fun saveAssistant(draft: AssistantEditorDraft): Boolean =
+        capabilities.content.onSaveAssistant(draft)
 
     fun selectAssistant(assistantId: String) = capabilities.content.onSelectAssistant(assistantId)
 
@@ -184,7 +186,12 @@ class ChatViewModel(
     fun deleteAssistantMemory(assistantId: String, memoryId: String) =
         capabilities.content.onDeleteAssistantMemory(assistantId, memoryId)
 
-    fun upsertAssistantMemory(assistantId: String, memoryId: String?, scope: String, content: String) =
+    fun upsertAssistantMemory(
+        assistantId: String,
+        memoryId: String?,
+        scope: String,
+        content: String
+    ): Deferred<Boolean> =
         capabilities.content.onUpsertAssistantMemory(assistantId, memoryId, scope, content)
 
     fun changeChatBackground(scope: ChatBackgroundScope, background: ChatBackgroundState?) =
@@ -360,6 +367,7 @@ class ChatViewModel(
             onSetContextSummaryModel = ::setContextSummaryModel,
             onUndoContextSummary = ::undoContextSummary,
             onSearchContextSummarySources = ::searchContextSummarySources,
+            onMessageIntent = capabilities.conversation.onMessageIntent,
         ),
         generation = ChatGenerationActions(
             onInputChange = ::changeInput,

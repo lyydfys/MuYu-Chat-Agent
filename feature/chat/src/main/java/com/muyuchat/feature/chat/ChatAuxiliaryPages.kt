@@ -3,6 +3,7 @@ package com.muyuchat.feature.chat
 import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.Deferred
 
 @Composable
 internal fun ChatAssistantRoleSubpage(
@@ -10,8 +11,8 @@ internal fun ChatAssistantRoleSubpage(
     onDismiss: () -> Unit,
     state: ChatUiState,
     assistantMemories: List<AssistantMemoryUiItem>,
-    onSaveAssistant: (AssistantEditorDraft) -> Unit,
-    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit,
+    onSaveAssistant: (AssistantEditorDraft) -> Boolean,
+    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean>,
     onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit,
     onSelectAssistant: (String) -> Unit,
     onDeleteAssistant: (String) -> Unit,

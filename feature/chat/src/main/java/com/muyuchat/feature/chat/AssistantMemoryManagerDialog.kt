@@ -237,6 +237,7 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.PromptMessageRetention
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -261,18 +262,71 @@ import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
+internal const val ASSISTANT_MEMORY_SAVE_FAILED_MESSAGE =
+    "保存角色记忆失败，草稿已保留，请重试。"
+internal const val ASSISTANT_MEMORY_SAVE_CANCELLED_MESSAGE =
+    "保存已取消，草稿已保留，请重试。"
+
+internal data class AssistantMemoryEditorState(
+    val editingId: String?,
+    val scope: String,
+    val content: String,
+    val isSaving: Boolean = false,
+    val saveError: String? = null
+) {
+    fun beginSave(): AssistantMemoryEditorState = copy(isSaving = true, saveError = null)
+
+    fun applySaveResult(result: AssistantMemorySaveResult): AssistantMemoryEditorState = when (result) {
+        AssistantMemorySaveResult.Saved -> copy(
+            editingId = null,
+            content = "",
+            isSaving = false,
+            saveError = null
+        )
+        is AssistantMemorySaveResult.Failed -> copy(isSaving = false, saveError = result.message)
+    }
+
+    fun cancelSave(): AssistantMemoryEditorState = copy(
+        isSaving = false,
+        saveError = ASSISTANT_MEMORY_SAVE_CANCELLED_MESSAGE
+    )
+}
+
+internal sealed interface AssistantMemorySaveResult {
+    data object Saved : AssistantMemorySaveResult
+    data class Failed(val message: String) : AssistantMemorySaveResult
+}
+
+internal suspend fun awaitAssistantMemorySave(submit: suspend () -> Boolean): AssistantMemorySaveResult =
+    try {
+        if (submit()) AssistantMemorySaveResult.Saved else AssistantMemorySaveResult.Failed(
+            ASSISTANT_MEMORY_SAVE_FAILED_MESSAGE
+        )
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        val detail = error.message?.trim()?.takeIf(String::isNotBlank)
+        AssistantMemorySaveResult.Failed(
+            if (detail == null) ASSISTANT_MEMORY_SAVE_FAILED_MESSAGE
+            else "保存角色记忆失败：$detail；草稿已保留，请重试。"
+        )
+    }
+
 @Composable
 internal fun AssistantMemoryManagerDialog(
     assistant: AssistantUiItem,
     memories: List<AssistantMemoryUiItem>,
     onDismiss: () -> Unit,
-    onUpsert: (assistantId: String, id: String?, scope: String, content: String) -> Unit,
+    onUpsert: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean>,
     onDelete: (assistantId: String, id: String) -> Unit
 ) {
     var selectedScope by rememberSaveable(assistant.id) { mutableStateOf("user_profile") }
     var editingId by rememberSaveable(assistant.id) { mutableStateOf<String?>(null) }
     var content by rememberSaveable(assistant.id) { mutableStateOf("") }
+    var saveError by rememberSaveable(assistant.id) { mutableStateOf<String?>(null) }
+    var isSaving by remember(assistant.id) { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<AssistantMemoryUiItem?>(null) }
+    val coroutineScope = rememberCoroutineScope()
     val visibleMemories = memories
         .filter {
             it.assistantId == assistant.id &&
@@ -280,13 +334,26 @@ internal fun AssistantMemoryManagerDialog(
         }
         .sortedWith(compareByDescending<AssistantMemoryUiItem> { it.createdAt }.thenBy { it.id })
 
+    fun applyEditorState(state: AssistantMemoryEditorState) {
+        editingId = state.editingId
+        selectedScope = state.scope
+        content = state.content
+        saveError = state.saveError
+        isSaving = state.isSaving
+    }
+
     fun clearEditor() {
-        editingId = null
-        content = ""
+        applyEditorState(
+            AssistantMemoryEditorState(
+                editingId = null,
+                scope = selectedScope,
+                content = ""
+            )
+        )
     }
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!isSaving) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
@@ -300,13 +367,14 @@ internal fun AssistantMemoryManagerDialog(
                         Text("角色记忆", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                         Text(assistant.name, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = onDismiss, enabled = !isSaving) {
                         Icon(Icons.Default.Close, contentDescription = "关闭记忆管理")
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = selectedScope == "user_profile",
+                        enabled = !isSaving,
                         onClick = {
                             selectedScope = "user_profile"
                             clearEditor()
@@ -315,6 +383,7 @@ internal fun AssistantMemoryManagerDialog(
                     )
                     FilterChip(
                         selected = selectedScope == "role_progress",
+                        enabled = !isSaving,
                         onClick = {
                             selectedScope = "role_progress"
                             clearEditor()
@@ -330,20 +399,57 @@ internal fun AssistantMemoryManagerDialog(
                     },
                     minLines = 3,
                     maxLines = 6,
+                    readOnly = isSaving,
                     modifier = Modifier.fillMaxWidth()
                 )
+                saveError?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         onClick = {
-                            onUpsert(assistant.id, editingId, selectedScope, content.trim())
-                            clearEditor()
+                            val attempt = AssistantMemoryEditorState(
+                                editingId = editingId,
+                                scope = selectedScope,
+                                content = content
+                            ).beginSave()
+                            applyEditorState(attempt)
+                            coroutineScope.launch {
+                                try {
+                                    val result = awaitAssistantMemorySave {
+                                        onUpsert(
+                                            assistant.id,
+                                            attempt.editingId,
+                                            attempt.scope,
+                                            attempt.content.trim()
+                                        ).await()
+                                    }
+                                    applyEditorState(attempt.applySaveResult(result))
+                                } catch (cancelled: CancellationException) {
+                                    applyEditorState(attempt.cancelSave())
+                                    throw cancelled
+                                } finally {
+                                    if (isSaving) isSaving = false
+                                }
+                            }
                         },
-                        enabled = content.isNotBlank()
+                        enabled = content.isNotBlank() && !isSaving
                     ) {
-                        Text(if (editingId == null) "添加记忆" else "保存修改")
+                        if (isSaving) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("保存中…")
+                        } else {
+                            Text(if (editingId == null) "添加记忆" else "保存修改")
+                        }
                     }
                     if (editingId != null) {
-                        TextButton(onClick = ::clearEditor) { Text("取消编辑") }
+                        TextButton(onClick = ::clearEditor, enabled = !isSaving) { Text("取消编辑") }
                     }
                 }
                 HorizontalDivider()
@@ -375,10 +481,11 @@ internal fun AssistantMemoryManagerDialog(
                                     selectedScope = if (memory.scope == "auto_summary") "role_progress" else memory.scope
                                     editingId = memory.id
                                     content = memory.content
-                                }) {
+                                    saveError = null
+                                }, enabled = !isSaving) {
                                     Icon(Icons.Default.Edit, contentDescription = "编辑记忆")
                                 }
-                                IconButton(onClick = { pendingDelete = memory }) {
+                                IconButton(onClick = { pendingDelete = memory }, enabled = !isSaving) {
                                     Icon(Icons.Default.Delete, contentDescription = "删除记忆", tint = MaterialTheme.colorScheme.error)
                                 }
                             }

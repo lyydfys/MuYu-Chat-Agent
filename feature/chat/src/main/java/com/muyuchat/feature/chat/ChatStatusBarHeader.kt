@@ -27,6 +27,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.Role as SemanticsRole
@@ -60,6 +62,7 @@ internal fun ChatStatusBar(
     var modelMenuExpanded by rememberSaveable { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
     val cacheEvidence = cacheEvidenceLabel(state.stats).takeIf { state.hasReadyLocalModelForHeader() }
     val modelSubtitle = state.modelHeaderSubtitle()
     Row(
@@ -70,7 +73,7 @@ internal fun ChatStatusBar(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
-            modifier = Modifier.size(44.dp),
+            modifier = Modifier.size(48.dp),
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
             shadowElevation = 6.dp
@@ -106,7 +109,7 @@ internal fun ChatStatusBar(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = displayModelName(state.selectedModelName) ?: "选择模型",
-                            maxLines = 1,
+                            maxLines = if (compactForLargeText) 2 else 1,
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp, lineHeight = 15.sp),
                             color = MaterialTheme.colorScheme.onSurface,
@@ -129,26 +132,28 @@ internal fun ChatStatusBar(
                             )
                         }
                     }
-                    Surface(
-                        color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        shape = CircleShape
-                    ) {
-                        Text(
-                            text = "API",
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontWeight = FontWeight.Bold
+                    if (!compactForLargeText) {
+                        Surface(
+                            color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                            shape = CircleShape
+                        ) {
+                            Text(
+                                text = "API",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                                color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier
+                                .padding(start = 4.dp)
+                                .size(15.dp)
                         )
                     }
-                    Icon(
-                        imageVector = Icons.Default.KeyboardArrowDown,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .padding(start = 4.dp)
-                            .size(15.dp)
-                    )
                 }
             }
             ModelSwitcherDropdown(
@@ -183,14 +188,19 @@ internal fun ChatStatusBar(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onNewConversation, modifier = Modifier.size(38.dp)) {
+                IconButton(onClick = onNewConversation, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Default.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
                 }
-                IconButton(
-                    onClick = onOpenAppMenu,
+                Box(
                     modifier = Modifier
-                        .size(38.dp)
-                        .semantics { contentDescription = "打开应用菜单" }
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onOpenAppMenu)
+                        .semantics {
+                            contentDescription = "打开应用菜单"
+                            role = SemanticsRole.Button
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }

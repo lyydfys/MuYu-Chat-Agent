@@ -10,8 +10,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -43,7 +46,8 @@ import java.net.URI
 internal fun WebSearchTestStatusPanel(
     statusMessage: String?,
     latestDiagnostic: WebSearchDiagnosticUiItem?,
-    configured: Boolean
+    configured: Boolean,
+    busy: Boolean
 ) {
     val context = LocalContext.current
     val message = statusMessage
@@ -66,7 +70,13 @@ internal fun WebSearchTestStatusPanel(
             .padding(10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text("当前测试结果", fontWeight = FontWeight.Bold, color = accent)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (busy) {
+                CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                Spacer(modifier = Modifier.size(6.dp))
+            }
+            Text("当前测试结果", fontWeight = FontWeight.Bold, color = accent)
+        }
         Text(
             message,
             style = MaterialTheme.typography.bodySmall,

@@ -10,6 +10,7 @@ import java.util.UUID
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -268,20 +269,35 @@ internal fun deleteFileAssetFor(
 
 internal fun clearFileLibraryFor(
     store: UiStateStore,
+    scope: CoroutineScope,
     showStatus: (String) -> Unit,
-    persistFiles: (List<FileAssetRecord>) -> Unit
-) {
+    persistFiles: suspend (List<FileAssetRecord>) -> Result<Unit>
+): Job? {
     val filesToRemove = store.state.value.files
     if (filesToRemove.isEmpty()) {
         showStatus("文件库已经为空")
-        return
+        return null
     }
-    store.update {
-        it.copy(
-            files = emptyList(),
-            statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
-        )
+    return scope.launch {
+        val persistence = runCatching { persistFiles(emptyList()) }
+            .getOrElse { failure ->
+                if (failure is CancellationException) throw failure
+                return@launch
+            }
+        if (persistence.isFailure) return@launch
+
+        val currentFiles = store.state.value.files
+        if (currentFiles != filesToRemove) {
+            persistFiles(currentFiles)
+            showStatus("文件库保存失败：清空期间文件库发生变化")
+            return@launch
+        }
+        store.update {
+            it.copy(
+                files = emptyList(),
+                statusMessage = "已清空文件库：${filesToRemove.size} 个文件"
+            )
+        }
     }
-    persistFiles(emptyList())
 }
 

@@ -144,7 +144,9 @@ internal class MainCoordinatorHostAdapter(
         operation: Long,
         successMessage: String,
         failureMessage: String
-    ) = vm.schedulePersistentPrefixCacheClear(operation, successMessage, failureMessage)
+    ) {
+        vm.schedulePersistentPrefixCacheClear(operation, successMessage, failureMessage)
+    }
     override fun hostAppendAssistant(
         delta: String,
         reasoningDelta: String,

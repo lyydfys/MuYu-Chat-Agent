@@ -23,6 +23,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +32,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
@@ -38,6 +40,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
@@ -67,6 +71,7 @@ fun ChatScreen(
     val onDeleteConversation = actions.conversation.onDeleteConversation
     val onDeleteLastTurn = actions.conversation.onDeleteLastTurn
     val onDeleteMessage = actions.conversation.onDeleteMessage
+    val onMessageIntent = actions.conversation.onMessageIntent
     val onExportConversation = actions.conversation.onExportConversation
     val onRenameConversation = actions.conversation.onRenameConversation
     val onSelectConversation = actions.conversation.onSelectConversation
@@ -163,6 +168,22 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val scrollFollowThresholdPx = with(LocalDensity.current) {
+        CHAT_SCROLL_FOLLOW_THRESHOLD_DP.dp.toPx()
+    }
+    val scrollCoordinator = remember(listState, scope, scrollFollowThresholdPx) {
+        ChatScrollCoordinator(
+            listState = listState,
+            scope = scope,
+            followThresholdPx = scrollFollowThresholdPx,
+        )
+    }
+    val scrollNestedScrollConnection = remember(scrollCoordinator) {
+        chatScrollNestedScrollConnection(scrollCoordinator)
+    }
+    DisposableEffect(scrollCoordinator) {
+        onDispose { scrollCoordinator.close() }
+    }
     var chatAttachmentPreflightRunning by remember { mutableStateOf(false) }
     val latestChatInput = rememberUpdatedState(state.input)
     val latestOnInputChange = rememberUpdatedState(onInputChange)
@@ -176,6 +197,7 @@ fun ChatScreen(
             // private path); waiting until the native boundary is too late and
             // makes the user bubble briefly show two images.
             if (chatImageAttachmentMarkerCount(submittedInput) < 1) {
+                scrollCoordinator.onUserSentMessage()
                 latestOnSend.value()
             } else {
                 chatAttachmentPreflightRunning = true
@@ -192,6 +214,7 @@ fun ChatScreen(
                         if (normalizedInput != submittedInput) {
                             latestOnInputChange.value(normalizedInput)
                         }
+                        scrollCoordinator.onUserSentMessage()
                         latestOnSend.value()
                     } finally {
                         chatAttachmentPreflightRunning = false
@@ -240,22 +263,30 @@ fun ChatScreen(
     val cameraPicker = rememberLauncherForActivityResult(ActivityResultContracts.TakePicturePreview()) { bitmap ->
         bitmap?.let { onUploadFile(saveCameraPreview(context, it).toString()) }
     }
-    val streamingScrollBucket = state.messages.lastOrNull()?.let { message ->
-        (message.content.length + message.reasoningContent.length) / STREAMING_SCROLL_CHAR_STEP
-    } ?: 0
     val browserSearchCardVisible = state.browserTask?.let { task ->
         task.kind == BrowserTaskKind.SEARCH && !task.windowVisible && task.phase in setOf(
-            BrowserTaskPhase.SEARCHING, BrowserTaskPhase.AWAITING_CONFIRMATION
+            BrowserTaskPhase.SEARCHING,
+            BrowserTaskPhase.AWAITING_CONFIRMATION
         )
     } == true
-    LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket,
-        state.browserTask?.taskId, state.browserTask?.navigationId, browserSearchCardVisible) {
-        if (browserSearchCardVisible) {
-            listState.scrollToItem(state.messages.size + if (state.messages.isEmpty()) 1 else 0)
-        } else if (state.messages.isNotEmpty()) {
-            listState.scrollToItem(state.messages.lastIndex)
-        }
+    val scrollRestoreTargetIndex = when {
+        state.messages.isNotEmpty() ->
+            state.messages.lastIndex + if (browserSearchCardVisible) 1 else 0
+        browserSearchCardVisible -> 1
+        else -> 0
     }
+    LaunchedEffect(scrollCoordinator, state.activeConversationId) {
+        scrollCoordinator.activateSession(
+            conversationId = state.activeConversationId,
+            restoreTargetItemIndex = scrollRestoreTargetIndex,
+        )
+        snapshotFlow { listState.toChatScrollLayoutObservation() }
+            .distinctUntilChanged()
+            .collect { observation ->
+                scrollCoordinator.onLayoutObservation(observation)
+            }
+    }
+
     val historyBackEnabled = !WindowInsets.isImeVisible && (
         drawerState.currentValue == DrawerValue.Open ||
             drawerState.targetValue == DrawerValue.Open
@@ -272,8 +303,9 @@ fun ChatScreen(
         scope.launch { drawerState.close() }
     }
     var bottomChromeHeightPx by remember { mutableStateOf(0) }
-    val bottomChromeHeight = with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
-        .coerceAtLeast(120.dp)
+    val bottomChromeHeight = resolveChatComposerOverlapDp(
+        with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
+    )
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -344,7 +376,7 @@ fun ChatScreen(
                 ChatMessageListSection(
                     listState = listState,
                     state = state,
-                    bottomChromeHeight = bottomChromeHeight,
+                    composerOverlap = bottomChromeHeight,
                     onOpenRecommendedModels = onOpenRecommendedModels,
                     onImportChatModel = onImportChatModel,
                     onOpenQuickStart = { showQuickStart = true },
@@ -361,7 +393,9 @@ fun ChatScreen(
                     onDeleteMessage = { onDeleteMessage(it) },
                     onTogglePinMessage = { onTogglePinMessage(it) },
                     onDeleteLastTurn = onDeleteLastTurn,
+                    onMessageIntent = onMessageIntent,
                     onBrowserTaskEvent = onBrowserTaskEvent,
+                    nestedScrollConnection = scrollNestedScrollConnection,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()

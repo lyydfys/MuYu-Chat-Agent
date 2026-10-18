@@ -66,6 +66,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -317,7 +318,7 @@ internal fun ChatInputBar(
                     )
                     IconButton(
                         onClick = { imagePromptMode = false },
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             Icons.Default.Close,
@@ -437,17 +438,23 @@ internal fun ChatInputBar(
                     }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
+                val sendFabEnabled = isGenerating || !attachmentPreflightRunning
                 FloatingActionButton(
                     onClick = {
-                        if (isGenerating) onStop()
-                        else if (attachmentPreflightRunning) Unit
-                        else if (imagePromptMode) onSendImagePrompt()
-                        else onSend()
+                        if (sendFabEnabled) {
+                            when {
+                                isGenerating -> onStop()
+                                imagePromptMode -> onSendImagePrompt()
+                                else -> onSend()
+                            }
+                        }
                     },
                     containerColor = McaPrimaryBlue,
                     elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                     shape = CircleShape,
-                    modifier = Modifier.size(40.dp)
+                    modifier = Modifier
+                        .size(40.dp)
+                        .semantics { if (!sendFabEnabled) disabled() }
                 ) {
                     if (attachmentPreflightRunning && !isGenerating) {
                         CircularProgressIndicator(

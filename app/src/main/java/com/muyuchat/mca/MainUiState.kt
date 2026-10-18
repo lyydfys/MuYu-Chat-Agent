@@ -125,6 +125,7 @@ data class MainUiState(
     val contextSummaryModelSelection: String = "current",
     /** A manual compression request is consumed by the next generation. */
     val contextCompressionPending: Boolean = false,
+    val settingsOperations: SettingsOperationState = SettingsOperationState(),
     val persistentPrefixCacheEnabled: Boolean = true,
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
@@ -194,6 +195,24 @@ data class MainUiState(
     val webSearchStatusMessage: String? = null,
     val webSearchDiagnostics: List<WebSearchDiagnosticRecord> = emptyList(),
     val appUpdate: AppUpdateState = AppUpdateState()
+)
+
+enum class SettingsCleanupOperation {
+    CHAT_HISTORY,
+    IMAGE_LIBRARY,
+    FILE_LIBRARY,
+    PERSISTENT_PREFIX_CACHE
+}
+
+enum class WebSearchOperation {
+    PREFLIGHT,
+    CONFIG_TEST,
+    TURN_TEST
+}
+
+data class SettingsOperationState(
+    val cleanup: SettingsCleanupOperation? = null,
+    val webSearch: WebSearchOperation? = null
 )
 
 /**

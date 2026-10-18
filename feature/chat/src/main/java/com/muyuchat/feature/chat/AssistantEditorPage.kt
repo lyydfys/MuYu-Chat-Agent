@@ -51,12 +51,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
+private const val ASSISTANT_SAVE_DRAFT_PRESERVED_MESSAGE =
+    "当前有角色请求或图片任务进行中，草稿已保留，请结束后重试"
 
 @Composable
 internal fun AssistantEditorPage(
@@ -67,8 +71,9 @@ internal fun AssistantEditorPage(
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
     onDelete: (String) -> Unit,
-    onSave: (AssistantEditorDraft) -> Unit,
-    onUpsertMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit = { _, _, _, _ -> },
+    onSave: (AssistantEditorDraft) -> Boolean,
+    onUpsertMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean> =
+        { _, _, _, _ -> CompletableDeferred(false) },
     onDeleteMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
@@ -104,6 +109,7 @@ internal fun AssistantEditorPage(
     var presetImportMessage by rememberSaveable(assistant?.id) { mutableStateOf<String?>(null) }
     var presetImporting by rememberSaveable(assistant?.id) { mutableStateOf(false) }
     var advancedSamplingExpanded by rememberSaveable(assistant?.id) { mutableStateOf(false) }
+    var saveError by rememberSaveable(assistant?.id) { mutableStateOf<String?>(null) }
     val context = LocalContext.current
     val presetImportScope = rememberCoroutineScope()
     val presetPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -176,6 +182,15 @@ internal fun AssistantEditorPage(
             stopWords = stopWordsText.toAssistantStopWords(assistant?.stopWords.orEmpty())
         )
 
+    fun submitDraft(draft: AssistantEditorDraft, closeOnSuccess: Boolean) {
+        saveError = null
+        if (!onSave(draft)) {
+            saveError = ASSISTANT_SAVE_DRAFT_PRESERVED_MESSAGE
+            return
+        }
+        if (closeOnSuccess) onBack()
+    }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -185,7 +200,7 @@ internal fun AssistantEditorPage(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
             }
             Column(modifier = Modifier.weight(1f)) {
@@ -493,7 +508,7 @@ internal fun AssistantEditorPage(
                         TextButton(
                             onClick = {
                                 val copyName = name.trim().ifBlank { assistant?.name ?: "未命名助手" }.let { "$it 副本" }
-                                onSave(buildDraft(null, copyName))
+                                submitDraft(buildDraft(null, copyName), closeOnSuccess = false)
                             },
                             enabled = assistant != null,
                             modifier = Modifier.weight(1f)
@@ -521,23 +536,33 @@ internal fun AssistantEditorPage(
             shape = RoundedCornerShape(24.dp),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
-            Row(
-                modifier = Modifier.padding(10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                TextButton(
-                    onClick = onBack,
-                    modifier = Modifier.weight(1f).height(48.dp)
-                ) {
-                    Text("取消")
+            Column(modifier = Modifier.padding(10.dp)) {
+                saveError?.let { message ->
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                 }
-                Button(
-                    onClick = { onSave(buildDraft(assistant?.id)) },
-                    modifier = Modifier.weight(1.45f).height(48.dp),
-                    shape = RoundedCornerShape(999.dp)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("保存")
+                    TextButton(
+                        onClick = onBack,
+                        modifier = Modifier.weight(1f).height(48.dp)
+                    ) {
+                        Text("取消")
+                    }
+                    Button(
+                        onClick = { submitDraft(buildDraft(assistant?.id), closeOnSuccess = true) },
+                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Text("保存")
+                    }
                 }
             }
         }

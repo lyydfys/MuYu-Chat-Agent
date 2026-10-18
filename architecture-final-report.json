@@ -49,7 +49,7 @@
   "gate_reasons": {
     "canonical_apk": "canonical APK bytes and SHA-256 resolved",
     "architecture_rules": "Architecture Rules Gate exited 0",
-    "release_integrity": "Release Integrity Gate exited 1: === MCA S-Grade Release Integrity & Gate Verification ===\n--> [Gate] Canonical APK: E:\\MAC\\artifacts\\rc\\final\\MCA-v0.2.4-arm64-v8a.apk (181360536 bytes, SHA-256 298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514)\n--> [Gate] Architecture Rules Gate...\n    PASSED: Architecture Rules Gate\n--> [Gate] SBOM schema and pinned versions verified (60 packages)\n--> [Gate] 16 KB Page-Size Audit: APK-bound report verified against canonical APK SHA-256 (94 packaged binaries, 0 unaligned)\n    FAILED: APK-bound production fault report is malformed or incomplete: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json\n    runtime fault report file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json\n    Existing contract-model report is diagnostic only: scope=contract_model_only, production=0, device=0\n-------------------------------------------\nRELEASE INTEGRITY CHECKS FAILED",
+    "release_integrity": "Release Integrity Gate exited 1: === MCA S-Grade Release Integrity & Gate Verification ===\n--> [Gate] Canonical APK: E:\\MAC\\artifacts\\rc\\final\\MCA-v0.2.4-arm64-v8a.apk (181368728 bytes, SHA-256 6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7)\n--> [Gate] Architecture Rules Gate...\n    PASSED: Architecture Rules Gate\n--> [Gate] SBOM schema and pinned versions verified (61 packages)\n--> [Gate] 16 KB Page-Size Audit: APK-bound report verified against canonical APK SHA-256 (94 packaged binaries, 0 unaligned)\n    FAILED: APK-bound production fault report is malformed or incomplete: E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\fault-report.json\n    runtime fault report file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\fault-report.json\n    Existing contract-model report is diagnostic only: scope=contract_model_only, production=0, device=0\n-------------------------------------------\nRELEASE INTEGRITY CHECKS FAILED",
     "runtime_evidence": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
     "runtime_evidence_contract": "final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
     "fault_injection_matrix": "production fault evidence is governed only by runtime_evidence_verification",
@@ -72,17 +72,17 @@
   "canonical_apk": {
     "status": "PASSED",
     "path": "E:\\MAC\\artifacts\\rc\\final\\MCA-v0.2.4-arm64-v8a.apk",
-    "bytes": 181360536,
-    "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-    "requested_expected_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-    "expected_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "bytes": 181368728,
+    "sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+    "requested_expected_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+    "expected_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
     "reason": "canonical APK bytes and SHA-256 resolved"
   },
   "apksigner_discovery": {
     "status": "AVAILABLE",
     "tool": "E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat",
     "sdk_root": "E:\\model\\android-sdk",
-    "source": "explicit",
+    "source": "environment/PATH/provenance/SDK discovery",
     "environment": {
       "APKSIGNER": "E:\\model\\android-sdk\\build-tools\\36.0.0\\apksigner.bat",
       "ANDROID_HOME": "E:\\model\\android-sdk",
@@ -94,15 +94,15 @@
     "status": "FAILED",
     "exit_code": null,
     "command": null,
-    "expected_apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+    "expected_apk_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
     "process_environment": {},
     "summary": null,
     "raw": null,
     "reason": "required runtime evidence is missing: soak-report.json, fault-report.json, device-*.json; final-gate runtime contract failed: device.report_count, device.same_apk_sha256, device.unique_physical_arm64, fault.report, soak.report",
     "evidence": {
-      "evidence_dir": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h",
-      "expected_soak_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json",
-      "expected_fault_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json",
+      "evidence_dir": "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6",
+      "expected_soak_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\soak-report.json",
+      "expected_fault_report": "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\fault-report.json",
       "soak_report": null,
       "fault_report": null,
       "device_reports": [],
@@ -127,22 +127,22 @@
           "status": "PASSED",
           "reason": "canonical APK SHA-256 and byte size are available",
           "computed": {
-            "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-            "bytes": 181360536
+            "sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+            "bytes": 181368728
           }
         },
         "soak.report": {
           "status": "FAILED",
-          "reason": "soak report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json",
+          "reason": "soak report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\soak-report.json",
           "computed": {
-            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\soak-report.json"
+            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\soak-report.json"
           }
         },
         "fault.report": {
           "status": "FAILED",
-          "reason": "fault report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json",
+          "reason": "fault report invalid: file missing: E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\fault-report.json",
           "computed": {
-            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\fault-report.json"
+            "path": "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\fault-report.json"
           }
         },
         "device.report_count": {
@@ -166,7 +166,7 @@
           "status": "FAILED",
           "reason": "one or more device reports are not bound to the canonical APK SHA-256",
           "computed": {
-            "canonical_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+            "canonical_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
             "reports": []
           }
         }
@@ -182,7 +182,7 @@
     "errors": 0,
     "skipped": 0,
     "testcases_observed": 5,
-    "time_seconds": 19.556,
+    "time_seconds": 11.42,
     "architecture_rules": {
       "status": "PASSED",
       "reason": "Architecture Rules Gate exited 0",
@@ -220,32 +220,32 @@
       "status": "PASSED",
       "path": "E:\\MAC\\artifacts\\rc\\final\\reproducibility-report.json",
       "declared_status": "PASSED",
-      "apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "apk_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
       "reason": "reproducibility equal=true, at least two builds, and every SHA-256/byte count matches the canonical APK",
       "equal_required": true,
       "minimum_builds": 2,
       "equal": true,
       "builds_observed": 2,
-      "expected_apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-      "expected_apk_bytes": 181360536,
-      "top_level_apk_bytes": 181360536,
+      "expected_apk_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+      "expected_apk_bytes": 181368728,
+      "top_level_apk_bytes": 181368728,
       "builds": [
         {
           "index": 0,
-          "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-          "bytes": 181360536,
+          "sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+          "bytes": 181368728,
           "ok": true
         },
         {
           "index": 1,
-          "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-          "bytes": 181360536,
+          "sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+          "bytes": 181368728,
           "ok": true
         }
       ],
       "candidates": [
-        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\reproducible-build-report.json",
-        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\reproducibility-report.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\reproducible-build-report.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\reproducibility-report.json",
         "E:\\MAC\\artifacts\\rc\\final\\reproducible-build-report.json",
         "E:\\MAC\\artifacts\\rc\\final\\reproducibility-report.json",
         "E:\\MAC\\artifacts\\rc\\reproducible-build-report.json",
@@ -258,12 +258,12 @@
       "status": "PASSED",
       "path": "E:\\MAC\\artifacts\\rc\\final\\build-provenance.json",
       "declared_status": "PASSED",
-      "apk_sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
+      "apk_sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
       "reason": "artifact report is APK-bound and PASS",
       "candidates": [
-        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\build-provenance.json",
-        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\release-provenance.json",
-        "E:\\MAC\\artifacts\\rc\\final\\campaign-ui-smoke-20261017h\\provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\build-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\release-provenance.json",
+        "E:\\MAC\\artifacts\\rc\\final\\campaign-20261018-final-r6\\provenance.json",
         "E:\\MAC\\artifacts\\rc\\final\\build-provenance.json",
         "E:\\MAC\\artifacts\\rc\\final\\release-provenance.json",
         "E:\\MAC\\artifacts\\rc\\final\\provenance.json",
@@ -276,8 +276,8 @@
       ]
     },
     "canonical_apk": {
-      "sha256": "298025a38ae7d045d88991a5686124563dffef872b74f7720ae9e698d5d0c514",
-      "bytes": 181360536
+      "sha256": "6bbf9d5ada4620dca8583cceea952c56ccae45b33ed55ae5d40f42738972e3b7",
+      "bytes": 181368728
     }
   },
   "rating_evaluation": {

@@ -5,40 +5,59 @@ import android.net.Uri
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
+import com.muyuchat.feature.chat.ChatMessageIdentity
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
-internal fun deleteMessageAtFor(
+private data class MessageDeleteCommit(
+    val sessions: List<ChatSessionRecord>,
+    val removedRequest: ChatGeneratedImageRequest?
+)
+
+internal fun deleteMessageFor(
     store: UiStateStore,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
     isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
     pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
     persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Job?,
-    index: Int
+    target: ChatMessageIdentity
 ) {
     val state = store.state.value
     if (rejectWhileConversationMutationInProgress()) return
+    if (target.conversationId != state.activeChatSessionId) return
     if (!state.canWriteToActiveAssistantSession()) return
     if (state.isGenerating) {
         showStatus("请先停止当前生成，再删除消息")
         return
     }
-    if (index !in state.messages.indices) return
-    val removedRequest = state.messages[index].generatedImageRequest
+    val initialIndex = target.resolveIndex(state.messages, state.activeChatSessionId) ?: return
+    val removedRequest = state.messages[initialIndex].generatedImageRequest
     if (removedRequest?.let(isChatImageRequestActive) == true) {
         showStatus("这条消息仍关联运行中的图片任务，请等任务结束后再删除。")
         return
     }
     val rollback = state.conversationMutationRollbackState()
-    val updatedMessages = state.messages.filterIndexed { messageIndex, _ -> messageIndex != index }
-    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-    var updatedSessions: List<ChatSessionRecord> = state.chatSessions
+    // Preserve the legacy unsaved-conversation path: a message list may exist before its
+    // durable session id is assigned. The identity then uses null for both sides, and the
+    // write below creates the session id exactly once inside the authoritative update.
+    val sessionId = target.conversationId ?: UUID.randomUUID().toString()
+    var commit: MessageDeleteCommit? = null
     store.update {
-        updatedSessions = if (updatedMessages.isEmpty()) {
+        commit = null
+        if (target.conversationId != it.activeChatSessionId ||
+            !it.canWriteToActiveAssistantSession() ||
+            it.isGenerating
+        ) return@update it
+        val currentIndex = target.resolveIndex(it.messages, it.activeChatSessionId)
+            ?: return@update it
+        val currentRequest = it.messages[currentIndex].generatedImageRequest
+        if (currentRequest?.let(isChatImageRequestActive) == true) return@update it
+        val nextMessages = it.messages.filterIndexed { messageIndex, _ -> messageIndex != currentIndex }
+        val nextSessions = if (nextMessages.isEmpty()) {
             it.chatSessions.map { session ->
                 if (session.id == sessionId) session.copy(
                     messages = emptyList(), contextSummaries = emptyList(),
@@ -49,22 +68,54 @@ internal fun deleteMessageAtFor(
             it.chatSessions.upsertSessionFor(
                 state = it,
                 sessionId = sessionId,
-                messages = updatedMessages,
+                messages = nextMessages,
                 assistantId = it.selectedAssistantId,
                 modelMode = it.selectedChatBackend.bindingValue(),
                 modelId = it.currentChatModelId()
             )
         }
+        commit = MessageDeleteCommit(nextSessions, currentRequest)
         it.copy(
-            messages = updatedMessages,
+            messages = nextMessages,
             activeChatSessionId = sessionId,
-            chatSessions = updatedSessions,
+            chatSessions = nextSessions,
             promptContextUsage = null,
             statusMessage = "已删除消息"
         )
     }
-    removedRequest?.let { pendingAssistantImageToolTurns.remove(it.id) }
-    persistConversationMutation(updatedSessions, rollback)
+    val applied = commit ?: return
+    applied.removedRequest?.let { pendingAssistantImageToolTurns.remove(it.id) }
+    persistConversationMutation(applied.sessions, rollback)
+}
+
+/**
+ * Compatibility entry point for callers that still address a row by index. The index is resolved
+ * to a message identity first; all deletion work then goes through [deleteMessageFor].
+ */
+internal fun deleteMessageAtFor(
+    store: UiStateStore,
+    rejectWhileConversationMutationInProgress: () -> Boolean,
+    showStatus: (String) -> Unit,
+    isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
+    pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
+    persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Job?,
+    index: Int
+) {
+    val state = store.state.value
+    val target = ChatMessageIdentity.atIndex(
+        messages = state.messages,
+        conversationId = state.activeChatSessionId,
+        index = index
+    ) ?: return
+    deleteMessageFor(
+        store = store,
+        rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
+        showStatus = showStatus,
+        isChatImageRequestActive = isChatImageRequestActive,
+        pendingAssistantImageToolTurns = pendingAssistantImageToolTurns,
+        persistConversationMutation = persistConversationMutation,
+        target = target
+    )
 }
 
 internal fun deleteLastConversationTurnFor(
@@ -320,20 +371,25 @@ internal fun clearChatHistoryFor(
     manualContextCompressionRequests: ContextCompressionRequestStore,
     queueWorldBookCleanup: (WorldBookScope, Set<String>) -> Unit,
     pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
-    persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Job?,
+    persistConversationMutation: (
+        List<ChatSessionRecord>,
+        ConversationMutationRollbackState,
+        (() -> Unit)?,
+        (() -> Unit)?
+    ) -> Job?,
     chatImageToolAuthorizationStore: ChatImageToolAuthorizationStore
-) {
+): Job? {
     val state = store.state.value
-    if (rejectWhileConversationMutationInProgress()) return
+    if (rejectWhileConversationMutationInProgress()) return null
     if (state.isGenerating) {
         showStatus("请先停止当前生成，再清空历史")
-        return
+        return null
     }
     if (state.chatSessions.any { session -> hasActiveAssistantImageExecution(session.id) } ||
         state.imageJobs.any { job -> job.spec?.chatSessionId != null && !job.status.terminal }
     ) {
         showStatus("仍有角色图片任务正在执行，请等任务结束后再清空历史。")
-        return
+        return null
     }
     val rollback = state.conversationMutationRollbackState()
     val freshSession = state.selectedAssistant()?.newConversationSession(
@@ -352,8 +408,7 @@ internal fun clearChatHistoryFor(
             },
             selectedKnowledgeBaseIds = emptySet(),
             promptContextUsage = null,
-            contextCompressionPending = false,
-            statusMessage = "已清空聊天记录"
+            contextCompressionPending = false
         )
     }
     queueWorldBookCleanup(
@@ -361,10 +416,18 @@ internal fun clearChatHistoryFor(
         state.chatSessions.mapTo(hashSetOf()) { it.id }
     )
     pendingAssistantImageToolTurns.clear()
-    persistConversationMutation(listOfNotNull(freshSession), rollback)
+    val persistenceJob = persistConversationMutation(
+        listOfNotNull(freshSession),
+        rollback,
+        {
+            store.update { current -> current.copy(statusMessage = "已清空聊天记录") }
+        },
+        null
+    )
     scope.launch(Dispatchers.IO) {
         chatImageToolAuthorizationStore.prune(emptyList())
     }
+    return persistenceJob
 }
 
 internal fun chatSessionExportFileNameFor(

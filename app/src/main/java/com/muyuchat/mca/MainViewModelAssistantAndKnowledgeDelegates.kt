@@ -3,6 +3,7 @@ package com.muyuchat.mca
 import android.net.Uri
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.core.engine.ReasoningMode
+import kotlinx.coroutines.Deferred
 
 fun MainViewModel.saveAssistantProfile(
     id: String?, name: String, avatar: String, tag: String, systemPrompt: String,
@@ -10,15 +11,19 @@ fun MainViewModel.saveAssistantProfile(
     nPredict: Int, topK: Int, minP: Float, repeatPenalty: Float, presencePenalty: Float,
     frequencyPenalty: Float, stopWords: List<String>, reasoningMode: ReasoningMode,
     memoryEnabled: Boolean, memorySummaryInterval: Int, webSearchEnabled: Boolean, fileContextEnabled: Boolean
-) = assistantProfileCoordinator.saveAssistantProfile(
+): Boolean = assistantProfileCoordinator.saveAssistantProfile(
     id, name, avatar, tag, systemPrompt, defaultModelMode, defaultModelId,
     temperature, topP, nPredict, topK, minP, repeatPenalty, presencePenalty,
     frequencyPenalty, stopWords, reasoningMode, memoryEnabled, memorySummaryInterval,
     webSearchEnabled, fileContextEnabled
 )
 
-fun MainViewModel.upsertAssistantMemory(assistantId: String, id: String?, scope: String, content: String) =
-    assistantProfileCoordinator.upsertAssistantMemory(assistantId, id, scope, content)
+fun MainViewModel.upsertAssistantMemory(
+    assistantId: String,
+    id: String?,
+    scope: String,
+    content: String
+): Deferred<Boolean> = assistantProfileCoordinator.upsertAssistantMemory(assistantId, id, scope, content)
 
 fun MainViewModel.deleteAssistantMemory(assistantId: String, id: String) =
     assistantProfileCoordinator.deleteAssistantMemory(assistantId, id)
@@ -92,23 +97,31 @@ fun MainViewModel.saveWebSearchConfig(
     fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
 ) = webSearchWorkflowCoordinator.saveWebSearchConfig(enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
 
-fun MainViewModel.testWebSearchConfig(query: String) = webSearchWorkflowCoordinator.testWebSearchConfig(query)
+fun MainViewModel.testWebSearchConfig(query: String) {
+    webSearchWorkflowCoordinator.testWebSearchConfig(query)
+}
 
 fun MainViewModel.testWebSearchConfig(
     query: String, enabled: Boolean, provider: String, endpoint: String, apiKey: String,
     maxResults: Int, fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-) = webSearchWorkflowCoordinator.testWebSearchConfig(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
+) {
+    webSearchWorkflowCoordinator.testWebSearchConfig(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
+}
 
 fun MainViewModel.preflightWebSearchConfig(
     enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
     fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-) = webSearchWorkflowCoordinator.preflightWebSearchConfig(enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
+) {
+    webSearchWorkflowCoordinator.preflightWebSearchConfig(enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders)
+}
 
 fun MainViewModel.testWebSearchTurn(
     query: String, enabled: Boolean, provider: String, endpoint: String, apiKey: String, maxResults: Int,
     fetchPageContent: Boolean, triggerMode: String, researchMode: String, backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
     allowPublicCheckSourceForProtocolTest: Boolean = false
-) = webSearchWorkflowCoordinator.testWebSearchTurn(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders, allowPublicCheckSourceForProtocolTest)
+) {
+    webSearchWorkflowCoordinator.testWebSearchTurn(query, enabled, provider, endpoint, apiKey, maxResults, fetchPageContent, triggerMode, researchMode, backupProviders, allowPublicCheckSourceForProtocolTest)
+}
 
 fun MainViewModel.toggleWebSearchForNextTurn() = webSearchWorkflowCoordinator.toggleWebSearchForNextTurn()
 fun MainViewModel.cycleWebSearchResearchModeForNextTurn() = webSearchWorkflowCoordinator.cycleWebSearchResearchModeForNextTurn()

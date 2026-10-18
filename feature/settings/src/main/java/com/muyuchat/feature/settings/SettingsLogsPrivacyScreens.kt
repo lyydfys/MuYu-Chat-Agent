@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,6 +20,7 @@ import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -191,6 +194,7 @@ fun PrivacyDataScreen(
                 enabled = state.persistentPrefixCacheEnabled,
                 entryCount = state.persistentPrefixCacheEntryCount,
                 bytes = state.persistentPrefixCacheBytes,
+                busy = state.cleanupBusy.persistentPrefixCache,
                 confirmClear = confirmClearPersistentPrefixCache,
                 onEnabledChanged = onPersistentPrefixCacheEnabledChanged,
                 onRequestClear = {
@@ -208,6 +212,9 @@ fun PrivacyDataScreen(
                 chatSessionCount = state.chatSessionCount,
                 imageAssetCount = state.imageAssetCount,
                 fileAssetCount = state.fileAssetCount,
+                chatHistoryBusy = state.cleanupBusy.chatHistory,
+                imageLibraryBusy = state.cleanupBusy.imageLibrary,
+                fileLibraryBusy = state.cleanupBusy.fileLibrary,
                 confirmClearChats = confirmClearChats,
                 confirmClearImages = confirmClearImages,
                 confirmClearFiles = confirmClearFiles,
@@ -251,6 +258,7 @@ private fun PersistentPrefixCacheCard(
     enabled: Boolean,
     entryCount: Int,
     bytes: Long,
+    busy: Boolean,
     confirmClear: Boolean,
     onEnabledChanged: (Boolean) -> Unit,
     onRequestClear: () -> Unit
@@ -275,7 +283,10 @@ private fun PersistentPrefixCacheCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(checked = enabled, onCheckedChange = onEnabledChanged)
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = if (busy) null else onEnabledChanged
+                )
             }
             Text(
                 "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}",
@@ -288,9 +299,13 @@ private fun PersistentPrefixCacheCard(
             )
             TextButton(
                 onClick = onRequestClear,
-                enabled = entryCount > 0,
+                enabled = entryCount > 0 && !busy,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                if (busy) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.size(6.dp))
+                }
                 Text(if (confirmClear) "确认清空前缀缓存" else "清空前缀缓存")
             }
         }
@@ -302,6 +317,9 @@ private fun PrivacyCleanupCard(
     chatSessionCount: Int,
     imageAssetCount: Int,
     fileAssetCount: Int,
+    chatHistoryBusy: Boolean,
+    imageLibraryBusy: Boolean,
+    fileLibraryBusy: Boolean,
     confirmClearChats: Boolean,
     confirmClearImages: Boolean,
     confirmClearFiles: Boolean,
@@ -309,6 +327,7 @@ private fun PrivacyCleanupCard(
     onRequestClearImages: () -> Unit,
     onRequestClearFiles: () -> Unit
 ) {
+    val anyBusy = chatHistoryBusy || imageLibraryBusy || fileLibraryBusy
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -321,24 +340,36 @@ private fun PrivacyCleanupCard(
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 TextButton(
                     onClick = onRequestClearChats,
-                    enabled = chatSessionCount > 0,
+                    enabled = chatSessionCount > 0 && !anyBusy,
                     modifier = Modifier.weight(1f)
                 ) {
+                    if (chatHistoryBusy) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.size(6.dp))
+                    }
                     Text(if (confirmClearChats) "确认清空聊天" else "清空聊天")
                 }
                 TextButton(
                     onClick = onRequestClearImages,
-                    enabled = imageAssetCount > 0,
+                    enabled = imageAssetCount > 0 && !anyBusy,
                     modifier = Modifier.weight(1f)
                 ) {
+                    if (imageLibraryBusy) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.size(6.dp))
+                    }
                     Text(if (confirmClearImages) "确认清空图片" else "清空图片")
                 }
             }
             TextButton(
                 onClick = onRequestClearFiles,
-                enabled = fileAssetCount > 0,
+                enabled = fileAssetCount > 0 && !anyBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
+                if (fileLibraryBusy) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(modifier = Modifier.size(6.dp))
+                }
                 Text(if (confirmClearFiles) "确认清空文件库" else "清空文件库")
             }
             Text(

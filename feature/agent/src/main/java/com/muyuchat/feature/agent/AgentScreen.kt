@@ -39,12 +39,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import com.muyuchat.core.advisor.AgentRecommendation
 import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.DeviceProfile
@@ -254,6 +258,77 @@ fun AgentScreen(
     onRollbackProfile: (() -> Unit)? = null
 ) {
     var infoDialog by rememberSaveable { mutableStateOf<AgentInfoDialog?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val lifecycleState by lifecycleOwner.lifecycle.currentStateAsState()
+    val pageResumed = lifecycleState.isAtLeast(Lifecycle.State.RESUMED)
+    val mainContentActive = pageResumed && infoDialog == null
+    val infoContentActive = pageResumed && infoDialog != null
+    val presentationHolder = remember { AgentPagePresentationHolder() }
+    val recommendation = state.recommendation
+    val tuningPlan = recommendation?.tuningPlan
+    val benchmark = state.benchmark
+    val presentations = remember(
+        mainContentActive,
+        state.benchmarkHistory,
+        state.agentDecisionHistory,
+        benchmark,
+        state.tuningTrials,
+        state.lastAutoTuningSummary,
+        tuningPlan?.nThreads,
+        tuningPlan?.reason,
+        recommendation?.explanation
+    ) {
+        if (mainContentActive) {
+            presentationHolder.refresh(
+                benchmarkHistory = state.benchmarkHistory.take(MAX_VISIBLE_BENCHMARK_HISTORY),
+                decisions = state.agentDecisionHistory.take(10),
+                currentModelReport = AgentCurrentModelReportKey(
+                    benchmark = benchmark,
+                    autoTuningSummary = state.lastAutoTuningSummary
+                ),
+                diagnostics = benchmark?.let { currentBenchmark ->
+                    AgentDiagnosticsKey(
+                        benchmark = currentBenchmark,
+                        trials = state.tuningTrials.toList(),
+                        fallbackThreadCount = tuningPlan?.nThreads ?: 0,
+                        recommendationReason = tuningPlan?.reason,
+                        recommendationExplanation = recommendation?.explanation
+                    )
+                }
+            )
+        } else {
+            presentationHolder.current
+        }
+    }
+    val infoResult = remember(
+        infoContentActive,
+        infoDialog,
+        benchmark,
+        tuningPlan?.nCtx,
+        tuningPlan?.nPredict,
+        tuningPlan?.nThreads,
+        tuningPlan?.reason,
+        recommendation?.explanation
+    ) {
+        when {
+            infoDialog == null -> null
+            infoContentActive -> presentationHolder.refreshInfoResult(
+                if (benchmark != null && recommendation != null && tuningPlan != null) {
+                    AgentInfoResultKey(
+                        benchmark = benchmark,
+                        nCtx = tuningPlan.nCtx,
+                        nPredict = tuningPlan.nPredict,
+                        nThreads = tuningPlan.nThreads,
+                        recommendationReason = tuningPlan.reason,
+                        explanation = recommendation.explanation
+                    )
+                } else {
+                    null
+                }
+            )
+            else -> presentationHolder.currentInfoResult
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         LazyColumn(
@@ -297,7 +372,12 @@ fun AgentScreen(
                 )
             }
 
-            item { CurrentModelReportCard(state) }
+            item {
+                CurrentModelReportCard(
+                    loadedModelName = state.loadedModelName,
+                    presentation = presentations.currentModelReport
+                )
+            }
 
             item {
                 RuntimeProfileCard(
@@ -322,9 +402,11 @@ fun AgentScreen(
                 }
             }
 
-            state.benchmark?.let { benchmark ->
-                item { DebugSummaryCard(state, benchmark) }
-                item { DebugDetailsCard(state, benchmark) }
+            if (benchmark != null) {
+                presentations.diagnostics?.let { diagnostics ->
+                    item { DebugSummaryCard(diagnostics.summary) }
+                    item { DebugDetailsCard(diagnostics.details) }
+                }
             }
 
             state.recommendation?.let { recommendation ->
@@ -339,7 +421,7 @@ fun AgentScreen(
             if (state.benchmarkHistory.isNotEmpty()) {
                 item {
                     BenchmarkHistoryCard(
-                        history = state.benchmarkHistory.take(MAX_VISIBLE_BENCHMARK_HISTORY),
+                        history = presentations.benchmarkHistoryRows,
                         totalCount = state.benchmarkHistory.size
                     )
                 }
@@ -347,7 +429,7 @@ fun AgentScreen(
 
             if (state.agentDecisionHistory.isNotEmpty()) {
                 item {
-                    AgentDecisionHistoryCard(state.agentDecisionHistory.take(10))
+                    AgentDecisionHistoryCard(presentations.decisionRows)
                 }
             }
 
@@ -365,7 +447,7 @@ fun AgentScreen(
         ) { pageModifier, closePage ->
             AgentInfoPage(
                 type = infoDialog ?: AgentInfoDialog.GUIDE,
-                state = state,
+                result = infoResult,
                 onBack = closePage,
                 modifier = pageModifier
             )
@@ -376,7 +458,7 @@ fun AgentScreen(
 @Composable
 private fun AgentInfoPage(
     type: AgentInfoDialog,
-    state: AgentUiState,
+    result: AgentInfoResultPresentation?,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -390,7 +472,7 @@ private fun AgentInfoPage(
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(46.dp)) {
+                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回智能调参")
                 }
                 Column(modifier = Modifier.weight(1f)) {
@@ -411,17 +493,13 @@ private fun AgentInfoPage(
                         Text("智能调参会根据本机 SoC、核心数、内存、温控、当前模型和实测 token/s 推荐参数。")
                         Text("智能调试只有一个入口：规则包负责参数搜索和安全阈值，当前已加载模型负责解释调试结果。")
                         Text("没有加载模型时，可以先查看体检和推荐；加载模型后才能运行快速、深度或省电调试。")
+                    } else if (result == null) {
+                        Text("当前还没有可解释的调试结果。请先运行快速调试、深度调试或省电调试。")
                     } else {
-                        val benchmark = state.benchmark
-                        val recommendation = state.recommendation
-                        if (benchmark == null || recommendation == null) {
-                            Text("当前还没有可解释的调试结果。请先运行快速调试、深度调试或省电调试。")
-                        } else {
-                            Text("本次实测速度 ${"%.2f".format(benchmark.decodeTps)} token/s，TTFT ${benchmark.ttftMs}ms。")
-                            Text("推荐线程 ${recommendation.tuningPlan.nThreads}，上下文 ${recommendation.tuningPlan.nCtx}，回复长度 ${recommendation.tuningPlan.nPredict}。")
-                            Text(recommendation.tuningPlan.reason.ifBlank { recommendation.explanation })
-                            Text("深度调试会做多轮验证，并采用较优稳定速度；省电调试会明显偏向低线程和低发热。")
-                        }
+                        Text(result.speedText)
+                        Text(result.planText)
+                        Text(result.reasonText)
+                        Text("深度调试会做多轮验证，并采用较优稳定速度；省电调试会明显偏向低线程和低发热。")
                     }
                 }
             }
@@ -453,7 +531,7 @@ private fun AgentHeader(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(46.dp)) {
+                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "返回聊天")
                 }
                 Spacer(modifier = Modifier.width(6.dp))

@@ -319,8 +319,12 @@ class GenerationFlagAccountingContractTest {
         val owners = assignments(mainViewModel).filter { it.second == "true" }.map { ownerOf(it.first) }.toSet()
         assertEquals(
             "Start sites moved; this test's KDoc lists the entry points and must move with them.",
-            setOf("regenerateLastResponse"),
+            setOf("regenerateLastResponseFor"),
             owners
+        )
+        assertTrue(
+            "The public regenerate entry point must continue delegating to the guarded site.",
+            mainViewModel.contains("fun regenerateLastResponse() = regenerateLastResponseFor(null)")
         )
         val continuationLines = assistantImageContinuation.lines()
         fun continuationOwnerOf(index: Int): String {

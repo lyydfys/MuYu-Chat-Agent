@@ -10,6 +10,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -30,7 +31,6 @@ import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.UploadFile
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
@@ -254,7 +254,7 @@ internal fun DownloadProgressPanel(
                 }
                 IconButton(
                     onClick = onShowDetails,
-                    modifier = Modifier.size(28.dp)
+                    modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.ExpandMore,
@@ -460,7 +460,7 @@ private fun HubModelCard(
         }.take(3)
         if (tags.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                tags.forEach { tag -> AssistChip(onClick = {}, label = { Text(tag.substringAfter(':')) }) }
+                tags.forEach { tag -> StaticStatusTag(tag.substringAfter(':')) }
             }
         }
         if (model.private || model.gated) {
@@ -473,6 +473,27 @@ private fun HubModelCard(
             OutlinedButton(onClick = onOpenPage, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
                 Text("打开页面")
             }
+        }
+    }
+}
+
+// Preserve chip-equivalent density without exposing click semantics.
+@Composable
+private fun StaticStatusTag(text: String) {
+    Surface(
+        modifier = Modifier.heightIn(min = 32.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Box(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

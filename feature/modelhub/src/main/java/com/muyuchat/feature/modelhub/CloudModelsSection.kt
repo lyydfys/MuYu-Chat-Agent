@@ -462,6 +462,13 @@ private fun CloudModelGroupCard(
     }
 }
 
+internal fun cloudModelDeleteActionLabel(model: CloudModelUiItem): String {
+    val target = model.displayName.trim().ifBlank {
+        model.modelName.trim().ifBlank { "未命名模型" }
+    }
+    return "删除云端模型：$target"
+}
+
 @Composable
 private fun CloudModelRow(
     model: CloudModelUiItem,
@@ -539,7 +546,7 @@ private fun CloudModelRow(
                         Text("编辑", maxLines = 1)
                     }
                     IconButton(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Default.Delete, contentDescription = "删除云端模型")
+                        Icon(Icons.Default.Delete, contentDescription = cloudModelDeleteActionLabel(model))
                     }
                 }
             }

@@ -85,7 +85,8 @@ internal fun MessageBubble(
     onDelete: () -> Unit,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
-    onDeleteLastTurn: () -> Unit
+    onDeleteLastTurn: () -> Unit,
+    canCopyMessage: () -> Boolean
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
@@ -103,13 +104,16 @@ internal fun MessageBubble(
                 onTogglePinned = onTogglePinned,
                 canTogglePinned = canTogglePinned,
                 onCopy = {
-                    val copyText = displayInputWithoutAttachment(message.content)
-                    if (copyText.isNotBlank()) {
-                        scope.launch {
-                            clipboard.setClipEntry(
-                                ClipEntry(ClipData.newPlainText("MCA", copyText))
-                            )
-                            Toast.makeText(context, "已复制提示词", Toast.LENGTH_SHORT).show()
+                    if (canCopyMessage()) {
+                        val copyText = displayInputWithoutAttachment(message.content)
+                        if (copyText.isNotBlank()) {
+                            scope.launch {
+                                if (!canCopyMessage()) return@launch
+                                clipboard.setClipEntry(
+                                    ClipEntry(ClipData.newPlainText("MCA", copyText))
+                                )
+                                Toast.makeText(context, "已复制提示词", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     }
                 }
@@ -147,10 +151,13 @@ internal fun MessageBubble(
                 canTogglePinned = canTogglePinned,
                 onDeleteLastTurn = onDeleteLastTurn,
                 onCopy = {
-                    scope.launch {
-                        clipboard.setClipEntry(
-                            ClipEntry(ClipData.newPlainText("MCA", message.content))
-                        )
+                    if (canCopyMessage()) {
+                        scope.launch {
+                            if (!canCopyMessage()) return@launch
+                            clipboard.setClipEntry(
+                                ClipEntry(ClipData.newPlainText("MCA", message.content))
+                            )
+                        }
                     }
                 }
             )
@@ -284,22 +291,22 @@ private fun UserMessageBubble(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (!readOnly) {
-                IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
+                IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Default.PushPin,
                         contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
-                        modifier = Modifier.size(17.dp),
+                        modifier = Modifier.size(18.dp),
                         tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             if (copyableContent.isNotBlank()) {
             IconButton(
                 onClick = onCopy,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(48.dp)
             ) {
                 Icon(
                     Icons.Default.ContentCopy,
                     contentDescription = "复制提示词",
-                    modifier = Modifier.size(17.dp),
+                    modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
                 )
             }

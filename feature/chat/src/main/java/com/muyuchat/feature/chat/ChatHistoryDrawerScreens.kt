@@ -19,6 +19,9 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -69,6 +72,7 @@ import androidx.compose.runtime.setValue
 
 // P9/S11：从 ChatChromeScreens.kt 等值移出的历史抽屉（会话列表）簇。
 // 原样逐字迁移，未做行为改动；无新增提升（ChatHistoryDrawer 原即 internal）。
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun ChatHistoryDrawer(
     state: ChatUiState,
@@ -94,6 +98,8 @@ internal fun ChatHistoryDrawer(
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val searchFocusRequester = remember { FocusRequester() }
+    val searchButtonFocusRequester = remember { FocusRequester() }
+    var restoreSearchFocus by remember { mutableStateOf(false) }
     val filteredHistory = remember(state.history, query) {
         filterHistoryItems(state.history, query)
     }
@@ -105,16 +111,20 @@ internal fun ChatHistoryDrawer(
     fun closeSearch() {
         query = ""
         searchActive = false
+        restoreSearchFocus = true
         focusManager.clearFocus(force = true)
         keyboardController?.hide()
     }
 
-    BackHandler(enabled = searchActive) { closeSearch() }
+    BackHandler(enabled = searchActive && !WindowInsets.isImeVisible) { closeSearch() }
 
-    LaunchedEffect(searchActive) {
+    LaunchedEffect(searchActive, restoreSearchFocus) {
         if (searchActive) {
             searchFocusRequester.requestFocus()
             keyboardController?.show()
+        } else if (restoreSearchFocus) {
+            searchButtonFocusRequester.requestFocus()
+            restoreSearchFocus = false
         }
     }
 
@@ -126,8 +136,7 @@ internal fun ChatHistoryDrawer(
             modifier = Modifier
                 .fillMaxSize()
                 .edgeSwipeBack {
-                    closeSearch()
-                    onClose()
+                    if (searchActive) closeSearch() else onClose()
                 }
                 .background(MaterialTheme.colorScheme.background)
                 .navigationBarsPadding()
@@ -210,7 +219,8 @@ internal fun ChatHistoryDrawer(
                                 IconButton(
                                     onClick = { searchActive = true },
                                     modifier = Modifier
-                                        .size(34.dp)
+                                        .size(48.dp)
+                                        .focusRequester(searchButtonFocusRequester)
                                         .testTag("history.search")
                                 ) {
                                     Icon(
@@ -222,7 +232,7 @@ internal fun ChatHistoryDrawer(
                                 IconButton(
                                     onClick = onOpenAppMenu,
                                     modifier = Modifier
-                                        .size(34.dp)
+                                        .size(48.dp)
                                         .semantics { contentDescription = "打开应用菜单" }
                                 ) {
                                     McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
@@ -279,7 +289,7 @@ internal fun ChatHistoryDrawer(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 24.dp, bottom = 24.dp)
-                    .height(44.dp)
+                    .height(48.dp)
                     .clickable(onClick = onNewConversation),
                 color = MaterialTheme.colorScheme.onBackground,
                 shape = CircleShape,
@@ -445,7 +455,7 @@ private fun AppFeatureButton(icon: @Composable () -> Unit, text: String, onClick
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(40.dp)
+            .heightIn(min = 48.dp)
             .clip(RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 4.dp),

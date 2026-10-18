@@ -4,6 +4,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
 
 // P3-b：把 ChatScreen 的 96 个回调参数按职责分成 5 个动作组（方案 §五.2）。
 // 逐项沿用 ChatScreen 既有参数的原类型与默认值；未做任何行为改动。
@@ -27,6 +29,8 @@ data class ChatConversationActions(
     val onSetContextSummaryModel: (String) -> Unit = {},
     val onUndoContextSummary: () -> Unit = {},
     val onSearchContextSummarySources: (String) -> List<ContextSummaryEvidenceUiItem> = { emptyList() },
+    /** Identity-aware replacement for delayed message actions; legacy callbacks remain above. */
+    val onMessageIntent: ((ChatMessageIntent) -> Unit)? = null,
 )
 
 /** 生成与输入：发送、停止、重试、参数与推理模式、模型后端、附件。 */
@@ -47,7 +51,7 @@ data class ChatGenerationActions(
 /** 内容与背景：助手、世界书、知识库、助手记忆、聊天背景。 */
 data class ChatContentActions(
     val onDeleteAssistant: (String) -> Unit = {},
-    val onSaveAssistant: (AssistantEditorDraft) -> Unit = {},
+    val onSaveAssistant: (AssistantEditorDraft) -> Boolean = { false },
     val onSelectAssistant: (String) -> Unit = {},
     val onImportAssistantCard: (String) -> Unit = {},
     val onImportAssistantCardFile: () -> Unit = {},
@@ -58,7 +62,8 @@ data class ChatContentActions(
     val onImportKnowledgeDocument: (String) -> Unit = {},
     val onSetKnowledgeBaseSelected: (String, Boolean) -> Unit = { _, _ -> },
     val onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
-    val onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit = { _, _, _, _ -> },
+    val onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean> =
+        { _, _, _, _ -> CompletableDeferred(false) },
     val onChatBackgroundChange: (ChatBackgroundScope, ChatBackgroundState?) -> Unit = { _, _ -> },
     val onChatBackgroundImageSelected: (ChatBackgroundScope, String) -> Unit = { _, _ -> },
 )

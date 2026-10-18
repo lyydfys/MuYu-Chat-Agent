@@ -36,6 +36,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.muyuchat.core.telemetry.SystemLoadReader
 import com.muyuchat.core.telemetry.SystemLoadSnapshot
 import kotlinx.coroutines.delay
@@ -63,12 +66,15 @@ fun RuntimeScreen(
     onAutoCheckChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var systemLoad by remember { mutableStateOf(SystemLoadSnapshot()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(lifecycleOwner) {
         val reader = SystemLoadReader(context.applicationContext)
-        while (true) {
-            systemLoad = withContext(Dispatchers.IO) { reader.read() }
-            delay(1000L)
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                systemLoad = withContext(Dispatchers.IO) { reader.read() }
+                delay(1000L)
+            }
         }
     }
     LazyColumn(

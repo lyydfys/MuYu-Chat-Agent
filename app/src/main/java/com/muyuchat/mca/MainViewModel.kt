@@ -12,6 +12,8 @@ import com.muyuchat.core.engine.ChatToolExchange
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.Role
 import com.muyuchat.core.tuning.UserPreference
+import com.muyuchat.feature.chat.ChatMessageIdentity
+import com.muyuchat.feature.chat.ChatMessageIntent
 import com.muyuchat.mca.composition.MainCoordinatorAssembly
 import com.muyuchat.mca.composition.MainCoordinatorHost
 import com.muyuchat.mca.composition.MainCoordinatorHostAdapter
@@ -132,6 +134,8 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val chatRuns: ChatRunOwnership get() = container.chatRuns
     internal val localApiIdempotencyJournalLock = Any()
     internal val uiStateStore = UiStateStore(bootstrapResult.uiState)
+    private val settingsCleanupLock = Any()
+    private var activeSettingsCleanupJob: Job? = null
     private val chatStreamAccumulatorInit = container.initializeChatStreamAccumulator(uiStateStore, viewModelScope)
     internal val chatAppearanceCoordinator: ChatAppearanceCoordinator = (injectedChatAppearanceCoordinator as? ChatAppearanceCoordinator) ?: container.createChatAppearanceCoordinator(scope = viewModelScope, uiStateStore = uiStateStore, showStatus = ::showStatus)
     internal val imageLibraryStartupReconciliation = container.createImageLibraryStartupReconciliation(uiStateStore, viewModelScope, chatImageCommitRecoveryPort, bootstrapResult.initialKnowledgeBases)
@@ -156,6 +160,44 @@ class MainViewModel @JvmOverloads internal constructor(
     private val _uiState: MutableStateFlow<MainUiState> get() = uiStateStore.ownerFlow
 
     internal fun showStatus(message: String?) { uiStateStore.showStatus(message) }
+
+    internal fun launchSettingsCleanup(
+        operation: SettingsCleanupOperation,
+        start: () -> Job?
+    ): Job? = synchronized(settingsCleanupLock) {
+        if (activeSettingsCleanupJob?.isActive == true) return null
+        uiStateStore.update { state ->
+            state.copy(
+                settingsOperations = state.settingsOperations.copy(cleanup = operation)
+            )
+        }
+        val job = start()
+        if (job == null) {
+            activeSettingsCleanupJob = null
+            uiStateStore.update { state ->
+                if (state.settingsOperations.cleanup == operation) {
+                    state.copy(settingsOperations = state.settingsOperations.copy(cleanup = null))
+                } else {
+                    state
+                }
+            }
+            return null
+        }
+        activeSettingsCleanupJob = job
+        job.invokeOnCompletion {
+            uiStateStore.update { state ->
+                if (state.settingsOperations.cleanup == operation) {
+                    state.copy(settingsOperations = state.settingsOperations.copy(cleanup = null))
+                } else {
+                    state
+                }
+            }
+            synchronized(settingsCleanupLock) {
+                if (activeSettingsCleanupJob === job) activeSettingsCleanupJob = null
+            }
+        }
+        job
+    }
 
     internal fun tryAcquireObservedImageGenerationLease(requestId: String): LocalImageGenerationCoordinator.Lease? =
         tryAcquireObservedImageGenerationLeaseFor(store = uiStateStore, coordinator = localImageGenerationCoordinator, observationLock = localImageGenerationCoordinatorObservationLock, requestId = requestId)
@@ -263,13 +305,19 @@ class MainViewModel @JvmOverloads internal constructor(
 
     internal fun chatImageNegativePromptSupported(state: MainUiState): Boolean = chatImageNegativePromptSupportedFor(state)
 
-    fun regenerateLastResponse() {
+    fun regenerateLastResponse() = regenerateLastResponseFor(null)
+
+    private fun regenerateLastResponseFor(target: ChatMessageIdentity?) {
         val state = uiStateStore.current
         if (rejectWhileConversationMutationInProgress()) return
         if (!state.canWriteToActiveAssistantSession()) return
         if (state.isGenerating) return
         val lastAssistant = state.messages.indexOfLast { it.role == Role.ASSISTANT }
         if (lastAssistant < 0) return
+        if (target != null) {
+            val targetIndex = target.resolveIndex(state.messages, state.activeChatSessionId)
+            if (targetIndex == null || targetIndex != lastAssistant) return
+        }
         val priorUser = state.messages.take(lastAssistant).indexOfLast { it.role == Role.USER }
         if (priorUser < 0) return
         val rollback = state.conversationMutationRollbackState()
@@ -297,6 +345,19 @@ class MainViewModel @JvmOverloads internal constructor(
     fun deleteMessageAt(index: Int) {
         if (rejectWhileConversationMutationInProgress()) return
         deleteMessageAtFor(store = uiStateStore, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress, showStatus = ::showStatus, isChatImageRequestActive = ::isChatImageRequestActive, pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns, persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) }, index = index)
+    }
+
+    fun deleteMessage(target: ChatMessageIdentity) {
+        deleteMessageFor(store = uiStateStore, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress, showStatus = ::showStatus, isChatImageRequestActive = ::isChatImageRequestActive, pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns, persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) }, target = target)
+    }
+
+    fun handleChatMessageIntent(intent: ChatMessageIntent) {
+        when (intent) {
+            is ChatMessageIntent.Delete -> deleteMessage(intent.target)
+            is ChatMessageIntent.Regenerate -> regenerateLastResponseFor(intent.target)
+            is ChatMessageIntent.DeleteLastTurn ->
+                chatWorkflowCoordinator.deleteLastConversationTurn(currentSessionId, intent.target)
+        }
     }
 
     val currentSessionId: String? get() = uiStateStore.current.activeChatSessionId
@@ -353,11 +414,26 @@ class MainViewModel @JvmOverloads internal constructor(
 
     fun clearChatHistory() {
         if (rejectWhileConversationMutationInProgress()) return
-        clearChatHistoryFor(store = uiStateStore, scope = viewModelScope, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress, showStatus = ::showStatus, hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) }, manualContextCompressionRequests = manualContextCompressionRequests, queueWorldBookCleanup = assistantProfileCoordinator::queueWorldBookCleanup, pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns, persistConversationMutation = { sessions, rollback -> persistConversationMutation(sessions, rollback) }, chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore)
+        launchSettingsCleanup(SettingsCleanupOperation.CHAT_HISTORY) {
+            clearChatHistoryFor(store = uiStateStore, scope = viewModelScope, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress, showStatus = ::showStatus, hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) }, manualContextCompressionRequests = manualContextCompressionRequests, queueWorldBookCleanup = assistantProfileCoordinator::queueWorldBookCleanup, pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns, persistConversationMutation = { sessions, rollback, onCommitted, onCommitFailed -> persistConversationMutation(sessions, rollback, onCommitted = onCommitted, onCommitFailed = onCommitFailed) }, chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore)
+        }
     }
 
-    fun setPersistentPrefixCacheEnabled(enabled: Boolean) = cacheManagementCoordinator.setPersistentPrefixCacheEnabled(enabled)
-    fun clearPersistentPrefixCache() = cacheManagementCoordinator.clearPersistentPrefixCache()
+    fun setPersistentPrefixCacheEnabled(enabled: Boolean) {
+        if (enabled) {
+            cacheManagementCoordinator.setPersistentPrefixCacheEnabled(true)
+        } else {
+            launchSettingsCleanup(SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE) {
+                cacheManagementCoordinator.setPersistentPrefixCacheEnabled(false)
+            }
+        }
+    }
+
+    fun clearPersistentPrefixCache() {
+        launchSettingsCleanup(SettingsCleanupOperation.PERSISTENT_PREFIX_CACHE) {
+            cacheManagementCoordinator.clearPersistentPrefixCache()
+        }
+    }
 
     fun clearChat() {
         viewModelScope.launch {
@@ -436,7 +512,11 @@ class MainViewModel @JvmOverloads internal constructor(
     fun deleteImageAsset(imageId: String) = deleteImageAssets(listOf(imageId))
     fun deleteImageAssets(imageIds: List<String>) = deleteImageAssetsOperation(imageAssetDeletionPort, imageIds)
     fun setImageAssetFavorite(imageId: String, favorite: Boolean) = setImageAssetFavoriteOperation(imageAssetDeletionPort, imageId, favorite)
-    fun clearImageLibrary() = clearImageLibraryOperation(imageAssetDeletionPort)
+    fun clearImageLibrary() {
+        launchSettingsCleanup(SettingsCleanupOperation.IMAGE_LIBRARY) {
+            clearImageLibraryOperation(imageAssetDeletionPort)
+        }
+    }
 
     fun updateChatImageLoraSelection(selections: List<Pair<String, Double>>?) {
         val frozen = selections?.toList()

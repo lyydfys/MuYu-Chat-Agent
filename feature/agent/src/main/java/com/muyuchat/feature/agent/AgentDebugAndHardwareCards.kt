@@ -12,7 +12,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -29,7 +28,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
 
@@ -65,9 +63,9 @@ internal fun HardwareOverview(profile: DeviceProfile) {
             ) {
                 Column {
                     Text("系统可用内存", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(formatBytes(profile.availableRamBytes), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    Text(formatAgentBytes(profile.availableRamBytes), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Text(
-                        "标称/总内存 ${formatBytes(profile.displayTotalRamBytes)} · 运行预算 ${formatBytes(profile.modelMemoryBudgetBytes)} · 温度 ${temperatureText(profile.batteryTemperatureC)}",
+                        "标称/总内存 ${formatAgentBytes(profile.displayTotalRamBytes)} · 运行预算 ${formatAgentBytes(profile.modelMemoryBudgetBytes)} · 温度 ${temperatureText(profile.batteryTemperatureC)}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -106,10 +104,7 @@ private fun MetricCard(title: String, value: String, detail: String, modifier: M
 }
 
 @Composable
-internal fun DebugSummaryCard(state: AgentUiState, benchmark: BenchmarkResult) {
-    val bestThread = benchmark.bestThreadCount.takeIf { it > 0 }
-        ?: state.recommendation?.tuningPlan?.nThreads
-        ?: 0
+internal fun DebugSummaryCard(summary: AgentDebugSummaryPresentation) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -119,31 +114,26 @@ internal fun DebugSummaryCard(state: AgentUiState, benchmark: BenchmarkResult) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             SectionTitle("本次调试")
             Text(
-                if (state.tuningTrials.isNotEmpty()) {
-                    "已完成 ${state.tuningTrials.size} 轮线程测试，最佳 ${bestThread} 线程。"
-                } else {
-                    "已完成短基准测试。"
-                },
+                summary.completionText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = {}, label = { Text("速度 ${"%.2f".format(benchmark.decodeTps)} token/s") })
-                AssistChip(onClick = {}, label = { Text("TTFT ${benchmark.ttftMs}ms") })
+                StaticStatusTag(summary.labels.speedText)
+                StaticStatusTag(summary.labels.ttftText)
             }
-            val rssKb = benchmark.processRssKb.takeIf { it > 0L } ?: benchmark.nativePssKb
             Text(
-                "输出 ${benchmark.genTokens} token · 内存 ${formatBytes(rssKb * 1024)} · 温控变化 ${benchmark.thermalDelta}",
+                summary.resourceText,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            benchmark.error?.let { Text("问题：$it", color = MaterialTheme.colorScheme.error) }
+            summary.errorText?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
     }
 }
 
 @Composable
-internal fun DebugDetailsCard(state: AgentUiState, benchmark: BenchmarkResult) {
+internal fun DebugDetailsCard(presentation: AgentDebugDetailsPresentation) {
     var expanded by rememberSaveable { mutableStateOf(false) }
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -169,34 +159,33 @@ internal fun DebugDetailsCard(state: AgentUiState, benchmark: BenchmarkResult) {
             }
             if (!expanded) {
                 Text(
-                    state.recommendation?.tuningPlan?.reason
-                        ?: "展开后查看线程扫描和调参解释。",
+                    presentation.collapsedText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 return@Column
             }
 
-            if (state.tuningTrials.isNotEmpty()) {
+            if (presentation.trialRows.isNotEmpty()) {
                 Text("线程扫描", fontWeight = FontWeight.SemiBold)
-                state.tuningTrials.forEach { trial ->
+                presentation.trialRows.forEach { trial ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "threads=${trial.threads}${if (trial.selected) " · 最佳" else ""}",
+                            trial.headerText,
                             fontWeight = if (trial.selected) FontWeight.Bold else FontWeight.Normal
                         )
                         Text(
-                            "${"%.2f".format(trial.decodeTps)} token/s",
+                            trial.speedText,
                             color = if (trial.selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = if (trial.selected) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                     Text(
-                        "TTFT ${trial.ttftMs}ms · 输出 ${trial.genTokens} · ${if (trial.stable) "稳定" else "异常"}",
+                        trial.detailText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -204,16 +193,16 @@ internal fun DebugDetailsCard(state: AgentUiState, benchmark: BenchmarkResult) {
             } else {
                 Text("短基准", fontWeight = FontWeight.SemiBold)
                 Text(
-                    "速度 ${"%.2f".format(benchmark.decodeTps)} token/s · TTFT ${benchmark.ttftMs}ms · decode ${benchmark.decodeMs}ms",
+                    presentation.shortBenchmarkText,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            state.recommendation?.let { recommendation ->
+            presentation.explanationText?.let { explanation ->
                 Text("调参解释", fontWeight = FontWeight.SemiBold)
                 Text(
-                    recommendation.tuningPlan.reason.ifBlank { recommendation.explanation },
+                    explanation,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -221,9 +210,8 @@ internal fun DebugDetailsCard(state: AgentUiState, benchmark: BenchmarkResult) {
         }
     }
 }
-
 @Composable
-internal fun BenchmarkHistoryCard(history: List<BenchmarkHistoryItem>, totalCount: Int) {
+internal fun BenchmarkHistoryCard(history: List<BenchmarkHistoryRowPresentation>, totalCount: Int) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -239,9 +227,9 @@ internal fun BenchmarkHistoryCard(history: List<BenchmarkHistoryItem>, totalCoun
             )
             history.forEach { item ->
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${item.timeText} · ${shortName(item.modelName)}", fontWeight = FontWeight.Medium)
+                    Text(item.titleText, fontWeight = FontWeight.Medium)
                     Text(
-                        "速度 ${"%.2f".format(item.decodeTps)} token/s · 首 token ${item.ttftMs}ms · 上下文 ${item.nCtx} · 线程 ${item.nThreads} · ${if (item.stable) "稳定" else "异常"}",
+                        item.detailText,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -252,7 +240,7 @@ internal fun BenchmarkHistoryCard(history: List<BenchmarkHistoryItem>, totalCoun
 }
 
 @Composable
-internal fun AgentDecisionHistoryCard(history: List<AgentDecisionItem>) {
+internal fun AgentDecisionHistoryCard(history: List<AgentDecisionRowPresentation>) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -268,18 +256,12 @@ internal fun AgentDecisionHistoryCard(history: List<AgentDecisionItem>) {
             )
             history.forEach { item ->
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text("${item.timeText} · ${item.title}", fontWeight = FontWeight.Medium)
-                    Text(item.detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(item.titleText, fontWeight = FontWeight.Medium)
+                    Text(item.detailText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }
-}
-
-private fun formatBytes(bytes: Long): String {
-    val gb = bytes / 1024.0 / 1024.0 / 1024.0
-    val mb = bytes / 1024.0 / 1024.0
-    return if (gb >= 1.0) "%.2f GB".format(gb) else "%.0f MB".format(mb)
 }
 
 private fun socText(value: String): String = when (value.lowercase()) {

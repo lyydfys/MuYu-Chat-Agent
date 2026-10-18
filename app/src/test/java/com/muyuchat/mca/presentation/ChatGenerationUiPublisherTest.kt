@@ -58,6 +58,19 @@ class ChatGenerationUiPublisherTest {
         totalEstimatedTokens = 3L
     )
 
+    private fun publisherWithClock(
+        chatRuns: ChatRunOwnership,
+        runId: Long,
+        uiState: MutableStateFlow<MainUiState>,
+        clock: () -> Long
+    ): ChatGenerationUiPublisher = ChatGenerationUiPublisher(
+        chatRuns,
+        runId,
+        uiState,
+        { transform -> uiState.update(transform) },
+        clock
+    )
+
     @Test
     fun currentRunPublishesStatusAndSearchLines() {
         val chatRuns = ChatRunOwnership()
@@ -128,6 +141,132 @@ class ChatGenerationUiPublisherTest {
         assertNull(uiState.value.generationTokenProgress)
         assertNull(uiState.value.generationPersistProgress)
         assertEquals(stats, uiState.value.generationStats)
+    }
+
+    @Test
+    fun streamChunkStatsPublishesImmediatelyThenThrottlesInsideTheWindow() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState())
+        var nowNanos = 0L
+        var stateWrites = 0
+        val publisher = ChatGenerationUiPublisher(
+            chatRuns,
+            runId,
+            uiState,
+            { transform ->
+                stateWrites += 1
+                uiState.update(transform)
+            },
+            { nowNanos }
+        )
+        val firstStats = RuntimeStats(loaded = true, completionTokens = 1, decodeTps = 1.0)
+        val skippedStats = firstStats.copy(completionTokens = 2, decodeTps = 2.0)
+        val latestStats = firstStats.copy(completionTokens = 3, decodeTps = 3.0)
+
+        publisher.publishStreamChunkStats(firstStats)
+        assertEquals(firstStats, uiState.value.stats)
+        assertEquals(firstStats, uiState.value.generationStats)
+        assertEquals(GenerationPhase.DECODE, uiState.value.generationPhase)
+        assertEquals(1, stateWrites)
+
+        nowNanos += 99_999_999L
+        publisher.publishStreamChunkStats(skippedStats)
+        assertEquals(firstStats, uiState.value.stats)
+        assertEquals(firstStats, uiState.value.generationStats)
+        assertEquals(1, stateWrites)
+
+        nowNanos += 1L
+        publisher.publishStreamChunkStats(latestStats)
+        assertEquals(latestStats, uiState.value.stats)
+        assertEquals(latestStats, uiState.value.generationStats)
+        assertEquals(2, stateWrites)
+    }
+
+    @Test
+    fun streamPhaseIgnoresTheChunkStatsThrottleWindow() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState())
+        var nowNanos = 0L
+        val publisher = publisherWithClock(chatRuns, runId, uiState) { nowNanos }
+
+        publisher.publishStreamChunkStats(RuntimeStats(loaded = true, completionTokens = 1))
+        val inFlightPersist = PersistProgress(PersistStage.WRITING, writtenBytes = 1, totalBytes = 2)
+        uiState.value = uiState.value.copy(generationPersistProgress = inFlightPersist)
+        nowNanos += 1L
+
+        val phaseStats = RuntimeStats(loaded = true, completionTokens = 2)
+        publisher.publishStreamPhase(phaseStats, GenerationPhase.PREFILL, TokenProgress(1, 4))
+
+        assertEquals(phaseStats, uiState.value.stats)
+        assertEquals(phaseStats, uiState.value.generationStats)
+        assertEquals(GenerationPhase.PREFILL, uiState.value.generationPhase)
+        assertEquals(TokenProgress(1, 4), uiState.value.generationTokenProgress)
+        assertSame(inFlightPersist, uiState.value.generationPersistProgress)
+    }
+
+    @Test
+    fun persistProgressAndRefusalIgnoreTheChunkStatsThrottleWindow() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState(isGenerating = true))
+        var nowNanos = 0L
+        val publisher = publisherWithClock(chatRuns, runId, uiState) { nowNanos }
+
+        publisher.publishStreamChunkStats(RuntimeStats(loaded = true, completionTokens = 1))
+        nowNanos += 50_000_000L
+        val progress = PersistProgress(PersistStage.WRITING, writtenBytes = 5, totalBytes = 9)
+        publisher.publishPersistProgress(progress)
+        assertSame(progress, uiState.value.generationPersistProgress)
+
+        publisher.refuseGenerationBeforeStream("generation refused")
+        val afterRefusal = uiState.value
+        assertFalse(afterRefusal.isGenerating)
+        assertNull(afterRefusal.generationPersistProgress)
+        assertEquals("generation refused", afterRefusal.statusMessage)
+    }
+
+    @Test
+    fun supersededRunRemainsGatedAfterTheStatsWindowElapses() {
+        val chatRuns = ChatRunOwnership()
+        val firstRunId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState())
+        var nowNanos = 0L
+        val stalePublisher = publisherWithClock(chatRuns, firstRunId, uiState) { nowNanos }
+
+        ownershipWithFreshRun(chatRuns)
+        nowNanos += 200_000_000L
+        val before = uiState.value
+        stalePublisher.publishStreamChunkStats(RuntimeStats(loaded = true, completionTokens = 9))
+
+        assertSame(before, uiState.value)
+    }
+
+    @Test
+    fun terminalSettlementKeepsFinalStatsInsideTheChunkStatsWindow() {
+        val chatRuns = ChatRunOwnership()
+        val runId = ownershipWithFreshRun(chatRuns)
+        val uiState = MutableStateFlow(MainUiState(isGenerating = true))
+        var nowNanos = 0L
+        val publisher = publisherWithClock(chatRuns, runId, uiState) { nowNanos }
+
+        publisher.publishStreamChunkStats(RuntimeStats(loaded = true, completionTokens = 1))
+        nowNanos += 50_000_000L
+        publisher.publishStreamChunkStats(RuntimeStats(loaded = true, completionTokens = 2))
+
+        val finalStats = RuntimeStats(loaded = true, completionTokens = 9, decodeTps = 12.5)
+        var finishMetricsCalls = 0
+        publisher.publishFallbackTermination(finalStats, "generation complete") {
+            finishMetricsCalls += 1
+            null
+        }
+
+        assertEquals(1, finishMetricsCalls)
+        assertEquals(finalStats, uiState.value.stats)
+        assertNull(uiState.value.generationStats)
+        assertFalse(uiState.value.isGenerating)
+        assertEquals("generation complete", uiState.value.statusMessage)
     }
 
     @Test

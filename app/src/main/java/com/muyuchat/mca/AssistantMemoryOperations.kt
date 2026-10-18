@@ -6,11 +6,14 @@ import com.muyuchat.core.engine.LocalChatExecutionContext
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -134,16 +137,16 @@ internal fun upsertAssistantMemoryFor(
     id: String?,
     scopeKind: String,
     content: String
-) {
+): Deferred<Boolean> {
     val state = store.state.value
-    if (state.assistants.none { it.id == assistantId }) return
-    if (scopeKind !in setOf("user_profile", "role_progress")) return
+    if (state.assistants.none { it.id == assistantId }) return CompletableDeferred(false)
+    if (scopeKind !in setOf("user_profile", "role_progress")) return CompletableDeferred(false)
     val cleanContent = content.trim().take(4_096)
-    if (cleanContent.isBlank()) return
+    if (cleanContent.isBlank()) return CompletableDeferred(false)
     val existing = id?.let { memoryId ->
         state.assistantMemories.firstOrNull { it.id == memoryId && it.assistantId == assistantId }
     }
-    if (id != null && existing == null) return
+    if (id != null && existing == null) return CompletableDeferred(false)
     val record = MemoryRecord(
         id = existing?.id ?: UUID.randomUUID().toString(),
         assistantId = assistantId,
@@ -152,22 +155,42 @@ internal fun upsertAssistantMemoryFor(
         source = "manual",
         createdAt = existing?.createdAt ?: System.currentTimeMillis()
     )
-    scope.launch(Dispatchers.IO) {
-        try {
-            check(chatSessionStore.upsertMemory(record)) { "记忆与角色不匹配" }
-            val refreshed = chatSessionStore.loadMemories(assistantId)
+    return launchAssistantMemoryPersistence(
+        scope = scope,
+        upsertMemory = { chatSessionStore.upsertMemory(record) },
+        loadMemories = { chatSessionStore.loadMemories(assistantId) },
+        commitMemories = { refreshed ->
             store.update { current ->
                 current.copy(
                     assistantMemories = current.assistantMemories.filterNot { it.assistantId == assistantId } + refreshed,
                     statusMessage = "角色记忆已保存"
                 )
             }
-            markLocalConversationContextInvalid()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            showStatus("保存角色记忆失败：${error.message ?: "存储错误"}")
-        }
+        },
+        markLocalConversationContextInvalid = markLocalConversationContextInvalid,
+        showStatus = showStatus
+    )
+}
+
+internal fun launchAssistantMemoryPersistence(
+    scope: CoroutineScope,
+    upsertMemory: suspend () -> Boolean,
+    loadMemories: suspend () -> List<MemoryRecord>,
+    commitMemories: (List<MemoryRecord>) -> Unit,
+    markLocalConversationContextInvalid: () -> Unit,
+    showStatus: (String) -> Unit
+): Deferred<Boolean> = scope.async(Dispatchers.IO) {
+    try {
+        check(upsertMemory()) { "记忆与角色不匹配" }
+        val refreshed = loadMemories()
+        commitMemories(refreshed)
+        markLocalConversationContextInvalid()
+        true
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        showStatus("保存角色记忆失败：${error.message ?: "存储错误"}")
+        false
     }
 }
 

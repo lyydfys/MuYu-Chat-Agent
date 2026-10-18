@@ -3,9 +3,11 @@
 package com.muyuchat.feature.agent
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -13,7 +15,6 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Science
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -169,7 +170,10 @@ internal fun SmartDebugCard(
 }
 
 @Composable
-internal fun CurrentModelReportCard(state: AgentUiState) {
+internal fun CurrentModelReportCard(
+    loadedModelName: String?,
+    presentation: AgentCurrentModelReportPresentation?
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -181,17 +185,17 @@ internal fun CurrentModelReportCard(state: AgentUiState) {
                 Icon(Icons.Default.Bolt, contentDescription = "体检", tint = MaterialTheme.colorScheme.primary)
                 Text("当前模型体检", fontWeight = FontWeight.Bold)
             }
-            Text(shortName(state.loadedModelName) ?: "尚未加载模型", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-            val benchmark = state.benchmark
-            if (benchmark == null) {
+            Text(shortName(loadedModelName) ?: "尚未加载模型", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            val labels = presentation?.labels
+            if (labels == null) {
                 Text("加载模型后会自动短基准；也可以手动重测。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AssistChip(onClick = {}, label = { Text("速度 ${"%.2f".format(benchmark.decodeTps)} token/s") })
-                    AssistChip(onClick = {}, label = { Text("首 token ${benchmark.ttftMs}ms") })
-                    AssistChip(onClick = {}, label = { Text(if (benchmark.stable) "稳定" else "需排查") })
+                    StaticStatusTag(labels.speedText)
+                    StaticStatusTag(labels.firstTokenText)
+                    StaticStatusTag(labels.stabilityText)
                 }
-                state.lastAutoTuningSummary?.let {
+                presentation.autoTuningSummary?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
@@ -493,9 +497,9 @@ internal fun RecommendationCard(
             }
             Text(recommendation.explanation, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = {}, label = { Text("上下文 ${recommendation.tuningPlan.nCtx}") })
-                AssistChip(onClick = {}, label = { Text("线程 ${recommendation.tuningPlan.nThreads}") })
-                AssistChip(onClick = {}, label = { Text("回复 ${recommendation.tuningPlan.nPredict}") })
+                StaticStatusTag("上下文 ${recommendation.tuningPlan.nCtx}")
+                StaticStatusTag("线程 ${recommendation.tuningPlan.nThreads}")
+                StaticStatusTag("回复 ${recommendation.tuningPlan.nPredict}")
             }
             if (recommendation.tuningPlan.reason.isNotBlank()) {
                 Text(recommendation.tuningPlan.reason, style = MaterialTheme.typography.bodySmall)
@@ -507,6 +511,27 @@ internal fun RecommendationCard(
             ) {
                 Text("应用参数")
             }
+        }
+    }
+}
+
+// Preserve chip-equivalent density without exposing click semantics.
+@Composable
+internal fun StaticStatusTag(text: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier.heightIn(min = 32.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Box(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

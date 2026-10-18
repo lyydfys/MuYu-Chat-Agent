@@ -46,6 +46,21 @@ internal fun floatingDeviceStatusBallTier(ballDp: Float): FloatingDeviceStatusBa
 }
 
 /**
+ * The ball's size is user-controlled, while accessibility font scale can still double the text.
+ * Keep the essential memory value inside the ring by reducing detail instead of disabling font
+ * scaling or clipping the label.
+ */
+internal fun floatingDeviceStatusBallTierForFontScale(
+    tier: FloatingDeviceStatusBallTier,
+    fontScale: Float
+): FloatingDeviceStatusBallTier = when {
+    fontScale >= 2f -> FloatingDeviceStatusBallTier.COMPACT
+    fontScale >= 1.5f && tier == FloatingDeviceStatusBallTier.FULL ->
+        FloatingDeviceStatusBallTier.STANDARD
+    else -> tier
+}
+
+/**
  * Ring weight scales with the ball so the small presets stay legible and the large ones
  * stay elegant.  The old fixed 2.5dp stroke was invisible on a 52dp ball.
  */

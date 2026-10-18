@@ -262,7 +262,7 @@ internal fun AssistantMessageBlock(
                 )
             } else if (!readOnly) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(32.dp)) {
+                    IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
                         Icon(
                             Icons.Default.PushPin,
                             contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",

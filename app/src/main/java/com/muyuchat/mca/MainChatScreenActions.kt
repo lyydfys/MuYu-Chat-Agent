@@ -62,6 +62,7 @@ internal fun mainChatScreenActions(
             onSetContextSummaryModel = viewModel::setContextSummaryModel,
             onUndoContextSummary = viewModel::undoContextSummary,
             onSearchContextSummarySources = viewModel::contextSummaryEvidenceForQuery,
+            onMessageIntent = viewModel::handleChatMessageIntent,
         ),
         generation = ChatGenerationActions(
             onInputChange = viewModel::onInputChange,

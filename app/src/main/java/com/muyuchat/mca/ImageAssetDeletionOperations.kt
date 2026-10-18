@@ -4,6 +4,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -228,7 +229,7 @@ internal fun setImageAssetFavoriteOperation(
 
 internal fun clearImageLibraryOperation(
     port: ImageAssetDeletionPort
-) {
+): Job? {
     val uiState = port.uiState
     val imageLibraryMutationMutex = port.imageLibraryMutationMutex
     val imageUpscaleOwner = port.imageUpscaleOwner
@@ -237,9 +238,9 @@ internal fun clearImageLibraryOperation(
     val imageAssetDirectory = port.imageAssetDirectory
     if (uiState.value.images.isEmpty()) {
         port.showStatus("图片库已为空")
-        return
+        return null
     }
-    port.scope.launch(Dispatchers.IO) {
+    return port.scope.launch(Dispatchers.IO) {
         port.awaitImageLibraryStartupReconciliation()
         val (removed, cleanupFailures) = imageLibraryMutationMutex.withLock {
             imageUpscaleOwner.withUpscaleLifecycleLock { _ ->

@@ -7,19 +7,21 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntOffset
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SwipeBackPage(
     visible: Boolean,
@@ -58,7 +60,7 @@ fun SwipeBackPage(
             }
 
             SystemBackMotionHandler(
-                enabled = visible,
+                enabled = visible && !WindowInsets.isImeVisible,
                 onProgress = { progress ->
                     scope.launch {
                         offsetX.snapTo(widthPx * progress.coerceIn(0f, 1f))
@@ -84,7 +86,7 @@ fun SwipeBackPage(
 
             val pageModifier = Modifier
                 .fillMaxSize()
-                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .graphicsLayer { translationX = offsetX.value }
 
             content(pageModifier, ::closeWithDrawerMotion)
         }

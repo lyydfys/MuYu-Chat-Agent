@@ -32,8 +32,8 @@ import com.muyuchat.core.engine.Role
  */
 internal fun List<ChatMessage>.chatTitle(): String {
     val userText = firstOrNull { it.role == Role.USER }?.content.orEmpty()
-    val fileName = Regex("""【上传文件：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
-    val imageName = Regex("""【上传图片：([^】]+)】""").find(userText)?.groupValues?.getOrNull(1)
+    val fileName = ATTACHMENT_FILE_PATTERN.find(userText)?.groupValues?.getOrNull(1)
+    val imageName = ATTACHMENT_IMAGE_PATTERN.find(userText)?.groupValues?.getOrNull(1)
     val raw = userText
         .lineSequence()
         .map { it.trim() }
@@ -48,8 +48,8 @@ internal fun List<ChatMessage>.chatTitle(): String {
         ?: imageName?.let { "图片：$it" }
         ?: "新对话"
     val compact = raw
-        .replace(Regex("""[#>*`_\[\]()]"""), "")
-        .replace(Regex("""\s+"""), " ")
+        .replace(CHAT_TITLE_MARKDOWN_PATTERN, "")
+        .replace(WHITESPACE_PATTERN, " ")
         .trim()
     return compact.ifBlank { "新对话" }.let { if (it.length > 28) it.take(28) + "..." else it }
 }
@@ -65,13 +65,13 @@ internal fun safeChatExportTitle(raw: String?): String {
         .firstOrNull { line -> line.isNotBlank() && !isUnsafeChatTitleLine(line) }
         ?: ""
     val cleaned = titleSource
-        .replace(Regex("[\\u0000-\\u001F\\u007F]"), " ")
-        .replace(Regex("[\\\\/:*?\"<>|]"), " ")
+        .replace(EXPORT_TITLE_CONTROL_PATTERN, " ")
+        .replace(EXPORT_TITLE_FILESYSTEM_PATTERN, " ")
         // Markdown/code markers are presentation syntax, not useful filename
         // content. Removing them prevents values such as ```html<... from
         // becoming the visible file name in a document picker.
-        .replace(Regex("[`*_#>\\[\\]()]"), " ")
-        .replace(Regex("\\s+"), " ")
+        .replace(EXPORT_TITLE_MARKDOWN_PATTERN, " ")
+        .replace(WHITESPACE_PATTERN, " ")
         .trim()
         .trim('.', ' ')
         .take(48)
@@ -88,33 +88,45 @@ internal fun isUnsafeChatTitleLine(value: String): Boolean {
     if (line.startsWith("<html", ignoreCase = true) || line.startsWith("</html", ignoreCase = true)) return true
     if (line.startsWith("{") || line.startsWith("[") || line.endsWith("};")) return true
     if (line.startsWith("#include") || line.startsWith("import ") || line.startsWith("from ")) return true
-    if (Regex("(?i)^(?:def|class|fun|function|const|let|var|val|public|private|protected|return|if|else|for|while|try|catch|SELECT|INSERT|UPDATE|CREATE)\\b")
-            .containsMatchIn(line)
-    ) return true
+    if (CODE_DECLARATION_PATTERN.containsMatchIn(line)) return true
     // A response can be a code line without a fence.  Do not let common call
     // expressions or shell snippets become the conversation title (and, later,
     // the suggested export filename).  Keep this intentionally anchored so a
     // normal sentence such as "请调用 console.log" remains a useful title.
-    if (Regex(
-            "(?i)^(?:console\\.(?:log|warn|error|info)|System\\.out\\.println|println|print|printf)\\s*\\("
-        ).containsMatchIn(line)
-    ) return true
-    if (Regex(
-            "^(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*)\\s*(?:=|\\+=|-=|\\*=|/=|:=)\\s*.+"
-        ).containsMatchIn(line)
-    ) return true
-    if (Regex(
-            "(?i)^(?:#!|\\$\\s+|>\\s+(?:adb|curl|python|pip|npm|gradle|java)|(?:adb|curl|python|pip|npm|gradle)\\s+)"
-        ).containsMatchIn(line)
-    ) return true
-    if (Regex("^<[/!]?\\s*[A-Za-z][^>]*>$").containsMatchIn(line)) return true
-    if (Regex("^\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+(?:\\s+\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+)*$")
-            .containsMatchIn(line)
-    ) return true
+    if (CALL_EXPRESSION_PATTERN.containsMatchIn(line)) return true
+    if (ASSIGNMENT_PATTERN.containsMatchIn(line)) return true
+    if (SHELL_SNIPPET_PATTERN.containsMatchIn(line)) return true
+    if (HTML_TAG_LINE_PATTERN.containsMatchIn(line)) return true
+    if (MULTIPLICATION_ROW_PATTERN.containsMatchIn(line)) return true
     if (line.contains("</") || line.contains("=>") || line.contains("{ ") || line.contains(";")) return true
     return line.count { it == '{' || it == '}' || it == '(' || it == ')' } >= 2
 }
 
+// P02a: Regex compilation is independent of user text. Keep these immutable Regex objects
+// reusable while retaining the original matching order and rule bodies in the functions above.
+private val ATTACHMENT_FILE_PATTERN = Regex("""【上传文件：([^】]+)】""")
+private val ATTACHMENT_IMAGE_PATTERN = Regex("""【上传图片：([^】]+)】""")
+private val CHAT_TITLE_MARKDOWN_PATTERN = Regex("""[#>*`_\[\]()]""")
+private val WHITESPACE_PATTERN = Regex("""\s+""")
+private val EXPORT_TITLE_CONTROL_PATTERN = Regex("[\\u0000-\\u001F\\u007F]")
+private val EXPORT_TITLE_FILESYSTEM_PATTERN = Regex("[\\\\/:*?\"<>|]")
+private val EXPORT_TITLE_MARKDOWN_PATTERN = Regex("[`*_#>\\[\\]()]")
+private val CODE_DECLARATION_PATTERN = Regex(
+    "(?i)^(?:def|class|fun|function|const|let|var|val|public|private|protected|return|if|else|for|while|try|catch|SELECT|INSERT|UPDATE|CREATE)\\b"
+)
+private val CALL_EXPRESSION_PATTERN = Regex(
+    "(?i)^(?:console\\.(?:log|warn|error|info)|System\\.out\\.println|println|print|printf)\\s*\\("
+)
+private val ASSIGNMENT_PATTERN = Regex(
+    "^(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\\.[A-Za-z_$][A-Za-z0-9_$]*)*)\\s*(?:=|\\+=|-=|\\*=|/=|:=)\\s*.+"
+)
+private val SHELL_SNIPPET_PATTERN = Regex(
+    "(?i)^(?:#!|\\$\\s+|>\\s+(?:adb|curl|python|pip|npm|gradle|java)|(?:adb|curl|python|pip|npm|gradle)\\s+)"
+)
+private val HTML_TAG_LINE_PATTERN = Regex("^<[/!]?\\s*[A-Za-z][^>]*>$")
+private val MULTIPLICATION_ROW_PATTERN = Regex(
+    "^\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+(?:\\s+\\d+\\s*[×x*＋+−-]\\s*\\d+\\s*=\\s*\\d+)*$"
+)
 private val WINDOWS_RESERVED_NAMES = setOf(
     "CON", "PRN", "AUX", "NUL",
     "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",

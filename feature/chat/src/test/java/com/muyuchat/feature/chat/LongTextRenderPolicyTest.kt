@@ -43,23 +43,15 @@ class LongTextRenderPolicyTest {
     }
 
     @Test
-    fun streamingScrollUpdatesAreBucketedInsteadOfTriggeredPerToken() {
-        val source = chatScreenSource()
-        val start = source.indexOf("val streamingScrollBucket =")
-        val end = source.indexOf("val historyBackEnabled", start)
-        require(start >= 0 && end > start) { "Missing streaming scroll policy" }
-        val policy = source.substring(start, end)
+    fun streamingScrollNoLongerUsesCharacterBucketedForcedScroll() {
+        val source = chatScreenOnlySource()
 
-        // The declaration moved to ChatChromeScreens.kt and had to widen from private to internal
-        // there, because Kotlin has no package-private scope and ChatScreen.kt still reads it. The
-        // assertion tracks the declaration, so it tracks the new file and the new modifier; the
-        // value it pins, 512, is unchanged.
-        assertTrue(source.contains("internal const val STREAMING_SCROLL_CHAR_STEP = 512"))
-        assertTrue(policy.contains("message.content.length + message.reasoningContent.length"))
-        assertTrue(policy.contains("/ STREAMING_SCROLL_CHAR_STEP"))
-        assertTrue(policy.contains("LaunchedEffect(state.messages.size, state.isGenerating, streamingScrollBucket,"))
-        assertFalse(policy.contains("message.content,"))
-        assertFalse(policy.contains("message.reasoningContent,"))
+        // P05a replaces the 512-character bucket and its forced scrollToItem call with the page-local
+        // ChatScrollCoordinator. The rendering page-size constants above stay untouched.
+        assertFalse(source.contains("STREAMING_SCROLL_CHAR_STEP"))
+        assertFalse(source.contains("streamingScrollBucket"))
+        assertFalse(source.contains("listState.scrollToItem"))
+        assertTrue(source.contains("toChatScrollLayoutObservation()"))
     }
 
     private fun invokeSafePrefix(value: String, maxCharacters: Int): String {
@@ -75,6 +67,19 @@ class LongTextRenderPolicyTest {
         )
         method.isAccessible = true
         return method.invoke(null, value, maxCharacters) as String
+    }
+
+    private fun chatScreenOnlySource(): String {
+        var root = File(requireNotNull(System.getProperty("user.dir"))).canonicalFile
+        repeat(6) {
+            val chatScreen = listOf(
+                File(root, "src/main/java/com/muyuchat/feature/chat/ChatScreen.kt"),
+                File(root, "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatScreen.kt")
+            ).firstOrNull(File::isFile)
+            if (chatScreen != null) return chatScreen.readText(Charsets.UTF_8)
+            root = root.parentFile ?: return@repeat
+        }
+        error("Unable to locate ChatScreen.kt from ${System.getProperty("user.dir")}")
     }
 
     private fun chatScreenSource(): String {

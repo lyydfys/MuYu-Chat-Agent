@@ -26,6 +26,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -51,7 +52,7 @@ fun LocalApiToolScreen(
     var modelsSelfTest by rememberSaveable { mutableStateOf("尚未测试 /v1/models。") }
     var chatSelfTest by rememberSaveable { mutableStateOf("尚未测试 /v1/chat/completions。") }
     var visionSelfTest by rememberSaveable { mutableStateOf("尚未测试图片输入接口。") }
-    var selfTestBusy by rememberSaveable { mutableStateOf(false) }
+    var selfTestBusy by remember { mutableStateOf(false) }
     val localBaseAddress = state.localApiAddress
         .ifBlank { "http://127.0.0.1:11435/v1" }
         .normalizedApiBase()
@@ -173,31 +174,37 @@ fun LocalApiToolScreen(
                     enabled = state.apiEnabled && state.apiKey.isNotBlank(),
                     onTestModels = {
                         scope.launch {
-                            selfTestBusy = true
-                            modelsSelfTest = runLocalApiModelsSelfTest(localBaseAddress, state.apiKey)
-                            selfTestBusy = false
+                            modelsSelfTest = withLocalApiSelfTestBusy(
+                                updateBusy = { selfTestBusy = it }
+                            ) {
+                                runLocalApiModelsSelfTest(localBaseAddress, state.apiKey)
+                            }
                         }
                     },
                     onTestChat = {
                         scope.launch {
-                            selfTestBusy = true
-                            chatSelfTest = runLocalApiChatSelfTest(
-                                baseUrl = localBaseAddress,
-                                apiKey = state.apiKey,
-                                loadedModelId = state.loadedModelId
-                            )
-                            selfTestBusy = false
+                            chatSelfTest = withLocalApiSelfTestBusy(
+                                updateBusy = { selfTestBusy = it }
+                            ) {
+                                runLocalApiChatSelfTest(
+                                    baseUrl = localBaseAddress,
+                                    apiKey = state.apiKey,
+                                    loadedModelId = state.loadedModelId
+                                )
+                            }
                         }
                     },
                     onTestVision = {
                         scope.launch {
-                            selfTestBusy = true
-                            visionSelfTest = runLocalApiVisionSelfTest(
-                                baseUrl = localBaseAddress,
-                                apiKey = state.apiKey,
-                                loadedModelId = state.loadedModelId
-                            )
-                            selfTestBusy = false
+                            visionSelfTest = withLocalApiSelfTestBusy(
+                                updateBusy = { selfTestBusy = it }
+                            ) {
+                                runLocalApiVisionSelfTest(
+                                    baseUrl = localBaseAddress,
+                                    apiKey = state.apiKey,
+                                    loadedModelId = state.loadedModelId
+                                )
+                            }
                         }
                     }
                 )
@@ -210,6 +217,18 @@ fun LocalApiToolScreen(
                 )
             }
         }
+    }
+}
+
+internal suspend fun <T> withLocalApiSelfTestBusy(
+    updateBusy: (Boolean) -> Unit,
+    block: suspend () -> T
+): T {
+    updateBusy(true)
+    try {
+        return block()
+    } finally {
+        updateBusy(false)
     }
 }
 

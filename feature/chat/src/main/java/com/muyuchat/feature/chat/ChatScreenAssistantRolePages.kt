@@ -42,6 +42,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.launch
 
 /**
@@ -66,8 +67,8 @@ internal fun AssistantRoleScreen(
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
-    onSaveAssistant: (AssistantEditorDraft) -> Unit,
-    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Unit,
+    onSaveAssistant: (AssistantEditorDraft) -> Boolean,
+    onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean>,
     onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit,
     onSelectAssistant: (String) -> Unit,
     onDeleteAssistant: (String) -> Unit,
@@ -106,7 +107,7 @@ internal fun AssistantRoleScreen(
                 .navigationBarsPadding()
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(42.dp)) {
+                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
                     Icon(Icons.Default.Close, contentDescription = "关闭")
                 }
                 Column(modifier = Modifier.weight(1f)) {
@@ -215,10 +216,7 @@ internal fun AssistantRoleScreen(
                     selectedModelId = selectedModelId,
                     selectedModelIsCloud = selectedModelIsCloud,
                     onDelete = onDeleteAssistant,
-                    onSave = {
-                        onSaveAssistant(it)
-                        closePage()
-                    },
+                    onSave = onSaveAssistant,
                     modifier = pageModifier
                 )
                 editingAssistant != null -> AssistantEditorPage(
@@ -232,10 +230,7 @@ internal fun AssistantRoleScreen(
                         onDeleteAssistant(id)
                         closePage()
                     },
-                    onSave = {
-                        onSaveAssistant(it)
-                        closePage()
-                    },
+                    onSave = onSaveAssistant,
                     onUpsertMemory = onUpsertAssistantMemory,
                     onDeleteMemory = onDeleteAssistantMemory,
                     modifier = pageModifier

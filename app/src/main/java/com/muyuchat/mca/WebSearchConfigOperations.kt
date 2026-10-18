@@ -3,8 +3,10 @@ package com.muyuchat.mca
 import android.content.Context
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
 
 import android.app.Application
@@ -85,11 +87,64 @@ internal fun persistWebSearchConfig(
         }
     }
 
+private suspend fun <T> runCatchingCancellable(block: suspend () -> T): Result<T> =
+    try {
+        Result.success(block())
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (error: Exception) {
+        Result.failure(error)
+    }
+
+private fun startWebSearchOperation(
+    port: WebSearchConfigPort,
+    scope: CoroutineScope,
+    operation: WebSearchOperation,
+    progressDetail: String,
+    progressStatus: String,
+    block: suspend () -> Unit
+): Job {
+    port.updateUiState {
+        it.copy(
+            settingsOperations = it.settingsOperations.copy(webSearch = operation),
+            webSearchStatusMessage = progressDetail,
+            statusMessage = progressStatus
+        )
+    }
+    return scope.launch {
+        try {
+            block()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            val detail = "测试失败：${error.message ?: "未知错误"}"
+            port.updateUiState {
+                it.copy(
+                    webSearchStatusMessage = detail,
+                    statusMessage = when (operation) {
+                        WebSearchOperation.PREFLIGHT -> "联网网络预检失败"
+                        WebSearchOperation.CONFIG_TEST -> "联网检索测试失败"
+                        WebSearchOperation.TURN_TEST -> "联网闭环自检未通过"
+                    }
+                )
+            }
+        } finally {
+            port.updateUiState { state ->
+                if (state.settingsOperations.webSearch == operation) {
+                    state.copy(settingsOperations = state.settingsOperations.copy(webSearch = null))
+                } else {
+                    state
+                }
+            }
+        }
+    }
+}
+
 internal fun runWebSearchConfigTest(
     port: WebSearchConfigPort,
     scope: CoroutineScope,
-query: String) {
-        runWebSearchConfigTest(port, scope, query, port.uiState().webSearchConfig)
+query: String): Job? {
+        return runWebSearchConfigTest(port, scope, query, port.uiState().webSearchConfig)
     }
 
 internal fun runWebSearchConfigTest(
@@ -106,8 +161,8 @@ internal fun runWebSearchConfigTest(
         triggerMode: String,
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
-        runWebSearchConfigTest(port, scope, 
+    ): Job? {
+        return runWebSearchConfigTest(port, scope,
             query = query,
             config = webSearchConfigFrom(
                 enabled = enabled,
@@ -136,7 +191,7 @@ internal fun runWebSearchPreflight(
         triggerMode: String,
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList()
-    ) {
+    ): Job {
         val config = webSearchConfigFrom(
             enabled = enabled,
             provider = provider,
@@ -148,16 +203,15 @@ internal fun runWebSearchPreflight(
             researchMode = researchMode,
             backupProviders = backupProviders
         )
-        scope.launch {
-            port.updateUiState {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在进行联网网络预检...",
-                    statusMessage = "正在进行联网网络预检..."
-                )
-            }
+        return startWebSearchOperation(
+            port = port,
+            scope = scope,
+            operation = WebSearchOperation.PREFLIGHT,
+            progressDetail = "正在进行联网网络预检...",
+            progressStatus = "正在进行联网网络预检..."
+        ) {
             val started = android.os.SystemClock.elapsedRealtime()
-            val result = runCatching {
+            val result = runCatchingCancellable {
                 withContext(Dispatchers.IO) {
                     buildWebSearchPreflightReport(
                         config = config,
@@ -190,7 +244,6 @@ internal fun runWebSearchPreflight(
                             )
                         )
                         state.copy(
-                            busy = false,
                             webSearchStatusMessage = report.message,
                             webSearchDiagnostics = diagnostics,
                             statusMessage = if (report.ok) "联网网络预检通过" else "联网网络预检需检查"
@@ -218,7 +271,6 @@ internal fun runWebSearchPreflight(
                             )
                         )
                         state.copy(
-                            busy = false,
                             webSearchStatusMessage = message,
                             webSearchDiagnostics = diagnostics,
                             statusMessage = "联网网络预检失败"
@@ -232,7 +284,7 @@ internal fun runWebSearchPreflight(
 internal fun runWebSearchConfigTest(
     port: WebSearchConfigPort,
     scope: CoroutineScope,
-query: String, config: WebSearchConfig) {
+query: String, config: WebSearchConfig): Job? {
         val cleanQuery = query.trim().ifBlank { "MCA 本地 AI" }
         val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
         if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
@@ -250,18 +302,17 @@ query: String, config: WebSearchConfig) {
                     }
                 )
             }
-            return
+            return null
         }
-        scope.launch {
-            port.updateUiState {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在测试联网检索：$cleanQuery",
-                    statusMessage = "正在测试联网检索..."
-                )
-            }
+        return startWebSearchOperation(
+            port = port,
+            scope = scope,
+            operation = WebSearchOperation.CONFIG_TEST,
+            progressDetail = "正在测试联网检索：$cleanQuery",
+            progressStatus = "正在测试联网检索..."
+        ) {
             val started = android.os.SystemClock.elapsedRealtime()
-            val result = runCatching { port.provider.search(plan, config) }
+            val result = runCatchingCancellable { port.provider.search(plan, config) }
             port.updateUiState { state ->
                 result.fold(
                     onSuccess = { searchResult ->
@@ -279,7 +330,6 @@ query: String, config: WebSearchConfig) {
                             )
                         )
                         state.copy(
-                            busy = false,
                             webSearchStatusMessage = message,
                             webSearchDiagnostics = diagnostics,
                             statusMessage = if (success) "联网检索测试成功" else "联网检索无结果"
@@ -295,7 +345,6 @@ query: String, config: WebSearchConfig) {
                             )
                         )
                         state.copy(
-                            busy = false,
                             webSearchStatusMessage = message,
                             webSearchDiagnostics = diagnostics,
                             statusMessage = "联网检索测试失败"
@@ -321,8 +370,8 @@ internal fun runWebSearchTurnTest(
         researchMode: String,
         backupProviders: List<WebSearchBackupProviderConfig> = emptyList(),
         allowPublicCheckSourceForProtocolTest: Boolean = false
-    ) {
-        runWebSearchTurnTest(port, scope, 
+    ): Job? {
+        return runWebSearchTurnTest(port, scope,
             query = query,
             config = webSearchConfigFrom(
                 enabled = enabled,
@@ -346,7 +395,7 @@ internal fun runWebSearchTurnTest(
         query: String,
         config: WebSearchConfig,
         allowPublicCheckSourceForProtocolTest: Boolean = false
-    ) {
+    ): Job? {
         val cleanQuery = query.trim().ifBlank { "MCA 本地 AI 最新说明" }
         val plan = buildWebSearchPlan(cleanQuery, config.researchMode)
         if (!config.configured && !(config.canReadDirectUrls && plan.directUrls.isNotEmpty())) {
@@ -360,16 +409,15 @@ internal fun runWebSearchTurnTest(
                     statusMessage = "联网闭环自检未开始"
                 )
             }
-            return
+            return null
         }
-        scope.launch {
-            port.updateUiState {
-                it.copy(
-                    busy = true,
-                    webSearchStatusMessage = "正在闭环自检：$cleanQuery",
-                    statusMessage = "正在验证联网检索闭环..."
-                )
-            }
+        return startWebSearchOperation(
+            port = port,
+            scope = scope,
+            operation = WebSearchOperation.TURN_TEST,
+            progressDetail = "正在闭环自检：$cleanQuery",
+            progressStatus = "正在验证联网检索闭环..."
+        ) {
             val outcome = executeWebSearchForChatTurn(
                 messages = listOf(ChatMessage(role = Role.USER, content = cleanQuery)),
                 config = config,
@@ -389,7 +437,6 @@ internal fun runWebSearchTurnTest(
             }
             port.updateUiState {
                 it.copy(
-                    busy = false,
                     webSearchStatusMessage = message,
                     webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
                     statusMessage = if (passed) "联网闭环自检通过" else "联网闭环自检未通过"

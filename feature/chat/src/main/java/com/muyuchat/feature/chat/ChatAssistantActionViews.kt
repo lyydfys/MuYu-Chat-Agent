@@ -107,31 +107,31 @@ internal fun AssistantActionRow(
             IconButton(
                 onClick = onRegenerate,
                 enabled = canRegenerate,
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(48.dp)
             ) {
                 Icon(
                     Icons.Default.Replay,
                     contentDescription = "重新生成",
-                    modifier = Modifier.size(17.dp),
+                    modifier = Modifier.size(18.dp),
                     tint = tint.copy(alpha = if (canRegenerate) 0.78f else 0.32f)
                 )
             }
         }
         IconButton(
             onClick = onCopy,
-            modifier = Modifier.size(32.dp)
+            modifier = Modifier.size(48.dp)
         ) {
             Icon(
                 Icons.Default.ContentCopy,
                 contentDescription = "复制消息",
-                modifier = Modifier.size(17.dp),
+                modifier = Modifier.size(18.dp),
                 tint = tint.copy(alpha = 0.78f)
             )
         }
         if (!readOnly) Box {
             IconButton(
                 onClick = { menuOpen = true },
-                modifier = Modifier.size(32.dp)
+                modifier = Modifier.size(48.dp)
             ) {
                 Icon(
                     Icons.Default.MoreVert,
