@@ -75,3 +75,12 @@ and raw evidence live in `FINAL-MATRIX.md`, `MOTION.md` and `artifacts/`.
 # release APK (holds the shared build lock)
 powershell -File tools/_build_locked.ps1 -LogPath artifacts/build-final.log
 ```
+
+## 6. Rejected experiment (recorded so it is not retried blindly)
+
+Deferring the settings section content by one frame (to keep the heavy LazyColumn out of the opening
+frame) was tried, built and measured on device: settings short-window P95 went **17–18 ms -> 19–22 ms**
+and P99 46–65 -> 53–73 ms. Splitting the composition moved the cost into the middle of the fade and
+created more janky frames, so the change was reverted and the build rebuilt. The known issue in
+section 3 stays as documented.
+
