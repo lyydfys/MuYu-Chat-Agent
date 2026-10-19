@@ -123,3 +123,14 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | waiting reasoning panel chevron removed | PASS (code) | `ChatReasoningPerformanceScreens.kt` |
 | composer action menu capped at 520dp and scrollable | PASS (code) | `ChatComposerActionMenuViews.kt` |
 | measure-frames settings lane | PARTIAL | lane added + static-checked; device run BLOCKED by an observation mismatch after the capsule a11y change (selector fallback committed, rerun pending) |
+
+### Round-27 follow-up frame samples (same build, same device)
+
+| lane | verdict | metrics | evidence |
+|---|---|---|---|
+| drawer + 6 scrolls + model panel | PASS | 727 frames, janky 0.96%, P50 8 / P90 12 / P95 16 / P99 36 ms | `artifacts/frames/20261020-003015-16080` |
+| settings open + 6 scrolls + back | FAIL (borderline) | 722 frames, janky 1.11%, P50 10 / P90 17 / P95 18 / P99 65 ms; repeat: P95 17 ms | `artifacts/frames/20261020-002805-6596`, `20261020-002859-36384` |
+
+The settings lane sits 1–2 ms over the 60 Hz budget on this device; P99 spikes point at the
+open-transition + first composition of the settings LazyColumn rather than steady scrolling. Listed
+as a known borderline, not as a passing result.
