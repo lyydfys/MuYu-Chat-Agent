@@ -94,6 +94,42 @@ New contract tests added by this slice: `McaMotionContractTest`, `McaIconButtonC
 `MainShellMotionContractTest`, `InlineMarkdownStabilityTest`, `ChatProjection*Test`,
 `ChatSessionTitleReuseTest`, `ChatMotionContractTest` updates.
 
+## 4b. Round-15 review follow-ups (rich text, states, tail, startup)
+
+- **Rich text**: Markdown links and bare URLs now carry `LinkAnnotation.Url` while keeping their
+  blue/underline span, so the styled text opens the target; table columns share one width per column
+  (widest cell) instead of sizing every cell independently, so rows line up.
+- **Failure presentation**: the assistant body receives a short, internals-free reason
+  (`failureSummaryLine`) instead of the raw worker/runtime diagnostic; the full message stays in the
+  status card and its 错误详情 dialog, so history, export and diagnostics keep their data.
+- **Composer**: an empty composer without an attachment no longer presents an enabled send action —
+  the FAB is disabled and dimmed (the stop state still works while generating, preflight still
+  disables it). Copy confirmation is driven by the successful clipboard write: the copy glyph swaps
+  to a check for ~1.4s with unchanged geometry (`r15/copied-check.png`).
+- **Answer tail**: metrics → sources → actions form one group with a 4dp inner rhythm while the 12dp
+  body boundary is untouched; metrics render as complete fields (`上行 315 tokens`, `下行 9 tokens`,
+  `0.4 tok/s`, `用时 1分43秒`) in a wrapping row with tabular figures, so a number never separates
+  from its unit and no orphan `·` starts a line (`r15/chat-tail.png`).
+- **Image states**: generated-image tiles distinguish Loading / Ready / Failed; a failed decode shows
+  an in-place retry instead of keeping "图片加载中…" forever.
+- **Startup**: only one ambient signal remains (skeleton sweep); brand breath/orbit and the progress
+  sweep are removed, and the fixed phase weights are no longer presented as a percentage
+  (`r15/startup-220.png`). The phase label still reflects real work.
+- **Chrome/motion**: history/new-chat/menu use `McaIconButton` (bounded ripple + press scale),
+  `McaIconButton` has explicit disabled tint/container, and the app-menu row uses a vector arrow.
+  `SwipeBackPage` and the app menu now share one animator owner and one position source: per-frame
+  progress posts to a conflated channel, the 8% jump is gone, cancelled gestures resume from the
+  current offset, and repeated backs dismiss once.
+- **Verification**: `:app:testDebugUnitTest` 2970 tests / 0 failures, `:feature:chat` and
+  `:core:designsystem` suites green; release install verified on the validation device. Motion
+  capture after the transition rework: PASS, 16 motion frames, `maxFrameDiff 24.05`
+  (`ui-motion/chat-20261019-134452-47080`); the `send` action was NOT_RUN because the chat model is
+  unloaded on the validation device.
+
+Still open from the same review: shadow-weight calibration (top capsules vs composer), icon optics
+for glyphs outside the header, 360 dp / 2.0x-font / long-statistics matrix, and frame P95/P99 from a
+real interaction recording.
+
 ## 5. Blocked / deferred
 
 - **Macrobenchmark**: dependencies resolve, but the OEM ROM rejects first-install of a new package
