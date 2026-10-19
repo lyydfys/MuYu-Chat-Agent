@@ -108,6 +108,7 @@ import com.muyuchat.mca.KnowledgeBaseRecord
 import com.muyuchat.mca.KnowledgeBaseStore
 import com.muyuchat.mca.LocalImageLoraStore
 import com.muyuchat.mca.LocalImageModelStore
+import com.muyuchat.mca.installImageFileDigestStore
 import com.muyuchat.mca.LocalImageUpscalerStore
 import com.muyuchat.mca.ModelGenerationProfileStore
 import com.muyuchat.mca.ModelRuntimeProfileStore
@@ -185,7 +186,11 @@ internal class McaAppContainer(internal val application: Application) {
 
     val webSearchDiagnosticStore = WebSearchDiagnosticStore(application)
 
-    val localImageModelStore = LocalImageModelStore(application)
+    // The image catalog's per-component SHA observations survive process restarts; without this
+    // store every cold start re-hashed multi-gigabyte weights on the main thread.
+    val localImageModelStore = LocalImageModelStore(application).also {
+        installImageFileDigestStore(application.filesDir)
+    }
 
     val localImageLoraStore = LocalImageLoraStore(application)
 

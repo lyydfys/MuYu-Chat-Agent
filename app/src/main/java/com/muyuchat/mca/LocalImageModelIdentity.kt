@@ -258,6 +258,91 @@ private val imageFileDigestCache = object : LinkedHashMap<String, ImageFileDiges
     override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ImageFileDigestCacheEntry>?): Boolean = size > 2_048
 }
 
+/**
+ * Cross-process digest observations.
+ *
+ * The in-process cache alone forced every cold start to re-read and SHA-256 the whole local image
+ * catalog (observed: 4.2 GB + 4.5 GB + 483 MB + 370 MB, 16 s of startup on the validation device).
+ * The persisted entry keeps the **same** reuse key as the memory cache -- size, mtime and the
+ * Linux ctime/inode change key -- so a same-length replacement whose mtime was restored still
+ * invalidates the digest; nothing here trusts an import-time/source hash.
+ */
+private const val IMAGE_FILE_DIGEST_STORE = "image-file-digests.json"
+
+private object ImageFileDigestStore {
+    private const val MAX_ENTRIES = 512
+    private val lock = Any()
+    private val entries = LinkedHashMap<String, ImageFileDigestCacheEntry>(128, 0.75f, true)
+    private var target: File? = null
+    private var loaded = false
+
+    fun install(directory: File) {
+        synchronized(lock) {
+            if (loaded) return
+            loaded = true
+            val store = File(directory, IMAGE_FILE_DIGEST_STORE)
+            target = store
+            runCatching {
+                if (!store.isFile) return@runCatching
+                val array = JSONObject(store.readText(Charsets.UTF_8)).optJSONArray("entries") ?: return@runCatching
+                for (index in 0 until array.length()) {
+                    val item = array.optJSONObject(index) ?: continue
+                    val path = item.optString("path")
+                    if (path.isBlank()) continue
+                    entries[path] = ImageFileDigestCacheEntry(
+                        sizeBytes = item.optLong("sizeBytes"),
+                        modifiedAt = item.optLong("modifiedAt"),
+                        changeKey = item.optString("changeKey"),
+                        sha256 = item.optString("sha256"),
+                    )
+                }
+            }
+        }
+    }
+
+    fun get(path: String): ImageFileDigestCacheEntry? = synchronized(lock) {
+        entries[path]?.takeIf { it.changeKey.isNotEmpty() && it.sha256.isNotBlank() }
+    }
+
+    fun put(path: String, entry: ImageFileDigestCacheEntry) {
+        synchronized(lock) {
+            entries[path] = entry
+            while (entries.size > MAX_ENTRIES) {
+                val iterator = entries.keys.iterator()
+                if (!iterator.hasNext()) break
+                iterator.next()
+                iterator.remove()
+            }
+            persistLocked()
+        }
+    }
+
+    private fun persistLocked() {
+        val store = target ?: return
+        runCatching {
+            val array = JSONArray()
+            entries.forEach { (path, entry) ->
+                array.put(
+                    JSONObject().put("path", path)
+                        .put("sizeBytes", entry.sizeBytes)
+                        .put("modifiedAt", entry.modifiedAt)
+                        .put("changeKey", entry.changeKey)
+                        .put("sha256", entry.sha256)
+                )
+            }
+            val payload = JSONObject().put("version", 1).put("entries", array).toString()
+            val temp = File(store.parentFile, store.name + ".tmp")
+            temp.writeText(payload, Charsets.UTF_8)
+            if (!temp.renameTo(store)) {
+                store.delete()
+                temp.renameTo(store)
+            }
+        }
+    }
+}
+
+internal fun installImageFileDigestStore(directory: File) = ImageFileDigestStore.install(directory)
+
 /** Cache only an observation made in this process, never a persisted/source hash. */
 internal fun observedLocalImageFileSha256(file: File, checkCancelled: () -> Unit = {}, force: Boolean = false): String {
     checkCancelled()
@@ -269,10 +354,16 @@ internal fun observedLocalImageFileSha256(file: File, checkCancelled: () -> Unit
         Files.readAttributes(file.toPath(), "unix:ctime,ino").toString()
     }.getOrDefault("")
     val cached = synchronized(imageFileDigestCache) { imageFileDigestCache[path] }
-    // Always re-hash small configurations/tokenizers; large immutable weights use a
-    // process-local stat/ctime key, so each page refresh does not re-read gigabytes.
+        ?: ImageFileDigestStore.get(path)
+    // Always re-hash small configurations/tokenizers; large immutable weights reuse an
+    // observation keyed by size + mtime + the Linux ctime/inode change key. The same key is used
+    // for the in-process and the persisted observation, so a changed file still invalidates it.
     if (!force && changeKey.isNotEmpty() && bytes > 4L * 1_024L * 1_024L && cached != null &&
         cached.sizeBytes == bytes && cached.modifiedAt == modified && cached.changeKey == changeKey) return cached.sha256
+if (Thread.currentThread().name == "main" && bytes > 64L * 1_024L * 1_024L) {
+        android.util.Log.i("McaStartup", "hash-on-main " + file.name + "\n" + android.util.Log.getStackTraceString(Throwable()))
+    }
+    val hashStartedAt = android.os.SystemClock.elapsedRealtime()
     val digest = MessageDigest.getInstance("SHA-256")
     file.inputStream().buffered().use { input ->
         val buffer = ByteArray(128 * 1_024)
@@ -289,7 +380,13 @@ internal fun observedLocalImageFileSha256(file: File, checkCancelled: () -> Unit
         "模型组件在校验期间发生变化，请重试：${file.name}"
     }
     val sha = digest.digest().joinToString("") { "%02x".format(it.toInt() and 0xff) }
-    synchronized(imageFileDigestCache) { imageFileDigestCache[path] = ImageFileDigestCacheEntry(bytes, modified, changeKey, sha) }
+    val hashTookMs = android.os.SystemClock.elapsedRealtime() - hashStartedAt
+    if (hashTookMs >= 300L) {
+        android.util.Log.i("McaStartup", "hash " + file.name + " " + (bytes / 1_048_576L) + "MB t=" + hashTookMs + "ms thread=" + Thread.currentThread().name)
+    }
+    val observed = ImageFileDigestCacheEntry(bytes, modified, changeKey, sha)
+    synchronized(imageFileDigestCache) { imageFileDigestCache[path] = observed }
+    ImageFileDigestStore.put(path, observed)
     return sha
 }
 

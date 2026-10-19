@@ -14,6 +14,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
+/** Logcat tag for the startup timing breadcrumbs added by the parallel frontend pass. */
+private const val STARTUP_TAG = "MCAStartup"
+
 internal class MainPostStartupCoordinator(
     private val store: UiStateStore,
     private val scope: CoroutineScope,
@@ -39,18 +42,31 @@ internal class MainPostStartupCoordinator(
     private val modelImportCoordinator = modelImportAndDownloadCoordinator
 
     fun runPostStartupWork() {
+        val startupThread = Thread.currentThread().name
+        Log.i(STARTUP_TAG, "post-work-begin thread=" + startupThread)
         restorePendingContentImportPreview()
+        val reconcileStartedAt = android.os.SystemClock.elapsedRealtime()
         imageLibraryStartupReconciliation.start()
+        Log.i(STARTUP_TAG, "image-reconcile-submit t=" + (android.os.SystemClock.elapsedRealtime() - reconcileStartedAt) + "ms thread=" + Thread.currentThread().name)
         observeManagedDownloadsAction()
         modelImportCoordinator.observeManagedImports()
 
         scope.launch {
-            offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle()?.let { bundle ->
+            // Bundle verification walks and hashes files. It used to run on the main dispatcher
+            // (viewModelScope) and could freeze the first chat frame for seconds — the MIUI hang
+            // watchdog caught it inside LocalImageModelIdentity's FileInputStream read. Only the
+            // resulting state write stays on main.
+            val verifyStartedAt = android.os.SystemClock.elapsedRealtime()
+            val bundle = withContext(Dispatchers.IO) {
+                offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle()
+            }
+            Log.i(STARTUP_TAG, "offline-bundle t=" + (android.os.SystemClock.elapsedRealtime() - verifyStartedAt) + "ms")
+            bundle?.let { verified ->
                 store.update { state ->
                     if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
                     else state.copy(
-                        offlineTranslationInstalled = bundle.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
-                        offlineTranslationStatus = offlinePromptTranslationAndChatImageCoordinator.offlineTranslationBundleReadyStatus(bundle)
+                        offlineTranslationInstalled = verified.identity.translatorFamily == OfflineTranslatorFamily.HY_MT2,
+                        offlineTranslationStatus = offlinePromptTranslationAndChatImageCoordinator.offlineTranslationBundleReadyStatus(verified)
                     )
                 }
             }
@@ -74,7 +90,9 @@ internal class MainPostStartupCoordinator(
         }
 
         scope.launch(Dispatchers.IO) {
+            val inversionStartedAt = android.os.SystemClock.elapsedRealtime()
             val loaded = loadInitialTextualInversionLibraryState(container.localImageTextualInversionStore)
+            Log.i(STARTUP_TAG, "textual-inversion t=" + (android.os.SystemClock.elapsedRealtime() - inversionStartedAt) + "ms")
             store.update { state ->
                 if (!state.localImageTextualInversionLoading) {
                     state
@@ -89,7 +107,9 @@ internal class MainPostStartupCoordinator(
         }
 
         chatModelCoordinator.launchModelOperation("恢复运行记录失败") {
+            val recoverStartedAt = android.os.SystemClock.elapsedRealtime()
             chatModelCoordinator.recoverInterruptedRuntimeProfiles()
+            Log.i(STARTUP_TAG, "recover-profiles t=" + (android.os.SystemClock.elapsedRealtime() - recoverStartedAt) + "ms thread=" + Thread.currentThread().name)
         }
 
         scope.launch {
@@ -121,8 +141,10 @@ internal class MainPostStartupCoordinator(
         }
 
         scope.launch(Dispatchers.IO) {
+            val readinessStartedAt = android.os.SystemClock.elapsedRealtime()
             val readinessPort = managedRuntimeReadinessPortProvider()
             refreshRuntimeReadiness(readinessPort)
+            Log.i(STARTUP_TAG, "readiness-first t=" + (android.os.SystemClock.elapsedRealtime() - readinessStartedAt) + "ms")
             if (!skipInitialModelDiscovery) {
                 recoverModelOperation(
                     operation = { modelStore.recoverInstalledQairtBundles() },
@@ -144,8 +166,12 @@ internal class MainPostStartupCoordinator(
                     }
                 )
             }
+            val reconcileIdsStartedAt = android.os.SystemClock.elapsedRealtime()
             reconcileModelIdentities()
+            Log.i(STARTUP_TAG, "reconcile-identities t=" + (android.os.SystemClock.elapsedRealtime() - reconcileIdsStartedAt) + "ms")
+            val readinessSecondStartedAt = android.os.SystemClock.elapsedRealtime()
             refreshRuntimeReadiness(readinessPort)
+            Log.i(STARTUP_TAG, "readiness-second t=" + (android.os.SystemClock.elapsedRealtime() - readinessSecondStartedAt) + "ms")
         }
     }
 

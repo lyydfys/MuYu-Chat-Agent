@@ -3,6 +3,8 @@ package com.muyuchat.mca
 import android.app.ActivityManager
 import android.app.Application
 import android.os.Build
+import android.os.SystemClock
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -21,6 +23,8 @@ import com.muyuchat.mca.composition.McaAppContainer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+
+private const val STARTUP_LOG_TAG = "McaStartup"
 
 /**
  * Real, observable startup phases. The label is what the launch surface shows verbatim, so it
@@ -53,6 +57,20 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
     private var cleared = false
     private var startupJob: Job? = null
     private val pendingActions = ArrayDeque<(MainViewModel) -> Unit>()
+    private var startupStartedAt = 0L
+
+    /**
+     * Low-volume startup timing, one line per real phase. Kept in release on purpose: startup
+     * attribution is a user-facing performance property and adb logcat is the only way to read it
+     * on a non-debuggable build.
+     */
+    private fun stamp(label: String) {
+        if (startupStartedAt == 0L) {
+            Log.i(STARTUP_LOG_TAG, "$label (no base)")
+            return
+        }
+        Log.i(STARTUP_LOG_TAG, "$label t=${SystemClock.elapsedRealtime() - startupStartedAt}ms")
+    }
 
     /** Publishes a real phase boundary; ignored once the app model is ready. */
     private fun mark(phase: AppStartupPhase, progress: Float) {
@@ -74,6 +92,8 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
         if (starting || cleared || state.value.model != null) return
         starting = true
         mutableState.value = AppStartupState()
+        startupStartedAt = SystemClock.elapsedRealtime()
+        stamp("begin")
         startupJob = viewModelScope.launch {
             launch {
                 delay(5_000L)
@@ -86,6 +106,7 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
             try {
                 val app = getApplication<Application>()
                 val previous = withContext(Dispatchers.IO) { StartupDiagnostics.read(app) }
+                stamp("diagnostics-read")
                 mark(AppStartupPhase.PREPARING, 0.05f)
                 if (checkPreviousAttempt && previous.optBoolean("starting")) {
                     mutableState.value = AppStartupState(loading = false,
@@ -94,15 +115,18 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                     return@launch
                 }
                 withContext(Dispatchers.IO) { StartupDiagnostics.record(app, true, null) }
+                stamp("diagnostics-record")
                 mark(AppStartupPhase.MIGRATING, 0.12f)
                 // Retain the instance even if the Activity is closed during construction;
                 // finally clears its ViewModelStore and cancels any owned work.
                 val migrated = withContext(Dispatchers.IO) {
                     ModelIdentityReferenceMigration(app).migratePendingReferences()
                 }
+                stamp("migration")
                 mark(AppStartupPhase.ASSEMBLING, 0.22f)
                 prepared = withContext(Dispatchers.IO) {
                     val container = McaAppContainer(app)
+                    stamp("container")
                     val installationScopeId = container.runtimeProfileStore.installationScopeId()
                     MainViewModel(
                         app,
@@ -115,6 +139,7 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                         )
                     )
                 }
+                stamp("viewmodel")
                 mark(AppStartupPhase.READING, 0.35f)
                 val main = requireNotNull(prepared)
                 ViewModelProvider(children, object : ViewModelProvider.Factory {
@@ -122,8 +147,11 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                     override fun <T : ViewModel> create(modelClass: Class<T>): T = main as T
                 })[MainViewModel::class.java]
                 withContext(Dispatchers.IO) { main.startAfterConstruction() }
+                stamp("post-startup")
                 mark(AppStartupPhase.FINISHING, 0.62f)
                 withContext(Dispatchers.IO) { StartupDiagnostics.record(app, false, null) }
+                stamp("diagnostics-final")
+                stamp("ready")
                 mutableState.value = AppStartupState(
                     model = main,
                     loading = false,

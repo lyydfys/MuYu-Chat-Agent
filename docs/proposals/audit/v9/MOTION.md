@@ -85,10 +85,25 @@ introduced by the motion slices. The only geometry animation is an explicit expa
 - Release APKs must be produced by `scripts/release.ps1`, which passes
   `-Pmca.keepNativeSymbols=false`. A manual `assembleRelease` keeps native DWARF and inflates the
   APK (211.8 MB vs the stripped artifact), but does not change runtime behaviour.
-- **Startup readiness (round 4 device measurement, build 0.2.4):** activity first frame 420 ms,
-  but the chat surface appeared at ~22 s on the first launch after an update and ~8.7 s on the
-  following cold start. This is the launch-screen duration users actually see and is the next
-  performance target; the launch surface itself is already animated and phase-accurate.
+- **Startup readiness (rounds 4–6, build 0.2.4):** activity first frame 420 ms, but the chat
+  surface appeared at ~22 s on the first launch after an update and ~8.7–16 s on later cold starts.
+  Round 6 attribution (release logcat + MIUI AppScout main-thread stack): the startup path itself
+  is **266–383 ms**; the surface was held by **synchronous SHA-256 of the local image catalog on
+  the main thread** — every cold process re-read 4.2 GB `dit.mnn.weight`, 4.5 GB `llm.mnn.weight`,
+  483 MB `vae_decoder.mnn` and 370 MB `embeddings_int4.bin` (`hash … t=5927ms thread=main`, then
+  7768 ms, then smaller ones), twice (worker + main). The in-process digest cache never survived a
+  process restart.
+  Fix: `ImageFileDigestStore` persists each component observation in `files/image-file-digests.json`
+  using the **same** reuse key as the memory cache — size, mtime and the Linux `ctime/inode` change
+  key — so an unchanged weight is verified without being read, while a same-length replacement whose
+  mtime was restored still invalidates it (that exact guarantee is pinned by
+  `LocalImageModelStoreIntegrationTest`). After the fix the device measured `TotalTime 217–219 ms`
+  and the chat frame was visible in the first recorded frames (≤ ~0.5 s); the per-hash logs
+  disappeared. Expect a one-time re-hash on the first launch after upgrading, because the old
+  catalog rows carry no ctime and must be observed once before they can be reused.
+  Verification status: the fast device run used the snapshot-reuse prototype; the shipped
+  persistent-store variant compiles, but its full test suite plus a repeat cold-start recording are
+  pending because the parallel build killed the test/task runs (see the build-lock note).
 - **Shared checkout: build under the MCA lock.** A parallel agent session runs
   `scripts/agent-verify.ps1`, which force-stops every `GradleDaemon`/`KotlinCompileDaemon` after
   taking `tools/build-guards/McaBuildLock.psm1`. A manual `gradlew` invocation that does not hold
