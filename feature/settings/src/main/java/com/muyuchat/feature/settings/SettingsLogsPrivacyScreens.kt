@@ -39,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaMotion
@@ -111,6 +112,9 @@ fun LogsApiScreen(
                     Text("导出", modifier = Modifier.padding(start = 6.dp))
                 }
             }
+        }
+        if (state.logs.isEmpty() && state.agentLogs.isEmpty() && state.diagnosticReport.isBlank()) {
+            item { LogsEmptyState() }
         }
         if (state.diagnosticReport.isNotBlank()) {
             item {
@@ -475,4 +479,46 @@ private fun runtimeLogRowPresentation(log: RuntimeMetrics): RuntimeLogRowPresent
         primary = "速度 ${"%.2f".format(log.decodeTps)} token/s · 首 token ${log.ttftMs} ms",
         secondary = "输出 ${log.genTokens} · RSS ${formatKb(rssKb ?: log.nativePssKb)} · PSS ${formatKb(log.nativePssKb)}"
     )
+}
+
+/**
+ * Empty state for the logs/diagnostics tab. Without it the tab was a wall of blank background under
+ * four buttons, which reads as a broken screen rather than "nothing captured yet".
+ */
+@Composable
+private fun LogsEmptyState() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                Icons.Rounded.Description,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                modifier = Modifier.size(32.dp)
+            )
+            Text(
+                "暂无运行日志",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                "点击刷新读取本机运行记录；生成诊断可收集引擎与设备信息，便于排查问题。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
+    }
 }

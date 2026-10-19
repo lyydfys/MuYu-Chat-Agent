@@ -70,7 +70,8 @@ the conflated-channel swipe-back and the zero-animation-scale behaviour.
   switch sits on the title row so it never overlays the description, the log actions use
   Refresh/Description glyphs instead of two identical save icons, and provider/trigger chips wrap
   instead of clipping at the right edge (`r12/settings-websearch-chips.png`,
-  `r12/settings-logs-fixed.png`).
+  `r12/settings-logs-fixed.png`). The logs/diagnostics tab now has a centred empty state (icon,
+  title, one-line hint) instead of a blank page (`r13/logs-empty-state.png`).
 - Dark mode / large font evidence: `r2/after-98a37aa7-dark-main.png`, `r5/r5-dark-chat.png`,
   `r5/r5-dark-drawer.png`, `r5/r5-font20-chat.png`, `r11/agent-light.png`,
   `r11/agent-dark.png`, `r11/agent-font20-dark.png`.
