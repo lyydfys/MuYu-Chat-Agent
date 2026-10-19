@@ -361,13 +361,20 @@ private fun ModelHubHeader(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // 2.0x 大字号下给标题列限宽，副标题省略而不是把右侧刷新/图标挤出屏幕
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) {
                     Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
                 }
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text("模型管理", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text("本地 / 云端 / 推荐 / 广场 / 文件", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "本地 / 云端 / 推荐 / 广场 / 文件",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {

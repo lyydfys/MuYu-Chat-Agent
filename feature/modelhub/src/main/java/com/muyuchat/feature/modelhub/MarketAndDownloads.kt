@@ -437,7 +437,8 @@ internal fun DownloadDetailsDialog(
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("模型下载诊断", downloadDiagnostics(state)))
             }) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
+                // 行内图标统一 18dp，16dp 是全模块孤例
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(4.dp))
                 Text("复制诊断")
             }

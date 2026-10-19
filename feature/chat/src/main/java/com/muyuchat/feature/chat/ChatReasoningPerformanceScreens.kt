@@ -1,6 +1,8 @@
 package com.muyuchat.feature.chat
 
 import android.os.SystemClock
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -18,7 +20,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -33,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -48,6 +50,7 @@ import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.PromptMessageRetention
+import com.muyuchat.core.designsystem.McaMotion
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
@@ -70,6 +73,13 @@ internal fun ReasoningPanel(
     if (cleaned.isBlank()) return
 
     var expanded by rememberSaveable { mutableStateOf(true) }
+    // One chevron vector, rotated in the layer phase: the previous Up/Down icon swap was a hard
+    // cut on every toggle and neither icon needed its own compose pass.
+    val arrowRotation = animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = McaMotion.sizeChange,
+        label = "reasoning-arrow"
+    )
     val seconds = durationMs.div(1000).coerceAtLeast(0)
     val title = if (awaitingFinalAnswer) {
         if (seconds > 0) "正在思考（用时 ${seconds} 秒）" else "正在思考"
@@ -85,6 +95,12 @@ internal fun ReasoningPanel(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // Expand/collapse and "show more" now settle through the shared size spring instead of
+            // jumping. This lives inside a message row, so the growing height can surface the
+            // ChatScrollCoordinator's ContentGrew while following: the spring is short and the
+            // risk is accepted here (alternative was keeping the instant jump); verify no visible
+            // scroll jitter while following a streaming reply.
+            .animateContentSize(animationSpec = McaMotion.sizeChangePx)
             .padding(top = 2.dp, bottom = 8.dp)
     ) {
         Row(
@@ -102,10 +118,13 @@ internal fun ReasoningPanel(
             )
             Spacer(modifier = Modifier.width(4.dp))
             Icon(
-                imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = if (expanded) "收起思考" else "展开思考",
                 tint = muted,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier
+                    .size(18.dp)
+                    // Layer-phase read: rotating the chevron does not recompose while animating.
+                    .graphicsLayer { rotationZ = arrowRotation.value }
             )
         }
         Row(

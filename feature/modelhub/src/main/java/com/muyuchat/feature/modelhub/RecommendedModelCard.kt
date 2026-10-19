@@ -204,7 +204,8 @@ internal fun RecommendedModelCard(
                 it,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = if (detailsExpanded) 8 else 3,
+                // 展开态必须能读全 21 组尺寸长文，折叠态仍保持 3 行
+                maxLines = if (detailsExpanded) Int.MAX_VALUE else 3,
                 overflow = TextOverflow.Ellipsis
             )
         }

@@ -87,7 +87,13 @@ class ModelHubStatusAccessibilityContractTest {
         val cloud = sourceFile("CloudModelsSection.kt")
         val local = sourceFile("LocalModelsSection.kt")
 
-        assertTrue(cloud.contains("Icon(Icons.Rounded.Delete, contentDescription = cloudModelDeleteActionLabel(model))"))
+        // Cloud delete icon is now normalized with the local one (18dp glyph + muted tint), so
+        // check the semantic label and the style pieces instead of freezing one call formatting.
+        val cloudDelete = cloud.substringAfter(
+            "contentDescription = cloudModelDeleteActionLabel(model)"
+        )
+        assertTrue(cloudDelete.substringBefore("tint =").contains("Modifier.size(18.dp)"))
+        assertTrue(cloudDelete.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
         assertTrue(cloud.contains("Icon(Icons.Rounded.Edit, contentDescription = null"))
         assertFalse(cloud.contains("contentDescription = \"删除云端模型\""))
 
@@ -97,7 +103,11 @@ class ModelHubStatusAccessibilityContractTest {
         assertTrue(local.contains("contentDescription = localModelDeleteActionLabel(model.displayName)"))
         assertTrue(local.contains("modifier = Modifier.size(18.dp)"))
         assertTrue(local.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
-        assertTrue(local.contains("Icon(Icons.Rounded.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))"))
+        val localImageDelete = local.substringAfter(
+            "contentDescription = localImageModelDeleteActionLabel(model.displayName)"
+        )
+        assertTrue(localImageDelete.substringBefore("tint =").contains("Modifier.size(18.dp)"))
+        assertTrue(localImageDelete.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
         assertTrue(local.contains("Icon(Icons.Rounded.CheckCircle, contentDescription = null"))
         assertFalse(local.contains("contentDescription = \"删除本地模型\""))
         assertFalse(local.contains("contentDescription = \"删除本地图像生成引擎\""))

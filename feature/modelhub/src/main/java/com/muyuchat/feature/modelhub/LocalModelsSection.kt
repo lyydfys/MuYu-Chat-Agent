@@ -588,8 +588,14 @@ private fun LocalImageModelCard(
                     Spacer(Modifier.width(6.dp))
                     Text("校验", maxLines = 1)
                 }
-                IconButton(onClick = { confirmRemoval = true }, enabled = enabled) {
-                    Icon(Icons.Rounded.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))
+                // 与本地聊天卡删除按钮统一：48dp 触达 + 18dp muted 字形
+                IconButton(onClick = { confirmRemoval = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        Icons.Rounded.Delete,
+                        contentDescription = localImageModelDeleteActionLabel(model.displayName),
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

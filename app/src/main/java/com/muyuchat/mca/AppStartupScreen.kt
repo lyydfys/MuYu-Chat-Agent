@@ -16,6 +16,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -143,6 +146,9 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
                 .widthIn(max = 420.dp)
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
+                // Background stays full-bleed; only the readable content respects the system bars
+                // (targetSdk 36 runs edge-to-edge on API 35+).
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(horizontal = 28.dp, vertical = 40.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

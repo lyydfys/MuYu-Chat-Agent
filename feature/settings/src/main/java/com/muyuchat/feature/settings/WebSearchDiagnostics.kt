@@ -343,7 +343,7 @@ internal fun WebSearchDiagnosticCard(
                     }
                 }
             ) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制诊断")
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                 Text("复制诊断", modifier = Modifier.padding(start = 6.dp))
             }
         }

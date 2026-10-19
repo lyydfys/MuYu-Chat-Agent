@@ -79,11 +79,11 @@ fun LogsApiScreen(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onRefreshLogs, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
+                    Icon(Icons.Rounded.Refresh, contentDescription = null)
                     Text("刷新", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(onClick = onRefreshDiagnostics, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Description, contentDescription = "生成诊断")
+                    Icon(Icons.Rounded.Description, contentDescription = null)
                     Text("生成诊断", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -101,7 +101,7 @@ fun LogsApiScreen(
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                     Text("复制", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(
@@ -109,7 +109,7 @@ fun LogsApiScreen(
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.FileDownload, contentDescription = "导出")
+                    Icon(Icons.Rounded.FileDownload, contentDescription = null)
                     Text("导出", modifier = Modifier.padding(start = 6.dp))
                 }
             }

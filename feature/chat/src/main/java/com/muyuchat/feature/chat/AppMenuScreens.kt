@@ -20,8 +20,10 @@ package com.muyuchat.feature.chat
 // judgement call about which imports each declaration still needs.
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -71,6 +73,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
 internal fun McaAppMenuPage(
@@ -317,11 +320,20 @@ internal fun McaAppMenuPage(
             text = {
                 Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                     state.contextSummaryModels.forEach { option ->
+                        val optionInteraction = remember { MutableInteractionSource() }
                         Row(
-                            Modifier.fillMaxWidth().clickable(enabled = !state.isGenerating) {
-                                onSetContextSummaryModel(option.id)
-                                chooseSummaryModel = false
-                            }.padding(vertical = 6.dp),
+                            Modifier
+                                .fillMaxWidth()
+                                .clickable(
+                                    interactionSource = optionInteraction,
+                                    indication = LocalIndication.current,
+                                    enabled = !state.isGenerating
+                                ) {
+                                    onSetContextSummaryModel(option.id)
+                                    chooseSummaryModel = false
+                                }
+                                .mcaPressScale(optionInteraction, enabled = !state.isGenerating)
+                                .padding(vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             androidx.compose.material3.RadioButton(

@@ -5,8 +5,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,7 +31,7 @@ import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -39,6 +41,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +55,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.mcaPressScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -154,7 +159,16 @@ internal fun ChatBackgroundSettingsPage(
     }
     Column(modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).navigationBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回应用菜单") }
+            // Same 48dp target and 24dp glyph as the previous IconButton; only the shared bounded
+            // ripple + layer-phase press weight differ. Tint keeps the previous content colour.
+            McaIconButton(
+                contentDescription = "返回应用菜单",
+                onClick = onDismiss,
+                glyphSize = 24.dp,
+                tint = LocalContentColor.current
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+            }
             Text("聊天背景", style = MaterialTheme.typography.titleLarge)
         }
             Column(
@@ -270,9 +284,14 @@ internal fun NewConversationAssistantDialog(
                 if (selected == null) {
                     if (assistants.isEmpty()) Text("暂无角色卡")
                     assistants.sortedByDescending { it.selected }.forEach { assistant ->
+                        val rowInteraction = remember { MutableInteractionSource() }
                         Surface(
                             modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                                .clickable { onSelectAssistant(assistant.id) },
+                                .clickable(
+                                    interactionSource = rowInteraction,
+                                    indication = LocalIndication.current
+                                ) { onSelectAssistant(assistant.id) }
+                                .mcaPressScale(rowInteraction),
                             color = Color.Transparent,
                             shape = RoundedCornerShape(8.dp)
                         ) {
@@ -301,9 +320,14 @@ internal fun NewConversationAssistantDialog(
                     Text("返回已有会话", style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     previous.forEach { item ->
+                        val rowInteraction = remember { MutableInteractionSource() }
                         Surface(
                             modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                                .clickable { onResume(item.id) },
+                                .clickable(
+                                    interactionSource = rowInteraction,
+                                    indication = LocalIndication.current
+                                ) { onResume(item.id) }
+                                .mcaPressScale(rowInteraction),
                             color = if (item.selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
                             shape = RoundedCornerShape(8.dp)
                         ) {

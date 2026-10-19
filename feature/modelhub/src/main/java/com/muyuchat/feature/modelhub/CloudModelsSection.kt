@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -140,13 +141,20 @@ internal fun CloudModelEditorPage(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // 2.0x 大字号下给标题列限宽，长副标题省略而不是越界裁切
+            Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onBack) {
                     Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回云端模型")
                 }
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         }
@@ -350,7 +358,8 @@ internal fun CloudModelEditorPage(
             item {
                 val status = cloudDialogStatusMessage(statusMessage)
                 if (status != null) {
-                    StatusMessageCard(message = status)
+                    // 保存/测试失败需要 error 语义，复用模块内已有的状态判定
+                    StatusMessageCard(message = status, isError = modelHubStatusMessageIsError(status))
                 } else {
                     CardBox {
                         Text("状态反馈", fontWeight = FontWeight.Bold)
@@ -377,6 +386,7 @@ internal fun CloudModelEditorPage(
             shape = RoundedCornerShape(24.dp),
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
         ) {
+            // 2.0x 大字号下固定 48dp 会裁切按钮文字，改为最小高度并让保存按钮省略
             Row(
                 modifier = Modifier.padding(10.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -385,7 +395,7 @@ internal fun CloudModelEditorPage(
                 if (isImage) {
                     OutlinedButton(
                         onClick = onBack,
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Text("取消")
@@ -393,16 +403,16 @@ internal fun CloudModelEditorPage(
                     Button(
                         onClick = onSaveImage,
                         enabled = enabled && cloud.imageConfigured,
-                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
-                        Text("保存并设为当前", maxLines = 1)
+                        Text("保存并设为当前", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 } else {
                     OutlinedButton(
                         onClick = onTest,
                         enabled = enabled && cloud.configured,
-                        modifier = Modifier.weight(1f).height(48.dp),
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Text("测试")
@@ -410,10 +420,10 @@ internal fun CloudModelEditorPage(
                     Button(
                         onClick = onSaveChat,
                         enabled = enabled && cloud.configured,
-                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
-                        Text("保存并加载", maxLines = 1)
+                        Text("保存并加载", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -545,8 +555,14 @@ private fun CloudModelRow(
                         Spacer(Modifier.width(6.dp))
                         Text("编辑", maxLines = 1)
                     }
-                    IconButton(onClick = { confirmDelete = true }) {
-                        Icon(Icons.Rounded.Delete, contentDescription = cloudModelDeleteActionLabel(model))
+                    // 与本地模型卡删除按钮统一：48dp 触达 + 18dp muted 字形
+                    IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.Rounded.Delete,
+                            contentDescription = cloudModelDeleteActionLabel(model),
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }

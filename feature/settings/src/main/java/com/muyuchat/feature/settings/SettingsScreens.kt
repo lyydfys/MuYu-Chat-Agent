@@ -16,6 +16,8 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -238,8 +240,13 @@ fun SettingsHubScreen(
                     modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
+                    McaIconButton(
+                        contentDescription = "返回聊天",
+                        onClick = onBack,
+                        glyphSize = 24.dp,
+                        tint = LocalContentColor.current
+                    ) {
+                        Icon(Icons.Rounded.Close, contentDescription = null)
                     }
                     Column {
                         Text("系统设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)

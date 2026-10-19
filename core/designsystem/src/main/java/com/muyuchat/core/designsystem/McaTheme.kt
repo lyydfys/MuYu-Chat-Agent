@@ -33,6 +33,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -140,7 +141,9 @@ fun McaTheme(
     val colorScheme = mcaColorScheme(darkTheme)
     val view = LocalView.current
     if (!view.isInEditMode) {
-        SideEffect {
+        // System-bar writes touch the window layout params, so apply them when the theme actually
+        // changes instead of on every recomposition of the host (streaming chat recomposes often).
+        DisposableEffect(darkTheme) {
             val window = (view.context as Activity).window
             window.applySystemBarColors(
                 statusBarColor = colorScheme.background.toArgb(),
@@ -148,6 +151,7 @@ fun McaTheme(
             )
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
             WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = !darkTheme
+            onDispose { }
         }
     }
 

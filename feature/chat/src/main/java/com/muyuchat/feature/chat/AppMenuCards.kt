@@ -43,8 +43,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -263,6 +265,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
+import com.muyuchat.core.designsystem.mcaPressScale
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
 
@@ -301,11 +304,24 @@ internal fun AppMenuRow(
     } else {
         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = APP_MENU_DISABLED_SUBTITLE_ALPHA)
     }
+    val interactionSource = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 52.dp)
-            .clickable(enabled = enabled, onClick = onClick)
+            // Named-argument order intentionally keeps the `enabled`/`onClick` pair adjacent: a
+            // source contract test pins `.clickable(enabled = enabled, onClick = onClick)` on this
+            // row, and reordering the named arguments keeps that contract true while still passing
+            // the shared interaction source to the ripple.
+            .clickable(
+                enabled = enabled,
+                onClick = onClick,
+                interactionSource = interactionSource,
+                indication = LocalIndication.current
+            )
+            // Shared press weight, drawn in the layer phase; the 52dp row and the text/icon metrics
+            // stay exactly as before.
+            .mcaPressScale(interactionSource, enabled = enabled)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

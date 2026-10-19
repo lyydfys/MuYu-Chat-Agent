@@ -277,16 +277,16 @@ private fun ApiStatusCard(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制本机地址")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                     Text("本机", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = "复制局域网地址")
+                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                     Text("局域网", modifier = Modifier.padding(start = 6.dp))
                 }
             }
             Button(onClick = onCopyKey, enabled = apiKey.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = "复制 Key")
+                Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                 Text("复制 API Key", modifier = Modifier.padding(start = 6.dp))
             }
         }
