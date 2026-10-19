@@ -3,7 +3,10 @@ package com.muyuchat.feature.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -216,22 +219,24 @@ fun SearchSettingsScreen(
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("启用联网检索", fontWeight = FontWeight.Bold)
-                            Text(
-                                "开启后可读取用户提供的网页链接；关键词搜索还需要配置搜索服务。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                    // The switch belongs to the title row: centring it against a two-line
+                    // title+description column made it sit on top of the description text.
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("启用联网检索", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            Spacer(Modifier.width(12.dp))
+                            Switch(checked = enabled, onCheckedChange = { enabled = it })
                         }
-                        Switch(checked = enabled, onCheckedChange = { enabled = it })
+                        Text(
+                            "开启后可读取用户提供的网页链接；关键词搜索还需要配置搜索服务。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         providerItems.forEach { item ->
                             FilterChip(
                                 selected = provider == item.first,
@@ -248,7 +253,7 @@ fun SearchSettingsScreen(
                     ) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("触发方式", fontWeight = FontWeight.Bold)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 triggerModes.forEach { item ->
                                     FilterChip(
                                         selected = triggerMode == item.first,
@@ -265,7 +270,7 @@ fun SearchSettingsScreen(
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("研究模式", fontWeight = FontWeight.Bold)
-                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 researchModes.forEach { item ->
                                     FilterChip(
                                         selected = researchMode == item.first,

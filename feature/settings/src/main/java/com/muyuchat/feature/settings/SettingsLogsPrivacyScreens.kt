@@ -17,7 +17,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.FileDownload
-import androidx.compose.material.icons.rounded.Save
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -76,11 +77,11 @@ fun LogsApiScreen(
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Button(onClick = onRefreshLogs, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Save, contentDescription = "刷新")
+                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
                     Text("刷新", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(onClick = onRefreshDiagnostics, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Save, contentDescription = "生成诊断")
+                    Icon(Icons.Rounded.Description, contentDescription = "生成诊断")
                     Text("生成诊断", modifier = Modifier.padding(start = 6.dp))
                 }
             }
