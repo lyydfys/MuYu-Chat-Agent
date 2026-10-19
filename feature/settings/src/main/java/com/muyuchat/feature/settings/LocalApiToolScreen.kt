@@ -75,11 +75,14 @@ fun LocalApiToolScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 IconButton(onClick = { if (showApiDocs) showApiDocs = false else onBack() }) {
                     Icon(Icons.Rounded.Close, contentDescription = "返回")
                 }
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(if (showApiDocs) "API使用文档" else "本地 API", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Text(
                         if (showApiDocs) "连接参数、接口路径、流式输出与排错" else "OpenAI 兼容接口与网页对话",
@@ -88,6 +91,7 @@ fun LocalApiToolScreen(
                     )
                 }
             }
+            Spacer(Modifier.width(8.dp))
             TextButton(onClick = { showApiDocs = !showApiDocs }) {
                 Text(if (showApiDocs) "接口信息" else "API使用文档")
             }
