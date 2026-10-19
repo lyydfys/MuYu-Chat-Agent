@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.modelstore.ChatModelRuntime
@@ -143,6 +144,7 @@ internal fun LocalModelsSection(
         if (!imageOnly) {
             item {
                 CardBox {
+                val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 localActionError?.let { StatusMessageCard(message = it, isError = true) }
@@ -154,7 +156,18 @@ internal fun LocalModelsSection(
                 ) {
                     Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(6.dp))
-                    Text("+ 导入 GGUF / LiteRT-LM / MNN 本地模型", fontWeight = FontWeight.Bold)
+                    // The long engine list does not fit on one line at 2.0x; keep the action and
+                    // its icon readable and leave the engine list to the description above.
+                    Text(
+                        text = if (compactForLargeText) {
+                            "+ 导入本地模型"
+                        } else {
+                            "+ 导入 GGUF / LiteRT-LM / MNN 本地模型"
+                        },
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                     if (state.localModels.isEmpty()) Text("还没有本地推理引擎，可从推荐页下载或导入完整模型。")
                 }

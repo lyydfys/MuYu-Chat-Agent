@@ -42,6 +42,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.ModelScopeHubModel
@@ -451,45 +455,71 @@ private fun ModelHubSegmentedTabs(
     selected: ModelHubSection,
     onSection: (ModelHubSection) -> Unit
 ) {
+    val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(14.dp),
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
-        Row(modifier = Modifier.fillMaxWidth().padding(2.dp)) {
-            ModelHubSection.entries.forEach { item ->
-                ModelHubTab(
-                    item = item,
-                    active = selected == item,
-                    onSection = onSection
-                )
+        if (compactForLargeText) {
+            // Five equal segments cannot hold 2.0x labels; wrap them instead of clipping the last
+            // one, the same adaptation the settings tabs use.
+            FlowRow(
+                modifier = Modifier.fillMaxWidth().padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                ModelHubSection.entries.forEach { item ->
+                    ModelHubTab(
+                        item = item,
+                        active = selected == item,
+                        onSection = onSection
+                    )
+                }
+            }
+        } else {
+            Row(modifier = Modifier.fillMaxWidth().padding(2.dp)) {
+                ModelHubSection.entries.forEach { item ->
+                    ModelHubTab(
+                        item = item,
+                        active = selected == item,
+                        onSection = onSection,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun RowScope.ModelHubTab(
+private fun ModelHubTab(
     item: ModelHubSection,
     active: Boolean,
-    onSection: (ModelHubSection) -> Unit
+    onSection: (ModelHubSection) -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     Surface(
         onClick = { onSection(item) },
-        modifier = Modifier
-            .weight(1f)
-            .height(46.dp)
+        modifier = modifier
+            .heightIn(min = 46.dp)
             .mcaPressScale(interactionSource),
         interactionSource = interactionSource,
         color = if (active) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(12.dp)
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
             Text(
                 item.title,
                 textAlign = TextAlign.Center,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis,
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
             )
