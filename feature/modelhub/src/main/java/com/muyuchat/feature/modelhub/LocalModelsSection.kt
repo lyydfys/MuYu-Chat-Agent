@@ -390,7 +390,14 @@ private fun LocalModelCard(
                     Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
                 }
                 IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Rounded.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))
+                    // Same 18dp glyph box and muted tint as the sibling action icons; the trash was
+                    // the only 24dp, full-contrast mark in the row.
+                    Icon(
+                        Icons.Rounded.Delete,
+                        contentDescription = localModelDeleteActionLabel(model.displayName),
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

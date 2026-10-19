@@ -91,7 +91,12 @@ class ModelHubStatusAccessibilityContractTest {
         assertTrue(cloud.contains("Icon(Icons.Rounded.Edit, contentDescription = null"))
         assertFalse(cloud.contains("contentDescription = \"删除云端模型\""))
 
-        assertTrue(local.contains("Icon(Icons.Rounded.Delete, contentDescription = localModelDeleteActionLabel(model.displayName))"))
+        // The local delete icon now also carries an 18dp box and a muted tint, so the assertion
+        // checks the pieces instead of freezing one formatting of the call.
+        assertTrue(local.contains("Icons.Rounded.Delete,"))
+        assertTrue(local.contains("contentDescription = localModelDeleteActionLabel(model.displayName)"))
+        assertTrue(local.contains("modifier = Modifier.size(18.dp)"))
+        assertTrue(local.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
         assertTrue(local.contains("Icon(Icons.Rounded.Delete, contentDescription = localImageModelDeleteActionLabel(model.displayName))"))
         assertTrue(local.contains("Icon(Icons.Rounded.CheckCircle, contentDescription = null"))
         assertFalse(local.contains("contentDescription = \"删除本地模型\""))
