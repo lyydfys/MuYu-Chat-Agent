@@ -274,19 +274,33 @@ private fun CodeBlock(language: String?, code: String, fileName: String? = null,
     }
 }
 
-private const val MIN_TABLE_COLUMN_DP = 92f
-private const val MAX_TABLE_COLUMN_DP = 190f
+internal const val MIN_TABLE_COLUMN_DP = 92f
+internal const val MAX_TABLE_COLUMN_DP = 190f
 
 /**
  * Estimated single-line width of a table cell at the 13sp table style. CJK glyphs take roughly a
- * full em, Latin glyphs about 0.55em; the result is clamped by the caller.
+ * full em, Latin glyphs about 0.55em. Pure so the alignment contract can be tested without Compose.
  */
-private fun estimatedTableCellWidthDp(text: String): Float {
+internal fun estimatedTableCellWidthDp(text: String): Float {
     var units = 0f
     for (character in text) {
         units += if (character.code > 0x2E80) 1.0f else 0.55f
     }
     return units * 14f + 20f
+}
+
+/**
+ * One width per column, taken from the widest cell in that column across every row. Rows are
+ * allowed to be ragged: a missing cell simply does not contribute to that column's width.
+ */
+internal fun tableColumnWidthsDp(rows: List<List<String>>): List<Float> {
+    val columnCount = rows.maxOfOrNull { it.size } ?: 0
+    return (0 until columnCount).map { column ->
+        val widest = rows.maxOfOrNull { row ->
+            estimatedTableCellWidthDp(row.getOrNull(column).orEmpty())
+        } ?: MIN_TABLE_COLUMN_DP
+        widest.coerceIn(MIN_TABLE_COLUMN_DP, MAX_TABLE_COLUMN_DP)
+    }
 }
 
 @Composable
@@ -295,15 +309,7 @@ private fun TableBlock(rows: List<List<String>>) {
     val scrollState = rememberScrollState()
     // One width per column, taken from the widest cell in that column across every row, so the
     // grid lines up instead of each row sizing its own cells independently.
-    val columnWidths = remember(rows) {
-        val columnCount = rows.maxOfOrNull { it.size } ?: 0
-        (0 until columnCount).map { column ->
-            val widest = rows.maxOfOrNull { row ->
-                estimatedTableCellWidthDp(row.getOrNull(column).orEmpty())
-            } ?: MIN_TABLE_COLUMN_DP
-            widest.coerceIn(MIN_TABLE_COLUMN_DP, MAX_TABLE_COLUMN_DP)
-        }
-    }
+    val columnWidths = remember(rows) { tableColumnWidthsDp(rows) }
     // 窄屏（手机 411dp）下三列表格会超出屏宽，末列被裁切且**没有任何滚动提示**，用户会以为
     // 被截断的列名就是完整内容。此处在可继续横滚时给出**功能性**右缘渐隐（不是装饰性渐变）。
     Box(modifier = Modifier.fillMaxWidth()) {
