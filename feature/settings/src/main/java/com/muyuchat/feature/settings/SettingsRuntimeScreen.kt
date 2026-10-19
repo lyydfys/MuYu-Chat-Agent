@@ -496,13 +496,17 @@ private val releaseNoteTableRule = Regex("^[|\\s:-]*-[|\\s:-]*$")
  */
 private fun releaseNoteLines(raw: String): List<ReleaseNoteLine> {
     val lines = mutableListOf<ReleaseNoteLine>()
-    for (rawLine in raw.lineSequence()) {
+    val rawLines = raw.lineSequence().toList()
+    for ((index, rawLine) in rawLines.withIndex()) {
         val line = rawLine.trimEnd()
         val indent = line.length - line.trimStart().length
         val trimmed = line.trim()
         if (trimmed.isEmpty()) continue
         if (releaseNoteTableRule.matches(trimmed)) continue
         if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+            // A row followed by a separator is the table header; the card does not need it.
+            val nextIsRule = rawLines.getOrNull(index + 1)?.trim()?.let(releaseNoteTableRule::matches) == true
+            if (nextIsRule) continue
             val cells = trimmed.trim('|').split('|').map { releaseNoteText(it) }.filter { it.isNotBlank() }
             if (cells.isNotEmpty()) lines += ReleaseNoteLine(ReleaseNoteKind.BODY, cells.joinToString("："))
             continue
