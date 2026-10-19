@@ -158,3 +158,20 @@ transition settles).
 All lines share the single `McaStartup` tag and a shared T0 (`begin t=0`), with per-step cost moved to
 `op=`; `diagnostics-final` now lands after `ready`, confirming the final diagnostics record is off the
 readiness path.
+
+## 12. Round-28 page craft pass (build 2026-10-20 03:49)
+
+| page group | status | notes |
+|---|---|---|
+| settings (runtime/logs/privacy/web search/local API) | PASS (code+tests) | header back is McaIconButton; expandable rows expose stateDescription; busy update buttons show a same-size spinner; diagnostic rows get bounded ripple + button role |
+| model hub (local/cloud/recommended/market) | PASS (code+tests) | 2.0x action rows grow with two-line labels; '当前' pill 2.1:1 -> 4.5:1+; cloud writes disabled while busy; download panel hairline; folder icon onPrimaryContainer |
+| chat chrome (background, composer menu, reasoning, app menu) | PASS (code) | background bitmaps crossfade; menu capped+scrollable; waiting chevron removed; app-menu dialogs scroll at 2.0x |
+| assistants / roles / import / editor | PASS (code) | McaIconButton back/close, FlowRow chips and actions, heightIn(min) bottoms, empty list hint, no-op actions disabled |
+| images (preview, editor, gallery, UltraFix dialog) | PASS (code) | preview uses shared Loading/Ready/Failed with retry, zIndex above siblings while closing, dimmed actions on exit, scrollable confirm at 2.0x |
+| module gate | PASS | chat/settings/modelhub testDebugUnitTest green; release build 03:49 |
+
+a11y on the final build (device 98a37aa7): a fresh chat surface passes (25 nodes / 4 interactive / 0
+violations). With a scrolled conversation the probe reports 6 findings that are viewport-clipping
+artifacts (the top message action row is partially under the header, nodes report 34.9dp) plus two
+unnamed action-row parents; with the drawer open it reports the parallel session's new 38dp rail
+items. The copy/pin names were moved onto the buttons anyway (`26dcd81`).
