@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -581,6 +582,13 @@ internal fun ChatInputBar(
                                     ComposerPrimaryAction.Stop -> "停止"
                                     ComposerPrimaryAction.GenerateImage -> "生成图片"
                                     else -> "发送"
+                                },
+                                // The send glyph's ink sits left of its 24dp box; a 2dp shift puts
+                                // the visible mass on the FAB centre (stop/image stay untouched).
+                                modifier = if (action == ComposerPrimaryAction.Send) {
+                                    Modifier.offset(x = 2.dp)
+                                } else {
+                                    Modifier
                                 },
                                 tint = Color.White
                             )

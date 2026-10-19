@@ -120,7 +120,7 @@ internal fun AssistantActionRow(
                 Icon(
                     Icons.Rounded.Replay,
                     contentDescription = "重新生成",
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(19.dp),
                     tint = tint.copy(alpha = if (canRegenerate) 0.78f else 0.32f)
                 )
             }
