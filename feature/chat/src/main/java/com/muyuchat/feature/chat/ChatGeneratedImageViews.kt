@@ -259,12 +259,13 @@ internal fun ChatGeneratedImageContent(
                         // Never decode an original camera/PNG at full resolution in the
                         // composition path.  A single 12K image can otherwise allocate tens of
                         // megabytes and take the UI process down when a chat image is selected.
-                        val bitmap by rememberChatImageBitmap(
+                        var imageRetryEpoch by remember(selectedImage.id) { mutableStateOf(0) }
+                        val imageState = rememberChatImageLoadState(
                             context = context,
                             uriString = selectedImage.uriString,
-                            maxDimensionPx = 1536
+                            maxDimensionPx = 1536,
+                            revisionKey = imageRetryEpoch
                         )
-                        val bitmapValue = bitmap
                         val ratio = remember(selectedImage.width, selectedImage.height) {
                             if (selectedImage.width > 0 && selectedImage.height > 0) {
                                 (selectedImage.width.toFloat() / selectedImage.height.toFloat())
@@ -283,18 +284,27 @@ internal fun ChatGeneratedImageContent(
                                 .clickable { previewImageId = selectedImage.id },
                             contentAlignment = Alignment.Center
                         ) {
-                            if (bitmapValue != null) {
-                                Image(
-                                    bitmap = bitmapValue.asImageBitmap(),
+                            when (val state = imageState) {
+                                is ChatImageLoadState.Ready -> Image(
+                                    bitmap = state.bitmap.asImageBitmap(),
                                     contentDescription = "生成图片 ${selectedImage.width}×${selectedImage.height}，点击查看大图",
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier.fillMaxSize()
                                 )
-                            } else {
-                                Text(
-                                    "图片文件暂时无法读取",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                ChatImageLoadState.Failed -> Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    Text(
+                                        "图片文件暂时无法读取",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    TextButton(onClick = { imageRetryEpoch++ }) { Text("重试") }
+                                }
+                                ChatImageLoadState.Loading -> CircularProgressIndicator(
+                                    modifier = Modifier.size(22.dp),
+                                    strokeWidth = 2.dp
                                 )
                             }
                         }

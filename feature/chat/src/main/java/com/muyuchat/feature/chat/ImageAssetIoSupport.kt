@@ -101,6 +101,9 @@ internal fun rememberChatImageLoadState(
         key2 = maxDimensionPx,
         key3 = revisionKey
     ) {
+        // A retry (revisionKey change) restarts the producer; reset to Loading so the failed
+        // appearance does not persist while the new decode runs.
+        value = ChatImageLoadState.Loading
         value = runCatching { loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey) }
             .fold(
                 onSuccess = { bitmap ->

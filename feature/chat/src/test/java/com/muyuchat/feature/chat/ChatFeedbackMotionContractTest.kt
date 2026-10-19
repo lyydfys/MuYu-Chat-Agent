@@ -37,6 +37,17 @@ class ChatFeedbackMotionContractTest {
         assertTrue(background.contains("mcaPressScale("))
     }
 
+    @Test
+    fun `image previews use the three-state loader and reset on retry`() {
+        val loader = source("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetIoSupport.kt")
+        assertTrue(loader.contains("value = ChatImageLoadState.Loading"))
+
+        val views = source("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatGeneratedImageViews.kt")
+        assertTrue(views.contains("rememberChatImageLoadState("))
+        assertTrue(views.contains("ChatImageLoadState.Failed"))
+        assertTrue(views.contains("imageRetryEpoch++"))
+    }
+
     private fun source(relativePath: String): String =
         File(projectRoot(), relativePath).readText(Charsets.UTF_8)
 
