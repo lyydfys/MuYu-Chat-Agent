@@ -81,7 +81,7 @@ internal fun ChatStatusBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 10.dp),
+            .padding(start = if (compactForLargeText) 12.dp else 18.dp, end = if (compactForLargeText) 12.dp else 18.dp, top = 14.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Surface(
@@ -131,14 +131,21 @@ internal fun ChatStatusBar(
                     modifier = Modifier.padding(start = 10.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    McaLogoMark(size = 24.dp, cornerRadius = 8.dp)
-                    Spacer(modifier = Modifier.width(8.dp))
+                    // At 2.0x font scale the model name needs every dp of the capsule; the mark
+                    // is decorative, the name is the information.
+                    if (!compactForLargeText) {
+                        McaLogoMark(size = 24.dp, cornerRadius = 8.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = displayModelName(state.selectedModelName) ?: "选择模型",
                             // Only the large-font layout gets a second line so the name stays
                             // readable instead of clipping; the default layout keeps one line.
-                            maxLines = if (compactForLargeText) 2 else 1,
+                            // One ellipsised line: at 2.0x font scale the narrow capsule turned the name
+                            // into a vertical character stack, which reads as broken.
+                            maxLines = 1,
+                            softWrap = false,
                             overflow = TextOverflow.Ellipsis,
                             style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp, lineHeight = 15.sp),
                             color = MaterialTheme.colorScheme.onSurface,
