@@ -42,9 +42,10 @@ and raw evidence live in `FINAL-MATRIX.md`, `MOTION.md` and `artifacts/`.
 
 ## 3. Known issues (honest, not hidden)
 
-1. **Settings open-transition spikes**: short windows (open + 6 scrolls) fail the 16.7 ms budget by
-   1–2 ms (P95 17–18 ms, P99 46–65 ms). Steady scrolling passes. The spike is the page composition
-   inside the open transition, not sustained work.
+1. **Settings open-transition spikes**: the update card used to render the whole changelog on the
+   opening frame. It now shows a six-line digest with 展开全部/收起. After that change the settings
+   lane passes 3/3 on the second validation device (P95 10–13 ms, janky 0.2–0.3 %); the original
+   device lost USB authorization mid-round, so the same-device before/after is pending re-auth.
 2. **Long-table screenshot** not captured on device (needs a chat message containing a table); the
    layout rule is covered by unit tests.
 3. **Composer menu at 2.0x** is capped at 520 dp and scrolls; not yet captured on device.
