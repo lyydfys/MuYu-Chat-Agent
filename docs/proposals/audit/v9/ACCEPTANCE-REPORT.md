@@ -128,9 +128,18 @@ New contract tests added by this slice: `McaMotionContractTest`, `McaIconButtonC
 
 The 360 dp / 2.0x-font check now passes: metrics wrap as complete fields and the model capsule
 keeps two clean ellipsised lines instead of a vertical character stack
-(`r15/chat-360dp-font20-capsule.png`). Still open from the same review: shadow-weight calibration
-(top capsules vs composer), icon optics for glyphs outside the header, and frame P95/P99 from a real
-interaction recording.
+(`r15/chat-360dp-font20-capsule.png`).
+
+Round-16 surface and motion numbers:
+- surface weight: composer shell 14dp -> 10dp, the three header capsules share 5dp, and the overflow
+  glyph is 20dp against 18dp copy/replay for optical balance
+  (`r16/shadow-before-light.png` -> `r16/shadow-after-light.png`, `r16/shadow-after-dark.png`).
+- frame sample on the same build (3 drawer open/close, model sheet, 6 scrolls): 714 frames, 7 janky
+  (0.98%), P50 7 ms, P90 11 ms, P95 13 ms, P99 22 ms, 2 missed vsync
+  (`ui-quality/r16/gfxinfo.txt`).
+
+Still open from the same review: optical audit of the remaining glyphs (send/stop/add/pin), the
+agent-workspace acceptance work owned by the parallel session, and the edge-to-edge decision.
 
 ## 5. Blocked / deferred
 
