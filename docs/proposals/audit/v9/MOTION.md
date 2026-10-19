@@ -101,9 +101,17 @@ introduced by the motion slices. The only geometry animation is an explicit expa
   and the chat frame was visible in the first recorded frames (≤ ~0.5 s); the per-hash logs
   disappeared. Expect a one-time re-hash on the first launch after upgrading, because the old
   catalog rows carry no ctime and must be observed once before they can be reused.
-  Verification status: the fast device run used the snapshot-reuse prototype; the shipped
-  persistent-store variant compiles, but its full test suite plus a repeat cold-start recording are
-  pending because the parallel build killed the test/task runs (see the build-lock note).
+  Verification (round 7, shipped persistent-store build):
+  the first launch after the upgrade logs the one-time `hash-on-main dit.mnn.weight` + hashing pass
+  (startup code path itself 1390 ms, then the background fill). The second and third cold starts
+  log **no hash lines at all** and measure `am start -W TotalTime 220–224 ms` with the chat frame
+  already present in the recording (`r7/run2.mp4`, `r7/run3.mp4`). Image catalog still intact on
+  device: 生图 (4) lists Qwen-Image-2.1 (9.45 GB, 17 components) and Stable Diffusion Turbo
+  (4.86 GB, 2 components) with the current selection preserved (`r7/image-models.png`).
+  Full app unit tests: **2927 tests, 1 failure** — `McaGenerationForegroundServiceContractTest`,
+  whose source file is being edited by the parallel agent session (their uncommitted change adds a
+  second promote call; the contract counts 1). `LocalImageModelStoreIntegrationTest` passes
+  26/26, including the same-length + restored-mtime invalidation case.
 - **Shared checkout: build under the MCA lock.** A parallel agent session runs
   `scripts/agent-verify.ps1`, which force-stops every `GradleDaemon`/`KotlinCompileDaemon` after
   taking `tools/build-guards/McaBuildLock.psm1`. A manual `gradlew` invocation that does not hold
