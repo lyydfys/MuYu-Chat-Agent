@@ -111,7 +111,8 @@ internal fun ChatStatusBar(
                 modifier = Modifier
                     .fillMaxWidth()
                     .semantics(mergeDescendants = true) {
-                        contentDescription = "选择模型"
+                        // The visible model name/subtitle already name this capsule; an extra
+                        // contentDescription duplicated the text and hid the current model.
                         role = SemanticsRole.Button
                     }
                     .clickable(

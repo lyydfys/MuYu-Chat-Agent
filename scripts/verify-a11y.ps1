@@ -352,7 +352,7 @@ $state = [ordered]@{
         'Only the currently visible screen is audited; other tabs/screens are not covered by this run.',
         'Bounds are accessibility bounds; parent-enforced minimum touch targets and visual hit areas are not inferred.',
         'Duplicate content-desc/text detection is trim + ordinal case-sensitive; merged Compose semantics can yield false positives/negatives.',
-        'Missing-name findings record descendant labels for triage but do not suppress the node-level rule.',
+        'A clickable node whose label only exists on a descendant is treated as named (Compose merged semantics); mergedSemanticsNamed counts those nodes.',
         'Node records are filtered to the requested package when uiautomator exposes a package attribute; other windows (IME/system UI) are not audited.',
         'This is not a TalkBack runtime test and does not cover font-scale/large-text, focus order or announcement quality.',
         'PASS applies only to this device, package, build and screen snapshot; compare before/after on the same setup.'
@@ -566,14 +566,22 @@ try {
     }
 
     # 3) interactive node without content-desc or text
+    # Compose merges child semantics into the clickable parent, so a labelled descendant means the
+    # node is named (uiautomator only exposes the label on the descendant). Only unlabelled nodes
+    # without any labelled descendant are real violations.
+    $script:a11yMergedNamed = 0
     foreach ($record in $auditedInteractive) {
         if ($record.text -or $record.contentDesc) { continue }
         $descendantLabel = ''
         try { $descendantLabel = Find-DescendantLabel -Element $record.element } catch { $descendantLabel = '' }
+        if ($descendantLabel) {
+            $script:a11yMergedNamed += 1
+            continue
+        }
         Add-A11yFinding -Category 'missing-accessible-name' -Record $record -Detail ([ordered]@{
             kind             = 'missing-name'
             descendantLabel  = $descendantLabel
-            note             = 'interactive node has neither content-desc nor text; descendantLabel is diagnostic only'
+            note             = 'interactive node has neither content-desc nor text and no labelled descendant'
         })
     }
 
@@ -598,6 +606,7 @@ try {
             touchTargetTooSmall = $touchCount
             duplicateContentDescWithText = $duplicateCount
             missingAccessibleName = $missingCount
+            mergedSemanticsNamed  = $script:a11yMergedNamed
         }
         minTargetDp           = $MinTargetDp
         minTargetPx           = [math]::Round($minTargetPx, 2)
