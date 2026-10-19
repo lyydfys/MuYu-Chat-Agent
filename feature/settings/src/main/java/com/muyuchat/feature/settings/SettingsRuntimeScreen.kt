@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -451,7 +453,12 @@ private fun AppUpdateCard(
                     enabled = !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null)
+                    // Same-size spinner while checking keeps button geometry and adds busy feedback.
+                    if (checking) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null)
+                    }
                     Text("检查", modifier = Modifier.padding(start = 6.dp))
                 }
                 Button(
@@ -459,7 +466,12 @@ private fun AppUpdateCard(
                     enabled = hasUpdate && !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.Download, contentDescription = null)
+                    // Same-size spinner while downloading; the label and button size are unchanged.
+                    if (downloading) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Rounded.Download, contentDescription = null)
+                    }
                     Text("下载", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -469,7 +481,12 @@ private fun AppUpdateCard(
                     enabled = readyToInstall && !verifying,
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.InstallMobile, contentDescription = null)
+                    // Same-size spinner while verifying the downloaded update.
+                    if (verifying) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Rounded.InstallMobile, contentDescription = null)
+                    }
                     Text("安装", modifier = Modifier.padding(start = 6.dp))
                 }
                 OutlinedButton(

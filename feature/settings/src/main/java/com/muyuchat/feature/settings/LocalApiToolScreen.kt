@@ -22,7 +22,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconButton
 import kotlinx.coroutines.launch
 
 @Composable
@@ -81,8 +82,14 @@ fun LocalApiToolScreen(
                 modifier = Modifier.weight(1f),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = { if (showApiDocs) showApiDocs = false else onBack() }) {
-                    Icon(Icons.Rounded.Close, contentDescription = "返回")
+                McaIconButton(
+                    contentDescription = "返回",
+                    onClick = { if (showApiDocs) showApiDocs = false else onBack() },
+                    glyphSize = 24.dp,
+                    // Preserve the previous IconButton content colour while adding press feedback.
+                    tint = LocalContentColor.current
+                ) {
+                    Icon(Icons.Rounded.Close, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(if (showApiDocs) "API使用文档" else "本地 API", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)

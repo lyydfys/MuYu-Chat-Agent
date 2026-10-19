@@ -385,7 +385,8 @@ private fun ModelHubHeader(
                     Icon(
                         Icons.Rounded.Folder,
                         contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
+                        // 容器配对前景色：primary 在暗色 primaryContainer 上仅约 2.1:1，非文本图标也不足 3:1
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
                         modifier = Modifier.padding(9.dp).size(20.dp)
                     )
                 }

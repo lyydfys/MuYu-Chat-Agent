@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Share
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -70,6 +71,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -116,7 +118,17 @@ internal fun ImageAssetPreviewOverlay(
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 1280)
+    // The old nullable bitmap conflated "still decoding" with "decode failed": the failure copy
+    // appeared during loading and there was no retry. Reuse the existing ChatImageLoadState so the
+    // preview renders Loading / Ready / Failed honestly; bumping the revision restarts the same
+    // producer (no new state type).
+    var imageLoadRevision by remember(image.uriString) { mutableStateOf(0) }
+    val imageLoadState = rememberChatImageLoadState(
+        context = context,
+        uriString = image.uriString,
+        maxDimensionPx = 1280,
+        revisionKey = imageLoadRevision
+    )
     var showGenerationDetails by rememberSaveable(image.id) { mutableStateOf(false) }
     var showParameterReuse by rememberSaveable(image.id) { mutableStateOf(false) }
     var showUpscaleDialog by rememberSaveable(image.id) { mutableStateOf(false) }
@@ -152,9 +164,12 @@ internal fun ImageAssetPreviewOverlay(
     // The workspace registers its own back handler; this later, preview-only callback wins while
     // the overlay is composed and gives Back the same played-out close as the X button.
     BackHandler(enabled = !previewClosing) { dismissWithMotion() }
+    // Keep the preview above sibling workspace content for the whole exit animation; otherwise a
+    // later-ordered sibling could draw above the fading overlay.
     Box(
         modifier = modifier
             .testTag("image.preview.${image.id}")
+            .zIndex(1f)
             .fillMaxSize()
             .graphicsLayer {
                 val progress = entryProgress.value
@@ -165,6 +180,8 @@ internal fun ImageAssetPreviewOverlay(
             }
             .background(Color.Black.copy(alpha = 0.92f))
     ) {
+        // Disable the secondary top-bar actions while the exit animation runs; the close handler
+        // already guards re-entry, so closing stays available as the escape hatch.
         Row(
             modifier = Modifier
                 .align(Alignment.TopCenter)
@@ -177,7 +194,10 @@ internal fun ImageAssetPreviewOverlay(
                 shape = CircleShape,
                 modifier = Modifier.mcaPressScale(closeInteraction)
             ) {
-                IconButton(onClick = dismissWithMotion, interactionSource = closeInteraction) {
+                IconButton(
+                    onClick = dismissWithMotion,
+                    interactionSource = closeInteraction
+                ) {
                     Icon(Icons.Default.Close, contentDescription = "关闭预览", tint = Color.White)
                 }
             }
@@ -198,12 +218,15 @@ internal fun ImageAssetPreviewOverlay(
             ) {
                 IconButton(
                     onClick = { onSetFavorite(!image.favorite) },
-                    interactionSource = favoriteInteraction
+                    interactionSource = favoriteInteraction,
+                    enabled = !previewClosing
                 ) {
                     Icon(
                         if (image.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                         contentDescription = if (image.favorite) "取消收藏" else "收藏图片",
-                        tint = Color.White
+                        // Dim the icon together with the disabled state; an explicit white tint
+                        // would otherwise keep looking enabled while the exit animation runs.
+                        tint = if (previewClosing) Color.White.copy(alpha = 0.55f) else Color.White
                     )
                 }
             }
@@ -216,9 +239,10 @@ internal fun ImageAssetPreviewOverlay(
                 ) {
                     IconButton(
                         onClick = { showActionsMenu = true },
-                        interactionSource = moreInteraction
+                        interactionSource = moreInteraction,
+                        enabled = !previewClosing
                     ) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "更多图片操作", tint = Color.White)
+                        Icon(Icons.Default.MoreVert, contentDescription = "更多图片操作", tint = if (previewClosing) Color.White.copy(alpha = 0.55f) else Color.White)
                     }
                 }
                 DropdownMenu(
@@ -322,9 +346,9 @@ internal fun ImageAssetPreviewOverlay(
                 }
             }
         }
-        bitmap?.let { loadedBitmap ->
-            Image(
-                bitmap = loadedBitmap.asImageBitmap(),
+        when (imageLoadState) {
+            is ChatImageLoadState.Ready -> Image(
+                bitmap = imageLoadState.bitmap.asImageBitmap(),
                 contentDescription = image.name,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
@@ -334,14 +358,26 @@ internal fun ImageAssetPreviewOverlay(
                     .fillMaxHeight(0.82f)
                     .padding(horizontal = 12.dp, vertical = 76.dp)
             )
-        } ?: run {
-            Column(
+            ChatImageLoadState.Loading -> Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                CircularProgressIndicator(color = Color.White)
+                Text("正在读取图片", color = Color.White.copy(alpha = 0.82f))
+            }
+            ChatImageLoadState.Failed -> Column(
                 modifier = Modifier.align(Alignment.Center),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Icon(Icons.Default.Image, contentDescription = null, tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(42.dp))
                 Text("无法读取图片", color = Color.White.copy(alpha = 0.82f))
+                // Retry restarts the existing producer through its revision key; a failed decode
+                // must not be a dead end.
+                TextButton(onClick = { imageLoadRevision++ }) {
+                    Text("重试", color = Color.White)
+                }
             }
         }
         if (image.prompt.isNotBlank() || image.createdAtText.isNotBlank() || image.generationDetails.isNotBlank()) {
@@ -653,9 +689,9 @@ internal fun ImageAssetPreviewOverlay(
     }
     if (showParameterReuse) {
         val preset = image.generationPreset
-        if (preset == null) {
-            showParameterReuse = false
-        } else {
+        // Do not write Compose state during composition. If the preset disappeared, simply skip
+        // rendering; the caller only opens this dialog while the preset exists.
+        if (preset != null) {
             val availableFields = reusablePresetFields
             AlertDialog(
                 onDismissRequest = { showParameterReuse = false },

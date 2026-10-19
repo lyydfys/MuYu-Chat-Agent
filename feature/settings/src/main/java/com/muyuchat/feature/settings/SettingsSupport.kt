@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
@@ -138,7 +139,11 @@ private fun ExpandableSettingsHeader(
                 indication = ripple(bounded = true),
                 onClick = onClick
             )
-            .semantics { role = Role.Button }
+            .semantics {
+                // The clickable row, not the decorative chevron, announces the expand state.
+                role = Role.Button
+                stateDescription = if (expanded) "收起" else "展开"
+            }
             .mcaPressScale(interactionSource),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -151,9 +156,10 @@ private fun ExpandableSettingsHeader(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        // Decorative: the header row above already announces expanded/collapsed.
         Icon(
             imageVector = Icons.Rounded.KeyboardArrowDown,
-            contentDescription = if (expanded) "收起" else "展开",
+            contentDescription = null,
             modifier = Modifier.graphicsLayer { rotationZ = rotation }
         )
     }

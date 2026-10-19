@@ -31,6 +31,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.designsystem.McaMotion
 
@@ -416,6 +417,9 @@ internal fun ImageGalleryHome(
                     )
                     Text(
                         if (totalImageCount == 0) "生成完成的图片会自动保存在这里" else "没有符合当前筛选条件的图片",
+                        // At 2.0x the empty-state sentence wraps; center each line under the icon
+                        // instead of leaving the wrapped block start-aligned. No font/color change.
+                        textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

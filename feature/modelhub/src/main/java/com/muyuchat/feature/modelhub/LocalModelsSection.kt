@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -350,49 +350,74 @@ private fun LocalModelCard(
                     color = MaterialTheme.colorScheme.primary
                 )
             }
+            // 2.0x 下三按钮+删除同排会裁标签：大字号隐藏装饰图标、允许两行并改用最小高度
+            val largeTextActions = LocalDensity.current.fontScale >= 1.5f
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Button(
                     onClick = { if (isLoaded) onUnload() else onLoad() },
                     enabled = enabled && (isLoaded || canNormalLoad),
-                    modifier = Modifier.weight(1f).height(44.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                     shape = RoundedCornerShape(999.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                ) {
-                    Icon(
-                        imageVector = if (isLoaded) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                    contentPadding = PaddingValues(
+                        horizontal = if (largeTextActions) 4.dp else 8.dp,
+                        vertical = 0.dp
                     )
-                    Spacer(Modifier.width(4.dp))
+                ) {
+                    if (!largeTextActions) {
+                        Icon(
+                            imageVector = if (isLoaded) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                    }
                     if (isLoaded) {
-                        Text("卸载", maxLines = 1, softWrap = false)
+                        Text("卸载", maxLines = if (largeTextActions) 2 else 1, overflow = TextOverflow.Ellipsis)
                     } else if (!canLoadRuntime) {
-                        Text("引擎未启用", maxLines = 1, softWrap = false)
+                        Text("引擎未启用", maxLines = if (largeTextActions) 2 else 1, overflow = TextOverflow.Ellipsis)
                     } else {
-                        Text("加载", maxLines = 1, softWrap = false)
+                        Text("加载", maxLines = if (largeTextActions) 2 else 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 OutlinedButton(
                     onClick = onVerify,
                     enabled = enabled,
-                    modifier = Modifier.weight(1f).height(44.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                     shape = RoundedCornerShape(999.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    contentPadding = PaddingValues(
+                        horizontal = if (largeTextActions) 4.dp else 8.dp,
+                        vertical = 0.dp
+                    )
                 ) {
-                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (isQairtRuntime) "重新诊断" else "校验", maxLines = 1, softWrap = false)
+                    if (!largeTextActions) {
+                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        if (isQairtRuntime) "重新诊断" else "校验",
+                        maxLines = if (largeTextActions) 2 else 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                 OutlinedButton(
                     onClick = onAttachVisionProjector,
                     enabled = enabled,
-                    modifier = Modifier.weight(1f).height(44.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                     shape = RoundedCornerShape(999.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    contentPadding = PaddingValues(
+                        horizontal = if (largeTextActions) 4.dp else 8.dp,
+                        vertical = 0.dp
+                    )
                 ) {
-                    Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (model.hasVisionProjector) "更换" else "绑定", maxLines = 1, softWrap = false)
+                    if (!largeTextActions) {
+                        Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    Text(
+                        if (model.hasVisionProjector) "更换" else "绑定",
+                        maxLines = if (largeTextActions) 2 else 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                 IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
                     // Same 18dp glyph box and muted tint as the sibling action icons; the trash was
@@ -525,8 +550,9 @@ private fun LocalImageModelCard(
                     overflow = TextOverflow.Ellipsis
                 )
                 if (model.selected) {
-                    Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(999.dp)) {
-                        Text("当前", modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    // “当前”与“已加载”统一用 primary/onPrimary 配对（≥4.5:1）；原 primaryContainer 底在暗色仅约 2.1:1
+                    Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(999.dp)) {
+                        Text("当前", modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
                     }
                 }
             }

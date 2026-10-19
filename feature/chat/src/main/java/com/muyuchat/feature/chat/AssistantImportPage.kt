@@ -65,14 +65,12 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.wrapContentWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -132,7 +130,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -258,6 +255,7 @@ import java.util.Calendar
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
@@ -279,8 +277,14 @@ internal fun AssistantImportPage(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            // Shared icon button: same 48dp target and 24dp glyph as the previous IconButton,
+            // now with the layer-phase press weight; the accessible name stays on the button.
+            McaIconButton(
+                contentDescription = "返回助手列表",
+                onClick = onBack,
+                glyphSize = 24.dp
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text("导入角色卡", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -312,7 +316,8 @@ internal fun AssistantImportPage(
         }
         Button(
             onClick = onImportFile,
-            modifier = Modifier.fillMaxWidth().height(48.dp)
+            // 2.0x font: keep the 48dp minimum, let the label grow instead of clipping.
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
         ) {
             Icon(Icons.Default.Folder, contentDescription = null)
             Spacer(modifier = Modifier.width(8.dp))
@@ -329,13 +334,17 @@ internal fun AssistantImportPage(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = onBack, modifier = Modifier.weight(1f).height(48.dp)) {
+                TextButton(
+                    onClick = onBack,
+                    // 2.0x font: both actions keep their 48dp minimum and are allowed to grow.
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                ) {
                     Text("取消")
                 }
                 Button(
                     onClick = { onImport(rawJson) },
                     enabled = rawJson.isNotBlank(),
-                    modifier = Modifier.weight(1.45f).height(48.dp),
+                    modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
                     shape = RoundedCornerShape(999.dp)
                 ) {
                     Text("导入")

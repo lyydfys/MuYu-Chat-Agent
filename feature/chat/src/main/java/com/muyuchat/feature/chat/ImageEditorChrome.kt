@@ -80,7 +80,9 @@ internal fun ImageEditorScaffold(
                     }
                     TextButton(
                         onClick = onConfirm,
-                        enabled = confirmEnabled,
+                        // A save in flight must not be re-submittable: the spinner describes the
+                        // operation, and the button stays disabled until the caller clears `saving`.
+                        enabled = confirmEnabled && !saving,
                         modifier = Modifier.heightIn(min = 48.dp)
                     ) {
                         if (saving) {

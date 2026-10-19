@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -55,6 +56,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.mcaPressScale
 import kotlinx.coroutines.Dispatchers
@@ -81,19 +83,34 @@ internal fun ChatBackground(
         }
     }
     Box(modifier = modifier) {
-        bitmap?.let { image ->
-            Image(
-                bitmap = image.asImageBitmap(),
-                contentDescription = null,
-                contentScale = when (state.scaleMode) {
-                    ChatBackgroundScaleMode.CROP -> ContentScale.Crop
-                    ChatBackgroundScaleMode.FIT -> ContentScale.Fit
-                    ChatBackgroundScaleMode.CENTER -> ContentScale.None
-                },
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(if (state.blurRadius > 0f) Modifier.blur(state.blurRadius.dp) else Modifier)
-            )
+        // `produceState` keeps the previous bitmap in its remembered state while the next image
+        // decodes (a key change restarts the producer, it does not reset the value to null), so
+        // this crossfade always starts from the picture still on screen: switching backgrounds
+        // fades old to new instead of flashing the empty surface underneath.
+        Crossfade(
+            targetState = bitmap,
+            animationSpec = McaMotion.fade(180),
+            modifier = Modifier.fillMaxSize(),
+            label = "chatBackgroundImage"
+        ) { image ->
+            if (image != null) {
+                Image(
+                    bitmap = image.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = when (state.scaleMode) {
+                        ChatBackgroundScaleMode.CROP -> ContentScale.Crop
+                        ChatBackgroundScaleMode.FIT -> ContentScale.Fit
+                        ChatBackgroundScaleMode.CENTER -> ContentScale.None
+                    },
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(if (state.blurRadius > 0f) Modifier.blur(state.blurRadius.dp) else Modifier)
+                )
+            }
+        }
+        // The scrim only exists over a picture, exactly as before; it is not faded because it is a
+        // plain read of the current scrim slider, not part of the image swap.
+        if (bitmap != null) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()

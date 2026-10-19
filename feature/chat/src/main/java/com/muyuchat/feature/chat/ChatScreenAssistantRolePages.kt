@@ -12,9 +12,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -23,7 +23,6 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,7 +40,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconButton
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.launch
 
@@ -107,8 +108,14 @@ internal fun AssistantRoleScreen(
                 .navigationBarsPadding()
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭")
+                // Shared icon button: same 48dp target and 24dp glyph as the previous IconButton,
+                // now with the layer-phase press weight; the accessible name stays on the button.
+                McaIconButton(
+                    contentDescription = "关闭",
+                    onClick = onBack,
+                    glyphSize = 24.dp
+                ) {
+                    Icon(Icons.Default.Close, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("助手与角色", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -142,7 +149,8 @@ internal fun AssistantRoleScreen(
             Spacer(modifier = Modifier.height(16.dp))
             Button(
                 onClick = { managingContext = true },
-                modifier = Modifier.fillMaxWidth().height(48.dp)
+                // 2.0x font: keep the 48dp minimum but let the button grow instead of clipping.
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
             ) {
                 Icon(Icons.Default.Folder, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -160,6 +168,19 @@ internal fun AssistantRoleScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 14.dp)
             ) {
+                if (assistants.isEmpty()) {
+                    // Empty state: without this the labelled list slot is an unexplained blank
+                    // area on a fresh profile. Text-only, same list slot, no layout change.
+                    item {
+                        Text(
+                            "暂无助手，可从下方导入角色卡或新建",
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                    }
+                }
                 items(assistants) { assistant ->
                     AssistantListCard(
                         assistant = assistant,
@@ -183,6 +204,9 @@ internal fun AssistantRoleScreen(
                             }
                         }
                     },
+                    // No selected assistant means there is nothing to export; keep the action
+                    // visibly disabled instead of leaving a dead tap that looks available.
+                    enabled = selected != null,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("导出当前助手")

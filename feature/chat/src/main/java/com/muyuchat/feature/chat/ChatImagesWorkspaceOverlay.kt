@@ -16,6 +16,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -390,7 +392,13 @@ internal fun ChatImagesWorkspaceOverlay(
                     onDismissRequest = { pendingUltraFixSubmission = null },
                     title = { Text("开始 UltraFix 精修？") },
                     text = {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // At 2.0x the two warning paragraphs can exceed the dialog height; keep the
+                        // warning scrollable so the confirm/dismiss buttons stay reachable. No
+                        // typography, color or default-size change when the content already fits.
+                        Column(
+                            modifier = Modifier.verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             Text(
                                 "将以 ${ultraFix.targetWidth}×${ultraFix.targetHeight} 分块处理整张图片，" +
                                     "通常明显慢于普通生成并会增加设备发热。"

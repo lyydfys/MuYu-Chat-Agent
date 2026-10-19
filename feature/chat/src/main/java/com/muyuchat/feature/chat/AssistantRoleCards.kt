@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -72,14 +74,19 @@ internal fun AssistantCurrentCard(
                     )
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 2.0x font: three chips no longer fit one line; FlowRow keeps the 1.0x single row
+            // unchanged and wraps instead of clipping when the type scale grows.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistantCapabilityChip("记忆", assistant?.memoryEnabled == true)
                 AssistantCapabilityChip("联网检索", assistant?.webSearchEnabled == true)
                 AssistantCapabilityChip("文件上下文", assistant?.fileContextEnabled != false)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = onEdit) { Text("编辑") }
-                TextButton(onClick = onExport) { Text("导出") }
+            // Same wrapping rule for the two text actions: 1.0x stays one row, 2.0x wraps.
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                // With no assistant available the current-card actions have nothing to act on;
+                // disable them instead of leaving dead taps that look enabled.
+                TextButton(onClick = onEdit, enabled = assistant != null) { Text("编辑") }
+                TextButton(onClick = onExport, enabled = assistant != null) { Text("导出") }
             }
         }
     }
@@ -127,11 +134,22 @@ internal fun AssistantListCard(
                     Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            // 2.0x font: three actions can exceed the card width; FlowRow wraps them while the
+            // 1.0x layout keeps its single row and 8dp rhythm.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 TextButton(onClick = onSelect, enabled = !assistant.selected) { Text(if (assistant.selected) "使用中" else "切换") }
                 TextButton(onClick = onEdit) { Text("编辑") }
-                TextButton(onClick = onDelete, enabled = assistant.id != "default") {
-                    Text("删除", color = if (assistant.id == "default") MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error)
+                val deletable = assistant.id != "default"
+                TextButton(onClick = onDelete, enabled = deletable) {
+                    // Disabled delete inherits the Material3 disabled content colour instead of
+                    // the normal neutral colour, so it no longer reads as an available action.
+                    Text(
+                        "删除",
+                        color = if (deletable) MaterialTheme.colorScheme.error else LocalContentColor.current
+                    )
                 }
             }
         }

@@ -27,6 +27,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,7 +55,7 @@ import androidx.compose.material.icons.filled.Settings
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -73,6 +74,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
@@ -114,8 +116,14 @@ internal fun McaAppMenuPage(
             .navigationBarsPadding()
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "关闭")
+            // Shared icon button: same 48dp target and 24dp glyph as the previous IconButton,
+            // now with the layer-phase press weight; the accessible name stays on the button.
+            McaIconButton(
+                contentDescription = "关闭",
+                onClick = onClose,
+                glyphSize = 24.dp
+            ) {
+                Icon(Icons.Default.Close, contentDescription = null)
             }
             Spacer(modifier = Modifier.weight(1f))
         }
@@ -285,7 +293,12 @@ internal fun McaAppMenuPage(
             onDismissRequest = { chooseCompressionThreshold = false },
             title = { Text("自动压缩阈值") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                // 2.0x font: keep the dialog's existing 420dp cap and make the option list
+                // scrollable, so larger text cannot push the buttons off-screen.
+                Column(
+                    modifier = Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
                         "阈值越低越早整理上下文；系统消息、角色设定和最近消息会保留。",
                         style = MaterialTheme.typography.bodyMedium
@@ -342,7 +355,17 @@ internal fun McaAppMenuPage(
                                 enabled = !state.isGenerating
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text(option.label, modifier = Modifier.weight(1f))
+                            Text(
+                                option.label,
+                                modifier = Modifier.weight(1f),
+                                // The row is disabled while generating: dim its label to match
+                                // the shared disabled treatment instead of looking available.
+                                color = if (state.isGenerating) {
+                                    LocalContentColor.current.copy(alpha = 0.38f)
+                                } else {
+                                    LocalContentColor.current
+                                }
+                            )
                         }
                     }
                 }
@@ -437,7 +460,9 @@ internal fun McaAppMenuPage(
                 }
             },
             confirmButton = {
-                Row {
+                // 2.0x font: the two long actions no longer fit one dialog line; FlowRow keeps
+                // the 1.0x single row and wraps only when the type scale needs it.
+                FlowRow {
                     TextButton(
                         onClick = {
                             onUndoContextSummary()

@@ -45,6 +45,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,6 +63,8 @@ internal fun CloudModelsSection(
 ) {
     val chatModels = state.cloudApi.connectedModels.filter { it.kind == "CHAT" }
     val imageModels = state.cloudApi.connectedModels.filter { it.kind == "IMAGE" }
+    // 与本地/推荐一致：busy 时禁用云端写操作，避免和保存/测试并发
+    val enabled = !state.isBusy
     LazyColumn(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             CloudModelGroupCard(
@@ -70,6 +73,7 @@ internal fun CloudModelsSection(
                 emptyTitle = "还没有云端推理引擎",
                 emptyBody = "点击下方按钮选择 OpenAI 或 Anthropic 协议，再填写自定义 Base URL、模型名和 API Key。",
                 models = chatModels,
+                enabled = enabled,
                 primaryAction = "加载",
                 addAction = "+ 接入更多推理引擎",
                 onAdd = { onBeginAddCloudModel("CHAT") },
@@ -85,6 +89,7 @@ internal fun CloudModelsSection(
                 emptyTitle = "还没有图像生成引擎",
                 emptyBody = "图像生成引擎和云端推理引擎分开保存，支持 OpenAI Images、DashScope Image 和后续自定义路径。",
                 models = imageModels,
+                enabled = enabled,
                 primaryAction = "设为当前",
                 addAction = "+ 接入更多图像生成引擎",
                 onAdd = { onBeginAddCloudModel("IMAGE") },
@@ -438,6 +443,7 @@ private fun CloudModelGroupCard(
     emptyTitle: String,
     emptyBody: String,
     models: List<CloudModelUiItem>,
+    enabled: Boolean,
     primaryAction: String,
     addAction: String,
     onAdd: () -> Unit,
@@ -455,6 +461,7 @@ private fun CloudModelGroupCard(
             models.forEach { model ->
                 CloudModelRow(
                     model = model,
+                    enabled = enabled,
                     primaryAction = primaryAction,
                     onPrimaryAction = onPrimaryAction,
                     onEdit = onEdit,
@@ -464,6 +471,7 @@ private fun CloudModelGroupCard(
         }
         OutlinedButton(
             onClick = onAdd,
+            enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(10.dp)
         ) {
@@ -482,12 +490,15 @@ internal fun cloudModelDeleteActionLabel(model: CloudModelUiItem): String {
 @Composable
 private fun CloudModelRow(
     model: CloudModelUiItem,
+    enabled: Boolean,
     primaryAction: String,
     onPrimaryAction: (String) -> Unit,
     onEdit: (String) -> Unit,
     onDelete: (String) -> Unit
 ) {
     var confirmDelete by rememberSaveable(model.id) { mutableStateOf(false) }
+    // 2.0x 下动作按钮只有一半宽：隐藏装饰图标并允许两行，避免“设为当前”被硬裁
+    val largeText = LocalDensity.current.fontScale >= 1.5f
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
@@ -516,8 +527,9 @@ private fun CloudModelRow(
                         overflow = TextOverflow.Ellipsis
                     )
                     if (model.selected) {
-                        Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(999.dp)) {
-                            Text("当前", modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        // 与本地“已加载/当前”一致：primary/onPrimary 配对在明暗主题都 ≥4.5:1
+                        Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(999.dp)) {
+                            Text("当前", modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
                         }
                     }
                 }
@@ -534,29 +546,38 @@ private fun CloudModelRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         onClick = { onPrimaryAction(model.id) },
-                        enabled = !model.selected,
+                        enabled = enabled && !model.selected,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(999.dp)
                     ) {
-                        Icon(
-                            imageVector = if (model.kind == "IMAGE") Icons.Rounded.Image else Icons.Rounded.PlayArrow,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                        if (!largeText) {
+                            Icon(
+                                imageVector = if (model.kind == "IMAGE") Icons.Rounded.Image else Icons.Rounded.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text(
+                            if (model.selected) "当前" else primaryAction,
+                            maxLines = if (largeText) 2 else 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Spacer(Modifier.width(6.dp))
-                        Text(if (model.selected) "当前" else primaryAction, maxLines = 1)
                     }
                     OutlinedButton(
                         onClick = { onEdit(model.id) },
+                        enabled = enabled,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(999.dp)
                     ) {
-                        Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text("编辑", maxLines = 1)
+                        if (!largeText) {
+                            Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text("编辑", maxLines = if (largeText) 2 else 1, overflow = TextOverflow.Ellipsis)
                     }
                     // 与本地模型卡删除按钮统一：48dp 触达 + 18dp muted 字形
-                    IconButton(onClick = { confirmDelete = true }, modifier = Modifier.size(48.dp)) {
+                    IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
                         Icon(
                             Icons.Rounded.Delete,
                             contentDescription = cloudModelDeleteActionLabel(model),

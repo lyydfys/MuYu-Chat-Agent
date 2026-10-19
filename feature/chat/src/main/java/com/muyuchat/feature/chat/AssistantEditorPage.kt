@@ -8,12 +8,14 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -29,7 +31,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -49,6 +51,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import kotlinx.coroutines.CompletableDeferred
@@ -200,8 +203,14 @@ internal fun AssistantEditorPage(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            // Shared icon button: same 48dp target and 24dp glyph as the previous IconButton,
+            // now with the layer-phase press weight; the accessible name stays on the button.
+            McaIconButton(
+                contentDescription = "返回助手列表",
+                onClick = onBack,
+                glyphSize = 24.dp
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(if (assistant == null) "新建助手" else "编辑助手", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -307,7 +316,12 @@ internal fun AssistantEditorPage(
                 }
                 item {
                     Text("默认模型", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    // 2.0x font: the two binding labels can exceed one line; FlowRow wraps them
+                    // while 1.0x keeps the original single row and 8dp gap.
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         FilterChip(
                             selected = defaultModelMode == "follow_current",
                             onClick = {
@@ -351,7 +365,12 @@ internal fun AssistantEditorPage(
                         FilterChip(selected = webSearchEnabled, onClick = { webSearchEnabled = !webSearchEnabled }, label = { Text("联网检索") })
                     }
                     Spacer(modifier = Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    // 2.0x font: the second capability row is the one that overflows; FlowRow
+                    // keeps its 1.0x single line intact and only wraps when needed.
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         FilterChip(selected = fileContextEnabled, onClick = { fileContextEnabled = !fileContextEnabled }, label = { Text("文件上下文") })
                         FilterChip(selected = false, onClick = {}, enabled = false, label = { Text("本地工具预留") })
                     }
@@ -385,7 +404,8 @@ internal fun AssistantEditorPage(
                         OutlinedButton(
                             onClick = { presetPicker.launch(arrayOf("*/*")) },
                             enabled = !presetImporting,
-                            modifier = Modifier.height(40.dp)
+                            // 2.0x font: keep the 40dp minimum, allow the button to grow.
+                            modifier = Modifier.heightIn(min = 40.dp)
                         ) {
                             if (presetImporting) {
                                 CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
@@ -520,9 +540,12 @@ internal fun AssistantEditorPage(
                             enabled = assistant != null && assistant.id != "default",
                             modifier = Modifier.weight(1f)
                         ) {
+                            val deletable = assistant != null && assistant.id != "default"
+                            // Disabled delete inherits the Material3 disabled content colour
+                            // instead of looking like the normal destructive action.
                             Text(
                                 "删除助手",
-                                color = if (assistant != null && assistant.id != "default") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                color = if (deletable) MaterialTheme.colorScheme.error else LocalContentColor.current
                             )
                         }
                     }
@@ -552,13 +575,15 @@ internal fun AssistantEditorPage(
                 ) {
                     TextButton(
                         onClick = onBack,
-                        modifier = Modifier.weight(1f).height(48.dp)
+                        // 2.0x font: keep the 48dp minimum, allow the button to grow.
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                     ) {
                         Text("取消")
                     }
                     Button(
                         onClick = { submitDraft(buildDraft(assistant?.id), closeOnSuccess = true) },
-                        modifier = Modifier.weight(1.45f).height(48.dp),
+                        // Same 2.0x rule for the primary action.
+                        modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Text("保存")
