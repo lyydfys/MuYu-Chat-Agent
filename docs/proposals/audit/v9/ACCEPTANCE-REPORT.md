@@ -138,7 +138,12 @@ Round-16 surface and motion numbers:
   (0.98%), P50 7 ms, P90 11 ms, P95 13 ms, P99 22 ms, 2 missed vsync
   (`ui-quality/r16/gfxinfo.txt`).
 
-Still open from the same review: optical audit of the remaining glyphs (send/stop/add/pin), the
+Round-17 icon optics (zoomed before/after in `r17/`): the send glyph shifts 2dp right so its ink
+mass sits on the FAB centre, the header pencil uses the outlined Edit glyph to match the menu/history
+stroke weight, and the replay glyph is 19dp against the fuller 18dp copy shape. App unit tests:
+2985 / 0 failures.
+
+Still open from the same review: optical audit of the remaining glyphs (stop/add/pin), the
 agent-workspace acceptance work owned by the parallel session, and the edge-to-edge decision.
 
 ## 5. Blocked / deferred
