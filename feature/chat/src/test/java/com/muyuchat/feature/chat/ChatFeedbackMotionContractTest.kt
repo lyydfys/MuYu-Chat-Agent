@@ -42,6 +42,9 @@ class ChatFeedbackMotionContractTest {
         val loader = source("feature/chat/src/main/java/com/muyuchat/feature/chat/ImageAssetIoSupport.kt")
         assertTrue(loader.contains("value = ChatImageLoadState.Loading"))
 
+        val composer = source("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatComposerScreens.kt")
+        assertTrue(composer.contains("contentDescription = \"消息输入框\""))
+
         val views = source("feature/chat/src/main/java/com/muyuchat/feature/chat/ChatGeneratedImageViews.kt")
         assertTrue(views.contains("rememberChatImageLoadState("))
         assertTrue(views.contains("ChatImageLoadState.Failed"))

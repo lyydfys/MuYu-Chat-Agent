@@ -26,6 +26,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -155,7 +157,12 @@ internal fun CompactInputActionMenu(
                 shadowElevation = 18.dp
             ) {
                 Column(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 12.dp),
+                    // Rows grow with the font scale; cap the sheet and let it scroll instead of pushing
+                    // the first rows off-screen. Below the cap this is visually unchanged.
+                    modifier = Modifier
+                        .heightIn(max = 520.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 10.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     CompactInputActionRow(
