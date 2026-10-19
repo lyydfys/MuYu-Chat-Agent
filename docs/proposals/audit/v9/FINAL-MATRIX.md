@@ -134,3 +134,15 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 The settings lane sits 1–2 ms over the 60 Hz budget on this device; P99 spikes point at the
 open-transition + first composition of the settings LazyColumn rather than steady scrolling. Listed
 as a known borderline, not as a passing result.
+
+### Settings lane resolution (same build)
+
+| sample | verdict | metrics | evidence |
+|---|---|---|---|
+| settings open + 20 scrolls + back | PASS | 2330 frames, janky 0.21%, P50 9 / P90 15 / P95 16 / P99 19 ms, 0 missed vsync | `artifacts/frames/20261020-003122-22288` |
+| settings open + 6 scrolls (short window) | FAIL (borderline) | P95 17–18 ms, P99 46–65 ms | earlier runs above |
+
+The steady scroll is within budget; the short-window failures are isolated spikes during the open
+transition (page composition inside the crossfade), not sustained scrolling. Recorded as: settings
+steady-state PASS, open-transition spikes known (candidate follow-up: defer heavy cards until the
+transition settles).
