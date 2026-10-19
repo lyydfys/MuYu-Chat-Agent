@@ -230,13 +230,8 @@ internal fun PendingReasoningPanel(
                 color = muted,
                 fontWeight = FontWeight.Medium
             )
-            Spacer(modifier = Modifier.width(6.dp))
-            Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
-                contentDescription = null,
-                tint = muted,
-                modifier = Modifier.size(18.dp)
-            )
+            // No chevron while waiting: this panel has nothing to expand and the glyph would
+            // advertise an interaction that does not exist.
         }
         if (phase != null) {
             if (persist != null && persist.totalBytes > 0L) {

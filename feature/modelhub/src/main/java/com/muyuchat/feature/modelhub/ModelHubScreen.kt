@@ -528,7 +528,9 @@ private fun ModelHubTab(
                 softWrap = false,
                 overflow = TextOverflow.Ellipsis,
                 fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
-                color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                // onPrimaryContainer reads 5.95:1 light / 6.30:1 dark on this container;
+                // primary only reached 4.12 / 3.43.
+                color = if (active) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
             )
         }
     }

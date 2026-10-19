@@ -8,7 +8,8 @@
       1. resolve adb/device/package; bring the app to the chat surface (unless -NoLaunch);
       2. resolve the production selectors needed by the requested actions;
       3. `adb shell dumpsys gfxinfo <Package> reset`;
-      4. run the requested actions (drawer open/close, N scroll swipes, model panel open/close)
+      4. run the requested actions (drawer open/close, N scroll swipes, model panel open/close,
+         and the settings path: app menu -> 系统设置 -> N scroll swipes -> back to chat)
          with configurable sleeps between steps;
       5. capture `adb shell dumpsys gfxinfo <Package>` into gfxinfo.txt;
       6. parse Total frames / Janky frames / 50th / 90th / 95th / 99th percentile and
@@ -43,8 +44,10 @@
 
 .PARAMETER Actions
     Interaction sequence to run while stats are being collected. Supported: drawer, scroll,
-    model. Comma-separated (`-Actions drawer,scroll`) or a native PowerShell array. At least
-    one action is required. Default: drawer,scroll,model.
+    model, settings. The settings action opens the app menu, enters 系统设置, scrolls the default
+    settings section N times and returns to chat via 返回聊天. Comma-separated
+    (`-Actions drawer,settings`) or a native PowerShell array. At least one action is required.
+    Default: drawer,scroll,model.
 
 .PARAMETER ScrollCount
     Number of alternating scroll swipes in the `scroll` action. Default 6.
@@ -95,6 +98,9 @@
 
 .EXAMPLE
     .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3 -Package com.muyuchat.mca -OutDir artifacts/frames/manual-drawer -Actions drawer
+
+.EXAMPLE
+    .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3 -Actions settings -ScrollCount 6
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -130,7 +136,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $repo = Split-Path -Parent $PSScriptRoot
-$allowedActions = @('drawer', 'scroll', 'model')
+$allowedActions = @('drawer', 'scroll', 'model', 'settings')
 
 # Accept `-Actions drawer,scroll` (single string when launched via `powershell -File`) and native
 # arrays. Validate early so an unknown action is a usage error, not a silent typo.
@@ -147,7 +153,7 @@ foreach ($rawAction in @($Actions)) {
     }
 }
 if ($requestedActions.Count -eq 0) {
-    [Console]::Error.WriteLine('measure-frames: at least one -Actions value is required (drawer, scroll, model)')
+    [Console]::Error.WriteLine('measure-frames: at least one -Actions value is required (drawer, scroll, model, settings)')
     exit 2
 }
 
@@ -391,8 +397,9 @@ $state = [ordered]@{
         'Janky-frame classification and percentile bucket resolution are OS/device dependent.',
         'The P95 default 16.7 ms assumes a 60 Hz frame budget; adjust MaxP95Ms for other refresh rates.',
         'Sleeps between steps are part of the measured window; this is a short UI workload, not a long soak.',
-        'The drawer/model verification uses uiautomator dumps inside the measured window; those dumps add a few frames and are part of the sample.',
-        'The scroll action is verified only by successful swipe commands, not by a visual content marker; drawer/model provide the overlay observations.',
+        'The drawer/model/settings verification uses uiautomator dumps inside the measured window; those dumps add a few frames and are part of the sample.',
+        'The scroll action is verified only by successful swipe commands, not by a visual content marker; drawer/model/settings provide overlay/page observations.',
+        'The settings action measures the default settings section reached from the app menu; it does not switch settings section tabs and relies on the 打开应用菜单 / 系统设置 / 返回聊天 selectors.',
         'PASS applies only to this device, package, build and run; compare before/after on the same device and conditions.'
     )
 }
@@ -464,6 +471,46 @@ try {
         if (-not $scrollBox) { Stop-FrameRun -Status 'BLOCKED' -Reason 'scroll action requested but no vertical scrollable node was found on the chat surface' }
         $plan.scroll = $scrollBox
     }
+    if ($requestedActions -contains 'settings') {
+        # Settings path depends on three production selectors: the header menu button, the app
+        # menu row and the settings page back control. Resolve all of them before reset; any
+        # missing selector is BLOCKED rather than measured as a no-op interaction.
+        $settingsMenuButton = Find-NodeCenter -Raw $surface -Attribute 'content-desc' -Value '打开应用菜单'
+        if (-not $settingsMenuButton) { Stop-FrameRun -Status 'BLOCKED' -Reason 'settings action requested but the 打开应用菜单 node was not found on the chat surface' }
+        & $adb -s $DeviceSerial shell input tap $settingsMenuButton.x $settingsMenuButton.y 2>&1 | Out-Null
+        Start-Sleep -Milliseconds $PanelOpenMs
+        $menuDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+        $settingsEntry = Find-NodeCenter -Raw $menuDump -Attribute 'text' -Value '系统设置'
+        if (-not $settingsEntry) { Stop-FrameRun -Status 'BLOCKED' -Reason 'settings action requested but the 系统设置 row was not found in the app menu' }
+        & $adb -s $DeviceSerial shell input tap $settingsEntry.x $settingsEntry.y 2>&1 | Out-Null
+        Start-Sleep -Milliseconds $PanelOpenMs
+        $settingsDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+        if (-not (Test-UiMarker -Raw $settingsDump -Attribute 'text' -Value '系统设置')) {
+            Stop-FrameRun -Status 'BLOCKED' -Reason 'settings action requested but the settings page title was not found'
+        }
+        $settingsBack = Find-NodeCenter -Raw $settingsDump -Attribute 'content-desc' -Value '返回聊天'
+        if (-not $settingsBack) { Stop-FrameRun -Status 'BLOCKED' -Reason 'settings action requested but the 返回聊天 control was not found on the settings page' }
+        $settingsScrollBox = Find-ScrollableBox -Raw $settingsDump
+        if (-not $settingsScrollBox) { Stop-FrameRun -Status 'BLOCKED' -Reason 'settings action requested but no vertical scrollable node was found on the settings page' }
+        $plan.settingsMenu = $settingsMenuButton
+        $plan.settingsEntry = $settingsEntry
+        $plan.settingsBack = $settingsBack
+        $plan.settingsScroll = $settingsScrollBox
+        # Return to chat before reset so the measured window starts from the same baseline as the
+        # other actions. Settings can be layered over the app menu; allow up to three BACKs.
+        & $adb -s $DeviceSerial shell input tap $settingsBack.x $settingsBack.y 2>&1 | Out-Null
+        Start-Sleep -Milliseconds $PanelCloseMs
+        $returnedToChat = $false
+        for ($attempt = 0; $attempt -lt 3; $attempt++) {
+            $checkDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+            if (Test-UiMarker -Raw $checkDump -Attribute 'content-desc' -Value '打开历史') { $returnedToChat = $true; break }
+            & $adb -s $DeviceSerial shell input keyevent 4 2>&1 | Out-Null
+            Start-Sleep -Milliseconds $PanelCloseMs
+        }
+        if (-not $returnedToChat) {
+            Stop-FrameRun -Status 'BLOCKED' -Reason 'could not return to the chat surface after the settings selector preflight'
+        }
+    }
 
     # --- reset gfxinfo -----------------------------------------------------------------------
     $reset = Invoke-AdbCapture -Adb $adb -Arguments @('-s', $DeviceSerial, 'shell', 'dumpsys', 'gfxinfo', $Package, 'reset')
@@ -518,6 +565,46 @@ try {
                     Start-Sleep -Milliseconds $ScrollIntervalMs
                 }
                 $steps.Add([pscustomobject]@{ action = 'scroll'; observed = $true; marker = ''; note = ("alternating vertical swipes: $swipes"); elapsedMs = [int](((Get-Date) - $stepStart).TotalMilliseconds) }) | Out-Null
+            }
+            'settings' {
+                & $adb -s $DeviceSerial shell input tap $plan.settingsMenu.x $plan.settingsMenu.y 2>&1 | Out-Null
+                Start-Sleep -Milliseconds $PanelOpenMs
+                $menuDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+                $menuObserved = (Test-UiMarker -Raw $menuDump -Attribute 'text' -Value 'MuYu Chat Agent') -or
+                    (Test-UiMarker -Raw $menuDump -Attribute 'content-desc' -Value '关闭')
+                & $adb -s $DeviceSerial shell input tap $plan.settingsEntry.x $plan.settingsEntry.y 2>&1 | Out-Null
+                Start-Sleep -Milliseconds $PanelOpenMs
+                $settingsDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+                $settingsObserved = (Test-UiMarker -Raw $settingsDump -Attribute 'text' -Value '系统设置') -and
+                    (Test-UiMarker -Raw $settingsDump -Attribute 'content-desc' -Value '返回聊天')
+                $box = $null
+                if ($settingsObserved) { $box = Find-ScrollableBox -Raw $settingsDump }
+                if (-not $box) { $box = $plan.settingsScroll; $settingsObserved = $false }
+                $swipes = 0
+                if ($settingsObserved) {
+                    $settingsCenterX = [int](($box.left + $box.right) / 2)
+                    $settingsUpperY = [int]($box.top + ($box.height * 0.30))
+                    $settingsLowerY = [int]($box.top + ($box.height * 0.72))
+                    for ($i = 1; $i -le $ScrollCount; $i++) {
+                        if ($i % 2 -eq 1) { $startY = $settingsLowerY; $endY = $settingsUpperY } else { $startY = $settingsUpperY; $endY = $settingsLowerY }
+                        & $adb -s $DeviceSerial shell input swipe $settingsCenterX $startY $settingsCenterX $endY 240 2>&1 | Out-Null
+                        $swipes++
+                        Start-Sleep -Milliseconds $ScrollIntervalMs
+                    }
+                }
+                & $adb -s $DeviceSerial shell input tap $plan.settingsBack.x $plan.settingsBack.y 2>&1 | Out-Null
+                Start-Sleep -Milliseconds $PanelCloseMs
+                $homeObserved = $false
+                for ($attempt = 0; $attempt -lt 3; $attempt++) {
+                    $returnDump = Get-UiDumpRaw -Adb $adb -Serial $DeviceSerial
+                    if (Test-UiMarker -Raw $returnDump -Attribute 'content-desc' -Value '打开历史') { $homeObserved = $true; break }
+                    & $adb -s $DeviceSerial shell input keyevent 4 2>&1 | Out-Null
+                    Start-Sleep -Milliseconds $PanelCloseMs
+                }
+                $observed = ($menuObserved -and $settingsObserved -and $homeObserved)
+                $settingsNote = "menu=$menuObserved settings=$settingsObserved home=$homeObserved swipes=$swipes"
+                $steps.Add([pscustomobject]@{ action = 'settings'; observed = $observed; marker = '系统设置/返回聊天'; note = $settingsNote; elapsedMs = [int](((Get-Date) - $stepStart).TotalMilliseconds) }) | Out-Null
+                if (-not $observed) { $interactionFailures.Add('settings path did not complete (' + $settingsNote + ')') | Out-Null }
             }
         }
         Start-Sleep -Milliseconds $StepDelayMs
