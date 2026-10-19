@@ -88,3 +88,17 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | edge-to-edge | DEFERRED | changes insets/window geometry; needs a product decision |
 | status severity without Chinese keyword matching | DEFERRED | needs `statusMessage: String?` upgraded to a structured type in the app shell |
 | 360 dp / 2.0x matrix on every page | PASS | chat, settings, agent, model hub (`r20/modelhub-font20-fixed.png`) and image workspace (`r21/image-workspace-font20-dark.png`) captured |
+
+## 9. Round-25 additions
+
+| item | status | evidence |
+|---|---|---|
+| single generated image uses Loading/Ready/Failed + retry | PASS (code + guard) | `ChatImageLoadState` in `ChatGeneratedImageViews`; `ChatFeedbackMotionContractTest` |
+| retry resets the image loader to Loading | PASS (code) | `ImageAssetIoSupport.rememberChatImageLoadState` resets before decoding |
+| composer action menu grows for 2.0x and degrades all parts together | PASS (code) | `heightIn(min = 48.dp)`, two-line subtitle, one disabled colour |
+| startup timeline uses one tag and one T0 | PASS (code) | `StartupLog` in `AppStartupViewModel` + coordinator lines |
+| successful diagnostics record is off the ready path | PASS (code) | `viewModelScope.launch(IO)` after publishing ready |
+| market/files/recommended distinguish busy from empty | PASS (code) | progress rows + `没有找到模型` empty card |
+| a11y probe script | PASS (tool) first run surfaced 15 findings, rule corrected for Compose merged semantics (`mergedSemanticsNamed`) | `scripts/verify-a11y.ps1`, `artifacts/a11y/20261019-214708-23492` |
+| model capsule no longer duplicates its label | PASS (code, tests) | `contentDescription` removed; role kept; rebuild pending |
+| release APK with this batch | PARTIAL | 21:37 build installed (375.4 MB); one more rebuild needed for the capsule a11y line, blocked by the shared build lock (parallel session running app tests) |
