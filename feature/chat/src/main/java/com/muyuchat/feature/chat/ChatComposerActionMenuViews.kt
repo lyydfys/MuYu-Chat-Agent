@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -50,11 +49,13 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -245,10 +246,20 @@ private fun CompactInputActionRow(
     onClick: () -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
+    val titleColor = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124)
+    // One disabled colour for the whole row: title, subtitle and the leading glyph/plate all drop
+    // to the existing 0.58 title alpha instead of the glyph staying at full strength. No new token:
+    // the alpha and both base colours already exist in this row.
+    val disabledAlpha = 0.58f
+    val disabledColor = titleColor.copy(alpha = disabledAlpha)
+    val plateColor = (if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF1F3F4))
+        .copy(alpha = if (enabled) 1f else disabledAlpha)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(48.dp)
+            // min height, not a fixed 48dp: at 2.0x font scale a title plus a two-line subtitle
+            // must be allowed to grow instead of being clipped/overlapped.
+            .heightIn(min = 48.dp)
             .clip(CircleShape)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 8.dp),
@@ -256,19 +267,24 @@ private fun CompactInputActionRow(
     ) {
         Surface(
             modifier = Modifier.size(34.dp),
-            color = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF1F3F4),
+            color = plateColor,
             shape = CircleShape
         ) {
             Box(contentAlignment = Alignment.Center) {
-                icon()
+                if (enabled) {
+                    icon()
+                } else {
+                    CompositionLocalProvider(LocalContentColor provides disabledColor) {
+                        icon()
+                    }
+                }
             }
         }
         Spacer(modifier = Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
             Text(
                 text = label,
-                color = (if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
-                    .copy(alpha = if (enabled) 1f else 0.58f),
+                color = if (enabled) titleColor else disabledColor,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
@@ -277,9 +293,15 @@ private fun CompactInputActionRow(
             subtitle?.takeIf(String::isNotBlank)?.let {
                 Text(
                     text = it,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.82f else 0.62f),
+                    color = if (enabled) {
+                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f)
+                    } else {
+                        disabledColor
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
+                    // Large-font subtitles may use a second line; the min-height row grows instead
+                    // of clipping. Normal-font rows keep their previous geometry for short text.
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
             }

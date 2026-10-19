@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -94,8 +95,17 @@ internal fun RecommendedModelsSection(
             )
         }
 
+        // busy 且无推荐时用行内进度占位，空态只在非 busy 时出现
+        if (state.isBusy && !hasRecommendations) {
+            item(key = "recommendations-loading") {
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+        }
+
         if (!hasRecommendations) {
-            item { EmptyCard("暂无推荐模型", "稍后刷新推荐列表，或到广场搜索公开模型。") }
+            if (!state.isBusy) {
+                item { EmptyCard("暂无推荐模型", "稍后刷新推荐列表，或到广场搜索公开模型。") }
+            }
         } else {
             item(key = "cpu-chat-header") {
                 RecommendationSectionHeader(

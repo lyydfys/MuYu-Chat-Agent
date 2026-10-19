@@ -14,8 +14,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 
-/** Logcat tag for the startup timing breadcrumbs added by the parallel frontend pass. */
-private const val STARTUP_TAG = "MCAStartup"
+// Startup timing goes through StartupLog (owned by AppStartupViewModel) so these lines share one
+// tag and one T0 with the phase stamps instead of forming a second MCAStartup timeline.
 
 internal class MainPostStartupCoordinator(
     private val store: UiStateStore,
@@ -43,11 +43,11 @@ internal class MainPostStartupCoordinator(
 
     fun runPostStartupWork() {
         val startupThread = Thread.currentThread().name
-        Log.i(STARTUP_TAG, "post-work-begin thread=" + startupThread)
+        StartupLog.stamp("post-work-begin", thread = startupThread)
         restorePendingContentImportPreview()
         val reconcileStartedAt = android.os.SystemClock.elapsedRealtime()
         imageLibraryStartupReconciliation.start()
-        Log.i(STARTUP_TAG, "image-reconcile-submit t=" + (android.os.SystemClock.elapsedRealtime() - reconcileStartedAt) + "ms thread=" + Thread.currentThread().name)
+        StartupLog.stamp("image-reconcile-submit", opStartedAt = reconcileStartedAt, thread = Thread.currentThread().name)
         observeManagedDownloadsAction()
         modelImportCoordinator.observeManagedImports()
 
@@ -60,7 +60,7 @@ internal class MainPostStartupCoordinator(
             val bundle = withContext(Dispatchers.IO) {
                 offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle()
             }
-            Log.i(STARTUP_TAG, "offline-bundle t=" + (android.os.SystemClock.elapsedRealtime() - verifyStartedAt) + "ms")
+            StartupLog.stamp("offline-bundle", opStartedAt = verifyStartedAt)
             bundle?.let { verified ->
                 store.update { state ->
                     if (state.offlineTranslationDownloading || state.offlineTranslationInstalling) state
@@ -92,7 +92,7 @@ internal class MainPostStartupCoordinator(
         scope.launch(Dispatchers.IO) {
             val inversionStartedAt = android.os.SystemClock.elapsedRealtime()
             val loaded = loadInitialTextualInversionLibraryState(container.localImageTextualInversionStore)
-            Log.i(STARTUP_TAG, "textual-inversion t=" + (android.os.SystemClock.elapsedRealtime() - inversionStartedAt) + "ms")
+            StartupLog.stamp("textual-inversion", opStartedAt = inversionStartedAt)
             store.update { state ->
                 if (!state.localImageTextualInversionLoading) {
                     state
@@ -109,7 +109,7 @@ internal class MainPostStartupCoordinator(
         chatModelCoordinator.launchModelOperation("恢复运行记录失败") {
             val recoverStartedAt = android.os.SystemClock.elapsedRealtime()
             chatModelCoordinator.recoverInterruptedRuntimeProfiles()
-            Log.i(STARTUP_TAG, "recover-profiles t=" + (android.os.SystemClock.elapsedRealtime() - recoverStartedAt) + "ms thread=" + Thread.currentThread().name)
+            StartupLog.stamp("recover-profiles", opStartedAt = recoverStartedAt, thread = Thread.currentThread().name)
         }
 
         scope.launch {
@@ -144,7 +144,7 @@ internal class MainPostStartupCoordinator(
             val readinessStartedAt = android.os.SystemClock.elapsedRealtime()
             val readinessPort = managedRuntimeReadinessPortProvider()
             refreshRuntimeReadiness(readinessPort)
-            Log.i(STARTUP_TAG, "readiness-first t=" + (android.os.SystemClock.elapsedRealtime() - readinessStartedAt) + "ms")
+            StartupLog.stamp("readiness-first", opStartedAt = readinessStartedAt)
             if (!skipInitialModelDiscovery) {
                 recoverModelOperation(
                     operation = { modelStore.recoverInstalledQairtBundles() },
@@ -168,10 +168,10 @@ internal class MainPostStartupCoordinator(
             }
             val reconcileIdsStartedAt = android.os.SystemClock.elapsedRealtime()
             reconcileModelIdentities()
-            Log.i(STARTUP_TAG, "reconcile-identities t=" + (android.os.SystemClock.elapsedRealtime() - reconcileIdsStartedAt) + "ms")
+            StartupLog.stamp("reconcile-identities", opStartedAt = reconcileIdsStartedAt)
             val readinessSecondStartedAt = android.os.SystemClock.elapsedRealtime()
             refreshRuntimeReadiness(readinessPort)
-            Log.i(STARTUP_TAG, "readiness-second t=" + (android.os.SystemClock.elapsedRealtime() - readinessSecondStartedAt) + "ms")
+            StartupLog.stamp("readiness-second", opStartedAt = readinessSecondStartedAt)
         }
     }
 

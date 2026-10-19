@@ -24,7 +24,38 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 
-private const val STARTUP_LOG_TAG = "McaStartup"
+/**
+ * One startup log channel and one time base for the whole launch path.
+ *
+ * [AppStartupViewModel] owns the phase stamps and [MainPostStartupCoordinator] reports the
+ * post-startup work; keeping both halves on this tag and this T0 is what makes a cold start
+ * filterable (`adb logcat -s McaStartup`) and comparable as one TTID -> TTFD timeline. The base
+ * is restarted per startup attempt, so every logged `t=` is elapsed time since that attempt began.
+ */
+internal object StartupLog {
+    const val TAG = "McaStartup"
+
+    @Volatile
+    private var baseElapsedMs = 0L
+
+    /** Marks the shared T0. Called once when an attempt starts. */
+    fun begin() {
+        baseElapsedMs = SystemClock.elapsedRealtime()
+    }
+
+    /**
+     * Logs [label] relative to the shared T0. [opStartedAt], when supplied, adds the duration of
+     * the individual step as `op=`; [thread] keeps the existing thread attribution.
+     */
+    fun stamp(label: String, opStartedAt: Long? = null, thread: String? = null) {
+        val now = SystemClock.elapsedRealtime()
+        val base = baseElapsedMs
+        val relative = if (base == 0L) "no base" else "t=${now - base}ms"
+        val operation = opStartedAt?.let { " op=${now - it}ms" }.orEmpty()
+        val caller = thread?.let { " thread=$it" }.orEmpty()
+        Log.i(TAG, "$label $relative$operation$caller")
+    }
+}
 
 /**
  * Real, observable startup phases. The label is what the launch surface shows verbatim, so it
@@ -57,20 +88,14 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
     private var cleared = false
     private var startupJob: Job? = null
     private val pendingActions = ArrayDeque<(MainViewModel) -> Unit>()
-    private var startupStartedAt = 0L
 
     /**
      * Low-volume startup timing, one line per real phase. Kept in release on purpose: startup
      * attribution is a user-facing performance property and adb logcat is the only way to read it
-     * on a non-debuggable build.
+     * on a non-debuggable build. Routed through [StartupLog] so phase stamps and post-startup
+     * work share one tag and one T0.
      */
-    private fun stamp(label: String) {
-        if (startupStartedAt == 0L) {
-            Log.i(STARTUP_LOG_TAG, "$label (no base)")
-            return
-        }
-        Log.i(STARTUP_LOG_TAG, "$label t=${SystemClock.elapsedRealtime() - startupStartedAt}ms")
-    }
+    private fun stamp(label: String) = StartupLog.stamp(label)
 
     /** Publishes a real phase boundary; ignored once the app model is ready. */
     private fun mark(phase: AppStartupPhase, progress: Float) {
@@ -92,7 +117,7 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
         if (starting || cleared || state.value.model != null) return
         starting = true
         mutableState.value = AppStartupState()
-        startupStartedAt = SystemClock.elapsedRealtime()
+        StartupLog.begin()
         stamp("begin")
         startupJob = viewModelScope.launch {
             launch {
@@ -149,8 +174,6 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                 withContext(Dispatchers.IO) { main.startAfterConstruction() }
                 stamp("post-startup")
                 mark(AppStartupPhase.FINISHING, 0.62f)
-                withContext(Dispatchers.IO) { StartupDiagnostics.record(app, false, null) }
-                stamp("diagnostics-final")
                 stamp("ready")
                 mutableState.value = AppStartupState(
                     model = main,
@@ -159,6 +182,16 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                     progress = 1f,
                 )
                 published = true
+                // The success diagnostics record serializes process-exit history and fsyncs a
+                // JSON file; none of it is needed for the first app frame. Publish ready first
+                // and write it off the startup path. The failure branch below still records on
+                // the path because its text is shown on the retry card. The tiny window between
+                // ready and this write only means a process death there would still be reported
+                // as an incomplete previous start on the next launch.
+                viewModelScope.launch(Dispatchers.IO) {
+                    StartupDiagnostics.record(app, false, null)
+                    stamp("diagnostics-final")
+                }
                 while (pendingActions.isNotEmpty()) pendingActions.removeFirst()(main)
             } catch (cancelled: CancellationException) {
                 throw cancelled

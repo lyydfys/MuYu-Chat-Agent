@@ -98,6 +98,12 @@ internal fun MarketSection(
                 }
             }
         }
+        // 搜索中显示行内加载占位；搜索完成且无结果时给出明确空态
+        if (state.isBusy && state.hubModels.isEmpty()) {
+            item { LinearProgressIndicator(modifier = Modifier.fillMaxWidth()) }
+        } else if (!state.isBusy && state.hubModels.isEmpty() && state.hubQuery.isNotBlank()) {
+            item { EmptyCard("没有找到模型", "换个关键词或稍后重试。") }
+        }
         if (state.hubModels.isNotEmpty()) {
             item { Text("已显示 ${state.hubModels.size}/${state.hubTotalCount} · 第 ${state.hubPage} 页", style = MaterialTheme.typography.bodySmall) }
             items(state.hubModels, key = { it.id }) { model ->
@@ -194,7 +200,19 @@ internal fun RemoteFilesSection(
                 )
             }
         }
-        if (state.remoteFiles.isEmpty()) {
+        // 加载中优先显示读取占位，避免把“暂无文件”误当空态
+        if (state.isBusy && state.remoteFiles.isEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text(
+                        "正在读取文件列表",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        } else if (state.remoteFiles.isEmpty()) {
             item { EmptyCard("暂无文件", "可从推荐或广场读取文件列表。") }
         } else if (visibleFiles.isEmpty()) {
             item { EmptyCard("没有匹配文件", "清除筛选或换一个文件名、路径、类型关键词。") }
