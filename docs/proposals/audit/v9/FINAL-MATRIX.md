@@ -146,3 +146,15 @@ The steady scroll is within budget; the short-window failures are isolated spike
 transition (page composition inside the crossfade), not sustained scrolling. Recorded as: settings
 steady-state PASS, open-transition spikes known (candidate follow-up: defer heavy cards until the
 transition settles).
+
+### Startup timeline on the final build (device, 3 cold starts)
+
+| run | TotalTime | ready | notes |
+|---|---|---|---|
+| 1 | 272 ms | t=187 ms | diagnostics-final after ready (t=204) |
+| 2 | 292 ms | t=207 ms | offline-bundle at t=201 / op=1 ms |
+| 3 | 239 ms | t=195 ms | offline-bundle late (t=308, op=118 ms) but after ready |
+
+All lines share the single `McaStartup` tag and a shared T0 (`begin t=0`), with per-step cost moved to
+`op=`; `diagnostics-final` now lands after `ready`, confirming the final diagnostics record is off the
+readiness path.
