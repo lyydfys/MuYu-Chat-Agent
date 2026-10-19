@@ -111,3 +111,15 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | a11y probe understands merged Compose semantics | PASS (tool) | `mergedSemanticsNamed` in `scripts/verify-a11y.ps1`; only truly unlabelled interactive nodes fail |
 | model capsule no longer duplicates its visible label | PASS (code) | `ChatStatusBarHeader` keeps role=Button and drops the override |
 | final APK containing the capsule/primary changes | PENDING | queued behind the shared lock; previous 21:37 APK is installed and smoke-tested |
+
+## 11. Round-27 verification (final build 2026-10-20 00:06)
+
+| item | status | evidence |
+|---|---|---|
+| a11y probe on the chat surface | PASS | 86 nodes / 17 interactive / 0 violations (`artifacts/a11y/20261020-001843-17172`) |
+| model capsule + composer field accessible names | PASS | probe rerun above; `ChatFeedbackMotionContractTest` pins the field name |
+| loaded pill / active tab contrast | PASS (code + 2x capture) | primary+onPrimary pill, onPrimaryContainer tab; `r26/modelhub-2x-contrast.png` |
+| model filter chips and hub tags wrap at 2.0x | PASS (code + 2x capture) | FlowRow; same screenshot |
+| waiting reasoning panel chevron removed | PASS (code) | `ChatReasoningPerformanceScreens.kt` |
+| composer action menu capped at 520dp and scrollable | PASS (code) | `ChatComposerActionMenuViews.kt` |
+| measure-frames settings lane | PARTIAL | lane added + static-checked; device run BLOCKED by an observation mismatch after the capsule a11y change (selector fallback committed, rerun pending) |
