@@ -61,6 +61,8 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -313,7 +315,13 @@ internal fun AppMenuRow(
                 .alpha(if (enabled) 1f else APP_MENU_DISABLED_TITLE_ALPHA),
             contentAlignment = Alignment.Center
         ) {
-            icon()
+            // Leading icons read as supporting information, not as the row's subject: provide the
+            // muted token so callers that rely on the default tint stay visually subordinate.
+            CompositionLocalProvider(
+                LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant
+            ) {
+                icon()
+            }
         }
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -343,6 +351,7 @@ internal fun AppMenuRow(
             Icon(
                 imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = null,
+                modifier = Modifier.size(20.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
