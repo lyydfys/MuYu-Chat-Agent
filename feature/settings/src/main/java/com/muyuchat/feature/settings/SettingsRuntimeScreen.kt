@@ -27,11 +27,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -558,13 +560,19 @@ private fun releaseNoteText(value: String): String = value
     .replace(Regex("\\[(.+?)]\\((.+?)\\)"), "$1")
     .trim()
 
+private const val RELEASE_NOTES_COLLAPSED_LINES = 6
+
 @Composable
 private fun ReleaseNotes(notes: String) {
     val lines = remember(notes) { releaseNoteLines(notes) }
     if (lines.isEmpty()) return
+    // A full changelog is long; rendering every line on the first frame is both a scan problem and
+    // the main composition cost when settings opens. Show a digest and expand on demand.
+    var expanded by rememberSaveable(notes) { mutableStateOf(false) }
+    val visibleLines = if (expanded) lines else lines.take(RELEASE_NOTES_COLLAPSED_LINES)
     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
         Text("更新说明", fontWeight = FontWeight.SemiBold)
-        lines.forEach { line ->
+        visibleLines.forEach { line ->
             when (line.kind) {
                 ReleaseNoteKind.SECTION -> Text(
                     line.text,
@@ -582,6 +590,11 @@ private fun ReleaseNotes(notes: String) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+        if (lines.size > RELEASE_NOTES_COLLAPSED_LINES) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "收起" else "展开全部")
             }
         }
     }
