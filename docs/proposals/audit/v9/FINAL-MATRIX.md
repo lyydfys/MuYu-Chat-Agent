@@ -23,7 +23,7 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 |---|---|---|
 | shared motion primitives + contracts | PASS | `McaMotionContractTest`, `ChatMotionContractTest` |
 | drawer / app-menu / model sheet recorded motion | PASS | `ui-motion/chat-20261019-134452-47080` (16 frames, max 24.05) |
-| back/swipe continuity, single animator owner | PASS (code + contracts) | device gesture pass NOT_RUN after the rework |
+| back/swipe continuity, single animator owner | PASS | device gesture recording `r21/swipeback.mp4` + `r21/swipeback-contact.png` (page follows the drag, no 8 % pre-jump) |
 | zero-animation-scale immediacy | PASS | contract tests + device scales restored to 0 |
 
 ## 3. Chat surface
@@ -86,4 +86,4 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | agent-workspace acceptance | DEFERRED | module still being edited by the parallel session |
 | edge-to-edge | DEFERRED | changes insets/window geometry; needs a product decision |
 | status severity without Chinese keyword matching | DEFERRED | needs `statusMessage: String?` upgraded to a structured type in the app shell |
-| 360 dp / 2.0x matrix on every page | partial | chat + settings + agent captured; model hub now captured and fixed (`r20/modelhub-font20-fixed.png`); image workspace NOT_RUN |
+| 360 dp / 2.0x matrix on every page | PASS | chat, settings, agent, model hub (`r20/modelhub-font20-fixed.png`) and image workspace (`r21/image-workspace-font20-dark.png`) captured |
