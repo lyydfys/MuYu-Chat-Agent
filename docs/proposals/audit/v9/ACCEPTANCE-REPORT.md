@@ -143,8 +143,12 @@ mass sits on the FAB centre, the header pencil uses the outlined Edit glyph to m
 stroke weight, and the replay glyph is 19dp against the fuller 18dp copy shape. App unit tests:
 2985 / 0 failures.
 
-Still open from the same review: optical audit of the remaining glyphs (stop/add/pin), the
-agent-workspace acceptance work owned by the parallel session, and the edge-to-edge decision.
+Round-18 closes the glyph pass: the composer add uses the outlined plus, and pin actions are
+outlined while unpinned and filled/primary-tinted while pinned, so the state is visible in the glyph
+(`r18/add-button-after.png`, `r18/user-pin-copy-after2.png`).
+
+Still open: the agent-workspace acceptance work owned by the parallel session and the edge-to-edge
+decision (a product choice, not a code blocker).
 
 ## 5. Blocked / deferred
 
