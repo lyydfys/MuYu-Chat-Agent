@@ -66,7 +66,11 @@ the conflated-channel swipe-back and the zero-animation-scale behaviour.
   ripple, press weight, required accessible name, optional tonal selected state).
 - Drawer: search capsule, section labels, 44 dp rows, list animations.
 - Settings: release notes render as structured sections/bullets/paragraphs instead of raw Markdown
-  (`r11/settings-notes-final.png`); dark mode verified.
+  (`r11/settings-notes-final.png`); dark mode verified. Round-12 craft fixes: the web-search enable
+  switch sits on the title row so it never overlays the description, the log actions use
+  Refresh/Description glyphs instead of two identical save icons, and provider/trigger chips wrap
+  instead of clipping at the right edge (`r12/settings-websearch-chips.png`,
+  `r12/settings-logs-fixed.png`).
 - Dark mode / large font evidence: `r2/after-98a37aa7-dark-main.png`, `r5/r5-dark-chat.png`,
   `r5/r5-dark-drawer.png`, `r5/r5-font20-chat.png`, `r11/agent-light.png`,
   `r11/agent-dark.png`, `r11/agent-font20-dark.png`.
