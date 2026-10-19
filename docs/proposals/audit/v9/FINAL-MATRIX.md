@@ -31,7 +31,7 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | item | status | evidence |
 |---|---|---|
 | links clickable (Markdown + bare URL) | PASS (unit) | `InlineMarkdownStabilityTest` + `LinkAnnotation` |
-| table columns share widths | PASS (code) | `ChatMarkdownBlockRenderers`; long-table screenshot NOT_RUN |
+| table columns share widths | PASS (unit + refactor) | `tableColumnWidthsDp` covered by `ChatMarkdownTableWidthTest` (5 tests); visual long-table screenshot NOT_RUN |
 | failure body is a short reason, diagnostics kept | PASS (code + unit) | `failureSummaryLine`, `ChatExecutionSettlementSteps` |
 | empty composer send is disabled and dimmed | PASS | `r15/chat-tail.png` |
 | copy succeeds -> in-place check for ~1.4 s | PASS | `r15/copied-check.png` |
