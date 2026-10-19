@@ -102,3 +102,12 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | a11y probe script | PASS (tool) first run surfaced 15 findings, rule corrected for Compose merged semantics (`mergedSemanticsNamed`) | `scripts/verify-a11y.ps1`, `artifacts/a11y/20261019-214708-23492` |
 | model capsule no longer duplicates its label | PASS (code, tests) | `contentDescription` removed; role kept; rebuild pending |
 | release APK with this batch | PARTIAL | 21:37 build installed (375.4 MB); one more rebuild needed for the capsule a11y line, blocked by the shared build lock (parallel session running app tests) |
+
+## 10. Round-26 additions
+
+| item | status | evidence |
+|---|---|---|
+| local API page has one filled primary | PASS (code + tests) | URL copies and self-test actions are outlined; only `复制 API Key` stays filled (`031430c`) |
+| a11y probe understands merged Compose semantics | PASS (tool) | `mergedSemanticsNamed` in `scripts/verify-a11y.ps1`; only truly unlabelled interactive nodes fail |
+| model capsule no longer duplicates its visible label | PASS (code) | `ChatStatusBarHeader` keeps role=Button and drops the override |
+| final APK containing the capsule/primary changes | PENDING | queued behind the shared lock; previous 21:37 APK is installed and smoke-tested |
