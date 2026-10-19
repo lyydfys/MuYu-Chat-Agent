@@ -4,6 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -436,10 +438,7 @@ private fun AppUpdateCard(
                 )
             }
             if (notes.isNotBlank()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("更新说明", fontWeight = FontWeight.SemiBold)
-                    Text(notes, style = MaterialTheme.typography.bodySmall)
-                }
+                ReleaseNotes(notes)
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -477,6 +476,106 @@ private fun AppUpdateCard(
                     Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
                     Text("打开 Release", modifier = Modifier.padding(start = 6.dp))
                 }
+            }
+        }
+    }
+}
+
+private enum class ReleaseNoteKind { HEADING, SECTION, BULLET, BODY }
+
+private data class ReleaseNoteLine(val kind: ReleaseNoteKind, val text: String)
+
+private val releaseNoteTableRule = Regex("^[|\\s:-]*-[|\\s:-]*$")
+
+/**
+ * GitHub release bodies arrive as Markdown. Rendering the raw text (`#`, `##`, `-`, `| a | b |`)
+ * in the update card reads as broken copy, so flatten the subset the project actually writes:
+ * headings become section labels, bullets stay bullets, hard-wrapped body lines merge into one
+ * paragraph and pipe tables become label/value lines. The version heading is dropped because the
+ * card already shows the version above.
+ */
+private fun releaseNoteLines(raw: String): List<ReleaseNoteLine> {
+    val lines = mutableListOf<ReleaseNoteLine>()
+    for (rawLine in raw.lineSequence()) {
+        val line = rawLine.trimEnd()
+        val indent = line.length - line.trimStart().length
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) continue
+        if (releaseNoteTableRule.matches(trimmed)) continue
+        if (trimmed.startsWith("|") && trimmed.endsWith("|")) {
+            val cells = trimmed.trim('|').split('|').map { releaseNoteText(it) }.filter { it.isNotBlank() }
+            if (cells.isNotEmpty()) lines += ReleaseNoteLine(ReleaseNoteKind.BODY, cells.joinToString("："))
+            continue
+        }
+        val section = when {
+            trimmed.startsWith("#### ") -> trimmed.removePrefix("#### ")
+            trimmed.startsWith("### ") -> trimmed.removePrefix("### ")
+            trimmed.startsWith("## ") -> trimmed.removePrefix("## ")
+            else -> null
+        }
+        if (section != null) {
+            lines += ReleaseNoteLine(ReleaseNoteKind.SECTION, releaseNoteText(section))
+            continue
+        }
+        if (trimmed.startsWith("# ")) continue
+        val bullet = when {
+            trimmed.startsWith("- ") -> trimmed.drop(2)
+            trimmed.startsWith("* ") -> trimmed.drop(2)
+            trimmed.startsWith("• ") -> trimmed.drop(2)
+            else -> null
+        }
+        if (bullet != null) {
+            lines += ReleaseNoteLine(ReleaseNoteKind.BULLET, releaseNoteText(bullet))
+            continue
+        }
+        val continuation = indent >= 2 && lines.isNotEmpty() &&
+            (lines.last().kind == ReleaseNoteKind.BULLET || lines.last().kind == ReleaseNoteKind.BODY)
+        if (continuation) {
+            val previous = lines.last()
+            lines[lines.size - 1] = previous.copy(text = previous.text + " " + releaseNoteText(trimmed))
+            continue
+        }
+        if (lines.isNotEmpty() && lines.last().kind == ReleaseNoteKind.BODY) {
+            val previous = lines.last()
+            lines[lines.size - 1] = previous.copy(text = previous.text + " " + releaseNoteText(trimmed))
+        } else {
+            lines += ReleaseNoteLine(ReleaseNoteKind.BODY, releaseNoteText(trimmed))
+        }
+    }
+    return lines.take(60)
+}
+
+private fun releaseNoteText(value: String): String = value
+    .replace(Regex("\\*\\*(.+?)\\*\\*"), "$1")
+    .replace(Regex("__(.+?)__"), "$1")
+    .replace(Regex("`(.+?)`"), "$1")
+    .replace(Regex("\\[(.+?)]\\((.+?)\\)"), "$1")
+    .trim()
+
+@Composable
+private fun ReleaseNotes(notes: String) {
+    val lines = remember(notes) { releaseNoteLines(notes) }
+    if (lines.isEmpty()) return
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Text("更新说明", fontWeight = FontWeight.SemiBold)
+        lines.forEach { line ->
+            when (line.kind) {
+                ReleaseNoteKind.SECTION -> Text(
+                    line.text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(top = 6.dp)
+                )
+                ReleaseNoteKind.BULLET -> Row(verticalAlignment = Alignment.Top) {
+                    Text("•", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(6.dp))
+                    Text(line.text, style = MaterialTheme.typography.bodySmall)
+                }
+                else -> Text(
+                    line.text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
