@@ -126,9 +126,11 @@ New contract tests added by this slice: `McaMotionContractTest`, `McaIconButtonC
   (`ui-motion/chat-20261019-134452-47080`); the `send` action was NOT_RUN because the chat model is
   unloaded on the validation device.
 
-Still open from the same review: shadow-weight calibration (top capsules vs composer), icon optics
-for glyphs outside the header, 360 dp / 2.0x-font / long-statistics matrix, and frame P95/P99 from a
-real interaction recording.
+The 360 dp / 2.0x-font check now passes: metrics wrap as complete fields and the model capsule
+keeps two clean ellipsised lines instead of a vertical character stack
+(`r15/chat-360dp-font20-capsule.png`). Still open from the same review: shadow-weight calibration
+(top capsules vs composer), icon optics for glyphs outside the header, and frame P95/P99 from a real
+interaction recording.
 
 ## 5. Blocked / deferred
 
