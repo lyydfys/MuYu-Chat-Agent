@@ -70,7 +70,10 @@ the conflated-channel swipe-back and the zero-animation-scale behaviour.
   switch sits on the title row so it never overlays the description, the log actions use
   Refresh/Description glyphs instead of two identical save icons, and provider/trigger chips wrap
   instead of clipping at the right edge (`r12/settings-websearch-chips.png`,
-  `r12/settings-logs-fixed.png`). The logs/diagnostics tab now has a centred empty state (icon,
+  `r12/settings-logs-fixed.png`). Round-14: the five section tabs wrap through FlowRow so none is
+  clipped at 1.0/2.0 font scale, the header reserves the gear slot, and the update/privacy switch
+  cards keep their switch on the title row (`r14/settings-font20-final.png`,
+  `r14/settings-update-card-fixed.png`, `r14/settings-privacy-fixed.png`). The logs/diagnostics tab now has a centred empty state (icon,
   title, one-line hint) instead of a blank page (`r13/logs-empty-state.png`).
 - Dark mode / large font evidence: `r2/after-98a37aa7-dark-main.png`, `r5/r5-dark-chat.png`,
   `r5/r5-dark-drawer.png`, `r5/r5-font20-chat.png`, `r11/agent-light.png`,

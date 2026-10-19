@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -302,22 +303,23 @@ private fun PersistentPrefixCacheCard(
         shape = RoundedCornerShape(8.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("持久化前缀缓存", fontWeight = FontWeight.Bold)
-                    Text(
-                        "在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            // Switch stays on the title row; the description below keeps the full card width.
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("持久化前缀缓存", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = enabled,
+                        onCheckedChange = if (busy) null else onEnabledChanged
                     )
                 }
-                Switch(
-                    checked = enabled,
-                    onCheckedChange = if (busy) null else onEnabledChanged
+                Text(
+                    "在本机保存 llama.cpp 的前缀 KV 缓存，用于减少重复预填充。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Text(

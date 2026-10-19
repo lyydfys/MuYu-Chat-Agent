@@ -371,22 +371,24 @@ private fun AppUpdateCard(
         shape = RoundedCornerShape(8.dp)
     ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("应用更新", fontWeight = FontWeight.Bold)
-                    Text(
-                        "从官方 GitHub Releases 检查并安装稳定版更新。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            // Switch on the title row; at 2.0x font scale a vertically centred switch used to sit
+            // on top of the two-line description.
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("应用更新", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(12.dp))
+                    Switch(
+                        checked = state.autoCheckEnabled,
+                        onCheckedChange = onAutoCheckChanged
                     )
                 }
-                Switch(
-                    checked = state.autoCheckEnabled,
-                    onCheckedChange = onAutoCheckChanged
+                Text(
+                    "从官方 GitHub Releases 检查并安装稳定版更新。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 

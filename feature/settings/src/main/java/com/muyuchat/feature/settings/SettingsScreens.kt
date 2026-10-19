@@ -3,12 +3,13 @@ package com.muyuchat.feature.settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Settings
@@ -229,10 +230,14 @@ fun SettingsHubScreen(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // The title block takes the remaining width so the gear keeps its slot even at
+                // large font scales instead of being pushed against the window edge.
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     IconButton(onClick = onBack) {
                         Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
                     }
@@ -241,11 +246,14 @@ fun SettingsHubScreen(
                         Text("运行、日志、隐私与实验功能", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
+                Spacer(Modifier.width(8.dp))
                 Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
-            Row(
+            // Wrap instead of scrolling: with four sections a phone-width row could clip the last
+            // tab, and a horizontal scroll made it look truncated at 2.0x font scale.
+            FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.horizontalScroll(rememberScrollState())
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SettingsSection.entries.forEach { item ->
                     FilterChip(
