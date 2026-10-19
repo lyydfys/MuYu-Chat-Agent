@@ -86,4 +86,4 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | agent-workspace acceptance | DEFERRED | module still being edited by the parallel session |
 | edge-to-edge | DEFERRED | changes insets/window geometry; needs a product decision |
 | status severity without Chinese keyword matching | DEFERRED | needs `statusMessage: String?` upgraded to a structured type in the app shell |
-| 360 dp / 2.0x matrix on every page | partial | chat + settings + agent captured; model hub and image workspace NOT_RUN |
+| 360 dp / 2.0x matrix on every page | partial | chat + settings + agent captured; model hub now captured and fixed (`r20/modelhub-font20-fixed.png`); image workspace NOT_RUN |
