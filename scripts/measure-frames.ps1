@@ -263,6 +263,24 @@ function Find-NodeCenter {
     return $null
 }
 
+function Find-NodeCenterContaining {
+    param([string] $Raw, [string] $Needle)
+    if (-not $Raw) { return $null }
+    try {
+        $document = New-Object System.Xml.XmlDocument
+        $document.LoadXml($Raw)
+        foreach ($node in $document.SelectNodes('//node')) {
+            $text = $node.GetAttribute('text')
+            $description = $node.GetAttribute('content-desc')
+            if (($text -and $text.Contains($Needle)) -or ($description -and $description.Contains($Needle))) {
+                $bounds = ConvertFrom-Bounds -Value $node.GetAttribute('bounds')
+                if ($bounds) { return $bounds }
+            }
+        }
+    } catch { }
+    return $null
+}
+
 function Find-ScrollableBox {
     param([string] $Raw)
     if (-not $Raw) { return $null }
@@ -463,6 +481,11 @@ try {
     }
     if ($requestedActions -contains 'model') {
         $modelNode = Find-NodeCenter -Raw $surface -Attribute 'content-desc' -Value '选择模型'
+        if (-not $modelNode) {
+            # The capsule no longer carries a contentDescription: its visible model name/subtitle
+            # names it for accessibility, so accept a text node containing 选择模型 as the target.
+            $modelNode = Find-NodeCenterContaining -Raw $surface -Needle '选择模型'
+        }
         if (-not $modelNode) { Stop-FrameRun -Status 'BLOCKED' -Reason 'model action requested but the 选择模型 node was not found on the chat surface' }
         $plan.model = $modelNode
     }
