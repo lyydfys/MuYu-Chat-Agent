@@ -511,7 +511,12 @@ internal fun ChatInputBar(
                                 lineHeight = 20.sp
                             ),
                             cursorBrush = SolidColor(McaPrimaryBlue),
-                            modifier = Modifier.fillMaxWidth().testTag("chat.editor")
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                // The placeholder is a separate Text; give the field itself a
+                                // name so TalkBack (and the a11y probe) can announce it.
+                                .semantics { contentDescription = "消息输入框" }
+                                .testTag("chat.editor")
                         )
                     }
                 }
