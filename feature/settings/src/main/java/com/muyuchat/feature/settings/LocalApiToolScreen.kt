@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -140,20 +142,22 @@ fun LocalApiToolScreen(
                 ) {
                     Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text("服务开关", fontWeight = FontWeight.Bold)
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("本机调用", fontWeight = FontWeight.Medium)
-                                Text("供同一台设备上的客户端、浏览器或本机组件访问。", style = MaterialTheme.typography.bodySmall)
+                        Column {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("本机调用", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                Spacer(Modifier.width(12.dp))
+                                Switch(checked = state.apiEnabled, onCheckedChange = onApiToggle)
                             }
-                            Switch(checked = state.apiEnabled, onCheckedChange = onApiToggle)
+                            Text("供同一台设备上的客户端、浏览器或本机组件访问。", style = MaterialTheme.typography.bodySmall)
                         }
                         HorizontalDivider()
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("开放端口", fontWeight = FontWeight.Medium)
-                                Text("开启后同网段设备可通过 HTTP 访问本机模型服务。", style = MaterialTheme.typography.bodySmall)
+                        Column {
+                            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Text("开放端口", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                                Spacer(Modifier.width(12.dp))
+                                Switch(checked = state.restEnabled, onCheckedChange = onRestToggle)
                             }
-                            Switch(checked = state.restEnabled, onCheckedChange = onRestToggle)
+                            Text("开启后同网段设备可通过 HTTP 访问本机模型服务。", style = MaterialTheme.typography.bodySmall)
                         }
                         Text(
                             if (state.restEnabled) "开放端口已开启，请只在可信网络中使用。"
