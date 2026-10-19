@@ -22,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
@@ -325,7 +326,7 @@ private fun UserMessageBubble(
                         .mcaPressScale(pinInteraction, enabled = canTogglePinned),
                     interactionSource = pinInteraction
                 ) {
-                    Icon(Icons.Default.PushPin,
+                    Icon(if (message.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
                         contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
                         modifier = Modifier.size(18.dp),
                         tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)

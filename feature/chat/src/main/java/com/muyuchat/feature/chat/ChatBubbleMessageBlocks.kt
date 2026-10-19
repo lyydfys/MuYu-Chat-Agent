@@ -16,6 +16,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -264,7 +265,7 @@ internal fun AssistantMessageBlock(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                         IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
                             Icon(
-                                Icons.Default.PushPin,
+                                if (message.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
                                 contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
                                 modifier = Modifier.size(16.dp),
                                 tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant

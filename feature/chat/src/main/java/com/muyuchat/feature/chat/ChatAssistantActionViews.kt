@@ -44,6 +44,7 @@ import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.Search
@@ -166,7 +167,12 @@ internal fun AssistantActionRow(
                 )
                 DropdownMenuItem(
                     text = { Text(if (pinned) "取消固定上下文" else "固定到上下文") },
-                    leadingIcon = { Icon(Icons.Rounded.PushPin, contentDescription = null) },
+                    leadingIcon = {
+                        Icon(
+                            if (pinned) Icons.Rounded.PushPin else Icons.Outlined.PushPin,
+                            contentDescription = null
+                        )
+                    },
                     enabled = canTogglePinned,
                     onClick = {
                         menuOpen = false
