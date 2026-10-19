@@ -88,7 +88,7 @@ internal fun ChatStatusBar(
             modifier = Modifier.size(48.dp),
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 6.dp
+            shadowElevation = 5.dp
         ) {
             McaIconButton(
                 contentDescription = "打开历史",
@@ -225,7 +225,7 @@ internal fun ChatStatusBar(
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 6.dp
+            shadowElevation = 5.dp
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),

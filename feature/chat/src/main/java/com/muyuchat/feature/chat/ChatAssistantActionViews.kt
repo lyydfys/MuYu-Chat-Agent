@@ -146,7 +146,7 @@ internal fun AssistantActionRow(
                 Icon(
                     Icons.Rounded.MoreVert,
                     contentDescription = "更多消息操作",
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(20.dp),
                     tint = tint.copy(alpha = 0.78f)
                 )
             }

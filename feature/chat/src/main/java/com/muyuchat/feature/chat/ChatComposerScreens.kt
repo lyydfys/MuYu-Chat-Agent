@@ -309,7 +309,7 @@ internal fun ChatInputBar(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         color = inputShellColor,
         shape = RoundedCornerShape(36.dp),
-        shadowElevation = 14.dp
+        shadowElevation = 10.dp
     ) {
         Column(
             modifier = Modifier
