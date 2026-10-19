@@ -45,6 +45,7 @@ import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -326,8 +327,10 @@ private fun UserMessageBubble(
                         .mcaPressScale(pinInteraction, enabled = canTogglePinned),
                     interactionSource = pinInteraction
                 ) {
+                    // The name lives on the button, not on the vector: uiautomator sometimes
+                    // drops icon-only semantics for this row and exposed an unnamed 48dp target.
                     Icon(if (message.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                        contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                        contentDescription = null,
                         modifier = Modifier.size(18.dp),
                         tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -335,12 +338,13 @@ private fun UserMessageBubble(
             if (copyableContent.isNotBlank()) {
             IconButton(
                 onClick = onCopy,
-                modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction),
+                modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction)
+                    .semantics { contentDescription = "复制提示词" },
                 interactionSource = copyInteraction
             ) {
                 Icon(
                     Icons.Default.ContentCopy,
-                    contentDescription = "复制提示词",
+                    contentDescription = null,
                     modifier = Modifier.size(18.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
                 )
