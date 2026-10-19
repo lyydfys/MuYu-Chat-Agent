@@ -20,6 +20,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
@@ -276,11 +278,11 @@ private fun ApiStatusCard(
                 value = if (apiKey.isBlank()) "未生成" else "已生成，复制后填入客户端 Key/Token"
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                     Text("本机", modifier = Modifier.padding(start = 6.dp))
                 }
-                Button(onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
+                OutlinedButton(onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Rounded.ContentCopy, contentDescription = null)
                     Text("局域网", modifier = Modifier.padding(start = 6.dp))
                 }
@@ -318,14 +320,14 @@ private fun ApiSelfTestCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
+                OutlinedButton(
                     onClick = onTestModels,
                     enabled = enabled && !busy,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("测试模型列表")
                 }
-                Button(
+                OutlinedButton(
                     onClick = onTestChat,
                     enabled = enabled && !busy,
                     modifier = Modifier.weight(1f)
@@ -333,7 +335,7 @@ private fun ApiSelfTestCard(
                     Text("测试聊天接口")
                 }
             }
-            Button(
+            OutlinedButton(
                 onClick = onTestVision,
                 enabled = enabled && !busy,
                 modifier = Modifier.fillMaxWidth()
