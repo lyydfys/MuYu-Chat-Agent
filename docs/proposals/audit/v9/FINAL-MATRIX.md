@@ -50,6 +50,7 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | edit glyph outlined, replay 19 dp | PASS | `r17/after-header-buttons.png` |
 | add outlined, pin outline/filled by state | PASS | `r18/add-button-after.png`, `r18/user-pin-copy-after2.png` |
 | composer 10 dp, header capsules 5 dp | PASS | `r16/shadow-after-light.png`, `r16/shadow-after-dark.png` |
+| app-menu leading icons muted, chevron 20 dp | PASS | `r22/app-menu-polished.png`, `r22/app-menu-polished-dark.png` |
 
 ## 5. Settings
 
