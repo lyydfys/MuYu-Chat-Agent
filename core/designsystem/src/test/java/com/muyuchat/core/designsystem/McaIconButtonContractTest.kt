@@ -13,7 +13,8 @@ import org.junit.Test
  * 48 dp circular target with a 22 dp glyph, a required accessible name and the shared
  * [mcaPressScale] weight feedback. The content lambda is intentionally parameterless and the
  * accessible name is applied once on the button, so a caller cannot end up with two live
- * descriptions on the same node.
+ * descriptions on the same node. Disabled buttons must downgrade both their content and any
+ * selected container instead of looking available.
  *
  * Behaviour on device is covered by the app-level interaction tests once callers adopt it.
  */
@@ -101,10 +102,60 @@ class McaIconButtonContractTest {
             Regex("""selectedTint: Color = MaterialTheme\.colorScheme\.primary""")
                 .containsMatchIn(source)
         )
+        val compact = source.replace(Regex("""\s+"""), "")
         assertTrue(
-            "the selected container must only paint while selected",
-            Regex("""background\(if \(selected\) selectedContainer else Color\.Transparent\)""")
-                .containsMatchIn(source)
+            "the selected container must only paint while enabled and selected",
+            compact.contains("selected&&enabled->selectedContainer")
         )
+        assertTrue(
+            "a selected tint must not survive into the disabled state",
+            compact.contains("!enabled->disabledTint")
+        )
+        assertTrue(
+            "the selected tint is still applied when enabled",
+            compact.contains("selected->selectedTint")
+        )
+    }
+
+    @Test
+    fun `disabled state visibly degrades content and neutralises a selected container`() {
+        val source = designSystemSource("McaButtons.kt")
+
+        assertTrue(
+            "disabled content must use the Material3 38% content alpha",
+            Regex(
+                """disabledTint: Color = MaterialTheme\.colorScheme\.onSurface\.copy\(alpha = 0\.38f\)"""
+            ).containsMatchIn(source)
+        )
+        assertTrue(
+            "disabled container must use the Material3 12% container alpha",
+            Regex(
+                """disabledContainer: Color = MaterialTheme\.colorScheme\.onSurface\.copy\(alpha = 0\.12f\)"""
+            ).containsMatchIn(source)
+        )
+
+        val compact = source.replace(Regex("""\s+"""), "")
+        assertTrue(
+            "disabled must win over selected for the container",
+            Regex(
+                """val containerColor = when \{[\s\S]*?selected && enabled -> selectedContainer""" +
+                    """[\s\S]*?selected -> disabledContainer[\s\S]*?else -> Color\.Transparent"""
+            ).containsMatchIn(source)
+        )
+        assertTrue(
+            "disabled content must replace the normal and selected tint",
+            Regex(
+                """val contentColor = when \{[\s\S]*?!enabled -> disabledTint""" +
+                    """[\s\S]*?selected -> selectedTint[\s\S]*?else -> tint"""
+            ).containsMatchIn(source)
+        )
+
+        // The two overrides are additive and sit before the trailing content slot so existing
+        // named/trailing-lambda call sites keep compiling.
+        val disabledTintIndex = compact.indexOf("disabledTint:Color")
+        val disabledContainerIndex = compact.indexOf("disabledContainer:Color")
+        val contentIndex = compact.indexOf("content:@Composable()->Unit")
+        assertTrue(disabledTintIndex in 0 until contentIndex)
+        assertTrue(disabledContainerIndex in 0 until contentIndex)
     }
 }

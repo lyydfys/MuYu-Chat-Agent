@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.feature.chat.failureSummaryLine
+
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatToolCall
 import com.muyuchat.core.engine.GenerateEvent
@@ -98,8 +100,12 @@ internal fun ChatGenerationExecutionPort.appendErrorOutcomeFor(
                     if (isConfigurationActionError(event)) {
                         removePendingAssistantPlaceholder(generationRunId)
                     } else {
+                        // The body carries a short, internals-free reason; the full diagnostic
+                        // (stage/runtime/model/memory) stays in the status message and its
+                        // "错误详情" entry, and history/export therefore no longer show raw logs as
+                        // if the assistant had answered with them.
                         appendAssistant(
-                            "\n${event.message}",
+                            "\n${failureSummaryLine(event.message)}",
                             generationRunId = generationRunId
                         )
                     }

@@ -274,10 +274,36 @@ private fun CodeBlock(language: String?, code: String, fileName: String? = null,
     }
 }
 
+private const val MIN_TABLE_COLUMN_DP = 92f
+private const val MAX_TABLE_COLUMN_DP = 190f
+
+/**
+ * Estimated single-line width of a table cell at the 13sp table style. CJK glyphs take roughly a
+ * full em, Latin glyphs about 0.55em; the result is clamped by the caller.
+ */
+private fun estimatedTableCellWidthDp(text: String): Float {
+    var units = 0f
+    for (character in text) {
+        units += if (character.code > 0x2E80) 1.0f else 0.55f
+    }
+    return units * 14f + 20f
+}
+
 @Composable
 private fun TableBlock(rows: List<List<String>>) {
     if (rows.isEmpty()) return
     val scrollState = rememberScrollState()
+    // One width per column, taken from the widest cell in that column across every row, so the
+    // grid lines up instead of each row sizing its own cells independently.
+    val columnWidths = remember(rows) {
+        val columnCount = rows.maxOfOrNull { it.size } ?: 0
+        (0 until columnCount).map { column ->
+            val widest = rows.maxOfOrNull { row ->
+                estimatedTableCellWidthDp(row.getOrNull(column).orEmpty())
+            } ?: MIN_TABLE_COLUMN_DP
+            widest.coerceIn(MIN_TABLE_COLUMN_DP, MAX_TABLE_COLUMN_DP)
+        }
+    }
     // 窄屏（手机 411dp）下三列表格会超出屏宽，末列被裁切且**没有任何滚动提示**，用户会以为
     // 被截断的列名就是完整内容。此处在可继续横滚时给出**功能性**右缘渐隐（不是装饰性渐变）。
     Box(modifier = Modifier.fillMaxWidth()) {
@@ -300,7 +326,7 @@ private fun TableBlock(rows: List<List<String>>) {
                             }
                         )
                     ) {
-                        row.forEach { cell ->
+                        row.forEachIndexed { cellIndex, cell ->
                             Text(
                                 text = inlineMarkdownText(cell),
                                 color = MaterialTheme.colorScheme.onSurface,
@@ -310,7 +336,7 @@ private fun TableBlock(rows: List<List<String>>) {
                                 ),
                                 fontWeight = if (rowIndex == 0) FontWeight.Bold else FontWeight.Normal,
                                 modifier = Modifier
-                                    .widthIn(min = 92.dp, max = 190.dp)
+                                    .width(columnWidths.getOrElse(cellIndex) { MIN_TABLE_COLUMN_DP }.dp)
                                     .padding(horizontal = 10.dp, vertical = 8.dp),
                                 softWrap = true
                             )

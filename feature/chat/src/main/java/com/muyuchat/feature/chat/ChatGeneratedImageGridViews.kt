@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -99,10 +100,12 @@ internal fun ChatGeneratedImageGrid(
             ) {
                 rowImages.forEachIndexed { columnIndex, item ->
                     val itemIndex = rowIndex * 2 + columnIndex + 1
-                    val bitmap by rememberChatImageBitmap(
+                    var retryEpoch by remember(item.id) { mutableStateOf(0) }
+                    val loadState = rememberChatImageLoadState(
                         context = context,
                         uriString = item.uriString,
-                        maxDimensionPx = 640
+                        maxDimensionPx = 640,
+                        revisionKey = retryEpoch
                     )
                     Surface(
                         modifier = Modifier
@@ -118,19 +121,34 @@ internal fun ChatGeneratedImageGrid(
                         }
                     ) {
                         Box(modifier = Modifier.fillMaxSize()) {
-                            if (bitmap != null) {
-                                Image(
-                                    bitmap = bitmap!!.asImageBitmap(),
+                            when (val imageState = loadState) {
+                                is ChatImageLoadState.Ready -> Image(
+                                    bitmap = imageState.bitmap.asImageBitmap(),
                                     contentDescription = "生成图片第 ${itemIndex} 张 ${item.name}",
                                     contentScale = ContentScale.Fit,
                                     modifier = Modifier.fillMaxSize()
                                 )
-                            } else {
-                                Text(
-                                    "图片加载中…",
+                                ChatImageLoadState.Failed -> Column(
                                     modifier = Modifier.align(Alignment.Center),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.BrokenImage,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(22.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Text(
+                                        "图片加载失败",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    TextButton(onClick = { retryEpoch++ }) { Text("重试") }
+                                }
+                                ChatImageLoadState.Loading -> CircularProgressIndicator(
+                                    modifier = Modifier.align(Alignment.Center).size(18.dp),
+                                    strokeWidth = 2.dp
                                 )
                             }
                             Surface(

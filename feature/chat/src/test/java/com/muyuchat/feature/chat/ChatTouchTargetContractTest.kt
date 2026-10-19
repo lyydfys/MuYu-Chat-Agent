@@ -15,6 +15,14 @@ class ChatTouchTargetContractTest {
         assertTrue(status.contains("contentDescription = \"打开应用菜单\""))
         assertFalse(status.contains("Modifier.size(38.dp)"))
 
+        // The three small icon actions must share the press-scale + bounded-ripple primitive
+        // instead of mixing native IconButton, a bare clickable and a text glyph.
+        assertTrue(status.contains("McaIconButton("))
+        assertTrue(status.contains("ripple(bounded = true)"))
+        assertTrue(status.contains(".mcaPressScale(modelCapsuleInteraction)"))
+        assertFalse(status.contains("import androidx.compose.material3.IconButton"))
+        assertFalse(status.contains("LocalIndication"))
+
         val composer = source("ChatComposerScreens.kt")
         assertTrue(composer.contains("RoundedCornerShape(36.dp)"))
         assertTrue(composer.contains(".size(40.dp)"))

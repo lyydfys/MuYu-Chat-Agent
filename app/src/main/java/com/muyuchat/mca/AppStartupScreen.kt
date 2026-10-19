@@ -97,24 +97,8 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
     }
 
     val ambient = rememberInfiniteTransition(label = "startup-ambient")
-    val breath = ambient.animateFloat(
-        initialValue = 0.94f,
-        targetValue = 1.04f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(2400, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "brand-breath",
-    )
-    val orbit = ambient.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(9000, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "brand-orbit",
-    )
+    // One looping signal only: the skeleton sweep. The brand mark is static and the progress bar
+    // transitions on real phase changes, so the launch surface does not compete with itself.
     val shimmer = ambient.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
@@ -162,12 +146,7 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
                 .padding(horizontal = 28.dp, vertical = 40.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            BrandBlock(
-                breath = { breath.value },
-                orbit = { orbit.value },
-                highlight = shimmerHighlight,
-                reveal = reveal,
-            )
+            BrandBlock(reveal = reveal)
             Spacer(Modifier.height(22.dp))
             Text(
                 text = "MCA",
@@ -190,14 +169,12 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
                 Spacer(Modifier.height(24.dp))
                 StartupProgress(
                     progress = { animatedProgress.value },
-                    sweep = { shimmer.value },
                     reveal = reveal,
                 )
                 Spacer(Modifier.height(16.dp))
                 StatusLine(
                     reveal = reveal,
                     label = state.phase.label,
-                    progressText = "${(state.progress * 100).roundToInt()}%",
                 )
                 Spacer(Modifier.height(6.dp))
                 CaptionLine(reveal = reveal, text = "大型模型的扫描将在后台继续。")
@@ -236,9 +213,6 @@ internal fun AppStartupScreen(state: AppStartupState, onRetry: () -> Unit, onSki
 
 @Composable
 private fun BrandBlock(
-    breath: () -> Float,
-    orbit: () -> Float,
-    highlight: Color,
     reveal: (Float) -> Float,
 ) {
     val colors = MaterialTheme.colorScheme
@@ -248,7 +222,7 @@ private fun BrandBlock(
             .graphicsLayer {
                 val p = reveal(0f)
                 alpha = p
-                val scale = (0.92f + 0.08f * p) * breath()
+                val scale = 0.92f + 0.08f * p
                 scaleX = scale
                 scaleY = scale
             },
@@ -257,7 +231,8 @@ private fun BrandBlock(
         Canvas(Modifier.size(124.dp)) {
             val center = Offset(size.width / 2f, size.height / 2f)
             val radius = size.minDimension / 2f
-            // Breathing halo.
+            // Static halo: the launch surface keeps one moving signal (the skeleton sweep) instead
+            // of layering breath, orbit and sweep at the same time.
             drawCircle(
                 brush = Brush.radialGradient(
                     colors = listOf(
@@ -271,20 +246,6 @@ private fun BrandBlock(
                 radius = radius,
                 center = center,
             )
-            // Two orbiting sparks read the angle at draw time.
-            val angle = orbit()
-            val orbitRadius = radius * 0.86f
-            listOf(0f, 180f).forEachIndexed { index, offsetDeg ->
-                val rad = Math.toRadians((angle + offsetDeg).toDouble())
-                drawCircle(
-                    color = colors.primary.copy(alpha = if (index == 0) 0.75f else 0.45f),
-                    radius = (if (index == 0) 2.6f else 2.0f).dp.toPx(),
-                    center = Offset(
-                        center.x + (cos(rad) * orbitRadius).toFloat(),
-                        center.y + (sin(rad) * orbitRadius).toFloat(),
-                    ),
-                )
-            }
         }
         McaBrandLogo(size = 72.dp, cornerRadius = 18.dp)
     }
@@ -391,7 +352,7 @@ private fun SkeletonBar(
 }
 
 @Composable
-private fun StartupProgress(progress: () -> Float, sweep: () -> Float, reveal: (Float) -> Float) {
+private fun StartupProgress(progress: () -> Float, reveal: (Float) -> Float) {
     val colors = MaterialTheme.colorScheme
     Box(
         modifier = Modifier
@@ -410,33 +371,11 @@ private fun StartupProgress(progress: () -> Float, sweep: () -> Float, reveal: (
             // The default Material stop dot reads as a stray marker on a thin 4dp bar.
             drawStopIndicator = {},
         )
-        // A slow highlight travelling over the track keeps the wait alive without implying
-        // extra progress; it is drawn after the indicator so it reads as moving light.
-        Canvas(Modifier.fillMaxSize()) {
-            val center = (sweep() * 1.8f - 0.4f) * size.width
-            val half = size.width * 0.22f
-            drawRect(
-                brush = Brush.horizontalGradient(
-                    colors = listOf(
-                        Color.Transparent,
-                        if (colors.background.luminance() < 0.5f) {
-                            Color.White.copy(alpha = 0.22f)
-                        } else {
-                            Color.White.copy(alpha = 0.55f)
-                        },
-                        Color.Transparent,
-                    ),
-                    startX = center - half,
-                    endX = center + half,
-                ),
-                size = size,
-            )
-        }
     }
 }
 
 @Composable
-private fun StatusLine(reveal: (Float) -> Float, label: String, progressText: String) {
+private fun StatusLine(reveal: (Float) -> Float, label: String) {
     val colors = MaterialTheme.colorScheme
     Row(
         modifier = Modifier
@@ -451,13 +390,8 @@ private fun StatusLine(reveal: (Float) -> Float, label: String, progressText: St
                 .clip(CircleShape)
                 .background(colors.primary)
         )
+        // No percentage: the phase weights are fixed and cannot honestly claim "x% of the work".
         Text(text = label, style = MaterialTheme.typography.bodyLarge, color = colors.onBackground)
-        Spacer(Modifier.weight(1f))
-        Text(
-            text = progressText,
-            style = MaterialTheme.typography.labelMedium,
-            color = colors.onSurfaceVariant,
-        )
     }
 }
 

@@ -81,6 +81,37 @@ internal suspend fun loadChatImageBitmap(
     }
 }
 
+/** Honest load state: a failed decode must not keep rendering "loading" forever. */
+internal sealed interface ChatImageLoadState {
+    data object Loading : ChatImageLoadState
+    data class Ready(val bitmap: Bitmap) : ChatImageLoadState
+    data object Failed : ChatImageLoadState
+}
+
+@Composable
+internal fun rememberChatImageLoadState(
+    context: Context,
+    uriString: String,
+    maxDimensionPx: Int? = null,
+    revisionKey: Any? = null
+): ChatImageLoadState {
+    val state = produceState<ChatImageLoadState>(
+        initialValue = ChatImageLoadState.Loading,
+        key1 = uriString,
+        key2 = maxDimensionPx,
+        key3 = revisionKey
+    ) {
+        value = runCatching { loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey) }
+            .fold(
+                onSuccess = { bitmap ->
+                    if (bitmap != null) ChatImageLoadState.Ready(bitmap) else ChatImageLoadState.Failed
+                },
+                onFailure = { ChatImageLoadState.Failed }
+            )
+    }
+    return state.value
+}
+
 @Composable
 internal fun rememberChatImageBitmap(
     context: Context,

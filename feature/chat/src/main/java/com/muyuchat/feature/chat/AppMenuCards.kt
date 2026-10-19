@@ -90,6 +90,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -334,8 +335,16 @@ internal fun AppMenuRow(
                 )
             }
         }
+        // 24 dp matches the previous Text line box (bodyLarge: 16 sp / 24 sp line height), so the
+        // row height and the title/subtitle baseline are unchanged. The chevron is decorative:
+        // the clickable row's title already names the action, so it must not add a second
+        // TalkBack description.
         if (enabled) {
-            Text("›", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(
+                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

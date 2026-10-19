@@ -1,6 +1,5 @@
 package com.muyuchat.feature.chat
 
-import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -19,10 +18,11 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -30,7 +30,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -46,6 +45,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.mcaPressScale
 
 @Composable
@@ -90,8 +90,19 @@ internal fun ChatStatusBar(
             shape = CircleShape,
             shadowElevation = 6.dp
         ) {
-            IconButton(onClick = onOpenHistory) {
-                Icon(Icons.Rounded.Menu, contentDescription = "打开历史", modifier = Modifier.size(24.dp))
+            McaIconButton(
+                contentDescription = "打开历史",
+                onClick = onOpenHistory,
+                glyphSize = 24.dp,
+                // Preserve the previous IconButton content colour (the Surface's onSurface),
+                // instead of the shared component's lower-emphasis default tint.
+                tint = LocalContentColor.current,
+            ) {
+                Icon(
+                    Icons.Rounded.Menu,
+                    contentDescription = null,
+                    modifier = Modifier.size(24.dp)
+                )
             }
         }
         Spacer(modifier = Modifier.width(12.dp))
@@ -105,7 +116,7 @@ internal fun ChatStatusBar(
                     }
                     .clickable(
                         interactionSource = modelCapsuleInteraction,
-                        indication = LocalIndication.current
+                        indication = ripple(bounded = true)
                     ) {
                         focusManager.clearFocus(force = true)
                         keyboardController?.hide()
@@ -213,19 +224,23 @@ internal fun ChatStatusBar(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onNewConversation, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Rounded.Edit, contentDescription = "新建聊天", modifier = Modifier.size(22.dp))
+                McaIconButton(
+                    contentDescription = "新建聊天",
+                    onClick = onNewConversation,
+                    glyphSize = 22.dp,
+                    // Previous IconButton content colour; keeps the header icons unchanged.
+                    tint = LocalContentColor.current,
+                ) {
+                    Icon(
+                        Icons.Rounded.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp)
+                    )
                 }
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onOpenAppMenu)
-                        .semantics {
-                            contentDescription = "打开应用菜单"
-                            role = SemanticsRole.Button
-                        },
-                    contentAlignment = Alignment.Center
+                McaIconButton(
+                    contentDescription = "打开应用菜单",
+                    onClick = onOpenAppMenu,
+                    glyphSize = 28.dp,
                 ) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }

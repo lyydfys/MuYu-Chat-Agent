@@ -5,11 +5,13 @@ import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import com.muyuchat.core.engine.Role
 
@@ -150,13 +152,17 @@ internal fun buildInlineMarkdown(
             value.startsWith("[", index) -> {
                 val match = MARKDOWN_LINK_PATTERN.find(value, index)
                 if (match != null && match.range.first == index) {
-                    withStyle(
-                        SpanStyle(
-                            color = linkColor,
-                            textDecoration = TextDecoration.Underline
-                        )
-                    ) {
-                        append(wrapForDisplay(match.groupValues[1]))
+                    // The blue/underline styling is kept as a span so existing render tests still see
+                    // it; the LinkAnnotation makes the styled text actually open the target.
+                    withLink(LinkAnnotation.Url(match.groupValues[2])) {
+                        withStyle(
+                            SpanStyle(
+                                color = linkColor,
+                                textDecoration = TextDecoration.Underline
+                            )
+                        ) {
+                            append(wrapForDisplay(match.groupValues[1]))
+                        }
                     }
                     index = match.range.last + 1
                 } else {
@@ -166,13 +172,15 @@ internal fun buildInlineMarkdown(
             }
             urlMatchAt(index)?.let { it.range.first == index } == true -> {
                 val match = urlMatchAt(index)!!
-                withStyle(
-                    SpanStyle(
-                        color = linkColor,
-                        textDecoration = TextDecoration.Underline
-                    )
-                ) {
-                    append(wrapForDisplay(match.value))
+                withLink(LinkAnnotation.Url(match.value)) {
+                    withStyle(
+                        SpanStyle(
+                            color = linkColor,
+                            textDecoration = TextDecoration.Underline
+                        )
+                    ) {
+                        append(wrapForDisplay(match.value))
+                    }
                 }
                 index = match.range.last + 1
             }

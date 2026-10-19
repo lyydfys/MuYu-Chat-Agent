@@ -84,7 +84,8 @@ internal fun AssistantMessageBlock(
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
     onDeleteLastTurn: () -> Unit,
-    onCopy: () -> Unit
+    onCopy: () -> Unit,
+    copied: Boolean = false
 ) {
     val contextTrace = remember(message.id, message.contextAssemblyTraceJson) {
         parseContextAssemblyTrace(message.contextAssemblyTraceJson)
@@ -215,60 +216,60 @@ internal fun AssistantMessageBlock(
                     onDeleteImageAsset = onDeleteImageAsset
                 )
             }
-            if (isGenerating) {
-                GenerationPerformanceLine(generationStats)
-            } else {
-                message.generationMetricsSummary()?.let { summary ->
-                    // 与生成中态保持一致：labelSmall(11sp) 在手机上偏小，提到 labelMedium(12sp)。
-                    // 颜色沿用 onSurfaceVariant（Material3 对次级文本的正确 token），不做额外 alpha 折减。
-                    Text(
-                        text = summary,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+            // 回答尾部：正文与尾部之间仍由外层 12dp 分界；尾部内部（统计 → 来源 → 操作）用更紧
+            // 的 4dp 节奏，让它们读作同一条回答，而不影响推理区、图片和正文的既有间距。
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (isGenerating) {
+                    GenerationPerformanceLine(generationStats)
+                } else {
+                    message.generationMetricsFields()?.let { fields ->
+                        GenerationMetricsRow(fields)
+                    }
+                }
+                if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
+                    WebSearchSourcesRow(
+                        sources = message.sourceReferences,
+                        trace = message.webSearchTrace,
+                        sessionId = browserSessionId,
+                        messageId = message.id,
+                        onOpenBrowserTask = onOpenBrowserTask
                     )
                 }
-            }
-            if (message.sourceReferences.isNotEmpty() || message.webSearchTrace?.hasContent == true) {
-                WebSearchSourcesRow(
-                    sources = message.sourceReferences,
-                    trace = message.webSearchTrace,
-                    sessionId = browserSessionId,
-                    messageId = message.id,
-                    onOpenBrowserTask = onOpenBrowserTask
-                )
-            }
-            if (contextTrace != null) {
-                TextButton(
-                    onClick = { showContextTrace = true },
-                    modifier = Modifier.testTag("context-trace-${message.id}"),
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
-                ) {
-                    Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("上下文来源", style = MaterialTheme.typography.labelMedium)
+                if (contextTrace != null) {
+                    TextButton(
+                        onClick = { showContextTrace = true },
+                        modifier = Modifier.testTag("context-trace-${message.id}"),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
+                    ) {
+                        Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("上下文来源", style = MaterialTheme.typography.labelMedium)
+                    }
                 }
-            }
-            if (showActions) {
-                AssistantActionRow(
-                    readOnly = readOnly,
-                    canRegenerate = canRegenerate,
-                    onRegenerate = onRegenerate,
-                    onDelete = onDelete,
-                    onDeleteLastTurn = onDeleteLastTurn,
-                    onCopy = onCopy,
-                    pinned = message.pinned,
-                    canTogglePinned = canTogglePinned,
-                    onTogglePinned = onTogglePinned
-                )
-            } else if (!readOnly) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
-                        Icon(
-                            Icons.Default.PushPin,
-                            contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
-                            modifier = Modifier.size(16.dp),
-                            tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                if (showActions) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    AssistantActionRow(
+                        readOnly = readOnly,
+                        canRegenerate = canRegenerate,
+                        onRegenerate = onRegenerate,
+                        onDelete = onDelete,
+                        onDeleteLastTurn = onDeleteLastTurn,
+                        onCopy = onCopy,
+                        copied = copied,
+                        pinned = message.pinned,
+                        canTogglePinned = canTogglePinned,
+                        onTogglePinned = onTogglePinned
+                    )
+                } else if (!readOnly) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
+                            Icon(
+                                Icons.Default.PushPin,
+                                contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                                modifier = Modifier.size(16.dp),
+                                tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }

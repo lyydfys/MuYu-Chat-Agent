@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -66,6 +67,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -513,7 +515,15 @@ internal fun ChatInputBar(
                     }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
-                val sendFabEnabled = isGenerating || !attachmentPreflightRunning
+                // An empty composer with no attachment must not present an enabled primary action:
+                // the button previously looked ready while send was a no-op.
+                val hasSendableContent = visibleInput.isNotBlank() || attachmentPresent
+                val sendFabEnabled = isGenerating || (!attachmentPreflightRunning && hasSendableContent)
+                val sendFabAlpha = animateFloatAsState(
+                    targetValue = if (sendFabEnabled) 1f else 0.55f,
+                    animationSpec = McaMotion.press,
+                    label = "sendFabEmphasis"
+                )
                 val primaryAction = when {
                     attachmentPreflightRunning && !isGenerating -> ComposerPrimaryAction.Preflight
                     isGenerating -> ComposerPrimaryAction.Stop
@@ -536,6 +546,7 @@ internal fun ChatInputBar(
                     shape = CircleShape,
                     modifier = Modifier
                         .size(40.dp)
+                        .graphicsLayer { alpha = sendFabAlpha.value }
                         .mcaPressScale(sendInteraction, enabled = sendFabEnabled)
                         .semantics { if (!sendFabEnabled) disabled() },
                     interactionSource = sendInteraction

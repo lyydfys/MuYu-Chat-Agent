@@ -25,6 +25,13 @@ internal enum class GuidanceAction(val label: String) {
 
 internal data class UserNotice(val problem: String, val nextStep: String, val action: GuidanceAction)
 
+/**
+ * Short, internals-free summary of a failed turn for the assistant body. The complete diagnostic
+ * (stage, runtime, model, memory) stays in the status message and the "错误详情" dialog.
+ */
+public fun failureSummaryLine(message: String): String =
+    userNotice(message)?.problem ?: "本次生成未完成"
+
 // Legacy messages remain available in details. Only recognized failures get specific advice.
 internal fun userNotice(message: String): UserNotice? = when {
     message.startsWith("请先在模型") || message.contains("未加载模型") ->

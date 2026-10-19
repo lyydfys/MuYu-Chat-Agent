@@ -242,6 +242,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -282,53 +283,92 @@ internal fun SmoothRightToLeftPage(
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val density = LocalDensity.current
             val widthPx = with(density) { maxWidth.toPx() }
-            val scope = rememberCoroutineScope()
-            val offsetX = remember { Animatable(0f) }
+            // Single position source for the entrance, predictive-back drag, cancel and dismissal.
+            // Read only inside graphicsLayer. The page starts one width off screen and animates in
+            // through the same value a gesture later takes over.
+            val offsetX = remember { Animatable(widthPx) }
+            // Collectors are keyed on the stable offset only so a window resize cannot cancel a
+            // running entrance/dismissal; they still read the current width for their maths.
+            val latestWidthPx = rememberUpdatedState(widthPx)
+            val gestureProgress = remember { Channel<Float>(Channel.CONFLATED) }
+            val settleTargets = remember { Channel<AppMenuPageTarget>(Channel.CONFLATED) }
+            val gate = remember { AppMenuPageGate() }
             // Let the IME own the first Back press. Some Android builds dispatch that event
             // through the page callback while a text field is acquiring focus.
             val imeVisible = WindowInsets.isImeVisible
 
-            LaunchedEffect(visible) {
-                if (visible) offsetX.snapTo(0f)
+            // Predictive-back drag: one consumer, conflated samples, no coroutine per callback.
+            // Taking over cancels the settle job and continues from the current offset.
+            LaunchedEffect(offsetX) {
+                for (progress in gestureProgress) {
+                    gate.settleJob?.cancel()
+                    gate.settleJob = null
+                    gate.dismissing = false
+                    if (!gate.gestureActive) {
+                        gate.gestureActive = true
+                        gate.gestureBase = offsetX.value.coerceIn(0f, latestWidthPx.value)
+                    }
+                    val fraction = progress.coerceIn(0f, 1f)
+                    offsetX.snapTo(
+                        gate.gestureBase +
+                            (latestWidthPx.value - gate.gestureBase) * fraction
+                    )
+                }
             }
 
-            suspend fun closeAnimated() {
-                offsetX.animateTo(
-                    targetValue = widthPx,
-                    animationSpec = tween(durationMillis = 180)
-                )
-                onDismiss()
+            // One settle-job owner: callbacks only post targets, the latest target wins, and a
+            // cancelled animation never reaches its dismissal callback.
+            LaunchedEffect(offsetX) {
+                for (target in settleTargets) {
+                    when (target) {
+                        AppMenuPageTarget.Enter -> {
+                            // A gesture that already took over owns the position; a stale entrance
+                            // target must not pull the page back.
+                            if (gate.gestureActive) continue
+                            gate.settleJob?.cancel()
+                            gate.settleJob = launch {
+                                offsetX.animateTo(0f, tween(durationMillis = 240))
+                            }
+                        }
+
+                        AppMenuPageTarget.Cancel -> {
+                            gate.gestureActive = false
+                            gate.dismissing = false
+                            gate.settleJob?.cancel()
+                            gate.settleJob = launch {
+                                offsetX.animateTo(0f, tween(durationMillis = 160))
+                            }
+                        }
+
+                        AppMenuPageTarget.Dismiss -> {
+                            if (gate.dismissing) continue
+                            gate.dismissing = true
+                            gate.gestureActive = false
+                            gate.settleJob?.cancel()
+                            gate.settleJob = launch {
+                                offsetX.animateTo(latestWidthPx.value, tween(durationMillis = 180))
+                                onDismiss()
+                            }
+                        }
+                    }
+                }
+            }
+
+            LaunchedEffect(visible) {
+                if (visible) settleTargets.trySend(AppMenuPageTarget.Enter)
             }
 
             fun closeWithDrawerMotion() {
-                scope.launch {
-                    closeAnimated()
-                }
+                settleTargets.trySend(AppMenuPageTarget.Dismiss)
             }
 
             SystemBackMotionHandler(
                 enabled = visible && !imeVisible,
-                onProgress = { progress ->
-                    scope.launch {
-                        offsetX.snapTo(widthPx * progress.coerceIn(0f, 1f))
-                    }
-                },
-                onCancel = {
-                    scope.launch {
-                        offsetX.animateTo(
-                            targetValue = 0f,
-                            animationSpec = tween(durationMillis = 160)
-                        )
-                    }
-                },
-                onBack = {
-                    scope.launch {
-                        if (offsetX.value < widthPx * 0.08f) {
-                            offsetX.snapTo(widthPx * 0.08f)
-                        }
-                        closeAnimated()
-                    }
-                }
+                onProgress = { progress -> gestureProgress.trySend(progress) },
+                onCancel = { settleTargets.trySend(AppMenuPageTarget.Cancel) },
+                // No minimum-offset kick: the exit continues from the current offset so an
+                // immediate back press during the entrance cannot jump.
+                onBack = { settleTargets.trySend(AppMenuPageTarget.Dismiss) }
             )
 
             val pageModifier = Modifier
@@ -340,10 +380,19 @@ internal fun SmoothRightToLeftPage(
     }
 }
 
-private fun appMenuPageEnter() = slideInHorizontally(
-    animationSpec = tween(durationMillis = 240),
-    initialOffsetX = { it }
-) + fadeIn(animationSpec = tween(durationMillis = 140))
+private enum class AppMenuPageTarget { Enter, Cancel, Dismiss }
+
+/** Plain holder: per-frame gesture bookkeeping must not invalidate composition. */
+private class AppMenuPageGate {
+    var settleJob: Job? = null
+    var dismissing = false
+    var gestureActive = false
+    var gestureBase = 0f
+}
+
+// Only the fade stays on AnimatedVisibility: horizontal position is owned by offsetX so the
+// entrance, gesture takeover and dismissal cannot stack two different translations.
+private fun appMenuPageEnter() = fadeIn(animationSpec = tween(durationMillis = 140))
 
 /**
  * Chat-scoped spring language shared by the composer, message list and page chrome.

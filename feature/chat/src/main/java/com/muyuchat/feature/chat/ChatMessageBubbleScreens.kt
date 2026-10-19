@@ -28,8 +28,11 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,6 +55,7 @@ import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.PersistProgress
 import com.muyuchat.core.engine.TokenProgress
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
@@ -100,6 +104,15 @@ internal fun MessageBubble(
     // `modifier` carries the LazyColumn item animation (appearance/move/removal springs) and is
     // applied to the item's root node. Static layout is unchanged: fillMaxWidth plus the same
     // horizontal arrangement as before.
+    // Copy confirmation reflects a successful clipboard write: the action row swaps to a check
+    // for ~1.4s and returns to the copy glyph without changing button geometry.
+    var copiedRecently by remember(message.id) { mutableStateOf(false) }
+    LaunchedEffect(copiedRecently) {
+        if (copiedRecently) {
+            delay(1_400)
+            copiedRecently = false
+        }
+    }
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
@@ -164,9 +177,11 @@ internal fun MessageBubble(
                             clipboard.setClipEntry(
                                 ClipEntry(ClipData.newPlainText("MCA", message.content))
                             )
+                            copiedRecently = true
                         }
                     }
-                }
+                },
+                copied = copiedRecently
             )
         }
     }

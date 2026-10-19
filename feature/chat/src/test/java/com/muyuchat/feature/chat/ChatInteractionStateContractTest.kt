@@ -40,7 +40,14 @@ class ChatInteractionStateContractTest {
         assertTrue(source.contains(".alpha(if(enabled)1felseAPP_MENU_DISABLED_TITLE_ALPHA)"))
         assertTrue(source.contains("detail,color=subtitleColor"))
         assertTrue(source.contains(".clickable(enabled=enabled,onClick=onClick)"))
-        assertTrue(source.contains("if(enabled){Text(\"›\""))
+        assertTrue(
+            "the enabled row must use the vector chevron",
+            source.contains(
+                "if(enabled){Icon(imageVector=Icons.AutoMirrored.Rounded.KeyboardArrowRight," +
+                    "contentDescription=null,"
+            )
+        )
+        assertFalse("the text glyph chevron must not come back", source.contains("Text(\"›\""))
         assertTrue(source.contains(".heightIn(min=52.dp)"))
         assertTrue(source.contains(".size(34.dp)"))
     }
@@ -51,7 +58,16 @@ class ChatInteractionStateContractTest {
         val compact = source.replace(Regex("\\s+"), "")
 
         assertFalse(source.contains("else if (attachmentPreflightRunning) Unit"))
-        assertTrue(compact.contains("valsendFabEnabled=isGenerating||!attachmentPreflightRunning"))
+        assertTrue(
+            compact.contains(
+                "valhasSendableContent=visibleInput.isNotBlank()||attachmentPresent"
+            )
+        )
+        assertTrue(
+            compact.contains(
+                "valsendFabEnabled=isGenerating||(!attachmentPreflightRunning&&hasSendableContent)"
+            )
+        )
         assertTrue(compact.contains(".semantics{if(!sendFabEnabled)disabled()}"))
         assertTrue(
             compact.contains(

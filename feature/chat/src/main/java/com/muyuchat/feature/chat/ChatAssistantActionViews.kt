@@ -37,6 +37,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Image
@@ -94,6 +95,7 @@ internal fun AssistantActionRow(
     onDelete: () -> Unit,
     onDeleteLastTurn: () -> Unit,
     onCopy: () -> Unit,
+    copied: Boolean = false,
     pinned: Boolean,
     canTogglePinned: Boolean,
     onTogglePinned: () -> Unit
@@ -129,10 +131,10 @@ internal fun AssistantActionRow(
             modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction),
         ) {
             Icon(
-                Icons.Rounded.ContentCopy,
-                contentDescription = "复制消息",
+                imageVector = if (copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                contentDescription = if (copied) "已复制" else "复制消息",
                 modifier = Modifier.size(18.dp),
-                tint = tint.copy(alpha = 0.78f)
+                tint = if (copied) McaPrimaryBlue else tint.copy(alpha = 0.78f)
             )
         }
         if (!readOnly) Box {
