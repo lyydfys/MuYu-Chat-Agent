@@ -393,16 +393,22 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                     flushPendingAssistantOutput(generationRunId)
                     if (!generationStillOwnsUi()) return@collect
                     if (event.toolCalls.isNotEmpty()) {
-                        val handled = handleAssistantImageToolCalls(
-                            calls = event.toolCalls,
-                            originalRequestMessages = requestMessages,
-                            paramsBeforeAssistant = requestParams,
-                            chatSessionId = initialState.activeChatSessionId,
-                            cloudModelId = cloudModelIdForToolTurn,
-                            chatModelIdentity = chatModelIdentityForToolTurn,
-                            imageModelBinding = imageModelBindingForToolTurn,
-                            chatConfig = chatConfigForToolTurn
-                        )
+                        // Tool turns verify/refresh local image engines, which can read and hash
+                        // multi-gigabyte model components. Keep that work off the UI thread: the
+                        // generation collector runs on main, and a first-run image proof used to
+                        // freeze the surface here.
+                        val handled = withContext(Dispatchers.IO) {
+                            handleAssistantImageToolCalls(
+                                calls = event.toolCalls,
+                                originalRequestMessages = requestMessages,
+                                paramsBeforeAssistant = requestParams,
+                                chatSessionId = initialState.activeChatSessionId,
+                                cloudModelId = cloudModelIdForToolTurn,
+                                chatModelIdentity = chatModelIdentityForToolTurn,
+                                imageModelBinding = imageModelBindingForToolTurn,
+                                chatConfig = chatConfigForToolTurn
+                            )
+                        }
                         if (handled) {
                             persistChatSessions(generationRunId = generationRunId)
                             return@collect

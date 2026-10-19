@@ -112,6 +112,14 @@ introduced by the motion slices. The only geometry animation is an explicit expa
   whose source file is being edited by the parallel agent session (their uncommitted change adds a
   second promote call; the contract counts 1). `LocalImageModelStoreIntegrationTest` passes
   26/26, including the same-length + restored-mtime invalidation case.
+- **First-launch hashing is off the UI thread (round 8).** The residual one-time fill ran inside the
+  generation collector's main-thread tool-turn handling (`handleAssistantImageToolCalls` →
+  runtime verification → `LocalImageModelIdentityKt` → SHA-256; MIUI AppScout stack). That call is
+  now wrapped in `withContext(Dispatchers.IO)` in `ChatExecutionOperations`, so the first image-proof
+  computation still happens once but no longer freezes the surface. Compile-verified; the device
+  first-launch scenario could not be re-created without clearing user data, and the round's test run
+  was blocked by the shared build directory (parallel session held it for >6 minutes). Re-verify in
+  a clean window.
 - **Shared checkout: build under the MCA lock.** A parallel agent session runs
   `scripts/agent-verify.ps1`, which force-stops every `GradleDaemon`/`KotlinCompileDaemon` after
   taking `tools/build-guards/McaBuildLock.psm1`. A manual `gradlew` invocation that does not hold
