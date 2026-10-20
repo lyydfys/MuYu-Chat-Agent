@@ -88,7 +88,8 @@ internal fun ChatStatusBar(
             modifier = Modifier.size(48.dp),
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 5.dp
+            // 4dp keeps the capsule lifted without the grey band reading as a second surface.
+            shadowElevation = 4.dp
         ) {
             McaIconButton(
                 contentDescription = "打开历史",
@@ -165,7 +166,7 @@ internal fun ChatStatusBar(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
-                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
@@ -226,7 +227,7 @@ internal fun ChatStatusBar(
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 5.dp
+            shadowElevation = 4.dp
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),

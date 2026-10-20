@@ -90,7 +90,16 @@ internal fun ChatDeviceStatusOverlay(
         context.getSharedPreferences("chat_device_status_overlay", Context.MODE_PRIVATE)
     }
     var horizontalFraction by rememberSaveable {
-        mutableStateOf(preferences.getFloat("x_fraction", 1f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 1f)
+        mutableStateOf(
+            preferences.getFloat("x_fraction", DEFAULT_FLOATING_X_FRACTION)
+                .takeIf { it.isFinite() }
+                ?.let { stored ->
+                    // Older builds parked the ball at the right edge, where it covered the copy
+                    // action. Migrate that stored default left of the action column.
+                    if (stored >= 0.97f) DEFAULT_FLOATING_X_FRACTION else stored.coerceIn(0f, 1f)
+                }
+                ?: DEFAULT_FLOATING_X_FRACTION
+        )
     }
     var verticalFraction by rememberSaveable {
         mutableStateOf(preferences.getFloat("y_fraction", 0.70f).takeIf { it.isFinite() }?.coerceIn(0f, 1f) ?: 0.70f)

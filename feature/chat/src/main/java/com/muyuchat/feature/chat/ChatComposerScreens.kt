@@ -219,9 +219,11 @@ internal fun ChatInputBar(
             }
         )
     }
-    if (showActionSheet) {
-        CompactInputActionMenu(
-            onDismiss = {
+    // Always composed: the host cannot remove it on dismiss or the exit animation never gets a
+    // frame. CompactInputActionMenu draws nothing while closed.
+    CompactInputActionMenu(
+        open = showActionSheet,
+        onDismiss = {
                 researchModeExpanded = false
                 showActionSheet = false
             },
@@ -289,7 +291,6 @@ internal fun ChatInputBar(
             webSearchProviderLabel = webSearchProviderLabel,
             modifier = modifier
         )
-    }
     if (showActionSheet && researchModeExpanded) {
         ResearchModeFloatingCapsule(
             selected = webSearchResearchMode,
@@ -310,7 +311,8 @@ internal fun ChatInputBar(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         color = inputShellColor,
         shape = RoundedCornerShape(36.dp),
-        shadowElevation = 10.dp
+        // Calibrated down from 10dp: the grey band under the bar read heavier than the content.
+        shadowElevation = 8.dp
     ) {
         Column(
             modifier = Modifier

@@ -58,6 +58,8 @@ internal enum class FloatingDeviceStatusSize(val dp: Float, val label: String) {
 }
 
 internal const val DEFAULT_FLOATING_DEVICE_STATUS_SIZE_DP = 44f
+// Keep the default park left of the message action column (48dp) so copy is never covered.
+internal const val DEFAULT_FLOATING_X_FRACTION = 0.82f
 
 /**
  * Content tiers, one per preset.

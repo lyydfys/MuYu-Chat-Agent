@@ -7,6 +7,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -17,12 +18,19 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,7 +63,13 @@ internal fun ImageAssetTile(
 ) {
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 384)
+    var retryKey by remember(image.id) { mutableStateOf(0) }
+    val loadState = rememberChatImageLoadState(
+        context = context,
+        uriString = image.uriString,
+        maxDimensionPx = 384,
+        revisionKey = retryKey
+    )
     val tileInteraction = remember { MutableInteractionSource() }
     val favoriteInteraction = remember { MutableInteractionSource() }
     Box(
@@ -77,22 +91,32 @@ internal fun ImageAssetTile(
                 onLongClick = onLongPress
             )
     ) {
-        bitmap?.let { loadedBitmap ->
-            Image(
-                bitmap = loadedBitmap.asImageBitmap(),
+        when (loadState) {
+            is ChatImageLoadState.Ready -> Image(
+                bitmap = loadState.bitmap.asImageBitmap(),
                 contentDescription = image.name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-        } ?: run {
-            Icon(
-                imageVector = Icons.Default.Image,
-                contentDescription = null,
-                tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
+            ChatImageLoadState.Loading -> CircularProgressIndicator(
                 modifier = Modifier
                     .align(Alignment.Center)
-                    .size(28.dp)
+                    .size(20.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.primary
             )
+            ChatImageLoadState.Failed -> Column(
+                modifier = Modifier.align(Alignment.Center),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Image,
+                    contentDescription = null,
+                    tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
+                    modifier = Modifier.size(26.dp)
+                )
+                TextButton(onClick = { retryKey += 1 }) { Text("重试") }
+            }
         }
         if (image.favorite && !selectionMode) {
             Box(

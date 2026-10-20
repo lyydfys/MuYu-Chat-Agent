@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.VisibilityThreshold
@@ -57,12 +58,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -92,6 +95,7 @@ import androidx.compose.runtime.setValue
 
 @Composable
 internal fun CompactInputActionMenu(
+    open: Boolean,
     onDismiss: () -> Unit,
     onCamera: () -> Unit,
     onPhoto: () -> Unit,
@@ -125,16 +129,21 @@ internal fun CompactInputActionMenu(
             .navigationBarsPadding(),
         contentAlignment = Alignment.BottomStart
     ) {
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-                .clickable(onClick = onDismiss)
-        )
+        // A scrim exists only while open; a closed menu must never intercept the composer.
+        if (open) {
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clickable(onClick = onDismiss)
+            )
+        }
         // This sheet is only composed while it is open, so `visible = true` on the first frame
         // suppressed the entry animation. Start from an explicit hidden state so the spring-settled
         // slide shared with the other composer surfaces can actually play.
-        val menuVisibility = remember { MutableTransitionState(initialState = false) }
-        menuVisibility.targetState = true
+        // The host keeps this composed; targetState follows `open` so the exit runs exactly once.
+        val menuVisibility = remember { MutableTransitionState(initialState = open) }
+        LaunchedEffect(open) { menuVisibility.targetState = open }
+        if (!open && menuVisibility.isIdle && !menuVisibility.currentState) return
         AnimatedVisibility(
             visibleState = menuVisibility,
             enter = fadeIn(tween(120)) + slideInHorizontally(
@@ -145,7 +154,10 @@ internal fun CompactInputActionMenu(
                 ),
                 initialOffsetX = { -it / 5 }
             ),
-            exit = fadeOut(tween(100)),
+            exit = fadeOut(tween(100)) + slideOutHorizontally(
+                animationSpec = tween(100),
+                targetOffsetX = { -it / 5 }
+            ),
             modifier = Modifier
                 .padding(bottom = 86.dp)
                 .width(238.dp)
@@ -294,7 +306,8 @@ private fun CompactInputActionRow(
                 color = if (enabled) titleColor else disabledColor,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp, lineHeight = 19.sp),
                 fontWeight = FontWeight.Medium,
-                maxLines = 1,
+                // At large font the state words ("角色生图：本对话自动授权／每次询问") must not be cut.
+                maxLines = if (LocalDensity.current.fontScale >= 1.5f) 2 else 1,
                 overflow = TextOverflow.Ellipsis
             )
             subtitle?.takeIf(String::isNotBlank)?.let {

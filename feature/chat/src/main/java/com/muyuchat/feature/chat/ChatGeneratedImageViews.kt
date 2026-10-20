@@ -406,14 +406,15 @@ internal fun ChatGeneratedImageContent(
 
     val previewImage = images.firstOrNull { it.id == previewImageId }
     if (previewImage != null) {
-        // The full-screen preview still uses a bounded bitmap; the original file remains
-        // available for save/share and is never decoded into the Compose heap.
-        val previewBitmap by rememberChatImageBitmap(
+        // The full-screen preview shares the honest loader: no premature failure text while the
+        // decode is still running, and a retry that visibly returns to Loading.
+        var previewRetry by remember(previewImage.id) { mutableStateOf(0) }
+        val previewState = rememberChatImageLoadState(
             context = context,
             uriString = previewImage.uriString,
-            maxDimensionPx = 2048
+            maxDimensionPx = 2048,
+            revisionKey = previewRetry
         )
-        val previewBitmapValue = previewBitmap
         Dialog(
             onDismissRequest = { previewImageId = null },
             properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -438,17 +439,33 @@ internal fun ChatGeneratedImageContent(
                         )
                         TextButton(onClick = { previewImageId = null }) { Text("关闭") }
                     }
-                    if (previewBitmapValue != null) {
-                        Image(
-                            bitmap = previewBitmapValue.asImageBitmap(),
+                    when (previewState) {
+                        is ChatImageLoadState.Ready -> Image(
+                            bitmap = previewState.bitmap.asImageBitmap(),
                             contentDescription = previewImage.name,
                             contentScale = ContentScale.Fit,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(max = 680.dp)
                         )
-                    } else {
-                        Text("图片文件暂时无法读取。")
+                        ChatImageLoadState.Loading -> Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 180.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(26.dp), strokeWidth = 2.dp)
+                        }
+                        ChatImageLoadState.Failed -> Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 180.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Text("图片文件暂时无法读取。")
+                            TextButton(onClick = { previewRetry += 1 }) { Text("重试") }
+                        }
                     }
                 }
             }
