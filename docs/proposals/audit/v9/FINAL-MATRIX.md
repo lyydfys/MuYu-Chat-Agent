@@ -175,3 +175,21 @@ violations). With a scrolled conversation the probe reports 6 findings that are 
 artifacts (the top message action row is partially under the header, nodes report 34.9dp) plus two
 unnamed action-row parents; with the drawer open it reports the parallel session's new 38dp rail
 items. The copy/pin names were moved onto the buttons anyway (`26dcd81`).
+
+## 13. Round-29 completion gaps (build 2026-10-20 12:15)
+
+| gap | status | evidence |
+|---|---|---|
+| composer menu exit animation | PASS (code) | menu stays composed, targetState follows `open`, scrim only while open, exit fade+slide; 1x/2x captures `r30/composer-menu-1x.png`, `r30/composer-menu-2x.png` |
+| 2.0x menu title no longer cut | PASS (device) | 2-line title at 2.0x; `角色生图：每次询问` fully readable in `r30/composer-menu-2x.png` |
+| large-image preview three states + retry | PASS (code) | shared `ChatImageLoadState` with revision retry in `ChatGeneratedImageViews` |
+| gallery tiles three states | PASS (code) | spinner while loading, icon + `重试` on failure in `ImageAssetScreens` |
+| floating ball no longer covers copy | PASS (device) | default x 0.82 with legacy right-edge migration; `r30/chat-shadows.png` shows copy column clear |
+| cache evidence contrast | PASS (code) | extra 0.78 alpha removed (light ~3.71:1 -> token value) |
+| surface shadows calibrated | PASS (device) | header 5->4dp, composer 10->8dp; `r30/chat-shadows.png` |
+| menu exit animation device recording | NOT_RUN | screenrecord returned a 0.125s clip; code path verified, visual capture pending |
+| markdown table real render | NOT_RUN | still no rendered table capture; only the parser/width unit tests |
+
+a11y probe on this build: fresh chat PASS; scrolled conversation 6 findings (viewport-clipped action row +
+unnamed action parents); app-menu screen 8 findings (nested row clickables). These are recorded as probe
+limitations/attribution, not silently ignored.
