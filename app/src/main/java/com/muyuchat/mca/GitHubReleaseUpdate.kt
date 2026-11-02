@@ -31,7 +31,6 @@ internal const val GITHUB_RELEASE_PAGE_URL =
 internal const val GITHUB_RELEASE_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
 internal const val GITHUB_DOMESTIC_PROXY = "https://gh-proxy.com/"
 internal const val GITHUB_RELEASE_API_DOMESTIC_URL = GITHUB_DOMESTIC_PROXY + GITHUB_RELEASE_API_URL
-internal const val GITHUB_RELEASE_PAGE_DOMESTIC_URL = GITHUB_DOMESTIC_PROXY + GITHUB_RELEASE_PAGE_URL
 private const val GITHUB_REPOSITORY_WEB_PREFIX = "https://github.com/$GITHUB_RELEASE_REPOSITORY"
 private const val GITHUB_REPOSITORY_API_PREFIX = "https://api.github.com/repos/$GITHUB_RELEASE_REPOSITORY"
 private const val GITHUB_REPOSITORY_RAW_PREFIX = "https://raw.githubusercontent.com/$GITHUB_RELEASE_REPOSITORY"
@@ -109,7 +108,7 @@ data class AppUpdateState(
     val latestVersionName: String? = null,
     val latestTitle: String? = null,
     val releaseNotes: String = "",
-    val releaseUrl: String = GITHUB_RELEASE_PAGE_DOMESTIC_URL,
+    val releaseUrl: String = GITHUB_RELEASE_PAGE_URL,
     val apkSizeBytes: Long = 0L,
     val apkSha256: String? = null,
     val canDownload: Boolean = false,
@@ -211,7 +210,7 @@ internal fun parseGitHubReleaseJson(raw: String): GitHubRelease {
     return GitHubRelease(
         tagName = tagName,
         name = root.optString("name", tagName).trim().ifBlank { tagName },
-        htmlUrl = domesticGitHubUrl(root.optString("html_url", GITHUB_RELEASE_PAGE_URL).trim()),
+        htmlUrl = root.optString("html_url", GITHUB_RELEASE_PAGE_URL).trim(),
         body = root.optString("body", ""),
         publishedAt = root.optString("published_at", ""),
         draft = root.optBoolean("draft", false),

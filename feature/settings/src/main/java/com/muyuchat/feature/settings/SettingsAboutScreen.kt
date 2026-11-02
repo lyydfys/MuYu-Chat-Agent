@@ -54,11 +54,9 @@ import com.muyuchat.core.designsystem.McaIcons
 
 private const val ABOUT_AUTHOR = "lyydfys"
 private const val ABOUT_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
-private const val ABOUT_GITHUB_PROXY = "https://gh-proxy.com/"
 private const val ABOUT_AUTHOR_URL = "https://github.com/$ABOUT_AUTHOR"
-private const val ABOUT_REPOSITORY_OFFICIAL_URL = "https://github.com/$ABOUT_REPOSITORY"
-private const val ABOUT_REPOSITORY_URL = ABOUT_GITHUB_PROXY + ABOUT_REPOSITORY_OFFICIAL_URL
-private const val ABOUT_ISSUES_URL = "$ABOUT_REPOSITORY_OFFICIAL_URL/issues"
+private const val ABOUT_REPOSITORY_URL = "https://github.com/$ABOUT_REPOSITORY"
+private const val ABOUT_ISSUES_URL = "$ABOUT_REPOSITORY_URL/issues"
 private const val ABOUT_DONATE_URL = "$ABOUT_REPOSITORY_URL/blob/master/docs/DONATE.md"
 
 private const val ABOUT_PREFERENCES = "mca_about_ui"
@@ -764,7 +762,7 @@ private fun AboutStarGuideDialog(
                 AboutStarStep(
                     index = 1,
                     title = "打开项目主页",
-                    detail = "下方按钮已使用国内加速镜像，访问更稳定。"
+                    detail = "下方按钮打开 GitHub 官方仓库；如果加载较慢，请稍等或稍后重试。"
                 )
                 AboutStarStep(
                     index = 2,
@@ -777,10 +775,9 @@ private fun AboutStarGuideDialog(
                     detail = "按钮变成 Starred 就表示点 Star 成功。"
                 )
                 Text(
-                    "如果加速镜像打不开，可在浏览器中直接访问原站：\n$ABOUT_REPOSITORY_OFFICIAL_URL",
+                    "点 Star 只需要登录 GitHub，不会修改代码，也不会产生任何费用。",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         },

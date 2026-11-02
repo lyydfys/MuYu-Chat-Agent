@@ -93,6 +93,16 @@ class GitHubReleaseUpdateTest {
         assertEquals("v0.3.0", release.tagName)
         assertEquals("MCA 0.3.0", release.name)
         assertEquals("Bug fixes", release.body)
+        assertEquals(
+            "https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.3.0",
+            release.htmlUrl
+        )
+        assertEquals(
+            GITHUB_DOMESTIC_PROXY +
+                "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/mca-arm64-v8a.apk",
+            release.assets[0].downloadUrl
+        )
+        assertEquals("https://objects.githubusercontent.com/assets/checksum", release.assets[1].downloadUrl)
         assertEquals(2, release.assets.size)
         assertEquals(1234L, release.assets[0].sizeBytes)
         assertEquals(digest.lowercase(), release.assets[0].digest)
@@ -204,7 +214,6 @@ class GitHubReleaseUpdateTest {
         assertTrue(isTrustedGitHubDownloadUrl("https://objects.githubusercontent.com/a"))
         assertTrue(isTrustedGitHubDownloadUrl("https://release-assets.githubusercontent.com/a"))
         assertTrue(isTrustedGitHubDownloadUrl("https://github-releases.githubusercontent.com/a"))
-        assertTrue(isTrustedGitHubDownloadUrl(GITHUB_RELEASE_PAGE_DOMESTIC_URL))
         assertTrue(
             isTrustedGitHubDownloadUrl(
                 "https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/app.apk"
