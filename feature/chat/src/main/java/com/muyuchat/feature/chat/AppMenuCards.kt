@@ -1,5 +1,11 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaHairline
+import com.muyuchat.core.designsystem.McaTonal
+import com.muyuchat.core.designsystem.McaShape
+import com.muyuchat.core.designsystem.McaPlateSize
+import com.muyuchat.core.designsystem.McaIconPlate
+import com.muyuchat.core.designsystem.McaIcons
 import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
@@ -15,7 +21,6 @@ import android.os.BatteryManager
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.BackHandler
@@ -47,6 +52,7 @@ import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -91,40 +97,34 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
@@ -133,23 +133,18 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.rememberDateRangePickerState
@@ -266,7 +261,9 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
+import com.muyuchat.core.designsystem.McaIconSize
 
 
 // Text alpha values match CompactInputActionRow's existing disabled treatment.
@@ -278,7 +275,8 @@ internal fun AppMenuCard(content: @Composable ColumnScope.() -> Unit) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(20.dp)
+        shape = RoundedCornerShape(20.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
     ) {
         Column(content = content)
     }
@@ -305,6 +303,15 @@ internal fun AppMenuRow(
         MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = APP_MENU_DISABLED_SUBTITLE_ALPHA)
     }
     val interactionSource = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
+    LaunchedEffect(interactionSource, enabled) {
+        if (!enabled) return@LaunchedEffect
+        interactionSource.interactions.collect { interaction ->
+            if (interaction is PressInteraction.Release) {
+                haptics.tick()
+            }
+        }
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -336,7 +343,17 @@ internal fun AppMenuRow(
             CompositionLocalProvider(
                 LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant
             ) {
-                icon()
+                // Tonal squircle badge so the glyph never floats naked; the outer 34dp slot (and
+                // therefore the row geometry) is unchanged.
+                McaIconPlate(
+                    size = McaPlateSize.MenuBadge,
+                    shape = McaShape.Badge,
+                    containerColor = McaTonal.badgeFill(),
+                    borderColor = McaHairline.default(),
+                    animateColors = false,
+                ) {
+                    icon()
+                }
             }
         }
         Spacer(modifier = Modifier.width(10.dp))
@@ -365,9 +382,9 @@ internal fun AppMenuRow(
         // TalkBack description.
         if (enabled) {
             Icon(
-                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                imageVector = McaIcons.Forward,
                 contentDescription = null,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier.size(McaIconSize.M),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }

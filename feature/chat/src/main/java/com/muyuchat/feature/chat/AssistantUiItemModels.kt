@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import com.muyuchat.core.engine.ReasoningMode
 
 /**
@@ -8,6 +9,7 @@ import com.muyuchat.core.engine.ReasoningMode
  * ChatImageTranslationDraftUi 自 ChatUiItemModels.kt 逐字节平移；零改写。
  */
 
+@Immutable
 data class AssistantUiItem(
     val id: String,
     val name: String,
@@ -36,6 +38,7 @@ data class AssistantUiItem(
     val characterCardImported: Boolean = false
 )
 
+@Immutable
 data class AssistantMemoryUiItem(
     val id: String,
     val assistantId: String,
@@ -45,8 +48,10 @@ data class AssistantMemoryUiItem(
     val createdAt: Long
 )
 
+@Immutable
 data class ContextSummaryModelOption(val id: String, val label: String)
 
+@Immutable
 data class ContextSummaryUiItem(
     val version: Int,
     val source: String,
@@ -62,6 +67,7 @@ data class ContextSummaryUiItem(
     val diagnostic: String? = null
 )
 
+@Immutable
 data class ContextSummaryEvidenceUiItem(
     val kind: String,
     val text: String,
@@ -69,6 +75,7 @@ data class ContextSummaryEvidenceUiItem(
     val sourceOffset: Int
 )
 
+@Immutable
 data class ChatImageTranslationDraftUi(
     val id: String,
     val originalPositive: String,

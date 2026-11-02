@@ -1,7 +1,13 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.McaFeedbackPopup
+import com.muyuchat.core.designsystem.rememberMcaFeedbackState
 
 import android.content.ClipData
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.Image
@@ -24,31 +30,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Share
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +56,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -73,12 +65,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaIconSize
 
 /**
  * T2B22-T1（b 工位）拆片：ImageAssetPreviewOverlay（@Composable internal）自
@@ -118,33 +112,43 @@ internal fun ImageAssetPreviewOverlay(
     val context = LocalContext.current
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
+    val notify = rememberMcaNotify()
     // The old nullable bitmap conflated "still decoding" with "decode failed": the failure copy
     // appeared during loading and there was no retry. Reuse the existing ChatImageLoadState so the
     // preview renders Loading / Ready / Failed honestly; bumping the revision restarts the same
-    // producer (no new state type).
+    // producer (no new state type). The asset id is the display owner identity, so another asset
+    // shown at the same position cannot keep the previous one's frame.
     var imageLoadRevision by remember(image.uriString) { mutableStateOf(0) }
     val imageLoadState = rememberChatImageLoadState(
         context = context,
         uriString = image.uriString,
         maxDimensionPx = 1280,
-        revisionKey = imageLoadRevision
+        revisionKey = imageLoadRevision,
+        taskIdentity = image.id
     )
     var showGenerationDetails by rememberSaveable(image.id) { mutableStateOf(false) }
     var showParameterReuse by rememberSaveable(image.id) { mutableStateOf(false) }
     var showUpscaleDialog by rememberSaveable(image.id) { mutableStateOf(false) }
     var upscaleTargetScale by rememberSaveable(image.id) { mutableStateOf(2) }
     var pendingUpscalerDeleteId by rememberSaveable(image.id) { mutableStateOf<String?>(null) }
-    var showActionsMenu by remember(image.id) { mutableStateOf(false) }
-    var savingToGallery by remember(image.id) { mutableStateOf(false) }
     var selectedPresetFields by remember(image.id) {
         mutableStateOf(emptySet<ImageGenerationPresetField>())
+    }
+    // Closing is a one-way latch shared by Back, the close button and every business action. The
+    // overflow submenu and the in-flight gallery save live in the same owner, so the exit collapses
+    // the submenu atomically and can never submit the save twice.
+    val actionGate = remember(image.id) { ImagePreviewActionGate() }
+    // Single decision point: while the exit plays, nothing new may start. The submenu is collapsed
+    // even when its action is refused, so a late tap cannot leave a popup behind the fading overlay.
+    val runPreviewAction: (ImagePreviewAction, () -> Unit) -> Unit = { action, block ->
+        actionGate.closeMenu()
+        if (actionGate.allows(action)) block()
     }
     val sourceUpscaleRunning = upscaleJob?.running == true && upscaleJob.sourceImageId == image.id
     // Full-screen preview entrance/exit: one progress value drives alpha and the 0.96 -> 1 scale
     // inside a graphicsLayer, so no animated value is read during composition. Closing plays to the
     // end before the host is told to remove the preview.
     val entryProgress = remember { Animatable(0f) }
-    var previewClosing by remember { mutableStateOf(false) }
     val closeInteraction = remember { MutableInteractionSource() }
     val favoriteInteraction = remember { MutableInteractionSource() }
     val moreInteraction = remember { MutableInteractionSource() }
@@ -153,17 +157,20 @@ internal fun ImageAssetPreviewOverlay(
         entryProgress.animateTo(1f, McaMotion.contentEnter)
     }
     val dismissWithMotion: () -> Unit = {
-        if (!previewClosing) {
-            previewClosing = true
+        // Idempotent: the first Back/close tap owns the played-out exit, later ones are consumed
+        // without restarting it.
+        if (actionGate.requestClose()) {
             scope.launch {
                 entryProgress.animateTo(0f, McaMotion.fade(millis = 150))
                 onDismiss()
             }
         }
     }
-    // The workspace registers its own back handler; this later, preview-only callback wins while
-    // the overlay is composed and gives Back the same played-out close as the X button.
-    BackHandler(enabled = !previewClosing) { dismissWithMotion() }
+    // Hold Back from composition until removal, not only until the exit starts. The workspace
+    // registers its own Back handler; this later, preview-only callback wins while the overlay is
+    // composed, so once Closing begins a second Back is consumed by requestClose instead of reaching
+    // the workspace, which used to clear the preview id and truncate the ~150 ms exit.
+    BackHandler(enabled = true) { dismissWithMotion() }
     // Keep the preview above sibling workspace content for the whole exit animation; otherwise a
     // later-ordered sibling could draw above the fading overlay.
     Box(
@@ -194,11 +201,16 @@ internal fun ImageAssetPreviewOverlay(
                 shape = CircleShape,
                 modifier = Modifier.mcaPressScale(closeInteraction)
             ) {
-                IconButton(
+                McaIconButton(
+                    contentDescription = "关闭预览",
                     onClick = dismissWithMotion,
-                    interactionSource = closeInteraction
+                    interactionSource = closeInteraction,
+                    pressScaleEnabled = false,
+                    glyphSize = McaIconSize.L,
+                    tint = Color.White,
+                    disabledTint = Color.White.copy(alpha = 0.55f),
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭预览", tint = Color.White)
+                    Icon(McaIcons.Close, contentDescription = null)
                 }
             }
             Text(
@@ -216,17 +228,21 @@ internal fun ImageAssetPreviewOverlay(
                 shape = CircleShape,
                 modifier = Modifier.mcaPressScale(favoriteInteraction)
             ) {
-                IconButton(
-                    onClick = { onSetFavorite(!image.favorite) },
+                McaIconButton(
+                    contentDescription = if (image.favorite) "取消收藏" else "收藏图片",
+                    onClick = {
+                        runPreviewAction(ImagePreviewAction.FAVORITE) { onSetFavorite(!image.favorite) }
+                    },
                     interactionSource = favoriteInteraction,
-                    enabled = !previewClosing
+                    enabled = actionGate.allows(ImagePreviewAction.FAVORITE),
+                    pressScaleEnabled = false,
+                    glyphSize = McaIconSize.L,
+                    tint = Color.White,
+                    disabledTint = Color.White.copy(alpha = 0.55f),
                 ) {
                     Icon(
-                        if (image.favorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                        contentDescription = if (image.favorite) "取消收藏" else "收藏图片",
-                        // Dim the icon together with the disabled state; an explicit white tint
-                        // would otherwise keep looking enabled while the exit animation runs.
-                        tint = if (previewClosing) Color.White.copy(alpha = 0.55f) else Color.White
+                        if (image.favorite) McaIcons.Favorite else McaIcons.FavoriteBorder,
+                        contentDescription = null,
                     )
                 }
             }
@@ -237,88 +253,100 @@ internal fun ImageAssetPreviewOverlay(
                     shape = CircleShape,
                     modifier = Modifier.mcaPressScale(moreInteraction)
                 ) {
-                    IconButton(
-                        onClick = { showActionsMenu = true },
+                    McaIconButton(
+                        contentDescription = "更多图片操作",
+                        onClick = { actionGate.openMenu() },
                         interactionSource = moreInteraction,
-                        enabled = !previewClosing
+                        enabled = actionGate.allows(ImagePreviewAction.MORE_MENU),
+                        pressScaleEnabled = false,
+                        glyphSize = McaIconSize.L,
+                        tint = Color.White,
+                        disabledTint = Color.White.copy(alpha = 0.55f),
                     ) {
-                        Icon(Icons.Default.MoreVert, contentDescription = "更多图片操作", tint = if (previewClosing) Color.White.copy(alpha = 0.55f) else Color.White)
+                        Icon(
+                            McaIcons.MoreVert,
+                            contentDescription = null,
+                        )
                     }
                 }
                 DropdownMenu(
-                    expanded = showActionsMenu,
-                    onDismissRequest = { showActionsMenu = false }
+                    expanded = actionGate.isMenuOpen,
+                    // Closing collapses the submenu; while closing, openMenu() refuses to reopen it.
+                    onDismissRequest = { actionGate.closeMenu() }
                 ) {
                     if (image.generationDetails.isNotBlank()) {
                         DropdownMenuItem(
                             text = { Text("查看生成参数") },
-                            leadingIcon = { Icon(Icons.Default.Info, contentDescription = null) },
+                            leadingIcon = { Icon(McaIcons.Info, contentDescription = null) },
                             onClick = {
-                                showActionsMenu = false
-                                showGenerationDetails = true
+                                runPreviewAction(ImagePreviewAction.SHOW_GENERATION_DETAILS) {
+                                    showGenerationDetails = true
+                                }
                             }
                         )
                     }
                     DropdownMenuItem(
                         text = { Text("作为图生图输入") },
-                        leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                        enabled = canUseAsImg2Img,
+                        leadingIcon = { Icon(McaIcons.Edit, contentDescription = null) },
+                        enabled = canUseAsImg2Img &&
+                            actionGate.allows(ImagePreviewAction.USE_AS_IMAGE_INPUT),
                         onClick = {
-                            showActionsMenu = false
-                            onUseAsImg2Img()
+                            runPreviewAction(ImagePreviewAction.USE_AS_IMAGE_INPUT) { onUseAsImg2Img() }
                         }
                     )
                     if (canUseUltraFix) {
                         DropdownMenuItem(
                             text = { Text("使用 UltraFix 精修") },
-                            leadingIcon = { Icon(Icons.Default.Replay, contentDescription = null) },
+                            leadingIcon = { Icon(McaIcons.Replay, contentDescription = null) },
+                            // UltraFix feeds the same generation-input path as img2img.
+                            enabled = actionGate.allows(ImagePreviewAction.USE_AS_IMAGE_INPUT),
                             onClick = {
-                                showActionsMenu = false
-                                onUseUltraFix()
+                                runPreviewAction(ImagePreviewAction.USE_AS_IMAGE_INPUT) { onUseUltraFix() }
                             }
                         )
                     }
                     DropdownMenuItem(
                         text = { Text("高清放大") },
-                        leadingIcon = { Icon(Icons.Default.Image, contentDescription = null) },
+                        leadingIcon = { Icon(McaIcons.Image, contentDescription = null) },
+                        enabled = actionGate.allows(ImagePreviewAction.UPSCALE),
                         onClick = {
-                            showActionsMenu = false
-                            showUpscaleDialog = true
+                            runPreviewAction(ImagePreviewAction.UPSCALE) { showUpscaleDialog = true }
                         }
                     )
                     DropdownMenuItem(
                         text = { Text("分享图片") },
-                        leadingIcon = { Icon(Icons.Default.Share, contentDescription = null) },
+                        leadingIcon = { Icon(McaIcons.Share, contentDescription = null) },
+                        enabled = actionGate.allows(ImagePreviewAction.SHARE),
                         onClick = {
-                            showActionsMenu = false
-                            onShare()
+                            runPreviewAction(ImagePreviewAction.SHARE) { onShare() }
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text(if (savingToGallery) "保存中…" else "保存到系统图片库") },
-                        leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
-                        enabled = !savingToGallery,
+                        text = { Text(if (actionGate.isSaving) "保存中…" else "保存到系统图片库") },
+                        leadingIcon = { Icon(McaIcons.Download, contentDescription = null) },
+                        enabled = actionGate.allows(ImagePreviewAction.SAVE),
                         onClick = {
-                            showActionsMenu = false
-                            scope.launch {
-                                savingToGallery = true
-                                try {
-                                    val result = withContext(Dispatchers.IO) {
-                                        downloadImageAssetToGallery(context, image)
+                            actionGate.closeMenu()
+                            if (actionGate.beginSave()) {
+                                scope.launch {
+                                    try {
+                                        // A started gallery write settles here even if the visual exit
+                                        // removes the overlay (a half-finished copy would leave a
+                                        // pending MediaStore row with no feedback); beginSave() already
+                                        // guarantees it is submitted once.
+                                        withContext(NonCancellable + Dispatchers.IO) {
+                                            val result = downloadImageAssetToGallery(context, image)
+                                            withContext(Dispatchers.Main) {
+                                                result.onSuccess { path ->
+                                                    notify("已保存到 $path")
+                                                }.onFailure { error ->
+                                                    notify(error.message ?: "图片保存失败")
+                                                }
+                                            }
+                                        }
+                                    } finally {
+                                        actionGate.finishSave()
                                     }
-                                    result
-                                        .onSuccess { path ->
-                                            Toast.makeText(context, "已保存到 $path", Toast.LENGTH_SHORT).show()
-                                        }
-                                        .onFailure { error ->
-                                            Toast.makeText(
-                                                context,
-                                                error.message ?: "图片保存失败",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        }
-                                } finally {
-                                    savingToGallery = false
                                 }
                             }
                         }
@@ -332,15 +360,15 @@ internal fun ImageAssetPreviewOverlay(
                         },
                         leadingIcon = {
                             Icon(
-                                Icons.Default.Delete,
+                                McaIcons.Delete,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.error
                             )
                         },
-                        enabled = !sourceUpscaleRunning,
+                        enabled = !sourceUpscaleRunning &&
+                            actionGate.allows(ImagePreviewAction.DELETE),
                         onClick = {
-                            showActionsMenu = false
-                            onDelete()
+                            runPreviewAction(ImagePreviewAction.DELETE) { onDelete() }
                         }
                     )
                 }
@@ -371,12 +399,17 @@ internal fun ImageAssetPreviewOverlay(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(Icons.Default.Image, contentDescription = null, tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(42.dp))
+                Icon(McaIcons.Image, contentDescription = null, tint = Color.White.copy(alpha = 0.72f), modifier = Modifier.size(42.dp))
                 Text("无法读取图片", color = Color.White.copy(alpha = 0.82f))
                 // Retry restarts the existing producer through its revision key; a failed decode
-                // must not be a dead end.
-                TextButton(onClick = { imageLoadRevision++ }) {
-                    Text("重试", color = Color.White)
+                // must not be a dead end. While the exit plays it is refused, and the explicit white
+                // label is dimmed with the disabled state so it cannot look actionable mid-exit.
+                val retryAllowed = actionGate.allows(ImagePreviewAction.RETRY_IMAGE)
+                McaButton(style = McaButtonStyle.Text,
+                    onClick = { runPreviewAction(ImagePreviewAction.RETRY_IMAGE) { imageLoadRevision++ } },
+                    enabled = retryAllowed
+                ) {
+                    Text("重试", color = if (retryAllowed) Color.White else Color.White.copy(alpha = 0.55f))
                 }
             }
         }
@@ -419,16 +452,22 @@ internal fun ImageAssetPreviewOverlay(
                         )
                     }
                     if (image.canRecreate) {
-                        TextButton(
-                            onClick = onRecreate,
-                            enabled = recreateEnabled,
-                            modifier = Modifier.mcaPressScale(
-                                recreateInteraction,
-                                enabled = recreateEnabled
-                            ),
+                        val recreateAllowed = recreateEnabled &&
+                            actionGate.allows(ImagePreviewAction.RECREATE)
+                        McaButton(style = McaButtonStyle.Text,
+                            onClick = {
+                                runPreviewAction(ImagePreviewAction.RECREATE) { onRecreate() }
+                            },
+                            enabled = recreateAllowed,
                             interactionSource = recreateInteraction
                         ) {
-                            Text("按原参数再生成", color = Color.White)
+                            // The explicit white label used to stay bright on a disabled button, so a
+                            // refused action still read as executable. Keep the colour role and dim
+                            // only its alpha with the disabled state.
+                            Text(
+                                "按原参数再生成",
+                                color = if (recreateAllowed) Color.White else Color.White.copy(alpha = 0.55f)
+                            )
                         }
                     }
                 }
@@ -467,7 +506,7 @@ internal fun ImageAssetPreviewOverlay(
                         )
                     } else {
                         upscalers.forEach { upscaler ->
-                            FilterChip(
+                            McaChip(
                                 selected = upscaler.id == selectedUpscalerId,
                                 onClick = { onSelectUpscaler(upscaler.id) },
                                 enabled = upscaleJob?.running != true && !upscaler.deleting,
@@ -484,28 +523,29 @@ internal fun ImageAssetPreviewOverlay(
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = onImportUpscaler,
                             enabled = !upscalerImporting && upscaleJob?.running != true
                         ) {
                             Text(if (upscalerImporting) "导入中…" else "导入模型")
                         }
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 selectedUpscaler?.let { pendingUpscalerDeleteId = it.id }
                             },
                             enabled = selectedUpscaler != null &&
                                 !selectedUpscaler.inUse &&
                                 !selectedUpscaler.deleting &&
-                                upscaleJob?.running != true
+                                upscaleJob?.running != true,
+                            contentColor = MaterialTheme.colorScheme.error
                         ) {
-                            Text("删除所选", color = MaterialTheme.colorScheme.error)
+                            Text("删除所选")
                         }
                     }
                     Text("目标倍率", style = MaterialTheme.typography.titleSmall)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         IMAGE_UPSCALE_TARGET_SCALES.forEach { scale ->
-                            FilterChip(
+                            McaChip(
                                 selected = upscaleTargetScale == scale,
                                 onClick = { upscaleTargetScale = scale },
                                 enabled = upscaleJob?.running != true,
@@ -552,9 +592,9 @@ internal fun ImageAssetPreviewOverlay(
             },
             confirmButton = {
                 if (currentImageJob?.running == true) {
-                    Button(onClick = onCancelUpscale) { Text("停止") }
+                    McaButton(style = McaButtonStyle.Primary,onClick = onCancelUpscale) { Text("停止") }
                 } else {
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = { onUpscale(upscaleTargetScale) },
                         enabled = selectedUpscaler != null &&
                             !upscalerImporting &&
@@ -566,7 +606,7 @@ internal fun ImageAssetPreviewOverlay(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showUpscaleDialog = false }) { Text("关闭") }
+                McaButton(style = McaButtonStyle.Text,onClick = { showUpscaleDialog = false }) { Text("关闭") }
             }
         )
     }
@@ -579,7 +619,7 @@ internal fun ImageAssetPreviewOverlay(
                 Text("确定删除 ${upscaler?.name ?: "所选模型"}？模型文件会从本机移除。")
             },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         pendingUpscalerDeleteId = null
                         onDeleteUpscaler(upscalerId)
@@ -587,11 +627,13 @@ internal fun ImageAssetPreviewOverlay(
                 ) { Text("删除", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingUpscalerDeleteId = null }) { Text("取消") }
+                McaButton(style = McaButtonStyle.Text,onClick = { pendingUpscalerDeleteId = null }) { Text("取消") }
             }
         )
     }
     if (showGenerationDetails) {
+        val detailsFeedback = rememberMcaFeedbackState()
+        val detailsScope = rememberCoroutineScope()
         AlertDialog(
             onDismissRequest = { showGenerationDetails = false },
             title = { Text("生成参数") },
@@ -611,9 +653,9 @@ internal fun ImageAssetPreviewOverlay(
             confirmButton = {
                 Row {
                     if (image.parameterShareJson.isNotBlank()) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
-                                scope.launch {
+                                detailsScope.launch {
                                     clipboard.setClipEntry(
                                         ClipEntry(
                                             ClipData.newPlainText(
@@ -622,25 +664,21 @@ internal fun ImageAssetPreviewOverlay(
                                             )
                                         )
                                     )
-                                    Toast.makeText(context, "生成参数已复制", Toast.LENGTH_SHORT).show()
+                                    detailsFeedback.post("生成参数已复制")
                                 }
                             }
                         ) {
                             Text("复制参数")
                         }
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
-                                scope.launch {
+                                detailsScope.launch {
                                     val encoded = runCatching {
                                         ImageGenerationParameterImportCodec.encodeMcaBase64(
                                             image.parameterShareJson
                                         )
                                     }.getOrElse { error ->
-                                        Toast.makeText(
-                                            context,
-                                            error.message?.takeIf(String::isNotBlank) ?: "参数编码失败",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                        detailsFeedback.post(error.message?.takeIf(String::isNotBlank) ?: "参数编码失败")
                                         return@launch
                                     }
                                     clipboard.setClipEntry(
@@ -651,7 +689,7 @@ internal fun ImageAssetPreviewOverlay(
                                             )
                                         )
                                     )
-                                    Toast.makeText(context, "Base64 参数已复制", Toast.LENGTH_SHORT).show()
+                                    detailsFeedback.post("Base64 参数已复制")
                                 }
                             }
                         ) {
@@ -659,30 +697,37 @@ internal fun ImageAssetPreviewOverlay(
                         }
                     }
                     if (image.generationPreset != null) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
-                                selectedPresetFields = reusablePresetFields
-                                showGenerationDetails = false
-                                showParameterReuse = true
-                            }
+                                runPreviewAction(ImagePreviewAction.USE_PARAMETERS) {
+                                    selectedPresetFields = reusablePresetFields
+                                    showGenerationDetails = false
+                                    showParameterReuse = true
+                                }
+                            },
+                            enabled = actionGate.allows(ImagePreviewAction.USE_PARAMETERS)
                         ) {
                             Text("复用参数")
                         }
                     }
                     if (image.canRecreate) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
-                                showGenerationDetails = false
-                                onRecreate()
+                                runPreviewAction(ImagePreviewAction.RECREATE) {
+                                    showGenerationDetails = false
+                                    onRecreate()
+                                }
                             },
-                            enabled = recreateEnabled
+                            enabled = recreateEnabled &&
+                                actionGate.allows(ImagePreviewAction.RECREATE)
                         ) {
                             Text("按原参数再生成")
                         }
                     }
-                    TextButton(onClick = { showGenerationDetails = false }) {
+                    McaButton(style = McaButtonStyle.Text,onClick = { showGenerationDetails = false }) {
                         Text("关闭")
                     }
+                    McaFeedbackPopup(detailsFeedback)
                 }
             }
         )
@@ -714,7 +759,7 @@ internal fun ImageAssetPreviewOverlay(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         availableFields.forEach { field ->
-                            FilterChip(
+                            McaChip(
                                 selected = field in selectedPresetFields,
                                 onClick = {
                                     selectedPresetFields = if (field in selectedPresetFields) {
@@ -729,16 +774,19 @@ internal fun ImageAssetPreviewOverlay(
                     }
                 },
                 confirmButton = {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
-                            onUseParameters(preset, selectedPresetFields)
-                            showParameterReuse = false
+                            runPreviewAction(ImagePreviewAction.USE_PARAMETERS) {
+                                onUseParameters(preset, selectedPresetFields)
+                                showParameterReuse = false
+                            }
                         },
-                        enabled = selectedPresetFields.isNotEmpty()
+                        enabled = selectedPresetFields.isNotEmpty() &&
+                            actionGate.allows(ImagePreviewAction.USE_PARAMETERS)
                     ) { Text("应用") }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showParameterReuse = false }) { Text("取消") }
+                    McaButton(style = McaButtonStyle.Text,onClick = { showParameterReuse = false }) { Text("取消") }
                 }
             )
         }

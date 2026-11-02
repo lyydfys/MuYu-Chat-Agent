@@ -21,7 +21,7 @@ internal interface SelectChatSessionPort {
     fun uiState(): MainUiState
 
     /** The single atomic publish. */
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ConversationSelectionFields) -> ConversationSelectionFields)
 
     fun rejectWhileConversationMutationInProgress(): Boolean
 

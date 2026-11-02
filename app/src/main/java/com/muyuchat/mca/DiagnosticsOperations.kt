@@ -17,38 +17,45 @@ import org.json.JSONObject
  * buildDiagnosticReport 自 MainViewModel 移出，engine 改由构造注入。
  *
  * 体逐字等价：state、日志器、设备档案均在原评测点经 lambda 调用；update 仍走同一
- * UiStateStore 流（CAS 语义不变）；报告体仅将 `_uiState.value` → currentState()、
+ * UiStateWriter<DiagnosticsFields> 流（CAS 语义不变）；报告体仅将 `_uiState.value` → currentState()、
  * `getApplication()` → 注入的 application 作参数替换。
  */
 internal class DiagnosticsOperations(
     private val engine: McaInferenceService,
     private val currentState: () -> MainUiState,
-    private val updateUiState: ((MainUiState) -> MainUiState) -> Unit,
+    private val updateUiState: ((DiagnosticsFields) -> DiagnosticsFields) -> Unit,
     private val recentAgentLogs: () -> List<AgentDecisionLog>,
     private val recentBenchmarkHistory: () -> List<BenchmarkHistoryRecord>,
     private val currentDeviceProfile: () -> DeviceProfile,
     private val application: Application
 ) {
     fun refreshLogs() {
-        // R3/S16: 诊断族写入统一经 UiStateStore（同一底层流，CAS 语义不变）。
+        // Native and diagnostic reads occur once; the CAS reducer may be retried.
+        val logs = engine.recentLogs()
+        val agentLogs = recentAgentLogs()
+        val benchmarkHistory = recentBenchmarkHistory()
+        val nativeStatsJson = engine.nativeStatsJson()
+        val diagnosticReport = buildDiagnosticReport()
         updateUiState {
             it.copy(
-                logs = engine.recentLogs(),
-                agentLogs = recentAgentLogs(),
-                benchmarkHistory = recentBenchmarkHistory(),
-                nativeStatsJson = engine.nativeStatsJson(),
-                diagnosticReport = buildDiagnosticReport()
+                logs = logs,
+                agentLogs = agentLogs,
+                benchmarkHistory = benchmarkHistory,
+                nativeStatsJson = nativeStatsJson,
+                diagnosticReport = diagnosticReport
             )
         }
     }
 
     fun refreshDiagnostics() {
-        // R3/S16: 诊断族写入统一经 UiStateStore。
+        val nativeStatsJson = engine.nativeStatsJson()
+        val benchmarkHistory = recentBenchmarkHistory()
+        val diagnosticReport = buildDiagnosticReport()
         updateUiState {
             it.copy(
-                nativeStatsJson = engine.nativeStatsJson(),
-                benchmarkHistory = recentBenchmarkHistory(),
-                diagnosticReport = buildDiagnosticReport(),
+                nativeStatsJson = nativeStatsJson,
+                benchmarkHistory = benchmarkHistory,
+                diagnosticReport = diagnosticReport,
                 statusMessage = "诊断报告已刷新"
             )
         }

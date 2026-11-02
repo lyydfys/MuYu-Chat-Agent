@@ -1,5 +1,9 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -13,28 +17,29 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.GenerationPhase
@@ -45,6 +50,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 private data class CharacterHtmlProjection(
     val messageId: String,
@@ -52,6 +58,53 @@ private data class CharacterHtmlProjection(
     val preview: String?,
     val blocks: List<CharacterHtmlBlock>?
 )
+
+/**
+ * Display-rate token pacer for active streaming turns.
+ *
+ * Network SSE and local JNI chunks arrive in uneven bursts. When [isGenerating] is true, this
+ * reveals newly appended characters smoothly across display frames using surrogate-safe prefixes
+ * ([safePrefix]), and snaps immediately to [content] as soon as generation completes or when
+ * system animations are disabled.
+ */
+@Composable
+private fun rememberSmoothedStreamingText(
+    content: String,
+    isGenerating: Boolean,
+    contentIdentity: ChatMessageIdentity
+): String {
+    if (!isGenerating || content.isEmpty()) return content
+    var revealedChars by remember(contentIdentity) { mutableIntStateOf(content.length) }
+    val latestTarget by rememberUpdatedState(content)
+    if (revealedChars > content.length) {
+        revealedChars = content.length
+    }
+    LaunchedEffect(contentIdentity, isGenerating) {
+        val durationScale = coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f
+        if (durationScale <= 0f) {
+            revealedChars = latestTarget.length
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos { }
+            val targetLen = latestTarget.length
+            val current = revealedChars
+            if (current < targetLen) {
+                val backlog = targetLen - current
+                val step = (backlog / 3).coerceAtLeast(2)
+                revealedChars = (current + step).coerceAtMost(targetLen)
+            } else if (current > targetLen) {
+                revealedChars = targetLen
+            }
+        }
+    }
+    val effectiveChars = revealedChars.coerceIn(0, content.length)
+    return if (effectiveChars >= content.length) {
+        content
+    } else {
+        content.safePrefix(effectiveChars)
+    }
+}
 
 @Composable
 internal fun AssistantMessageBlock(
@@ -88,6 +141,12 @@ internal fun AssistantMessageBlock(
     onCopy: () -> Unit,
     copied: Boolean = false
 ) {
+    val richTextIdentity = ChatMessageIdentity(browserSessionId, message.id)
+    val streamedContent = rememberSmoothedStreamingText(
+        content = message.content,
+        isGenerating = isGenerating,
+        contentIdentity = richTextIdentity
+    )
     val contextTrace = remember(message.id, message.contextAssemblyTraceJson) {
         parseContextAssemblyTrace(message.contextAssemblyTraceJson)
     }
@@ -178,17 +237,17 @@ internal fun AssistantMessageBlock(
                 if (visibleHtmlPreview != null) {
                     Column {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            TextButton(onClick = { showHtmlSource = !showHtmlSource }) {
+                            McaButton(style = McaButtonStyle.Text,onClick = { showHtmlSource = !showHtmlSource }) {
                                 Text(if (showHtmlSource) "返回预览" else "查看原文")
                             }
                         }
                         SelectionContainer {
                             if (showHtmlSource) {
-                                PagedAssistantRichText(message.content)
+                                PagedAssistantRichText(message.content, contentIdentity = richTextIdentity)
                             } else if (visibleHtmlBlocks != null) {
                                 CharacterHtmlBlocksContent(visibleHtmlBlocks)
                             } else {
-                                PagedAssistantRichText(visibleHtmlPreview)
+                                PagedAssistantRichText(visibleHtmlPreview, contentIdentity = richTextIdentity)
                             }
                         }
                     }
@@ -196,7 +255,11 @@ internal fun AssistantMessageBlock(
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else {
                     SelectionContainer {
-                        PagedAssistantRichText(message.content)
+                        PagedAssistantRichText(
+                            streamedContent,
+                            contentIdentity = richTextIdentity,
+                            isStreaming = isGenerating
+                        )
                     }
                 }
             }
@@ -219,7 +282,10 @@ internal fun AssistantMessageBlock(
             }
             // 回答尾部：正文与尾部之间仍由外层 12dp 分界；尾部内部（统计 → 来源 → 操作）用更紧
             // 的 4dp 节奏，让它们读作同一条回答，而不影响推理区、图片和正文的既有间距。
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(
+                modifier = Modifier.animateContentSize(animationSpec = McaMotion.sizeChangePx),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 if (isGenerating) {
                     GenerationPerformanceLine(generationStats)
                 } else {
@@ -237,12 +303,12 @@ internal fun AssistantMessageBlock(
                     )
                 }
                 if (contextTrace != null) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = { showContextTrace = true },
                         modifier = Modifier.testTag("context-trace-${message.id}"),
                         contentPadding = PaddingValues(horizontal = 0.dp, vertical = 0.dp)
                     ) {
-                        Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(McaIcons.Info, contentDescription = null, modifier = Modifier.size(McaIconSize.Xs))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("上下文来源", style = MaterialTheme.typography.labelMedium)
                     }
@@ -263,12 +329,18 @@ internal fun AssistantMessageBlock(
                     )
                 } else if (!readOnly) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        IconButton(onClick = onTogglePinned, enabled = canTogglePinned, modifier = Modifier.size(48.dp)) {
+                        McaIconButton(
+                            contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
+                            onClick = onTogglePinned,
+                            enabled = canTogglePinned,
+                            hapticsEnabled = false,
+                            size = 48.dp,
+                            glyphSize = McaIconSize.Xs,
+                            tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant,
+                        ) {
                             Icon(
-                                if (message.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                                contentDescription = if (message.pinned) "取消固定上下文" else "固定到上下文",
-                                modifier = Modifier.size(16.dp),
-                                tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
+                                if (message.pinned) McaIcons.PushPin else McaIcons.PinUnselected,
+                                contentDescription = null,
                             )
                         }
                     }

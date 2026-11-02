@@ -13,7 +13,6 @@ import com.muyuchat.core.tuning.PerformanceMode
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentTuningJobState
-import com.muyuchat.mca.composition.McaAppContainer
 import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,8 +27,8 @@ import org.json.JSONObject
  * 集中管理 Local API 控制平面装配、调优任务流转、独占生命周期冲突校验与幂等执行。
  */
 internal class LocalApiControlPlaneCoordinator(
-    private val container: McaAppContainer,
-    private val store: UiStateStore,
+    private val runtimeAdmission: RuntimeAdmissionState,
+    private val store: UiStateWriter<RuntimeProfileFields>,
     private val engine: McaInferenceService,
     private val tuningOwner: TuningOwner,
     private val runtimeProfileStore: ModelRuntimeProfileStore,
@@ -46,7 +45,13 @@ internal class LocalApiControlPlaneCoordinator(
     private val scope: CoroutineScope
 ) {
     val localApiPayloadPort: LocalApiPayloadPort =
-        container.createLocalApiPayloadPort(store, engine, tuningOwner)
+        LocalApiPayloadPortAdapter(
+            store = store,
+            engineRef = engine,
+            runtimeProfileStoreRef = runtimeProfileStore,
+            tuningRef = tuningOwner,
+            admissionRef = runtimeAdmission
+        )
 
     fun localApiModelMatches(
         requestedModel: String,
@@ -227,8 +232,10 @@ internal class LocalApiControlPlaneCoordinator(
     }
 
     val localApiTuningControlPort: LocalApiTuningControlPort =
-        container.createLocalApiTuningControlPort(
+        LocalApiTuningControlPortAdapter(
+            runtimeAdmission = runtimeAdmission,
             store = store,
+            runtimeProfileStore = runtimeProfileStore,
             tuningOwner = tuningOwner,
             localApiModelMatchesRef = ::localApiModelMatches,
             localApiPerformancePreferenceRef = ::localApiPerformancePreference,
@@ -266,7 +273,7 @@ internal class LocalApiControlPlaneCoordinator(
             }
         )
 
-    fun createControlPlane(): LocalApiControlPlane = container.createLocalApiControlPlane(
+    fun createControlPlane(): LocalApiControlPlane = LocalApiControlPlaneAdapter(
         busyStateProvider = {
             localApiBusyStateFor(store.current, tuningJson = { localApiTuningStateJson(localApiPayloadPort) })
         },

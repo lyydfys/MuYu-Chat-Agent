@@ -3,6 +3,7 @@ package com.muyuchat.feature.chat
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.Immutable
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,6 +17,7 @@ import org.json.JSONObject
  * normalizedImageSamplerForCapabilities 自 ChatUiItemModels.kt 逐字节平移；零改写。
  */
 
+@Immutable
 data class ImageGenerationUiPreset(
     val prompt: String,
     val taskMode: ImageGenerationUiTaskMode? = null,
@@ -55,6 +57,7 @@ internal enum class ImageGenerationPresetField(val label: String) {
     VAE_TILING("VAE 分块")
 }
 
+@Immutable
 data class FileAssetUiItem(
     val id: String,
     val name: String,
@@ -65,6 +68,7 @@ data class FileAssetUiItem(
     val truncated: Boolean
 )
 
+@Immutable
 data class ImageGenerationUiJob(
     val id: String,
     val prompt: String,

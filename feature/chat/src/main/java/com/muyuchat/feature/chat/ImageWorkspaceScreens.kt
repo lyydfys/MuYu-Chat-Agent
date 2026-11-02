@@ -20,7 +20,6 @@ package com.muyuchat.feature.chat
 // The import list is the one from ChatScreen.kt, copied whole rather than trimmed: unused imports
 // are warnings in Kotlin, and copying them keeps the move mechanical instead of making it a
 // judgement call about which of roughly 260 imports each declaration still needs.
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -44,9 +43,44 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** The existing status surfaces the image page may render a message through. */
+internal enum class ImageStatusSurface { GUIDANCE, COMPOSER }
+
+/**
+ * Picks the visible surface for an image-page status message.
+ *
+ * The image page used to render every message through [GuidanceNotice], which returns without
+ * drawing anything when [userNotice] does not recognise the text. Several real admission
+ * rejections from the image owner (an active job, the shared image lease, a structural readiness
+ * failure, a busy local chat turn, a loading Textual Inversion library) are not guidance text, so
+ * a genuine fail-closed rejection looked like a dead generate button. Recognised guidance keeps its
+ * guidance card; everything else uses the same status row the chat composer already renders.
+ */
+internal fun imageStatusSurfaceFor(message: String): ImageStatusSurface =
+    if (userNotice(message) != null) ImageStatusSurface.GUIDANCE else ImageStatusSurface.COMPOSER
+
+@Composable
+private fun ImageStatusFallbackNotice(
+    message: String,
+    onDismiss: () -> Unit
+) {
+    // Same row as the chat composer, so the two surfaces cannot drift. That row clamps to two lines;
+    // the full text stays reachable through accessibility instead of being dropped silently.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .semantics { contentDescription = message }
+    ) {
+        ComposerStatusMessage(message = message, onDismiss = onDismiss)
+    }
+}
 
 @Composable
 internal fun ImagesWorkspaceScreen(
@@ -187,6 +221,7 @@ internal fun ImagesWorkspaceScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val notify = rememberMcaNotify()
     val darkTheme = isSystemInDarkTheme()
     var showGenerationCanvas by rememberSaveable { mutableStateOf(false) }
     var revealParameters by rememberSaveable { mutableStateOf(0) }
@@ -311,11 +346,7 @@ internal fun ImagesWorkspaceScreen(
             } ?: return@activate false
             if (id in selectedTextualInversionIdsForAutocomplete) return@activate true
             if (selectedTextualInversionIdsForAutocomplete.size >= 8) {
-                Toast.makeText(
-                    context,
-                    "单次最多选择 8 个 Textual Inversion",
-                    Toast.LENGTH_SHORT,
-                ).show()
+                notify("单次最多选择 8 个 Textual Inversion")
                 return@activate false
             }
             onToggleTextualInversion(artifact.id)
@@ -547,15 +578,13 @@ internal fun ImagesWorkspaceScreen(
                                         downloadImageAssetToGallery(context, image).isFailure
                                     }
                                 }
-                                Toast.makeText(
-                                    context,
+                                notify(
                                     if (failures == 0) {
                                         "已保存 ${selected.size} 张图片"
                                     } else {
                                         "已保存 ${selected.size - failures} 张，失败 $failures 张"
-                                    },
-                                    Toast.LENGTH_SHORT
-                                ).show()
+                                    }
+                                )
                             } finally {
                                 batchSaving = false
                             }
@@ -571,12 +600,18 @@ internal fun ImagesWorkspaceScreen(
 
         Column(Modifier.align(Alignment.BottomCenter)) {
         (inputError ?: statusMessage)?.let { message ->
-            GuidanceNotice(
-                message = message,
-                onModels = onOpenModels,
-                onEdit = { showGenerationCanvas = false; revealParameters += 1 },
-                onDismiss = { inputError = null; onDismissStatusMessage() }
-            )
+            when (imageStatusSurfaceFor(message)) {
+                ImageStatusSurface.GUIDANCE -> GuidanceNotice(
+                    message = message,
+                    onModels = onOpenModels,
+                    onEdit = { showGenerationCanvas = false; revealParameters += 1 },
+                    onDismiss = { inputError = null; onDismissStatusMessage() }
+                )
+                ImageStatusSurface.COMPOSER -> ImageStatusFallbackNotice(
+                    message = message,
+                    onDismiss = { inputError = null; onDismissStatusMessage() }
+                )
+            }
         }
         ImagePromptBar(
             prompt = prompt,
@@ -595,7 +630,7 @@ internal fun ImagesWorkspaceScreen(
                             onTaskModeChange(ImageGenerationUiTaskMode.IMG2IMG)
                             onPickImageRole("input")
                         } else {
-                            Toast.makeText(context, "当前模型不支持图片输入", Toast.LENGTH_SHORT).show()
+                            notify("当前模型不支持图片输入")
                         }
                     }
                     else -> onPickImageRole("input")

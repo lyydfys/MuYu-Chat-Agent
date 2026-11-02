@@ -48,7 +48,7 @@ internal class LocalApiImageLoraGatewayAdapter(
 }
 
 internal class LocalApiImageGenerationPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<LocalApiImageFields>,
     private val localImageLoraLifecycleLockRef: Any,
     private val localImageTextualInversionLifecycleLockRef: Any,
     private val getActiveLocalApiImageModelIdRef: () -> String?,
@@ -70,7 +70,7 @@ internal class LocalApiImageGenerationPortAdapter(
 
     override val uiState: StateFlow<MainUiState> get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (LocalApiImageFields) -> LocalApiImageFields) {
         store.update(transform)
     }
 

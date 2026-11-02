@@ -1,5 +1,17 @@
 package com.muyuchat.mca.composition
 
+import com.muyuchat.mca.ImageUpscalerCatalogFields
+import com.muyuchat.mca.LocalImageAdapterFields
+import com.muyuchat.mca.RuntimeProfileFields
+import com.muyuchat.mca.UiStateReadPort
+import com.muyuchat.mca.ChatImageApprovalFields
+import com.muyuchat.mca.ConversationSelectionFields
+import com.muyuchat.mca.ImageTranslationFields
+import com.muyuchat.mca.ImageAssetDeletionFields
+import com.muyuchat.mca.ImageUpscaleFields
+import com.muyuchat.mca.ImageAssetCreationFields
+import com.muyuchat.mca.UiStateWriter
+import com.muyuchat.mca.OfflineTranslationFields
 import android.app.Application
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.ChatAppearanceCoordinator
@@ -283,7 +295,7 @@ internal class McaAppContainer(internal val application: Application) {
         createTuningOwnerImpl(store, scope, engine)
 
     /** R3/C3-S1：三个小端口的具名适配器工厂（真实依赖注入）。 */
-    fun createLocalImageAdapterPort(store: UiStateStore): LocalImageAdapterPort =
+    fun createLocalImageAdapterPort(store: UiStateWriter<LocalImageAdapterFields>): LocalImageAdapterPort =
         createLocalImageAdapterPortImpl(store)
 
     fun createWebSearchWorkflowCoordinator(
@@ -297,7 +309,7 @@ internal class McaAppContainer(internal val application: Application) {
         createVisionAttachmentPortImpl(store, engine)
 
     /** R3/C3-S2：Local API payload 端口的具名适配器工厂。 */
-    fun createLocalApiPayloadPort(store: UiStateStore, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
+    fun createLocalApiPayloadPort(store: UiStateReadPort, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
         createLocalApiPayloadPortImpl(store, engine, tuningOwner)
 
     /** R3/C3-S3：token 测量 host 的具名适配器工厂。 */
@@ -318,51 +330,54 @@ internal class McaAppContainer(internal val application: Application) {
     lateinit var chatStreamAccumulator: ChatStreamAccumulator
         private set
 
-    fun initializeChatStreamAccumulator(store: UiStateStore, scope: CoroutineScope): ChatStreamAccumulator =
-        ChatStreamAccumulator(
+    fun initializeChatStreamAccumulator(store: UiStateStore, scope: CoroutineScope): ChatStreamAccumulator {
+        val streamWriter = store.chatStreamWriter()
+        return ChatStreamAccumulator(
             scope = scope,
             currentRunId = { chatRuns.currentRunId() },
             activeSessionId = { store.current.activeChatSessionId },
             hasAssistantMessage = { store.current.messages.any { it.role == Role.ASSISTANT } },
             commit = { batch, isStillCurrent ->
-            // 在进入 CAS reducer 之前取一次时间：reducer 可能因竞争重试，
-            // 但同一次 commit 必须使用同一个 occurredAt（硬锁 §6 纯 reducer）。
-            val occurredAt = System.currentTimeMillis()
-            store.update { state ->
-                if (!isStillCurrent()) {
-                    state
-                } else {
-                    val updated = state.messages.toMutableList()
-                    val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-                    if (index >= 0) {
-                        val current = updated[index]
-                        updated[index] = current.copy(
-                            content = current.content + batch.content,
-                            reasoningContent = current.reasoningContent + batch.reasoning,
-                            reasoningDurationMs = maxOf(
-                                current.reasoningDurationMs,
-                                batch.reasoningDurationMs
+                // 在进入 CAS reducer 之前取一次时间：reducer 可能因竞争重试，
+                // 但同一次 commit 必须使用同一个 occurredAt（硬锁 §6 纯 reducer）。
+                val occurredAt = System.currentTimeMillis()
+                val fallbackSessionId = UUID.randomUUID().toString()
+                streamWriter.update { snapshot, state ->
+                    if (!isStillCurrent()) {
+                        state
+                    } else {
+                        val updated = state.messages.toMutableList()
+                        val index = updated.indexOfLast { it.role == Role.ASSISTANT }
+                        if (index >= 0) {
+                            val current = updated[index]
+                            updated[index] = current.copy(
+                                content = current.content + batch.content,
+                                reasoningContent = current.reasoningContent + batch.reasoning,
+                                reasoningDurationMs = maxOf(
+                                    current.reasoningDurationMs,
+                                    batch.reasoningDurationMs
+                                )
+                            )
+                        }
+                        val sessionId = state.activeChatSessionId ?: fallbackSessionId
+                        state.copy(
+                            messages = updated,
+                            activeChatSessionId = sessionId,
+                            chatSessions = state.chatSessions.upsertSessionFor(
+                                state = snapshot,
+                                sessionId = sessionId,
+                                messages = updated,
+                                assistantId = snapshot.selectedAssistantId,
+                                modelMode = snapshot.selectedChatBackend.bindingValue(),
+                                modelId = snapshot.currentChatModelId(),
+                                occurredAt = occurredAt
                             )
                         )
                     }
-                    val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-                    state.copy(
-                        messages = updated,
-                        activeChatSessionId = sessionId,
-                        chatSessions = state.chatSessions.upsertSessionFor(
-                            state = state,
-                            sessionId = sessionId,
-                            messages = updated,
-                            assistantId = state.selectedAssistantId,
-                            modelMode = state.selectedChatBackend.bindingValue(),
-                            modelId = state.currentChatModelId(),
-                            occurredAt = occurredAt
-                        )
-                    )
                 }
             }
-            }
         ).also { chatStreamAccumulator = it }
+    }
 
     /** R3/C3-S5：terminalSettlement 端口具名适配器工厂。 */
     fun createChatTerminalSettlementPort(store: UiStateStore): ChatTerminalSettlementPort =
@@ -386,22 +401,25 @@ internal class McaAppContainer(internal val application: Application) {
 
     /** R3/C3-S15：资产生成/放大端口工厂（owner 与 S13 对账 owner 均真实对象注入）。 */
     fun createImageAssetCreationPort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageAssetCreationFields>,
         application: Application,
         imageGenerationOwner: ImageGenerationOwner
     ): ImageAssetCreationPort =
         createImageAssetCreationPortImpl(store, application, imageGenerationOwner)
 
     fun createImageUpscalePort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageUpscaleFields>,
         application: Application,
         assetCreationPort: ImageAssetCreationPort,
-        startupReconciliation: ImageLibraryStartupReconciliation
+        startupReconciliation: ImageLibraryStartupReconciliation,
+        setDeferGenerationImageGrantRelease: (Boolean) -> Unit
     ): ImageUpscalePort =
-        createImageUpscalePortImpl(store, application, assetCreationPort, startupReconciliation)
+        createImageUpscalePortImpl(
+            store, application, assetCreationPort, startupReconciliation, setDeferGenerationImageGrantRelease
+        )
 
     fun createImageAssetDeletionPort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageAssetDeletionFields>,
         scope: CoroutineScope,
         imageUpscaleOwner: ImageUpscaleOwner,
         startupReconciliation: ImageLibraryStartupReconciliation
@@ -410,10 +428,11 @@ internal class McaAppContainer(internal val application: Application) {
 
     /** R3/C3-S27/S31：图片提示词翻译端口工厂（verifiedBundle 直调 operations，删除过渡 lambda）。 */
     fun createImagePromptTranslationPort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageTranslationFields>,
+        offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPort =
-        createImagePromptTranslationPortImpl(store, serviceProvider)
+        createImagePromptTranslationPortImpl(store, offlineTranslationStore, serviceProvider)
 
     /** R3/C2-S3：生图准入/执行唯一 owner 工厂（装配具名 ImageGenerationHostAdapter，真实依赖注入）。 */
     fun createImageGenerationOwner(
@@ -430,21 +449,22 @@ internal class McaAppContainer(internal val application: Application) {
 
     /** R3-S32：图片放大模型目录端口工厂（store / preferences / ownerLockProvider 真实依赖注入）。 */
     fun createLocalImageUpscalerPort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageUpscalerCatalogFields>,
         imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
     ): LocalImageUpscalerPort =
         createLocalImageUpscalerPortImpl(store, imageUpscaleOwnerProvider)
 
     /** R3-S33：提示词翻译预览端口工厂（直调 operations，service 延迟注入）。 */
     fun createImagePromptTranslationPreviewPort(
-        store: UiStateStore,
+        store: UiStateWriter<ImageTranslationFields>,
+        offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPreviewPort =
-        createImagePromptTranslationPreviewPortImpl(store, serviceProvider)
+        createImagePromptTranslationPreviewPortImpl(store, offlineTranslationStore, serviceProvider)
 
     /** R3-S34：助手生图工具轮次端口工厂（真实依赖注入，聊天操作由 lambda 委托）。 */
     fun createAssistantImageToolTurnPort(
-        store: UiStateStore,
+        store: UiStateReadPort,
         chatImageNegativePromptSupported: (MainUiState) -> Boolean,
         prepareAssistantImagePrompt: suspend (
             prompt: String,
@@ -468,7 +488,7 @@ internal class McaAppContainer(internal val application: Application) {
 
     /** R3-S35：聊天生图审批端口工厂（A 族第 4 端口）。 */
     fun createChatImageRequestApprovalPort(
-        store: UiStateStore,
+        store: UiStateWriter<ChatImageApprovalFields>,
         imageGenerationOwnerProvider: () -> ImageGenerationOwner,
         chatImageRequestPortProvider: () -> ChatImageRequestPort,
         buildChatImageRetrySnapshot: (ChatGeneratedImageRequest, String) -> ImageGenerationJobSpec?,
@@ -482,7 +502,7 @@ internal class McaAppContainer(internal val application: Application) {
 
     /** R3-S39：选择聊天会话端口工厂（B 族第 4 端口）。 */
     fun createSelectChatSessionPort(
-        store: UiStateStore,
+        store: UiStateWriter<ConversationSelectionFields>,
         rejectWhileConversationMutationInProgress: () -> Boolean,
         hasActiveAssistantImageExecution: (String?) -> Boolean,
         invalidatePendingChatImagePreparation: () -> Unit,
@@ -495,7 +515,7 @@ internal class McaAppContainer(internal val application: Application) {
         createSelectChatSessionPortImpl(store, rejectWhileConversationMutationInProgress, hasActiveAssistantImageExecution, invalidatePendingChatImagePreparation, cancelActiveWebSearch, bumpContentImportSelectionRevision, loadModelGenerationParams, markLocalConversationContextInvalid, continueAssistantImageTurn)
 
     fun createLocalApiTuningControlPort(
-        store: UiStateStore,
+        store: UiStateWriter<RuntimeProfileFields>,
         tuningOwner: TuningOwner,
         localApiModelMatchesRef: (String, MainUiState, ModelManifest) -> Boolean,
         localApiPerformancePreferenceRef: (String?) -> UserPreference?,
@@ -584,8 +604,14 @@ internal class McaAppContainer(internal val application: Application) {
     ): McaInferenceService =
         createInferenceServiceImpl(runners, installationScopeId)
 
-    fun createLocalApiRuntimeOwner(): LocalApiRuntimeOwner =
+    /**
+     * Process-scoped Local API publisher. A recreated page re-claims this same token instead of
+     * clearing the global bindings, so a configuration change cannot take the API down. Only the
+     * process root releases it.
+     */
+    val localApiRuntimeOwner: LocalApiRuntimeOwner by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         createLocalApiRuntimeOwnerImpl()
+    }
 
     fun createChatAppearanceCoordinator(
         scope: CoroutineScope,
@@ -607,15 +633,10 @@ internal class McaAppContainer(internal val application: Application) {
         imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
         chatImageRetryPort: ChatImageRetryPort,
         showStatus: (String?) -> Unit,
-        tryAcquireObservedImageGenerationLease: (String) -> LocalImageGenerationCoordinator.Lease?,
-        releaseObservedImageGenerationLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
         offlinePromptTranslationService: () -> OfflinePromptTranslationService,
         runtimeProfileStore: ModelRuntimeProfileStore,
         engine: McaInferenceService,
-        selectCloudImageModel: (String) -> Unit,
-        registerLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Unit,
-        unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
-        cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
+        selectCloudImageModel: (String) -> Unit
     ): ChatImageWorkflowCoordinator =
         createChatImageWorkflowCoordinatorImpl(
             scope,
@@ -628,15 +649,10 @@ internal class McaAppContainer(internal val application: Application) {
             imageLibraryStartupReconciliation,
             chatImageRetryPort,
             showStatus,
-            tryAcquireObservedImageGenerationLease,
-            releaseObservedImageGenerationLease,
             offlinePromptTranslationService,
             runtimeProfileStore,
             engine,
             selectCloudImageModel,
-            registerLocalApiImageGenerationOwnership,
-            unregisterLocalApiImageGenerationOwnership,
-            cancelOwnedLocalApiImageWorker,
         )
 
     fun createChatWorkflowCoordinator(

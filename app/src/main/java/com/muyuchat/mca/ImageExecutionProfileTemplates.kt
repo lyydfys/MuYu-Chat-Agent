@@ -91,5 +91,6 @@ internal fun profileTemplate(
     "sdcpp.qwen-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.QWEN_IMAGE, ImageModelVariant.QWEN_IMAGE, 40, 2.5, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT, maxPromptTokens = 512)
     "sdcpp.qwen-image-2.1" -> qwenImage21GgufProfile(profileId, fingerprint)
     "sdcpp.longcat-image" -> sdcppProfile(profileId, fingerprint, LocalImageModelFamily.LONGCAT_IMAGE, ImageModelVariant.LONGCAT_IMAGE, 20, 5.0, ImageSchedulerAlgorithm.FLOW_MATCH, 1024, RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT, maxPromptTokens = 512)
+    "sdcpp.anima-preview" -> animaCatalogProfile(profileId, fingerprint)
     else -> error("Unknown built-in image profile target: $profileId")
 }

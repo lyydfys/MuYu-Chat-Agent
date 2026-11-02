@@ -11,7 +11,7 @@ import kotlinx.coroutines.launch
 
 internal class CacheManagementCoordinator(
     private val application: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<CacheSettingsFields>,
     private val scope: CoroutineScope,
     private val engine: McaInferenceService,
     private val chatRuns: ChatRunOwnership,

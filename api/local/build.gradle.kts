@@ -23,7 +23,12 @@ android {
 
 dependencies {
     implementation(project(":core:inference-contract"))
+    // Pure contract module only: the video route validates engine/geometry against the same
+    // frozen definitions the workflow compiler uses. No Android or runtime implementation leaks
+    // into :api:local.
+    implementation(project(":core:video-contract"))
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation(project(":core:video-contract"))
 }

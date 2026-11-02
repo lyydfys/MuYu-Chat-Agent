@@ -24,7 +24,9 @@ import java.util.concurrent.atomic.AtomicLong
 // visibility widened. The private members inside the class -- ActiveOwner, the lock, the
 // counters -- move with it and stay private.
 //
-// No field, phase, branch or epoch rule was edited.
+// P03 later added the exact local attempt identity (ChatAttemptIdentity) to the existing active
+// owner, captured atomically by cancellation. Every original field, phase, branch and epoch rule
+// is unchanged.
 
 internal enum class UiGenerationRuntimePhase {
     PENDING,
@@ -38,11 +40,38 @@ internal data class UiGenerationReservation(
     val supersededOwner: Any?
 )
 
+/**
+ * Frozen identity of the one local engine request a UI chat run dispatched.
+ *
+ * The UI request id already encodes the monotonic run id (`ui-<runId>-<uuid>`): the run id never
+ * repeats for the lifetime of the process and the UUID makes accidental reuse impossible, so this
+ * value can target exactly one attempt without ever consulting "the token that is current" later.
+ * The init check is the identity verification: an attempt can only ever be attributed to the run
+ * named in its own id.
+ */
+internal data class ChatAttemptIdentity(
+    val runId: Long,
+    val requestId: String
+) {
+    init {
+        require(runId > 0L) { "A chat attempt must belong to a real generation run." }
+        require(requestId.startsWith("ui-$runId-")) {
+            "A chat attempt id must name its own generation run."
+        }
+    }
+}
+
 internal data class UiGenerationCancellation(
     val owner: Any?,
     val pendingCancelled: Boolean,
     val stopLocalRuntime: Boolean,
-    val invalidatedRunId: Long
+    val invalidatedRunId: Long,
+    /**
+     * The exact local engine request registered by the cancelled run, captured atomically under the
+     * ownership lock. Null means the run never dispatched a local attempt (cloud, not yet started, or
+     * already idle), so a stop must not target the engine at all -- never read a current token here.
+     */
+    val localAttempt: ChatAttemptIdentity? = null
 ) {
     val cancelled: Boolean
         get() = owner != null || pendingCancelled
@@ -59,7 +88,8 @@ internal class UiGenerationOwnership(
     private data class ActiveOwner(
         val runId: Long,
         val owner: Any,
-        var phase: UiGenerationRuntimePhase
+        var phase: UiGenerationRuntimePhase,
+        var localAttempt: ChatAttemptIdentity? = null
     )
 
     private val lock = Any()
@@ -106,6 +136,32 @@ internal class UiGenerationOwnership(
         true
     }
 
+    /**
+     * Registers the exact local engine request of [runId], once.
+     *
+     * A run dispatches at most one local attempt. Re-registering the same identity is accepted so a
+     * resume/replay path stays idempotent; a different id for the same run, a stale run or another
+     * owner's run is refused. The registration is what a later cancel freezes, so it must happen
+     * before the engine can be dispatched and before any phase transition that permits a stop.
+     */
+    fun markLocalAttempt(
+        runId: Long,
+        owner: Any,
+        attempt: ChatAttemptIdentity
+    ): Boolean = synchronized(lock) {
+        if (attempt.runId != runId) return@synchronized false
+        val active = activeOwner
+        if (active?.runId != runId || active.owner !== owner || sequence.get() != runId) {
+            return@synchronized false
+        }
+        val existing = active.localAttempt
+        if (existing == null) {
+            active.localAttempt = attempt
+            return@synchronized true
+        }
+        existing == attempt
+    }
+
     fun finish(runId: Long, owner: Any) = synchronized(lock) {
         val active = activeOwner
         if (active?.runId == runId && active.owner === owner) {
@@ -132,7 +188,8 @@ internal class UiGenerationOwnership(
             owner = active?.owner,
             pendingCancelled = pendingCancelled,
             stopLocalRuntime = active?.phase == UiGenerationRuntimePhase.LOCAL_ACTIVE,
-            invalidatedRunId = invalidatedRunId
+            invalidatedRunId = invalidatedRunId,
+            localAttempt = active?.localAttempt
         )
     }
 

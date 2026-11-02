@@ -1,0 +1,12 @@
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -2344,5 +2344,9 @@
+ 
+             sd::Tensor<float> cached_output;
+             if (step_cache.before_condition(&condition, noised_input, &cached_output)) {
++                // A cached step skips the denoiser, so without this report the caller only ever sees
++                // the schedule endpoints instead of one event per step. `steps` is already the
++                // requested step count (sigmas.size() - 1); adding one breaks the caller's check.
++                report_sample_progress(step, steps, terminal_sigma_is_zero, &last_progress_us);
+                 return std::move(cached_output);
+             }

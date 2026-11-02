@@ -13,10 +13,13 @@ import androidx.core.content.ContextCompat
 import com.muyuchat.core.engine.LocalChatSessionRecoveryPolicy
 import com.muyuchat.core.engine.LocalChatRuntime
 import com.muyuchat.core.engine.LocalChatRunner
+import com.muyuchat.core.engine.NativeGenerationActivity
+import com.muyuchat.core.engine.NativeQuiescenceProbe
 import com.muyuchat.core.engine.PersistentPrefixCacheRequest
 import com.muyuchat.core.engine.TokenProgress
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONObject
 
@@ -31,10 +34,11 @@ internal class RemoteLocalChatRunner(
     private val journalScope: String? = null,
     /** Disposable workers may retain Binder death evidence until native process exit is confirmed. */
     internal val retainWorkerDeathObserver: Boolean = false
-) : LocalChatRunner, AutoCloseable {
+) : LocalChatRunner, NativeQuiescenceProbe, AutoCloseable {
     internal val appContext = context.applicationContext
     internal val stageJournal = LocalChatWorkerStageJournal.forContext(appContext, journalScope)
     internal val stateLock = Any()
+    internal val activityState = LocalChatWorkerActivityState()
     internal var activeBinding: BindingAttempt? = null
     internal var connection: ServiceConnection? = null
     internal var bound = false
@@ -122,7 +126,11 @@ internal class RemoteLocalChatRunner(
     }
 
     override fun unloadModel() {
-        invoke { service -> service.unloadModel(); Unit }
+        try {
+            invoke { service -> service.unloadModel(); Unit }
+        } finally {
+            activityState.generationFinished()
+        }
         synchronized(stateLock) {
             workerSessionEpoch += 1L
             modelLoadedInWorker = false
@@ -150,7 +158,7 @@ internal class RemoteLocalChatRunner(
             ) { descriptor ->
                 service.beginCompletion(descriptor)
             }
-        }
+        }.also(activityState::beginResult)
 
     override fun beginCompletionWithPrefixCache(
         messagesJson: String,
@@ -171,7 +179,7 @@ internal class RemoteLocalChatRunner(
             ) { descriptor ->
                 service.beginCompletionWithPrefixCache(descriptor)
             }
-        }
+        }.also(activityState::beginResult)
     }
 
     override fun prefillProgress(): TokenProgress? {
@@ -203,16 +211,27 @@ internal class RemoteLocalChatRunner(
     }
 
     override fun generateNextChunk(): String? =
-        invoke { service -> service.generateNextChunk() }
+        invoke { service -> service.generateNextChunk() }.also(activityState::chunkResult)
 
     override fun invalidateConversationContext() {
         invoke { service -> service.invalidateConversationContext(); Unit }
     }
 
     override fun requestStop() {
-        val service = remoteIfBound() ?: return
+        val service = remoteIfBound()
+        if (service == null) {
+            Log.i(LOCAL_CHAT_LOG_TAG, "stop dispatch skipped: the isolated worker is not bound")
+            return
+        }
         try {
             service.requestStop()
+            // One-way: this only proves the stop transaction was accepted by Binder. The worker
+            // emits request -> observed -> idle latency lines under McaLocalChatWorker.
+            Log.i(
+                LOCAL_CHAT_LOG_TAG,
+                "stop dispatched to isolated worker runtime=${runtime.name} " +
+                    "hasEndpoint=${service.asBinder().isBinderAlive}"
+            )
         } catch (error: DeadObjectException) {
             handleRemoteFailure(service, disconnectedFailure("crashed or was reclaimed", error))
         } catch (error: RemoteException) {
@@ -235,6 +254,22 @@ internal class RemoteLocalChatRunner(
 
     override fun isSessionKnownLost(): Boolean = synchronized(stateLock) {
         workerSessionLost || (modelLoadedInWorker && remote == null)
+    }
+
+    /**
+     * Main-process, non-blocking native-activity evidence for the engine's stop settlement.
+     *
+     * The isolated worker owns the native call; this proxy only knows which blocking Binder call
+     * it currently has in flight and whether the last native terminal chunk already arrived. That
+     * is exactly the process-local evidence [NativeQuiescenceProbe] asks for: it never queries the
+     * worker and therefore can never re-create the Binder stall a stop is meant to break. A lost or
+     * closed session is UNKNOWN, never IDLE.
+     */
+    override fun nativeGenerationActivity(): NativeGenerationActivity = synchronized(stateLock) {
+        activityState.activity(
+            closed = closed,
+            sessionLost = workerSessionLost || (modelLoadedInWorker && remote == null)
+        )
     }
 
     override fun canReleasePreparedInputs(): Boolean {
@@ -337,6 +372,7 @@ internal class RemoteLocalChatRunner(
                 handleRemoteFailure(endpoint, disconnectedFailure("disconnected during shutdown", error))
             }
         }
+        activityState.generationFinished()
         detach()
     }
 
@@ -380,13 +416,15 @@ internal class RemoteLocalChatRunner(
             currentAttempt
         }
         attempt?.connected?.countDown()
+        activityState.generationFinished()
         attempt?.let { releaseBinding(it, preserveWorkerDeathObservation) }
     }
 
     private fun <T> invoke(block: (ILocalChatWorker) -> T): T {
         val service = ensureConnected()
-        return try {
-            block(service)
+        activityState.callStarted()
+        try {
+            return block(service)
         } catch (error: DeadObjectException) {
             val failure = disconnectedFailure("crashed or was reclaimed", error)
             handleRemoteFailure(service, failure)
@@ -402,6 +440,8 @@ internal class RemoteLocalChatRunner(
             val failure = workerFailure("lost its loaded model state.", error)
             handleRemoteFailure(service, failure)
             throw failure
+        } finally {
+            activityState.callFinished()
         }
     }
 
@@ -435,5 +475,49 @@ internal class RemoteLocalChatRunner(
         private const val REMOTE_LOG_TAG = "McaRemoteLocalChat"
         private const val MAX_STATS_READ_ATTEMPTS = 2
         private const val NO_MODEL_LOADED_MESSAGE = "No local text model is loaded"
+    }
+}
+
+/**
+ * Process-local native-activity evidence for [RemoteLocalChatRunner].
+ *
+ * It never queries the worker: it only counts blocking Binder calls this proxy currently has in
+ * flight and mirrors the last real begin/terminal-chunk result. That makes it a valid
+ * [NativeQuiescenceProbe] implementation while staying completely non-blocking, which matters when
+ * the worker's own Binder thread is stuck in prefill.
+ */
+internal class LocalChatWorkerActivityState {
+    private val callsInFlight = AtomicInteger(0)
+
+    @Volatile
+    private var generationActive = false
+
+    fun callStarted() {
+        callsInFlight.incrementAndGet()
+    }
+
+    fun callFinished() {
+        callsInFlight.decrementAndGet()
+    }
+
+    /** A successful native begin means a native generation now owns the worker. */
+    fun beginResult(returnCode: Int) {
+        generationActive = returnCode == 0
+    }
+
+    /** Only the native terminal `null` chunk proves the generation ended. */
+    fun chunkResult(chunk: String?) {
+        generationActive = chunk != null
+    }
+
+    fun generationFinished() {
+        generationActive = false
+    }
+
+    fun activity(closed: Boolean, sessionLost: Boolean): NativeGenerationActivity = when {
+        closed || sessionLost -> NativeGenerationActivity.UNKNOWN
+        callsInFlight.get() > 0 -> NativeGenerationActivity.ACTIVE
+        generationActive -> NativeGenerationActivity.ACTIVE
+        else -> NativeGenerationActivity.IDLE
     }
 }

@@ -65,6 +65,10 @@ internal fun downloadedImageBundleManifestJson(
                 .put("sourcePath", remote.path)
                 .put("provider", remote.provider.name)
                 .put("required", role != ImageEngineBundleComponentRole.OPTIONAL)
+                .also { component ->
+                    remote.sizeBytes?.let { component.put("expectedSizeBytes", it) }
+                    remote.sha256?.let { component.put("sha256", it) }
+                }
         )
     }
     val manifest = JSONObject()
@@ -91,6 +95,9 @@ internal fun downloadedImageBundleManifestJson(
                 .put("expectedOutputMime", bundle.smokeSpec.expectedOutputMime)
         )
         .put("components", components)
+    bundle.mediatekAnimaManifestPath?.let { path ->
+        manifest.put("mediatekAnimaManifestPath", path.replace('\\', '/'))
+    }
     // Runtime requirements participate in the observed manifest contract. They
     // must be present before binding the execution profile to that contract.
     bundle.requiredRuntimeProfile?.let { profile ->
@@ -297,6 +304,8 @@ internal fun expandedImageBundleManifestTargets(
                 canonical == primaryFile -> archiveRemote.copy(
                     path = "${archiveRemote.path}!/$relative",
                     name = canonical.name,
+                    sizeBytes = canonical.length(),
+                    sha256 = canonical.sha256ForProfile(),
                     bundleRole = ImageEngineBundleComponentRole.DIFFUSION,
                     relativePath = relative
                 )
@@ -304,7 +313,7 @@ internal fun expandedImageBundleManifestTargets(
                     path = "${archiveRemote.path}!/$relative",
                     name = canonical.name,
                     sizeBytes = canonical.length(),
-                    sha256 = null,
+                    sha256 = canonical.sha256ForProfile(),
                     bundleRole = ImageEngineBundleComponentRole.CONFIG,
                     relativePath = relative
                 )
@@ -450,6 +459,7 @@ internal fun ChatModelRuntime.toLocalChatRuntime(): LocalChatRuntime =
     when (this) {
         ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
         ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
+        ChatModelRuntime.GENIEX_LLAMA_CPP -> LocalChatRuntime.GENIEX_LLAMA_CPP
         ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
         ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
     }
@@ -459,6 +469,7 @@ internal fun ImageEngineBundleRuntime.toLocalImageRuntime(): LocalImageRuntime =
         ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP -> LocalImageRuntime.STABLE_DIFFUSION_CPP
         ImageEngineBundleRuntime.MNN_DIFFUSION -> LocalImageRuntime.MNN_DIFFUSION
         ImageEngineBundleRuntime.QNN_HTP -> LocalImageRuntime.QNN_HTP
+        ImageEngineBundleRuntime.MEDIATEK_NEURON -> LocalImageRuntime.MEDIATEK_NEURON
     }
 
 internal fun String.toFilePreview(): String =

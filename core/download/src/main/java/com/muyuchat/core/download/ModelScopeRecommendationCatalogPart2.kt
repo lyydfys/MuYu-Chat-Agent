@@ -2,6 +2,25 @@ package com.muyuchat.core.download
 
 internal val RECOMMENDED_MODELS_PART_2 = listOf(
     ModelScopeRecommendedModel(
+        id = "ling30_tiny_qnn",
+        title = "Ling-3.0-tiny 低拒答 · GenieX QNN",
+        repoId = "SC117/Ling-3.0-tiny-abliterated-APEX-GGUF",
+        revision = "151f49525bc3fe7e1a5f28d37d3de37c40135dd6",
+        description = "7.9B 总参 / 1.3B 激活的 Ling-3.0-tiny MoE，Q4_K 约 3.98GB。GenieX llama.cpp 的 HTP0/HYBRID QNN 路径，适合长上下文角色扮演；建议 HTP V79+（骁龙 8 Elite 级），未匹配设备仍可下载，QNN 加载失败时请使用 CPU/GGUF。",
+        recommendedFileName = "Ling-3.0-tiny-abliterated-APEX-I-Compact.gguf",
+        parameterScale = "7.9B-A1.3B",
+        quant = "Q4_K",
+        minRamGb = 12,
+        tags = listOf("Ling 3.0", "MoE", "QNN", "GenieX HTP", "低拒答", "角色扮演", "7.9B-A1.3B"),
+        priority = 1,
+        status = RecommendedModelStatus.EXPERIMENTAL,
+        group = ModelScopeRecommendedGroup.QUALITY_CHAT,
+        provider = ModelRepositoryProvider.HUGGING_FACE,
+        downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+        chatRuntime = RecommendedChatRuntime.GENIEX_LLAMA_CPP,
+        computeBackend = RecommendedComputeBackend.NPU
+    ),
+    ModelScopeRecommendedModel(
         id = "gemma4_e4b_iq4",
         title = "Gemma 4 E4B IT MNN",
         repoId = "MNN/gemma-4-E4B-it-MNN",

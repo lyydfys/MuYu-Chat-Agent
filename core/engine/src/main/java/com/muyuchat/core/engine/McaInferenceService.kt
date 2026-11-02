@@ -1,4 +1,4 @@
-﻿package com.muyuchat.core.engine
+package com.muyuchat.core.engine
 
 import android.content.Context
 import com.muyuchat.core.modelstore.QairtExecutionAdmission
@@ -48,6 +48,18 @@ class McaInferenceService(
     internal var activeGenerationStopTarget: ActiveGenerationStopTarget? = null
     /** Prevents duplicate stop calls while the original request is still unwinding. */
     internal var stopRequestedToken: GenerationStopToken? = null
+    /**
+     * Monotonic native-lifecycle incarnation. Bumped on every load/unload/shutdown transition so a
+     * quiescence proof taken before a reload can never be applied to the replacement worker.
+     */
+    @Volatile
+    internal var loadIncarnation = 0L
+    /**
+     * Bounded engine-owned execution records keyed by request id. The record survives the
+     * request-scoped stop token so a proof can still be answered after the token is cleared.
+     * Guarded by [generationStopGate].
+     */
+    internal val requestExecutionRecords = LinkedHashMap<String, RequestExecutionRecord>()
     internal val telemetry = TelemetryLogger(context.applicationContext)
     internal val socInfo = SocDetector.detect()
     internal val appContext = context.applicationContext
@@ -207,6 +219,36 @@ class McaInferenceService(
         stopGenerationImpl()
     }
     fun activeGenerationStopToken(): GenerationStopToken? = activeGenerationStopTokenImpl()
+
+    /**
+     * Non-blocking typed answer to "is this exact engine request proven quiescent?".
+     *
+     * A missing stop token is not proof: the answer is based on the retained execution record plus
+     * the runner's real native activity probe. Callers must not release a resource lease for
+     * anything other than [EngineStopSettlement.Released] or [EngineStopSettlement.NotDispatched].
+     */
+    fun stopSettlementSnapshot(requestId: String): EngineStopSettlement =
+        stopSettlementSnapshotImpl(requestId, expectedEpoch = null)
+
+    /** Identity-checked snapshot: a record from another request epoch is never a proof. */
+    fun stopSettlementSnapshot(token: GenerationStopToken): EngineStopSettlement =
+        stopSettlementSnapshotImpl(token.requestId, expectedEpoch = token.epoch)
+
+    /**
+     * Bounded wait for real quiescence of the exact request. Never takes the lifecycle mutex and
+     * never dispatches or repeats a stop. A model/network call that never returns ends as
+     * [EngineStopSettlement.TimedOut], which keeps the caller's resource fence.
+     */
+    suspend fun awaitStopSettlement(
+        requestId: String,
+        timeoutMillis: Long = DEFAULT_STOP_SETTLEMENT_TIMEOUT_MILLIS
+    ): EngineStopSettlement = awaitStopSettlementImpl(requestId, expectedEpoch = null, timeoutMillis)
+
+    /** Identity-checked bounded wait for the exact captured generation token. */
+    suspend fun awaitStopSettlement(
+        token: GenerationStopToken,
+        timeoutMillis: Long = DEFAULT_STOP_SETTLEMENT_TIMEOUT_MILLIS
+    ): EngineStopSettlement = awaitStopSettlementImpl(token.requestId, token.epoch, timeoutMillis)
     suspend fun stopGenerationIfActive(
         expected: GenerationStopToken? = activeGenerationStopToken()
     ): Boolean = stopGenerationIfActiveImpl(expected)
@@ -249,7 +291,10 @@ class McaInferenceService(
         collectorJob: Job?
     ): GenerationStopToken = activateGenerationStopTargetImpl(requestId, runner, collectorJob)
     private fun clearGenerationStopTarget(token: GenerationStopToken) = clearGenerationStopTargetImpl(token)
-    private companion object {
+    companion object {
+        /** Default bound for [awaitStopSettlement]; callers may pass a shorter explicit bound. */
+        const val DEFAULT_STOP_SETTLEMENT_TIMEOUT_MILLIS = 5_000L
+
         private const val REASONING_INSTRUCTION_ESTIMATE_TOKENS = 96
     }
 }

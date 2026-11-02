@@ -9,8 +9,6 @@ import com.muyuchat.core.engine.ChatToolCall
 import com.muyuchat.core.engine.ChatToolExchange
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.Role
-import com.muyuchat.mca.composition.McaAppContainer
-import com.muyuchat.mca.presentation.withGenerationProgressCleared
 import org.json.JSONObject
 
 /**
@@ -87,7 +85,7 @@ internal fun restorePendingAssistantImageToolTurnFor(
 }
 
 internal fun finishAssistantImageContinuationFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     chatImageRequestPort: ChatImageRequestPort,
     pendingAssistantImageToolTurns: MutableMap<String, PendingAssistantImageToolTurn>,
     requestId: String,
@@ -135,7 +133,7 @@ internal fun resumePendingAssistantImageToolTurnIfReadyFor(
 }
 
 internal fun continueAssistantImageToolTurnFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantImageContinuationFields>,
     admission: RuntimeAdmissionState,
     chatImageRequestPort: ChatImageRequestPort,
     restorePendingTurn: (String, ChatGeneratedImageRequest) -> PendingAssistantImageToolTurn?,
@@ -264,8 +262,12 @@ internal fun continueAssistantImageToolTurnFor(
                 messages = messages,
                 chatSessions = sessions,
                 isGenerating = true,
-                statusMessage = null
-            ).withGenerationProgressCleared()
+                statusMessage = null,
+                generationPhase = null,
+                generationTokenProgress = null,
+                generationPersistProgress = null,
+                generationStats = null
+            )
         }
         persistChatSessions(sessions)
         started = startGeneration(
@@ -300,38 +302,41 @@ internal fun continueAssistantImageToolTurnFor(
 }
 
 internal fun removeChatImageContinuationPlaceholderFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantImageContinuationFields>,
     persistChatSessions: (List<ChatSessionRecord>) -> Unit,
     chatSessionId: String
 ) {
-    var updatedSessions: List<ChatSessionRecord>? = null
-    store.update { state ->
-        if (state.activeChatSessionId != chatSessionId) return@update state
+    val occurredAt = System.currentTimeMillis()
+    val updatedSessions = store.updateWithResult { state ->
+        if (state.activeChatSessionId != chatSessionId) return@updateWithResult state to null
         val last = state.messages.lastOrNull()
         if (last?.role != Role.ASSISTANT || last.content.isNotBlank() ||
             last.generatedImageRequest != null
-        ) return@update state
+        ) return@updateWithResult state to null
         val messages = state.messages.dropLast(1)
-        val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@update state
+        val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@updateWithResult state to null
         val sessions = state.chatSessions.map { session ->
             if (session.id == chatSessionId) {
-                owner.copy(messages = messages, updatedAt = System.currentTimeMillis())
+                owner.copy(messages = messages, updatedAt = occurredAt)
             } else session
         }.sortedForHistory()
-        updatedSessions = sessions
         state.copy(
             messages = messages,
             chatSessions = sessions,
-            isGenerating = false
-        ).withGenerationProgressCleared()
+            isGenerating = false,
+            generationPhase = null,
+            generationTokenProgress = null,
+            generationPersistProgress = null,
+            generationStats = null
+        ) to sessions
     }
     updatedSessions?.let(persistChatSessions)
 }
 
 internal class AssistantImageToolContinuationCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<AssistantImageContinuationFields>,
     private val admission: RuntimeAdmissionState,
-    private val container: McaAppContainer,
+    private val chatImageToolAuthorizationStore: ChatImageToolAuthorizationStore,
     private val cloudChatProvider: OpenAiCompatibleChatProvider,
     private val chatContextComposer: ChatContextComposer,
     private val imageGenerationOwnerProvider: () -> ImageGenerationOwner,
@@ -353,13 +358,33 @@ internal class AssistantImageToolContinuationCoordinator(
         continuationRequestId: String?
     ) -> Boolean
 ) {
+    private val messageStore = store.restrict(
+        project = { fields -> ConversationMessageFields(
+            snapshot = fields.snapshot,
+            messages = fields.messages,
+            chatSessions = fields.chatSessions,
+            statusMessage = fields.statusMessage
+        ) },
+        merge = { fields, messages -> fields.copy(
+            messages = messages.messages,
+            chatSessions = messages.chatSessions,
+            statusMessage = messages.statusMessage
+        ) }
+    )
+    private val approvalStore = store.restrict(
+        project = { fields -> ChatImageApprovalFields(
+            snapshot = fields.snapshot, statusMessage = fields.statusMessage
+        ) },
+        merge = { fields, approval -> fields.copy(statusMessage = approval.statusMessage) }
+    )
     private val chatImageRequestApprovalPort: ChatImageRequestApprovalPort =
-        container.createChatImageRequestApprovalPort(
-            store = store,
+        ChatImageRequestApprovalPortAdapter(
+            store = approvalStore,
+            admission = admission,
             imageGenerationOwnerProvider = imageGenerationOwnerProvider,
             chatImageRequestPortProvider = chatImageRequestPort,
-            buildChatImageRetrySnapshot = buildChatImageRetrySnapshot,
-            continueAssistantImageToolTurn = ::continueAssistantImageToolTurn
+            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
+            continueAssistantImageToolTurnRef = ::continueAssistantImageToolTurn
         )
 
     fun continueAssistantImageToolTurn(requestId: String, outputJson: String) {
@@ -388,10 +413,12 @@ internal class AssistantImageToolContinuationCoordinator(
         imageModelBinding: AssistantImageModelBinding?,
         chatConfig: CloudApiConfig?
     ): Boolean {
-        val port = container.createAssistantImageToolTurnPort(
+        val port = AssistantImageToolTurnPortAdapter(
             store = store,
-            chatImageNegativePromptSupported = chatImageNegativePromptSupported,
-            prepareAssistantImagePrompt = { prompt, config, params, ctx ->
+            admission = admission,
+            authorizationStore = chatImageToolAuthorizationStore,
+            chatImageNegativePromptSupportedRef = chatImageNegativePromptSupported,
+            prepareAssistantImagePromptRef = { prompt, config, params, ctx ->
                 prepareAssistantImagePromptFor(
                     store = store,
                     cloudChatProvider = cloudChatProvider,
@@ -402,7 +429,7 @@ internal class AssistantImageToolContinuationCoordinator(
                     conversationContext = ctx
                 )
             },
-            prepareAssistantImageNegativePrompt = { prompt, config, params, ctx, preserve ->
+            prepareAssistantImageNegativePromptRef = { prompt, config, params, ctx, preserve ->
                 prepareAssistantImageNegativePromptFor(
                     prepareAssistantImagePrompt = { p, c, par, cx ->
                         prepareAssistantImagePromptFor(
@@ -422,23 +449,23 @@ internal class AssistantImageToolContinuationCoordinator(
                     preserveAuthoredNegative = preserve
                 )
             },
-            setPendingAssistantToolFailure = { message ->
+            setPendingAssistantToolFailureRef = { message ->
                 setPendingAssistantToolFailureFor(
-                    store = store,
+                    store = messageStore,
                     persistChatSessions = persistChatSessions,
                     message = message
                 )
             },
-            buildChatImageRetrySnapshot = buildChatImageRetrySnapshot,
-            attachAssistantImageRequestToTimeline = { sId, req ->
+            buildChatImageRetrySnapshotRef = buildChatImageRetrySnapshot,
+            attachAssistantImageRequestToTimelineRef = { sId, req ->
                 attachAssistantImageRequestToTimelineFor(
-                    store = store,
+                    store = messageStore,
                     persistChatSessions = persistChatSessions,
                     chatSessionId = sId,
                     request = req
                 )
             },
-            approveChatImageRequest = { requestId ->
+            approveChatImageRequestRef = { requestId ->
                 approveChatImageRequest(requestId)
             }
         )

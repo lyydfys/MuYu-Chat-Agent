@@ -1,6 +1,7 @@
 package com.muyuchat.feature.chat
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
 import android.content.Context
@@ -35,10 +36,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -101,6 +105,7 @@ fun ChatScreen(
     val onImportAssistantCard = actions.content.onImportAssistantCard
     val onImportAssistantCardFile = actions.content.onImportAssistantCardFile
     val onDeleteWorldBook = actions.content.onDeleteWorldBook
+    val onSetWorldBookEnabled = actions.content.onSetWorldBookEnabled
     val onImportWorldBookFile = actions.content.onImportWorldBookFile
     val onCreateKnowledgeBase = actions.content.onCreateKnowledgeBase
     val onDeleteKnowledgeBase = actions.content.onDeleteKnowledgeBase
@@ -153,6 +158,8 @@ fun ChatScreen(
     val onOpenSettings = actions.shell.onOpenSettings
     val onOpenAgent = actions.shell.onOpenAgent
     val onOpenAgentWorkspace = actions.shell.onOpenAgentWorkspace
+    val onOpenDshWorkspace = actions.shell.onOpenDshWorkspace
+    val onOpenVideoWorkspace = actions.shell.onOpenVideoWorkspace
     val onOpenApi = actions.shell.onOpenApi
     val onOpenWebSearchSettings = actions.shell.onOpenWebSearchSettings
     val onImportChatModel = actions.shell.onImportChatModel
@@ -168,6 +175,7 @@ fun ChatScreen(
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val haptics = rememberMcaHaptics()
     val scrollFollowThresholdPx = with(LocalDensity.current) {
         CHAT_SCROLL_FOLLOW_THRESHOLD_DP.dp.toPx()
     }
@@ -189,6 +197,7 @@ fun ChatScreen(
     val latestOnInputChange = rememberUpdatedState(onInputChange)
     val latestOnSend = rememberUpdatedState(onSend)
     val submitChatMessage = {
+        haptics.confirm()
         val submittedInput = latestChatInput.value
         if (!chatAttachmentPreflightRunning) {
             // Run the same asynchronous content-identity pass for every image
@@ -304,6 +313,18 @@ fun ChatScreen(
     val bottomChromeHeight = resolveChatComposerOverlapDp(
         with(LocalDensity.current) { bottomChromeHeightPx.toDp() }
     )
+    val isOverlayOrDrawerOpen = drawerState.targetValue == DrawerValue.Open ||
+        drawerState.currentValue == DrawerValue.Open ||
+        appMenuOpen ||
+        showImages ||
+        showAssistants ||
+        showFileLibrary ||
+        showBackgroundSettings
+    val mainCanvasScale by animateFloatAsState(
+        targetValue = if (isOverlayOrDrawerOpen) 0.98f else 1.0f,
+        animationSpec = McaMotion.sizeChange,
+        label = "chatMainCanvasDepthScale"
+    )
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -323,10 +344,21 @@ fun ChatScreen(
                     scope.launch { drawerState.close() }
                 },
                 onOpenAgentWorkspace = {
-                    scope.launch {
-                        drawerState.close()
-                        onOpenAgentWorkspace()
-                    }
+                    // Navigate first, then close the drawer. Closing first can suspend forever
+                    // when the drawer was already dismissed by the same gesture, which left the
+                    // Agent/DSH entries silently doing nothing on a real device.
+                    onOpenAgentWorkspace()
+                    scope.launch { drawerState.close() }
+                },
+                onOpenDshWorkspace = {
+                    onOpenDshWorkspace()
+                    scope.launch { drawerState.close() }
+                },
+                onOpenVideoWorkspace = {
+                    // Same navigate-then-close order as the Agent/DSH entries: closing the
+                    // drawer first can suspend forever when the same gesture already dismissed it.
+                    onOpenVideoWorkspace()
+                    scope.launch { drawerState.close() }
                 },
                 onSelectConversation = { id ->
                     onSelectConversation(id)
@@ -358,7 +390,14 @@ fun ChatScreen(
                 state = chatBackground,
                 modifier = Modifier.fillMaxSize()
             )
-            Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = mainCanvasScale
+                        scaleY = mainCanvasScale
+                    }
+            ) {
                 ChatStatusBar(
                     state = state,
                     onOpenHistory = { scope.launch { drawerState.open() } },
@@ -400,6 +439,7 @@ fun ChatScreen(
                     onMessageIntent = onMessageIntent,
                     onBrowserTaskEvent = onBrowserTaskEvent,
                     nestedScrollConnection = scrollNestedScrollConnection,
+                    onScrollToBottom = { scrollCoordinator.scrollToBottomNow() },
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
@@ -431,10 +471,16 @@ fun ChatScreen(
                 onInputChange = onInputChange,
                 onDismissStatusMessage = onDismissStatusMessage,
                 onSend = submitChatMessage,
-                onSendImagePrompt = onSendImagePrompt,
+                onSendImagePrompt = {
+                    haptics.confirm()
+                    onSendImagePrompt()
+                },
                 attachmentPreflightRunning = chatAttachmentPreflightRunning,
                 onSetAssistantImageToolAutoApproval = onSetAssistantImageToolAutoApproval,
-                onStop = onStop,
+                onStop = {
+                    haptics.stop()
+                    onStop()
+                },
                 onOpenCamera = {
                     cameraPicker.launch(null)
                 },
@@ -504,6 +550,7 @@ fun ChatScreen(
                 onImportAssistantCardFile = onImportAssistantCardFile,
                 onImportWorldBookFile = onImportWorldBookFile,
                 onDeleteWorldBook = onDeleteWorldBook,
+                onSetWorldBookEnabled = onSetWorldBookEnabled,
                 onCreateKnowledgeBase = onCreateKnowledgeBase,
                 onImportKnowledgeDocument = onImportKnowledgeDocument,
                 onSetKnowledgeBaseSelected = onSetKnowledgeBaseSelected,
@@ -597,5 +644,3 @@ fun ChatScreen(
         onDismiss = { showNewConversationPicker = false }
     )
 }
-
-

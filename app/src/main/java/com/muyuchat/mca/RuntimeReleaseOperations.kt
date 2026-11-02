@@ -4,7 +4,6 @@ import com.muyuchat.core.engine.EngineLifecycleLease
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.ModelRuntimeIdentity
 import com.muyuchat.feature.agent.AgentEngineLifecycle
-import com.muyuchat.mca.presentation.afterNativeRuntimeReleased
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 
@@ -15,7 +14,7 @@ import kotlinx.coroutines.withContext
  * （生命周期族），VM 保留逐字签名薄委托；`prepareLocalImageRuntimeMemoryFor` 供 ImageGenerationHost 链。
  */
 internal fun clearNativeRuntimeSessionStateFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     engine: McaInferenceService,
     lifecycle: AgentEngineLifecycle,
@@ -33,11 +32,12 @@ internal fun clearNativeRuntimeSessionStateFor(
     admission.activeProfileTransactionId = null
     val nativeStats = engine.nativeStatsJsonOrEmpty()
     val recentLogs = engine.recentEngineLogsOrEmpty()
+    val releasedStats = engine.stats.value
     store.update { state ->
-        state.afterNativeRuntimeReleased(
+        state.afterRuntimeNativeReleased(
             lifecycle = lifecycle,
             statusMessage = statusMessage,
-            stats = engine.stats.value,
+            stats = releasedStats,
             busy = busy
         ).copy(
             nativeStatsJson = nativeStats,
@@ -70,7 +70,7 @@ internal suspend fun clearPendingRuntimeTransactionForLifecycleFor(
 }
 
 internal suspend fun prepareLocalImageRuntimeMemoryFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     runtimeProfileStore: ModelRuntimeProfileStore,
     engine: McaInferenceService

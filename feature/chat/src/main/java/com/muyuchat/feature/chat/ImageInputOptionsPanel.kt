@@ -1,4 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -8,12 +11,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,16 +24,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -41,10 +37,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 // P9/S27: private→internal（跨文件被 ImageGalleryHome 引用）
@@ -141,6 +139,7 @@ internal fun ImageInputOptionsPanel(
     onSamplerChange: (String) -> Unit
 ) {
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
     val darkTheme = isSystemInDarkTheme()
     val selectedLoraById = selectedLoras.associateBy(ImageGenerationUiLoraDraft::id)
     val loraSelectionLimitReached = selectedLoras.size >= 8
@@ -201,11 +200,7 @@ internal fun ImageInputOptionsPanel(
                 )
             }
             .onFailure { error ->
-                Toast.makeText(
-                    context,
-                    error.message?.takeIf(String::isNotBlank) ?: "无法识别剪贴板图片参数。",
-                    Toast.LENGTH_SHORT
-                ).show()
+                notify(error.message?.takeIf(String::isNotBlank) ?: "无法识别剪贴板图片参数。")
             }
     }
     fun applyParameterImport(application: ImageGenerationParameterImportApplication) {
@@ -230,11 +225,7 @@ internal fun ImageInputOptionsPanel(
                     (structured.targetWidth < ultraFixSourceTarget.first ||
                         structured.targetHeight < ultraFixSourceTarget.second))
             ) {
-                Toast.makeText(
-                    context,
-                    "源图或目标尺寸已变化，无法安全应用 UltraFix 参数",
-                    Toast.LENGTH_SHORT
-                ).show()
+                notify("源图或目标尺寸已变化，无法安全应用 UltraFix 参数")
                 return
             }
             // Cross the mode switch before mutating any imported field. A rejected switch leaves
@@ -339,11 +330,7 @@ internal fun ImageInputOptionsPanel(
             ImageGenerationParameterImportSource.MCA -> "MCA"
             ImageGenerationParameterImportSource.LOCAL_DREAM -> "Local Dream"
         }
-        Toast.makeText(
-            context,
-            "已从 $sourceLabel 应用 ${fields.size} 项参数。",
-            Toast.LENGTH_SHORT
-        ).show()
+        notify("已从 $sourceLabel 应用 ${fields.size} 项参数。")
     }
     LaunchedEffect(pendingLoraDeleteId, loras) {
         val pendingId = pendingLoraDeleteId ?: return@LaunchedEffect
@@ -454,9 +441,9 @@ internal fun ImageInputOptionsPanel(
                 }
                 Icon(
                     imageVector = if (advancedParametersExpanded) {
-                        Icons.Default.KeyboardArrowUp
+                        McaIcons.KeyboardArrowUp
                     } else {
-                        Icons.Default.KeyboardArrowDown
+                        McaIcons.KeyboardArrowDown
                     },
                     contentDescription = null
                 )
@@ -466,8 +453,8 @@ internal fun ImageInputOptionsPanel(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = ::importParametersFromClipboard) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                McaButton(style = McaButtonStyle.Text,onClick = ::importParametersFromClipboard) {
+                    Icon(McaIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("从剪贴板导入")
                 }

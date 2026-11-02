@@ -1,0 +1,100 @@
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 2743fa5..eb1a2f4 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -15,6 +15,7 @@
+ #include "core/ggml_graph_cut.h"
+ #include "model/diffusion/dit.hpp"
+ #include "model/diffusion/model.hpp"
++#include "core/ggml_extend_backend.h"
+ 
+ namespace MiniMaxH3 {
+ 
+@@ -22,6 +23,43 @@ namespace MiniMaxH3 {
+     constexpr float FRAME_RESCALE        = 5.f / 3.f;
+     constexpr float VISUAL_COND_TIMESTEP = 0.999f;
+ 
++    // nightmare (dit/073): on Hexagon a matmul's result passes through fp16, and H3's latents came back NaN with the DiT
++    // on the NPU (the S25; the same file, step and prompt on the CPU drew the cat). Linear::set_scale runs x * s through
++    // the matmul and the result / s (dit/025, dit/045). Bisected on FastH3 at 256x256: condition_proj (the text
++    // embedding's projection) at 1/32 alone cleans a 21-frame clip (qkv or out alone stayed NaN); at 124 frames the
++    // attention out_proj overflows too (condition + qkv stayed NaN), so both get 1/32 by default.
++    // NM_H3_HTP_SCALE="name:scale,..." replaces the default, per projection name (qkv, out, fc1, fc2, condition,
++    // video_in, audio_in, video_out, audio_out; "all" matches every one); a name not listed keeps its own scale
++    // (upstream gives fc1/fc2 1/128). HTP only: every other backend is unchanged.
++    static void h3_htp_scale(GGMLRunnerContext* ctx, const std::shared_ptr<Linear>& l, const char* name) {
++        if (!l || ctx->backend == nullptr || !sd_backend_is(ctx->backend, "HTP")) {
++            return;
++        }
++        static const std::vector<std::pair<std::string, float>> table = [] {
++            std::vector<std::pair<std::string, float>> t;
++            const char* e    = std::getenv("NM_H3_HTP_SCALE");
++            std::string spec = e ? e : "condition:0.03125,out:0.03125";
++            size_t pos       = 0;
++            while (pos < spec.size()) {
++                size_t end = spec.find(',', pos);
++                if (end == std::string::npos) end = spec.size();
++                std::string item = spec.substr(pos, end - pos);
++                size_t colon     = item.find(':');
++                if (colon != std::string::npos) {
++                    t.emplace_back(item.substr(0, colon), (float)std::atof(item.c_str() + colon + 1));
++                }
++                pos = end + 1;
++            }
++            return t;
++        }();
++        for (const auto& [n, v] : table) {
++            if (n == "all" || n == name) {
++                l->set_scale(v);
++                return;
++            }
++        }
++    }
++
+     struct Config {
+         int64_t hidden_size              = 5376;
+         int64_t num_layers               = 50;
+@@ -149,6 +187,8 @@ namespace MiniMaxH3 {
+         ggml_tensor* forward(GGMLRunnerContext* ctx, ggml_tensor* x) override {
+             auto fc1 = std::dynamic_pointer_cast<Linear>(blocks["fc1"]);
+             auto fc2 = std::dynamic_pointer_cast<Linear>(blocks["fc2"]);
++            h3_htp_scale(ctx, fc1, "fc1");
++            h3_htp_scale(ctx, fc2, "fc2");
+             auto uv  = ggml_ext_chunk(ctx->ggml_ctx, fc1->forward(ctx, x), 2, 0);
+             return fc2->forward(ctx, ggml_mul(ctx->ggml_ctx,
+                                               ggml_silu(ctx->ggml_ctx, uv[0]),
+@@ -243,6 +283,8 @@ namespace MiniMaxH3 {
+ 
+             int64_t sequence = x->ne[1];
+             int64_t batch    = x->ne[2] * x->ne[3];
++            h3_htp_scale(ctx, qkv_proj, "qkv");
++            h3_htp_scale(ctx, out_proj, "out");
+             auto qkv         = ggml_ext_chunk(ctx->ggml_ctx, qkv_proj->forward(ctx, x), 3, 0);
+             auto q           = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
+             auto k           = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
+@@ -532,6 +574,8 @@ namespace MiniMaxH3 {
+             auto adaln     = std::dynamic_pointer_cast<AdaLayerNormModulation>(blocks["adaln_proj"]);
+             auto video_out = std::dynamic_pointer_cast<Linear>(blocks["video_out"]);
+             auto audio_out = std::dynamic_pointer_cast<Linear>(blocks["audio_out"]);
++            h3_htp_scale(ctx, video_out, "video_out");
++            h3_htp_scale(ctx, audio_out, "audio_out");
+             auto mods      = adaln->forward(ctx, t_emb);
+             auto apply     = [&](const TokenModulationSpan& segment) {
+                 auto row   = modulation_row(ctx->ggml_ctx, mods, config.hidden_size, 2, 1, segment.modulation_row);
+@@ -585,6 +629,7 @@ namespace MiniMaxH3 {
+             }
+             GGML_ASSERT(context->ne[0] == config.text_dim);
+             auto condition_proj = std::dynamic_pointer_cast<Linear>(blocks["condition_proj"]);
++            h3_htp_scale(ctx, condition_proj, "condition");
+             auto token_refiner  = std::dynamic_pointer_cast<TokenRefiner>(blocks["token_refiner"]);
+             return token_refiner->forward(ctx, condition_proj->forward(ctx, context));
+         }
+@@ -658,6 +703,8 @@ namespace MiniMaxH3 {
+                                                       const TokenModulationSpan& audio_segment) {
+             auto video_proj = std::dynamic_pointer_cast<Linear>(blocks["video_patch_proj"]);
+             auto audio_proj = std::dynamic_pointer_cast<Linear>(blocks["audio_patch_proj"]);
++            h3_htp_scale(ctx, video_proj, "video_in");
++            h3_htp_scale(ctx, audio_proj, "audio_in");
+ 
+             std::vector<std::pair<int64_t, int64_t>> condition_video_ranges;
+             ggml_tensor* video_rows = nullptr;

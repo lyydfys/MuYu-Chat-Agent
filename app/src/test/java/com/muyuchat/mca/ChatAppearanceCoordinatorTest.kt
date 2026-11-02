@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.composition.chatAppearanceWriter
+
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -23,7 +25,7 @@ class ChatAppearanceCoordinatorTest {
 
         val coordinator = ChatAppearanceCoordinator(
             scope = dummyScope,
-            uiStateStore = uiStateStore,
+            uiStateStore = uiStateStore.chatAppearanceWriter(),
             globalChatAppearanceStore = globalAppearanceStore,
             backgroundImageStore = backgroundImageStore,
             assistantStore = assistantStore,
@@ -47,7 +49,7 @@ class ChatAppearanceCoordinatorTest {
 
         val coordinator = ChatAppearanceCoordinator(
             scope = dummyScope,
-            uiStateStore = uiStateStore,
+            uiStateStore = uiStateStore.chatAppearanceWriter(),
             globalChatAppearanceStore = globalAppearanceStore,
             backgroundImageStore = backgroundImageStore,
             assistantStore = assistantStore,
@@ -72,7 +74,7 @@ class ChatAppearanceCoordinatorTest {
 
         val coordinator = ChatAppearanceCoordinator(
             scope = dummyScope,
-            uiStateStore = uiStateStore,
+            uiStateStore = uiStateStore.chatAppearanceWriter(),
             globalChatAppearanceStore = globalAppearanceStore,
             backgroundImageStore = backgroundImageStore,
             assistantStore = assistantStore,
@@ -97,7 +99,7 @@ class ChatAppearanceCoordinatorTest {
 
         val coordinator = ChatAppearanceCoordinator(
             scope = dummyScope,
-            uiStateStore = uiStateStore,
+            uiStateStore = uiStateStore.chatAppearanceWriter(),
             globalChatAppearanceStore = globalAppearanceStore,
             backgroundImageStore = backgroundImageStore,
             assistantStore = assistantStore,

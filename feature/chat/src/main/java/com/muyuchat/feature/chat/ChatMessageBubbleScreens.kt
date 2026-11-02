@@ -1,9 +1,16 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIconSize
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import android.content.ClipData
-import android.widget.Toast
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
@@ -17,29 +24,29 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.outlined.PushPin
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -48,6 +55,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconPlate
+import com.muyuchat.core.designsystem.McaPlateSize
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
@@ -62,7 +71,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
-import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 
 @Composable
 internal fun MessageBubble(
@@ -100,14 +110,16 @@ internal fun MessageBubble(
 ) {
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
-    val context = LocalContext.current
+    val haptics = rememberMcaHaptics()
     val isUser = message.role == Role.USER
 
     // `modifier` carries the LazyColumn item animation (appearance/move/removal springs) and is
     // applied to the item's root node. Static layout is unchanged: fillMaxWidth plus the same
     // horizontal arrangement as before.
     // Copy confirmation reflects a successful clipboard write: the action row swaps to a check
-    // for ~1.4s and returns to the copy glyph without changing button geometry.
+    // for ~1.4s and returns to the copy glyph without changing button geometry. User and assistant
+    // messages now share this in-place confirmation instead of the user side raising a Toast.
+    // `message.id` keeps the confirmation isolated per message: copying A never marks B as copied.
     var copiedRecently by remember(message.id) { mutableStateOf(false) }
     LaunchedEffect(copiedRecently) {
         if (copiedRecently) {
@@ -123,18 +135,24 @@ internal fun MessageBubble(
             UserMessageBubble(
                 message = message,
                 readOnly = readOnly,
-                onTogglePinned = onTogglePinned,
+                onTogglePinned = {
+                    haptics.confirm()
+                    onTogglePinned()
+                },
                 canTogglePinned = canTogglePinned,
+                copied = copiedRecently,
                 onCopy = {
                     if (canCopyMessage()) {
                         val copyText = displayInputWithoutAttachment(message.content)
                         if (copyText.isNotBlank()) {
+                            haptics.confirm()
                             scope.launch {
                                 if (!canCopyMessage()) return@launch
                                 clipboard.setClipEntry(
                                     ClipEntry(ClipData.newPlainText("MCA", copyText))
                                 )
-                                Toast.makeText(context, "已复制提示词", Toast.LENGTH_SHORT).show()
+                                // Feedback only after the real clipboard write succeeded.
+                                copiedRecently = true
                             }
                         }
                     }
@@ -169,11 +187,15 @@ internal fun MessageBubble(
                 generationStats = generationStats,
                 onRegenerate = onRegenerate,
                 onDelete = onDelete,
-                onTogglePinned = onTogglePinned,
+                onTogglePinned = {
+                    haptics.confirm()
+                    onTogglePinned()
+                },
                 canTogglePinned = canTogglePinned,
                 onDeleteLastTurn = onDeleteLastTurn,
                 onCopy = {
                     if (canCopyMessage()) {
+                        haptics.confirm()
                         scope.launch {
                             if (!canCopyMessage()) return@launch
                             clipboard.setClipEntry(
@@ -195,6 +217,7 @@ private fun UserMessageBubble(
     readOnly: Boolean,
     onTogglePinned: () -> Unit,
     canTogglePinned: Boolean,
+    copied: Boolean,
     onCopy: () -> Unit
 ) {
     val context = LocalContext.current
@@ -255,6 +278,14 @@ private fun UserMessageBubble(
                 bottomStart = 20.dp,
                 bottomEnd = 6.dp
             ),
+            border = BorderStroke(
+                0.5.dp,
+                if (darkTheme) {
+                    MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                } else {
+                    McaPrimaryBlue.copy(alpha = 0.16f)
+                }
+            ),
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
@@ -268,35 +299,69 @@ private fun UserMessageBubble(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.horizontalScroll(rememberScrollState())
                     ) {
+                        // Each attachment keeps its own retry epoch and request identity (URI plus the
+                        // attachment identity as task identity), so an insert or reorder never borrows a
+                        // neighbour's decoded state and a stale frame is never shown for another item.
                         visibleImageAttachments.forEach { attachment ->
-                            val bitmap by rememberChatImageBitmap(
-                                context,
-                                attachment.uriString,
-                                maxDimensionPx = 384
-                            )
-                            val displayBitmap = bitmap
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = attachmentPlaceholderColor,
-                                modifier = Modifier.size(104.dp)
-                            ) {
-                                if (displayBitmap != null) {
-                                    Image(
-                                        bitmap = displayBitmap.asImageBitmap(),
-                                        contentDescription = attachment.name.ifBlank { "上传图片" },
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
-                                } else {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Image,
-                                            contentDescription = null,
-                                            tint = McaPrimaryBlue.copy(alpha = 0.72f)
+                            key(attachment.uriString) {
+                                var attachmentRetry by remember(attachment.uriString) { mutableStateOf(0) }
+                                val attachmentDisplay = rememberChatImageBitmap(
+                                    context = context,
+                                    uriString = attachment.uriString,
+                                    maxDimensionPx = 384,
+                                    revisionKey = attachmentRetry,
+                                    taskIdentity = attachment.uriString
+                                )
+                                val displayBitmap = attachmentDisplay.readyValue
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = attachmentPlaceholderColor,
+                                    modifier = Modifier.size(104.dp)
+                                ) {
+                                    when {
+                                        displayBitmap != null -> Image(
+                                            bitmap = displayBitmap.asImageBitmap(),
+                                            contentDescription = attachment.name.ifBlank { "上传图片" },
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize()
                                         )
+                                        // A failed read is its own state with a retry, not the old
+                                        // "still decoding" placeholder that could never recover.
+                                        attachmentDisplay.phase == ImageDisplayPhase.FAILED -> Column(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(6.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.Center
+                                        ) {
+                                            Icon(
+                                                McaIcons.Image,
+                                                contentDescription = null,
+                                                tint = McaPrimaryBlue.copy(alpha = 0.72f)
+                                            )
+                                            McaButton(style = McaButtonStyle.Text,onClick = { attachmentRetry += 1 }) {
+                                                Text("重试", fontSize = 12.sp)
+                                            }
+                                        }
+                                        attachmentDisplay.phase == ImageDisplayPhase.LOADING -> Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(20.dp),
+                                                strokeWidth = 2.dp
+                                            )
+                                        }
+                                        else -> Box(
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                McaIcons.Image,
+                                                contentDescription = null,
+                                                tint = McaPrimaryBlue.copy(alpha = 0.72f)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -317,37 +382,116 @@ private fun UserMessageBubble(
                 }
             }
         }
+        val pinIconScale by animateFloatAsState(
+            targetValue = if (message.pinned) 1.12f else 1.0f,
+            animationSpec = McaMotion.sizeChange,
+            label = "userPinIconScale"
+        )
+        val copyIconScale by animateFloatAsState(
+            targetValue = if (copied) 1.15f else 1.0f,
+            animationSpec = McaMotion.sizeChange,
+            label = "userCopyIconScale"
+        )
+        val pinPillBg by animateColorAsState(
+            targetValue = if (message.pinned && canTogglePinned) {
+                McaPrimaryBlue.copy(alpha = 0.14f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = if (canTogglePinned) 0.45f else 0.22f)
+            },
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+            label = "userPinPillBg"
+        )
+        val pinPillBorder by animateColorAsState(
+            targetValue = if (message.pinned && canTogglePinned) {
+                McaPrimaryBlue.copy(alpha = 0.38f)
+            } else {
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (canTogglePinned) 0.42f else 0.20f)
+            },
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+            label = "userPinPillBorder"
+        )
+        val copyPillBg by animateColorAsState(
+            targetValue = if (copied) {
+                McaPrimaryBlue.copy(alpha = 0.14f)
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+            },
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+            label = "userCopyPillBg"
+        )
+        val copyPillBorder by animateColorAsState(
+            targetValue = if (copied) {
+                McaPrimaryBlue.copy(alpha = 0.38f)
+            } else {
+                MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.42f)
+            },
+            animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+            label = "userCopyPillBorder"
+        )
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (!readOnly) {
-                IconButton(
+                McaIconButton(
+                    contentDescription = if (message.pinned) {
+                        "取消固定上下文"
+                    } else {
+                        "固定到上下文"
+                    },
                     onClick = onTogglePinned,
                     enabled = canTogglePinned,
-                    modifier = Modifier
-                        .size(48.dp)
-                        .mcaPressScale(pinInteraction, enabled = canTogglePinned),
-                    interactionSource = pinInteraction
+                    hapticsEnabled = false,
+                    interactionSource = pinInteraction,
+                    glyphSize = McaPlateSize.Medium,
+                    tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
                 ) {
-                    // The name lives on the button, not on the vector: uiautomator sometimes
-                    // drops icon-only semantics for this row and exposed an unnamed 48dp target.
-                    Icon(if (message.pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                        tint = if (message.pinned) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant)
+                  McaIconPlate(
+                      size = 32.dp,
+                      containerColor = pinPillBg,
+                      borderColor = pinPillBorder,
+                      animateColors = false,
+                  ) {
+                        Icon(
+                            if (message.pinned) McaIcons.PushPin else McaIcons.PinUnselected,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .size(McaIconSize.Optical.Inline)
+                                .graphicsLayer {
+                                    scaleX = pinIconScale
+                                    scaleY = pinIconScale
+                                },
+                        )
+                    }
                 }
             }
             if (copyableContent.isNotBlank()) {
-            IconButton(
+            McaIconButton(
+                contentDescription = if (copied) "已复制" else "复制提示词",
                 onClick = onCopy,
-                modifier = Modifier.size(48.dp).mcaPressScale(copyInteraction)
-                    .semantics { contentDescription = "复制提示词" },
-                interactionSource = copyInteraction
+                hapticsEnabled = false,
+                interactionSource = copyInteraction,
+                glyphSize = McaPlateSize.Medium,
             ) {
-                Icon(
-                    Icons.Default.ContentCopy,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.78f)
-                )
+              McaIconPlate(
+                  size = 32.dp,
+                  containerColor = copyPillBg,
+                  borderColor = copyPillBorder,
+                  animateColors = false,
+              ) {
+                    Icon(
+                        if (copied) McaIcons.Check else McaIcons.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(McaIconSize.Optical.Inline)
+                            .graphicsLayer {
+                                scaleX = copyIconScale
+                                scaleY = copyIconScale
+                            },
+                        tint = if (copied) {
+                            McaPrimaryBlue
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                        }
+                    )
+                }
             }
             }
         }

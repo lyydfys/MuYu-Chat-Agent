@@ -1,8 +1,23 @@
 package com.muyuchat.mca
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+
+/**
+ * P04: search steps keep "failure" and "cancellation" distinct. A cancelled search (user stop,
+ * browser-task cancellation, caller cancellation) must travel up to the generation coroutine so a
+ * model request cannot follow it. Only an ordinary error becomes a degraded (warning) collection.
+ */
+private inline fun <T> runSearchStepCatching(block: () -> T): Result<T> =
+    try {
+        Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Throwable) {
+        Result.failure(error)
+    }
 
 /**
  * Web-search provider-collection operations (P7/S17), third intra-class extraction from
@@ -28,13 +43,18 @@ internal suspend fun runProviderDocumentCollection(
 ): WebSearchProviderCollection {
     var merged = WebSearchProviderCollection()
     providerConfigs.forEachIndexed { index, providerConfig ->
-        val collection = runCatching {
-            collectSingleProviderDocuments(port = port,
+        val collection = try {
+            collectSingleProviderDocuments(
+                port = port,
                 queries = queries,
                 config = providerConfig,
                 hasDirectDocuments = hasDirectDocuments || merged.documents.isNotEmpty()
             )
-        }.getOrElse { error ->
+        } catch (cancelled: CancellationException) {
+            // The enclosing turn is being cancelled: do not turn it into a provider warning and
+            // do not try the next provider.
+            throw cancelled
+        } catch (error: Throwable) {
             WebSearchProviderCollection(
                 warnings = listOf("${providerConfig.providerLabel}: ${error.friendlyWebSearchFailureMessage()}"),
                 providerLabels = listOf(providerConfig.providerLabel)
@@ -113,7 +133,7 @@ internal suspend fun runProviderQueries(
     coroutineScope {
         queries.map { plannedQuery ->
             async {
-                runCatching { port.searchProviderQuery(plannedQuery, config) }
+                runSearchStepCatching { port.searchProviderQuery(plannedQuery, config) }
                     .fold(
                         onSuccess = { documents ->
                             WebSearchQueryAttempt(query = plannedQuery, documents = documents)
@@ -140,7 +160,7 @@ internal suspend fun hydrateReadableContentVia(
                 if (index >= 3 || document.content.length > 500) {
                     document
                 } else {
-                    val fetched = runCatching {
+                    val fetched = runSearchStepCatching {
                         port.fetchReadableDocument(document.url, document.provider.ifBlank { config.providerLabel }, config)
                     }.getOrNull()
                     if (fetched == null || fetched.content.isBlank()) {

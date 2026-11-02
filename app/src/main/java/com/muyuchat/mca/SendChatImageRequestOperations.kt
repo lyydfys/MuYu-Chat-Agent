@@ -71,7 +71,11 @@ internal interface SendChatImageRequestPort {
      * Must keep `MutableStateFlow.update` semantics: the transform may run more than once under
      * contention, and the returned state is what gets published.
      */
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun <Result> updateUiStateWithResult(transform: (SendChatImageFields) -> Pair<SendChatImageFields, Result>): Result
+
+    fun updateUiState(transform: (SendChatImageFields) -> SendChatImageFields) {
+        updateUiStateWithResult { transform(it) to Unit }
+    }
 
     /** The single-writer funnel for the transient status line. */
     fun showStatus(message: String)
@@ -105,6 +109,8 @@ internal interface SendChatImageRequestPort {
 
     /** Inserts or replaces the session and returns the resulting list. */
     fun upsertSession(
+        state: MainUiState,
+        occurredAt: Long,
         sessions: List<ChatSessionRecord>,
         sessionId: String,
         messages: List<ChatMessage>,
@@ -236,22 +242,22 @@ internal object SendChatImageRequestOperations {
             generatedImageRequest = request,
             contextAssemblyTraceJson = contextTraceJson
         )
-        var ownerSessionId: String? = null
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        var knowledgeBaseIdsForBinding: Set<String> = emptySet()
-        port.updateUiState { state ->
-            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
-            ownerSessionId = sessionId
-            knowledgeBaseIdsForBinding = state.selectedKnowledgeBaseIds
+        val candidateSessionId = UUID.randomUUID().toString()
+        val occurredAt = System.currentTimeMillis()
+        val committed = port.updateUiStateWithResult { state ->
+            val sessionId = state.activeChatSessionId ?: candidateSessionId
+            val knowledgeBaseIdsForBinding = state.selectedKnowledgeBaseIds
             val messages = state.messages + user + assistant
-            sessionsToPersist = port.upsertSession(
+            val sessionsToPersist = port.upsertSession(
+                state = state.snapshot,
+                occurredAt = occurredAt,
                 sessions = state.chatSessions,
                 sessionId = sessionId,
                 messages = messages,
                 assistantId = assistantId,
                 assistantSnapshot = assistantSnapshot,
                 modelMode = state.selectedChatBackend.bindingValue(),
-                modelId = port.currentChatModelId(state)
+                modelId = port.currentChatModelId(state.snapshot)
             )
             state.copy(
                 input = "",
@@ -259,9 +265,9 @@ internal object SendChatImageRequestOperations {
                 activeChatSessionId = sessionId,
                 chatSessions = sessionsToPersist,
                 statusMessage = null
-            )
+            ) to Triple(sessionId, sessionsToPersist, knowledgeBaseIdsForBinding)
         }
-        val chatSessionId = ownerSessionId ?: return
+        val (chatSessionId, sessionsToPersist, knowledgeBaseIdsForBinding) = committed
         port.persistChatSessions(
             sessions = sessionsToPersist,
             knowledgeBinding = chatSessionId to knowledgeBaseIdsForBinding

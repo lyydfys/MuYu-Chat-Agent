@@ -1,4 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.annotation.SuppressLint
 import android.graphics.Bitmap
@@ -24,22 +28,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -63,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.muyuchat.core.designsystem.McaIconSize
 
 private const val DEFAULT_SEARCH_URL_TEMPLATE = "https://www.google.com/search?q={query}"
 
@@ -251,8 +246,8 @@ private fun InternalBrowserContent(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = { goBack() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+            McaIconButton(contentDescription = "返回", onClick = { goBack() }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L) {
+                Icon(McaIcons.Back, contentDescription = null)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(pageTitle.ifBlank { InternalBrowserUrlPolicy.allowedHost(currentUrl).orEmpty() },
@@ -260,20 +255,21 @@ private fun InternalBrowserContent(
                 Text(currentUrl, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
             }
-            IconButton(onClick = { searchExpanded = !searchExpanded }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Search, contentDescription = "搜索网页")
+            McaIconButton(contentDescription = "搜索网页", onClick = { searchExpanded = !searchExpanded }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L) {
+                Icon(McaIcons.Search, contentDescription = null)
             }
-            IconButton(
+            McaIconButton(
+                contentDescription = "刷新网页",
                 onClick = {
                     if (task.phase == BrowserTaskPhase.FAILED || task.phase == BrowserTaskPhase.BLOCKED) {
                         emit(BrowserTaskAction.RETRY)
                     } else {
                         requestNavigation(currentUrl, userInitiated = true)
                     }
-                }, modifier = Modifier.size(48.dp)
-            ) { Icon(Icons.Default.Refresh, contentDescription = "刷新网页") }
-            IconButton(onClick = { close() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "关闭网页")
+                }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L
+            ) { Icon(McaIcons.Refresh, contentDescription = null) }
+            McaIconButton(contentDescription = "关闭网页", onClick = { close() }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L) {
+                Icon(McaIcons.Close, contentDescription = null)
             }
         }
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
@@ -283,11 +279,11 @@ private fun InternalBrowserContent(
                 Text(it, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            IconButton(onClick = { webView?.zoomOut() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.ZoomOut, contentDescription = "缩小网页")
+            McaIconButton(contentDescription = "缩小网页", onClick = { webView?.zoomOut() }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L) {
+                Icon(McaIcons.ZoomOut, contentDescription = null)
             }
-            IconButton(onClick = { webView?.zoomIn() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.ZoomIn, contentDescription = "放大网页")
+            McaIconButton(contentDescription = "放大网页", onClick = { webView?.zoomIn() }, modifier = Modifier.size(48.dp), glyphSize = McaIconSize.L) {
+                Icon(McaIcons.ZoomIn, contentDescription = null)
             }
         }
         if (searchExpanded) {
@@ -298,8 +294,8 @@ private fun InternalBrowserContent(
                     singleLine = true, label = { Text("搜索关键词") },
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { submitSearch() }))
-                IconButton(onClick = { submitSearch() }) {
-                    Icon(Icons.Default.Search, contentDescription = "开始搜索")
+                McaIconButton(contentDescription = "开始搜索", onClick = { submitSearch() }, glyphSize = McaIconSize.L) {
+                    Icon(McaIcons.Search, contentDescription = null)
                 }
             }
         }
@@ -310,12 +306,12 @@ private fun InternalBrowserContent(
                 Text(task.pendingUrl.orEmpty(), maxLines = 3, overflow = TextOverflow.Ellipsis,
                     style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { emit(BrowserTaskAction.CONFIRM_NAVIGATION, userInitiated = true) }) {
-                        Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                    McaButton(style = McaButtonStyle.Text,onClick = { emit(BrowserTaskAction.CONFIRM_NAVIGATION, userInitiated = true) }) {
+                        Icon(McaIcons.Check, contentDescription = null, modifier = Modifier.size(McaIconSize.Xs))
                         Text("访问", modifier = Modifier.padding(start = 4.dp))
                     }
-                    TextButton(onClick = { emit(BrowserTaskAction.REJECT_NAVIGATION, message = "已取消此跳转") }) {
-                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(16.dp))
+                    McaButton(style = McaButtonStyle.Text,onClick = { emit(BrowserTaskAction.REJECT_NAVIGATION, message = "已取消此跳转") }) {
+                        Icon(McaIcons.Close, contentDescription = null, modifier = Modifier.size(McaIconSize.Xs))
                         Text("取消跳转", modifier = Modifier.padding(start = 4.dp))
                     }
                 }

@@ -1,4 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,14 +10,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -23,6 +22,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 // P9/S24: private→internal（跨文件被 ImageWorkspaceScreens 复合区引用）
@@ -64,15 +64,15 @@ internal fun ImageTranslationDownloadRow(
                     style = MaterialTheme.typography.labelLarge
                 )
             } else {
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = if (downloading) onCancel else onDownload,
                     enabled = downloading || (!installing && !installed),
                     modifier = Modifier.testTag(if (downloading) "image.translation.download.cancel" else "image.translation.download")
                 ) {
                     Icon(
-                        if (downloading) Icons.Default.Stop else Icons.Default.Download,
+                        if (downloading) McaIcons.Stop else McaIcons.Download,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(if (downloading) "取消" else "下载")

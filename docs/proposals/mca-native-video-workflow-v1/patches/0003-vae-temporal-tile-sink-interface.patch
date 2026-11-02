@@ -1,0 +1,308 @@
+# Source: src/model/vae/vae_tiling.hpp, src/model/vae/vae.hpp, src/model/vae/ltx_vae.hpp, src/model/vae/minimax_h3_vae.hpp
+# Change: add a VAETileSink/VAETileSinkStatus contract, a streaming temporal-tile loop, and sink-aware decode/_compute_temporal_tiled signatures for every VAE backend (LTX and MiniMax H3 accept and ignore the sink, default path unchanged).
+# Why:    Frame-by-frame delivery needs a per-tile consumer inside the VAE decode; without it the whole video tensor must exist before the caller can emit one frame (peak RSS = full video).
+diff --git a/src/model/vae/ltx_vae.hpp b/src/model/vae/ltx_vae.hpp
+index ac22c09..d82d44d 100644
+--- a/src/model/vae/ltx_vae.hpp
++++ b/src/model/vae/ltx_vae.hpp
+@@ -1361,8 +1361,18 @@ struct LTXVideoVAE : public VAE {
+     sd::Tensor<float> _compute_temporal_tiled(const int n_threads,
+                                               const sd::Tensor<float>& input,
+                                               VAETemporalDirection direction,
+-                                              const VAETemporalTilingConfig& config) override {
++                                              const VAETemporalTilingConfig& config,
++                                              const VAETileSink& on_tile = VAETileSink(),
++                                              bool* streamed_out         = nullptr) override {
+         GGML_ASSERT(direction == VAETemporalDirection::DECODE);
++        if (streamed_out != nullptr) {
++            *streamed_out = false;
++        }
++        if (on_tile) {
++            // LTX temporal decode blends overlap frames across tiles, so incremental delivery is not
++            // implemented for this VAE yet; the caller falls back to the whole tensor.
++            LOG_VERBOSE("LTX VAE does not stream temporal tiles; ignoring the tile sink");
++        }
+         return decode_temporal_tiled_streaming(n_threads,
+                                                input,
+                                                static_cast<size_t>(input.dim()),
+diff --git a/src/model/vae/minimax_h3_vae.hpp b/src/model/vae/minimax_h3_vae.hpp
+index ec65fa3..ec5b3e2 100644
+--- a/src/model/vae/minimax_h3_vae.hpp
++++ b/src/model/vae/minimax_h3_vae.hpp
+@@ -645,7 +645,17 @@ namespace MiniMaxH3VAE {
+                                  bool decode_video = false,
+                                  bool circular_x   = false,
+                                  bool circular_y   = false,
+-                                 bool silent       = false) override {
++                                 bool silent       = false,
++                                 const VAETileSink& on_tile = VAETileSink(),
++                                 bool* streamed_out         = nullptr) override {
++            if (streamed_out != nullptr) {
++                *streamed_out = false;
++            }
++            if (on_tile) {
++                // The chunked H3 decode blends frames across chunk boundaries, so incremental
++                // delivery is not supported here; the caller falls back to the whole tensor.
++                LOG_VERBOSE("MiniMax H3 VAE does not stream temporal tiles; ignoring the tile sink");
++            }
+             auto input  = ensure_video_shape(x);
+             auto tiling = h3_tiling(tiling_params);
+             if (input.shape()[2] == 1) {
+diff --git a/src/model/vae/vae.hpp b/src/model/vae/vae.hpp
+index b3a239f..b746cc7 100644
+--- a/src/model/vae/vae.hpp
++++ b/src/model/vae/vae.hpp
+@@ -36,10 +36,29 @@ protected:
+         return 1;
+     }
+ 
++    // Whole-video temporal decode. When `on_tile` is empty (default) the behaviour is exactly the
++    // original one: every tile is decoded and concatenated into one tensor.
++    //
++    // Subclasses that can hand finished tiles to a consumer incrementally override this and set
++    // `*streamed_out = true` after the last tile was delivered; the returned tensor is then empty
++    // by design (the frames live with the consumer). `*streamed_out = false` always means
++    // "nothing was delivered incrementally", so callers may safely fall back to the whole tensor.
+     virtual sd::Tensor<float> _compute_temporal_tiled(const int n_threads,
+                                                       const sd::Tensor<float>& input,
+                                                       VAETemporalDirection direction,
+-                                                      const VAETemporalTilingConfig& config) {
++                                                      const VAETemporalTilingConfig& config,
++                                                      const VAETileSink& on_tile = VAETileSink(),
++                                                      bool* streamed_out          = nullptr) {
++        if (streamed_out != nullptr) {
++            *streamed_out = false;
++        }
++        if (on_tile) {
++            // Generic VAE: incremental delivery is not implemented, so the sink is ignored and the
++            // caller receives the whole tensor (it may still convert and forward the frames).
++            LOG_VERBOSE("%s does not stream temporal tiles; ignoring the tile sink for this decode",
++                        get_desc().c_str());
++        }
++
+         if (direction != VAETemporalDirection::DECODE) {
+             return _compute(n_threads, input, false);
+         }
+@@ -79,7 +98,12 @@ protected:
+     sd::Tensor<float> compute_with_temporal_tiling(const int n_threads,
+                                                    const sd::Tensor<float>& input,
+                                                    VAETemporalDirection direction,
+-                                                   const sd_tiling_params_t& tiling_params) {
++                                                   const sd_tiling_params_t& tiling_params,
++                                                   const VAETileSink& on_tile = VAETileSink(),
++                                                   bool* streamed_out         = nullptr) {
++        if (streamed_out != nullptr) {
++            *streamed_out = false;
++        }
+         if (!tiling_params.temporal_tiling || input.dim() != 5 || input.shape()[2] <= 1) {
+             return _compute(n_threads, input, direction == VAETemporalDirection::DECODE);
+         }
+@@ -94,7 +118,7 @@ protected:
+             tiling_params,
+             get_default_temporal_tile_frames(direction),
+             get_default_temporal_tile_overlap(direction));
+-        return _compute_temporal_tiled(n_threads, input, direction, config);
++        return _compute_temporal_tiled(n_threads, input, direction, config, on_tile, streamed_out);
+     }
+ 
+     static inline void scale_tensor_to_minus1_1(sd::Tensor<float>* tensor) {
+@@ -125,14 +149,23 @@ protected:
+                                     bool decode_graph,
+                                     const sd_tiling_params_t& tiling_params,
+                                     const char* error_message,
+-                                    bool silent = false) {
++                                    bool silent                  = false,
++                                    const VAETileSink& on_tile   = VAETileSink(),
++                                    bool* streamed_out           = nullptr) {
+         auto on_processing = [&](const sd::Tensor<float>& input_tile) {
+             auto output_tile = compute_with_temporal_tiling(
+                 n_threads,
+                 input_tile,
+                 decode_graph ? VAETemporalDirection::DECODE : VAETemporalDirection::ENCODE,
+-                tiling_params);
++                tiling_params,
++                on_tile,
++                streamed_out);
+             if (output_tile.empty()) {
++                // A streaming decode returns no whole-video tensor by design; the "empty" result
++                // must not be reported as an error in that case.
++                if (streamed_out != nullptr && *streamed_out) {
++                    return sd::Tensor<float>();
++                }
+                 LOG_ERROR("%s", error_message);
+                 return sd::Tensor<float>();
+             }
+@@ -263,17 +296,52 @@ public:
+         return std::move(output);
+     }
+ 
++    // Whole-video decode (original contract) plus an optional incremental tile sink.
++    //
++    // `on_tile` empty -> identical behaviour to the original decode().
++    // `on_tile` set    -> only supported for plain temporal tiling (no spatial tiling); the
++    //                     subclass may deliver frames incrementally and set `*streamed_out = true`.
++    //                     Frames are delivered after the same 0..1 output scaling as the
++    //                     whole-video path, so consumers never see a different value range.
+     virtual sd::Tensor<float> decode(int n_threads,
+                                      const sd::Tensor<float>& x,
+                                      sd_tiling_params_t tiling_params,
+                                      bool decode_video = false,
+                                      bool circular_x   = false,
+                                      bool circular_y   = false,
+-                                     bool silent       = false) {
++                                     bool silent       = false,
++                                     const VAETileSink& on_tile = VAETileSink(),
++                                     bool* streamed_out         = nullptr) {
+         int64_t t0              = ggml_time_ms();
+         sd::Tensor<float> input = x;
+         sd::Tensor<float> output;
+ 
++        if (streamed_out != nullptr) {
++            *streamed_out = false;
++        }
++
++        VAETileSink effective_sink = on_tile;
++        if (effective_sink && tiling_params.enabled) {
++            // Spatial + temporal tiling produces one temporal stream per spatial patch; forwarding
++            // those to a single sink would interleave unrelated frames. Keep the original path and
++            // let the caller convert the whole tensor instead.
++            LOG_WARN("%s cannot stream temporal tiles while spatial tiling is enabled; ignoring the tile sink",
++                     get_desc().c_str());
++            effective_sink = VAETileSink();
++        }
++
++        // Deliver frames with the same 0..1 scaling the whole-video path applies after decode.
++        VAETileSink scaled_sink;
++        if (effective_sink) {
++            scaled_sink = [&](const VAETemporalTile& tile, const sd::Tensor<float>& frames) {
++                sd::Tensor<float> scaled = frames;
++                if (scale_input) {
++                    scale_tensor_to_0_1(&scaled);
++                }
++                return effective_sink(tile, scaled);
++            };
++        }
++
+         if (tiling_params.enabled) {
+             const int scale_factor = get_scale_factor();
+             int64_t W              = input.shape()[0] * scale_factor;
+@@ -298,18 +366,25 @@ public:
+                 true,
+                 tiling_params,
+                 "vae decode compute failed while processing a tile",
+-                silent);
++                silent,
++                scaled_sink,
++                streamed_out);
+         } else {
+             output = compute_with_temporal_tiling(n_threads,
+                                                   input,
+                                                   VAETemporalDirection::DECODE,
+-                                                  tiling_params);
++                                                  tiling_params,
++                                                  scaled_sink,
++                                                  streamed_out);
+         }
+ 
+         runner_end();
+ 
++        const bool streamed = streamed_out != nullptr && *streamed_out;
+         if (output.empty()) {
+-            LOG_ERROR("vae decode compute failed");
++            if (!streamed) {
++                LOG_ERROR("vae decode compute failed");
++            }
+             return {};
+         }
+         if (scale_input) {
+diff --git a/src/model/vae/vae_tiling.hpp b/src/model/vae/vae_tiling.hpp
+index 50cf083..e216a3d 100644
+--- a/src/model/vae/vae_tiling.hpp
++++ b/src/model/vae/vae_tiling.hpp
+@@ -3,6 +3,7 @@
+ 
+ #include <algorithm>
+ #include <cstdint>
++#include <functional>
+ #include <utility>
+ #include <vector>
+ 
+@@ -35,6 +36,28 @@ struct VAETemporalTilePlan {
+     std::vector<VAETemporalTile> tiles;
+ };
+ 
++// Consumer for incrementally produced temporal tiles.
++//
++// `output_tile` contains only the frames of this tile and is released as soon as the callback
++// returns, so a consumer must copy or write whatever it needs during the call.
++//
++// The return value is a status, not a plain bool, because "the consumer already has enough frames"
++// is a *successful* early stop and must not be reported as a failed generation:
++//   - CONTINUE: keep decoding the remaining tiles.
++//   - STOP:     the consumer is satisfied (for example it reached its requested frame count).
++//               Decoding ends here and the run is SUCCESSFUL.
++//   - ABORT:    the consumer failed (write error, cancellation, rejected frame). The caller must
++//               treat the generation as failed and publish nothing.
++//
++// Passing an empty VAETileSink to the decode paths keeps the original whole-video behaviour.
++enum class VAETileSinkStatus {
++    CONTINUE = 0,
++    STOP     = 1,
++    ABORT    = 2,
++};
++
++using VAETileSink = std::function<VAETileSinkStatus(const VAETemporalTile& tile, const sd::Tensor<float>& output_tile)>;
++
+ inline VAETemporalTilingConfig resolve_vae_temporal_tiling_config(const sd_tiling_params_t& params,
+                                                                   int default_tile_frames,
+                                                                   int default_overlap) {
+@@ -112,6 +135,49 @@ inline sd::Tensor<float> process_vae_temporal_tiles(const sd::Tensor<float>& inp
+     return output;
+ }
+ 
++// Incremental temporal tiling.
++//
++// Same tile plan and same per-tile processing as process_vae_temporal_tiles(), but each finished
++// tile is handed to `on_tile_output(tile, output_tile)` instead of being concatenated into one
++// whole-video tensor. The consumer must keep whatever it needs before the next tile starts;
++// `output_tile` is released when the callback returns.
++//
++// The existing process_vae_temporal_tiles() path is untouched, so default behaviour is unchanged.
++// Returns false only when a tile produced no output or the consumer reported ABORT; a consumer
++// that reports STOP (satisfied early) is a successful run.
++template <typename Fn, typename Sink>
++inline bool process_vae_temporal_tiles_streaming(const sd::Tensor<float>& input,
++                                                 const VAETemporalTilePlan& plan,
++                                                 Fn&& on_processing,
++                                                 Sink&& on_tile_output) {
++    for (const auto& tile : plan.tiles) {
++        auto input_tile  = sd::ops::slice(input, 2, tile.start, tile.end);
++        auto output_tile = on_processing(input_tile, tile);
++        if (output_tile.empty()) {
++            return false;
++        }
++        LOG_VERBOSE("vae temporal tile %d/%d: latent [%lld, %lld) -> %lld output frames",
++                    tile.index + 1,
++                    (int)plan.tiles.size(),
++                    (long long)tile.start,
++                    (long long)tile.end,
++                    (long long)output_tile.shape()[2]);
++        const VAETileSinkStatus status = on_tile_output(tile, output_tile);
++        if (status == VAETileSinkStatus::ABORT) {
++            return false;
++        }
++        if (status == VAETileSinkStatus::STOP) {
++            // Consumer is satisfied (e.g. it reached the requested frame count): stop decoding more
++            // tiles, but this is a successful run, not a failure.
++            LOG_VERBOSE("vae temporal tile stream stopped by the consumer after %d/%d tile(s)",
++                        tile.index + 1,
++                        (int)plan.tiles.size());
++            return true;
++        }
++    }
++    return true;
++}
++
+ template <typename Fn>
+ inline sd::Tensor<float> process_vae_temporal_tiles_blended(const sd::Tensor<float>& input,
+                                                             const VAETemporalTilePlan& plan,

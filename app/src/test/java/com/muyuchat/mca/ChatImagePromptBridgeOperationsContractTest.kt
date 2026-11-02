@@ -164,7 +164,8 @@ class ChatImagePromptBridgeOperationsContractTest {
         val portImplementationSource = viewModel + "\n" + corePortAdaptersSource()
         listOf(
             "override fun currentState(): MainUiState",
-            "override fun updateUiState(transform: (MainUiState) -> MainUiState)",
+            // The prompt bridge can submit only its four draft/status fields.
+            "override fun updateUiState(transform: (ChatPromptDraftFields) -> ChatPromptDraftFields)",
             "override fun currentBridgeGeneration(): Long",
             "override fun incrementBridgeGeneration(): Long",
             "override fun cancelBridgeJob()",

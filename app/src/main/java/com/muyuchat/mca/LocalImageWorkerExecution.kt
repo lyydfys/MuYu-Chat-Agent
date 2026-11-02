@@ -44,7 +44,7 @@ internal suspend fun LocalImageWorkerService.runGenerateJob(
                         cancelForDeadClient(active)
                     }
                     var waitingReported = false
-                    val result = LocalImageExecutionGate.withLease(
+                    val result = NativeMediaExecutionGate.withLease(
                         context = applicationContext,
                         isCancelled = { active.cancelRequested },
                         onWaiting = {
@@ -250,7 +250,7 @@ internal suspend fun LocalImageWorkerService.runUpscaleJob(
                 )
                 if (!startedDelivered) cancelForDeadClient(active)
                 var waitingReported = false
-                val result = LocalImageExecutionGate.withLease(
+                val result = NativeMediaExecutionGate.withLease(
                     context = applicationContext,
                     isCancelled = { active.cancelRequested },
                     onWaiting = {

@@ -21,6 +21,7 @@ fun MainViewModel.updateCloudSupportsVision(value: Boolean) = chatModelCoordinat
 fun MainViewModel.updateModelBackendPreference(modelId: String, backendId: String) = chatModelCoordinator.updateModelBackendPreference(modelId, backendId)
 fun MainViewModel.generationParamsForChatModel(modelId: String): GenerationParams = chatModelCoordinator.generationParamsForChatModel(modelId)
 fun MainViewModel.updateCloudSupportsTools(value: Boolean) = chatModelCoordinator.updateCloudSupportsTools(value)
+fun MainViewModel.updateCloudStreaming(value: Boolean) = chatModelCoordinator.updateCloudStreaming(value)
 fun MainViewModel.updateCloudImageModel(value: String) = chatModelCoordinator.updateCloudImageModel(value)
 fun MainViewModel.updateCloudResponsesReasoning(value: Boolean) = chatModelCoordinator.updateCloudResponsesReasoning(value)
 fun MainViewModel.updateCloudImageSize(value: String) = chatModelCoordinator.updateCloudImageSize(value)
@@ -30,13 +31,18 @@ fun MainViewModel.saveCloudApiConfig() = chatModelCoordinator.saveCloudApiConfig
 fun MainViewModel.saveCloudChatModel() = chatModelCoordinator.saveCloudChatModel()
 fun MainViewModel.saveCloudImageModel() = chatModelCoordinator.saveCloudImageModel()
 fun MainViewModel.testCloudApiConfig() = chatModelCoordinator.testCloudApiConfig()
+suspend fun MainViewModel.fetchCloudModelOptions(): Result<List<String>> = chatModelCoordinator.fetchCloudModelOptions()
 fun MainViewModel.selectCloudImageModel(modelId: String) = chatModelCoordinator.selectCloudImageModel(modelId)
 
 fun MainViewModel.fetchRemoteFiles() = modelScopeHubCoordinator.fetchRemoteFiles()
 fun MainViewModel.fetchRecommendedFiles(model: ModelScopeRecommendedModel) = modelScopeHubCoordinator.fetchRecommendedFiles(model)
 fun MainViewModel.downloadRecommended(model: ModelScopeRecommendedModel) = downloadRecommended(model, useAfterDownload = false)
-fun MainViewModel.downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean) =
-    modelScopeHubCoordinator.downloadRecommended(model, useAfterDownload)
+fun MainViewModel.downloadRecommended(
+    model: ModelScopeRecommendedModel,
+    useAfterDownload: Boolean,
+    imageBundleVariantId: String? = null
+) =
+    modelScopeHubCoordinator.downloadRecommended(model, useAfterDownload, imageBundleVariantId)
 fun MainViewModel.searchHubModels(reset: Boolean = true) = modelScopeHubCoordinator.searchHubModels(reset)
 fun MainViewModel.fetchHubModelFiles(model: ModelScopeHubModel) = modelScopeHubCoordinator.fetchHubModelFiles(model)
 fun MainViewModel.openModelScopePage(url: String) = modelScopeHubCoordinator.openModelScopePage(url)

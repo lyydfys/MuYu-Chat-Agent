@@ -282,13 +282,15 @@ data class ImageEngineExecutionProfileSpec(
 enum class ImageEngineBundleRuntime(val label: String) {
     STABLE_DIFFUSION_CPP("stable-diffusion.cpp"),
     MNN_DIFFUSION("MNN Diffusion"),
-    QNN_HTP("骁龙 NPU")
+    QNN_HTP("骁龙 NPU"),
+    MEDIATEK_NEURON("MediaTek NeuroPilot / Neuron")
 }
 
 enum class ImageEngineAccelerator(val label: String) {
     CPU("CPU"),
     OPENCL_GPU("OpenCL GPU"),
-    QNN_HTP("骁龙 NPU")
+    QNN_HTP("骁龙 NPU"),
+    MEDIATEK_NPU("MediaTek NPU")
 }
 
 enum class ImageEngineMinDeviceTier(val label: String) {
@@ -373,6 +375,8 @@ data class ImageEngineBundleSpec(
     val qnnSmokeSpecs: List<ImageEngineQnnSmokeSpec> = emptyList(),
     val requiredRuntimeProfile: ImageEngineQnnRuntimeProfileSpec? = null,
     val executionProfile: ImageEngineExecutionProfileSpec? = null,
+    /** Relative required component containing the standalone MediaTek Anima v3 manifest. */
+    val mediatekAnimaManifestPath: String? = null,
     /**
      * Explicit runtime family identifier persisted into the installed bundle
      * manifest.  It avoids relying on a checkpoint filename to choose a
@@ -380,6 +384,38 @@ data class ImageEngineBundleSpec(
      */
     val modelFamily: String? = executionProfile?.family?.name
 ) {
+    init {
+        val mediatekRuntime = runtime == ImageEngineBundleRuntime.MEDIATEK_NEURON
+        require((accelerator == ImageEngineAccelerator.MEDIATEK_NPU) == mediatekRuntime) {
+            "MediaTek Neuron runtime and MediaTek NPU accelerator must be selected together."
+        }
+        require((mediatekAnimaManifestPath != null) == mediatekRuntime) {
+            "MediaTek Neuron bundles must declare exactly one standalone Anima v3 manifest path."
+        }
+        if (mediatekRuntime) {
+            require(task == ImageEngineTask.TEXT_TO_IMAGE && modelFamily == ImageEngineModelFamily.ANIMA.name) {
+                "MediaTek Neuron bundles currently support only Anima text-to-image."
+            }
+            require(executionProfile == null) {
+                "MediaTek Anima uses its standalone v3 contract, not the generic image execution profile."
+            }
+            val path = requireNotNull(mediatekAnimaManifestPath).trim().replace('\\', '/')
+            require(path.isNotBlank() && !path.startsWith('/') && !Regex("^[A-Za-z]:").containsMatchIn(path) &&
+                path.split('/').all { it.isNotBlank() && it != "." && it != ".." }
+            ) { "MediaTek Anima v3 manifest path must be a safe relative bundle path." }
+            val pins = components.filter { component ->
+                component.required && component.role == ImageEngineBundleComponentRole.CONFIG &&
+                    (component.relativePath.replace('\\', '/') == path || component.fileName.replace('\\', '/') == path)
+            }
+            require(pins.size == 1) {
+                "MediaTek Anima v3 manifest must match exactly one required CONFIG component."
+            }
+            require(pins.single().expectedSizeBytes?.let { it > 0L } == true &&
+                pins.single().sha256?.matches(Regex("^[0-9a-fA-F]{64}$")) == true
+            ) { "MediaTek Anima v3 manifest component must pin source size and SHA-256." }
+        }
+    }
+
     init {
         executionProfile?.let { profile ->
             fun normalizedBundlePath(value: String): String = value
@@ -531,7 +567,8 @@ data class ImageEngineBundleSpec(
                     ImageEngineModelFamily.Z_IMAGE,
                     ImageEngineModelFamily.FLUX,
                     ImageEngineModelFamily.QWEN_IMAGE,
-                    ImageEngineModelFamily.LONGCAT_IMAGE
+                    ImageEngineModelFamily.LONGCAT_IMAGE,
+                    ImageEngineModelFamily.ANIMA
                 )
             ) {
                 val roles = required.mapTo(linkedSetOf(), ImageEngineBundleComponentSpec::role)

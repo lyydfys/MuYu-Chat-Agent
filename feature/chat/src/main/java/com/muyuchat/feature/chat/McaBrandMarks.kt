@@ -15,7 +15,6 @@ import android.os.BatteryManager
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.BackHandler
@@ -87,39 +86,34 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
@@ -128,23 +122,18 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.rememberDateRangePickerState
@@ -332,16 +321,23 @@ internal fun AnimatedMcaAssistantMark(
     isGenerating: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val transition = rememberInfiniteTransition(label = "mca-mark")
-    val angle by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 360f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1300, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "mca-ring"
-    )
+    // Completed replies keep the exact same static ring without retaining an infinite clock.
+    // Keep the animated value as State and read it in Canvas, so a generating ring invalidates
+    // drawing only rather than recomposing the complete assistant mark each frame.
+    val angle = if (isGenerating) {
+        val transition = rememberInfiniteTransition(label = "mca-mark")
+        transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1300, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "mca-ring"
+        )
+    } else {
+        null
+    }
     Box(
         modifier = modifier.size(38.dp),
         contentAlignment = Alignment.Center
@@ -351,6 +347,7 @@ internal fun AnimatedMcaAssistantMark(
             val ringInset = 1.5.dp.toPx()
             val ringSize = Size(this.size.width - ringInset * 2f, this.size.height - ringInset * 2f)
             if (isGenerating) {
+                val ringAngle = angle?.value ?: 0f
                 drawArc(
                     color = Color(0xFF1A73E8).copy(alpha = 0.16f),
                     startAngle = 0f,
@@ -362,7 +359,7 @@ internal fun AnimatedMcaAssistantMark(
                 )
                 drawArc(
                     color = Color(0xFF1A73E8).copy(alpha = 0.88f),
-                    startAngle = angle,
+                    startAngle = ringAngle,
                     sweepAngle = 132f,
                     useCenter = false,
                     style = stroke,
@@ -371,7 +368,7 @@ internal fun AnimatedMcaAssistantMark(
                 )
                 drawArc(
                     color = Color(0xFF34A853).copy(alpha = 0.74f),
-                    startAngle = angle + 180f,
+                    startAngle = ringAngle + 180f,
                     sweepAngle = 86f,
                     useCenter = false,
                     style = stroke,

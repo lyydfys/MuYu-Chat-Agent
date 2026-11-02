@@ -521,6 +521,37 @@ if(MCA_WITH_LLAMA_CPP AND EXISTS ${LLAMA_SRC}/CMakeLists.txt)
     set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama: build common utils library" FORCE)
     add_subdirectory(${LLAMA_SRC} build-llama)
 
+    # GenieX 0.10 ships its own llama.cpp/ggml ABI. Keep MCA's embedded
+    # llama/ggml DSOs under distinct output names so the GenieX plugin and
+    # the embedded runner can coexist in one APK without resolving each
+    # other's symbols.
+    if(TARGET llama)
+        set_target_properties(llama PROPERTIES OUTPUT_NAME "mca_llama")
+    endif()
+    if(TARGET llama-common)
+        set_target_properties(llama-common PROPERTIES OUTPUT_NAME "mca_llama-common")
+    endif()
+    if(TARGET ggml)
+        set_target_properties(ggml PROPERTIES OUTPUT_NAME "mca_ggml")
+    endif()
+    if(TARGET ggml-base)
+        set_target_properties(ggml-base PROPERTIES OUTPUT_NAME "mca_ggml-base")
+    endif()
+    foreach(mca_ggml_cpu_target IN ITEMS
+            ggml-cpu
+            ggml-cpu-android_armv8.0_1
+            ggml-cpu-android_armv8.2_1
+            ggml-cpu-android_armv8.2_2
+            ggml-cpu-android_armv8.6_1
+            ggml-cpu-android_armv9.0_1
+            ggml-cpu-android_armv9.2_1
+            ggml-cpu-android_armv9.2_2)
+        if(TARGET ${mca_ggml_cpu_target})
+            set_target_properties(${mca_ggml_cpu_target}
+                    PROPERTIES OUTPUT_NAME "mca_${mca_ggml_cpu_target}")
+        endif()
+    endforeach()
+
     # The GenieX AAR ships a libggml-opencl.so built against its private
     # ggml-base.  Loading that library beside MCA's newer ggml-base can make
     # the registry silently fall back to CPU.  Build an MCA-owned variant

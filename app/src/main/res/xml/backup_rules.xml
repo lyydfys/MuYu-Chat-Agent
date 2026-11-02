@@ -19,6 +19,13 @@
     <exclude domain="file" path="image_models" />
     <exclude domain="external" path="image_models" />
     <exclude domain="file" path="chat_sessions.json" />
+    <!-- Agent workspaces hold user-imported snapshots, payloads and artifacts; they move only
+         through the explicit Agent export format (architecture 10.2/10.6). -->
+    <exclude domain="file" path="agent" />
+    <!-- DSH owns its official home/workspace/config/log tree; it may contain user prompts,
+         credentials configured inside DSH and plugin state. It moves only through an explicit,
+         separately reviewed export, never through Android backup or device transfer. -->
+    <exclude domain="file" path="dsh" />
     <!-- Credentials and installation-local paths must never cross backup/restore boundaries. -->
     <exclude domain="sharedpref" path="mca_api.xml" />
     <exclude domain="sharedpref" path="mca_cloud_api.xml" />

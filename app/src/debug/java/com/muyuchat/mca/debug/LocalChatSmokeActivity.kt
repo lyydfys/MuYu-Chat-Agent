@@ -2712,6 +2712,7 @@ open class LocalChatSmokeActivity : Activity() {
         when (this) {
             ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
             ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
+            ChatModelRuntime.GENIEX_LLAMA_CPP -> LocalChatRuntime.GENIEX_LLAMA_CPP
             ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
             ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
         }

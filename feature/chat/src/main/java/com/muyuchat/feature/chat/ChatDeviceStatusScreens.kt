@@ -1,6 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.content.Context
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -8,6 +10,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -27,16 +30,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +52,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.positionChange
@@ -76,6 +78,10 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S16：从 ChatChromeScreens.kt 等值移出的状态栏与设备状态簇。
 // 原样逐字迁移，未做行为改动；无新增提升（入口原即 internal，双向扫描零跨区）。
@@ -86,6 +92,7 @@ internal fun ChatDeviceStatusOverlay(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current.applicationContext
+    val haptics = rememberMcaHaptics()
     val preferences = remember(context) {
         context.getSharedPreferences("chat_device_status_overlay", Context.MODE_PRIVATE)
     }
@@ -146,6 +153,26 @@ internal fun ChatDeviceStatusOverlay(
     val memoryAvailableKb = (memorySample?.availableKb ?: state.stats.availMemKb)
         .coerceIn(0L, memoryTotalKb.coerceAtLeast(0L))
     val usedFraction = memoryUsedFraction(memoryTotalKb, memoryAvailableKb)
+    val animatedUsedFraction by animateFloatAsState(
+        targetValue = usedFraction ?: 0f,
+        animationSpec = McaMotion.sizeChange,
+        label = "deviceMemoryUsedFraction"
+    )
+    val panelScale by animateFloatAsState(
+        targetValue = if (expanded) 1f else 0.92f,
+        animationSpec = McaMotion.sizeChange,
+        label = "deviceStatusPanelScale"
+    )
+    val panelAlpha by animateFloatAsState(
+        targetValue = if (expanded) 1f else 0f,
+        animationSpec = McaMotion.fade(150),
+        label = "deviceStatusPanelAlpha"
+    )
+    val ballIdleAlpha by animateFloatAsState(
+        targetValue = if (expanded) 0.62f else 1f,
+        animationSpec = McaMotion.fade(150),
+        label = "deviceStatusBallAlpha"
+    )
     val ballMemoryLabel = if (memoryTotalKb > 0L) formatMemoryMb(memoryAvailableKb) else "--"
     val ballCompactMemoryLabel = compactMemoryLabel(ballMemoryLabel)
     val hasActive = items.any { it.key != "memory" && it.active }
@@ -232,11 +259,16 @@ internal fun ChatDeviceStatusOverlay(
                     .offset(x = panelX, y = panelY)
                     .width(panelWidth)
                     .heightIn(max = panelHeight)
+                    .graphicsLayer {
+                        scaleX = panelScale
+                        scaleY = panelScale
+                        alpha = panelAlpha
+                    }
                     .testTag("chat-device-status-panel"),
                 shape = RoundedCornerShape(18.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.97f),
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                shadowElevation = 10.dp
+                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)),
+                shadowElevation = 6.dp
             ) {
                 Column(
                     modifier = Modifier
@@ -267,11 +299,22 @@ internal fun ChatDeviceStatusOverlay(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        IconButton(onClick = { expanded = false }) {
-                            Icon(Icons.Default.Close, contentDescription = "收起设备状态", modifier = Modifier.size(20.dp))
+                        McaIconButton(
+                            contentDescription = "收起设备状态",
+                            onClick = {
+                                haptics.tick()
+                                expanded = false
+                            },
+                            hapticsEnabled = false,
+                            glyphSize = McaIconSize.M
+                        ) {
+                            Icon(McaIcons.Close, contentDescription = null)
                         }
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    )
                     Column(
                         modifier = Modifier.testTag("chat-device-status-memory"),
                         verticalArrangement = Arrangement.spacedBy(4.dp)
@@ -287,9 +330,9 @@ internal fun ChatDeviceStatusOverlay(
                                 color = memoryHeadlineColor
                             )
                         }
-                        usedFraction?.let { fraction ->
+                        usedFraction?.let {
                             LinearProgressIndicator(
-                                progress = { fraction },
+                                progress = { animatedUsedFraction },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(5.dp)
@@ -311,7 +354,10 @@ internal fun ChatDeviceStatusOverlay(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    )
                     items.filter { it.key != "memory" }.forEach { item ->
                         Column(
                             modifier = Modifier
@@ -354,7 +400,10 @@ internal fun ChatDeviceStatusOverlay(
                             )
                         }
                     }
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                    )
                     // The size control used to be a continuous screen-fraction slider sitting
                     // in the middle of the readout, with a dead first eighth on 360dp phones.
                     // It is now a labelled absolute-dp preset row at the bottom of the panel.
@@ -376,20 +425,26 @@ internal fun ChatDeviceStatusOverlay(
                         ) {
                             FloatingDeviceStatusSize.entries.forEach { preset ->
                                 val selected = preset == FloatingDeviceStatusSize.nearest(sizeDp)
+                                val presetInteraction = remember(preset) { MutableInteractionSource() }
                                 Surface(
                                     modifier = Modifier
                                         .weight(1f)
                                         .height(40.dp)
+                                        .mcaPressScale(presetInteraction)
                                         .clip(RoundedCornerShape(11.dp))
-                                        .clickable {
+                                        .clickable(
+                                            interactionSource = presetInteraction,
+                                            indication = ripple(bounded = true)
+                                        ) {
+                                            haptics.tick()
                                             sizeDp = preset.dp
                                             saveSize()
                                         },
                                     shape = RoundedCornerShape(11.dp),
                                     color = if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.surface,
                                     border = BorderStroke(
-                                        1.dp,
-                                        if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.outlineVariant
+                                        0.5.dp,
+                                        if (selected) McaPrimaryBlue else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.65f)
                                     )
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
@@ -420,7 +475,7 @@ internal fun ChatDeviceStatusOverlay(
                 .size(ballSize)
                 // The open panel already shows these numbers, so the ball steps back
                 // instead of competing with it, while staying usable as the drag anchor.
-                .alpha(if (expanded) 0.62f else 1f)
+                .graphicsLayer { alpha = ballIdleAlpha }
                 .testTag("chat-device-status-ball")
                 .semantics(mergeDescendants = true) {
                     contentDescription = "MCA 设备状态，可用内存 $ballMemoryLabel。点击${if (expanded) "收起" else "展开"}；可拖动位置。$statusSummary"
@@ -451,7 +506,10 @@ internal fun ChatDeviceStatusOverlay(
                                 ?: break
                             if (change.changedToUp()) {
                                 change.consume()
-                                if (!dragged) expanded = !expanded
+                                if (!dragged) {
+                                    haptics.tick()
+                                    expanded = !expanded
+                                }
                                 savePosition()
                                 break
                             }
@@ -483,12 +541,12 @@ internal fun ChatDeviceStatusOverlay(
                 },
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 8.dp,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            shadowElevation = 5.dp,
+            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f))
         ) {
             Box(contentAlignment = Alignment.Center) {
                 val ringStroke = floatingDeviceStatusRingStrokeDp(ballSize.value).dp
-                usedFraction?.let { fraction ->
+                usedFraction?.let {
                     Canvas(modifier = Modifier.fillMaxSize()) {
                         val inset = ringStroke.toPx() / 2f + 1.dp.toPx()
                         val arcSize = Size(size.width - inset * 2, size.height - inset * 2)
@@ -504,7 +562,7 @@ internal fun ChatDeviceStatusOverlay(
                         drawArc(
                             color = memoryAccent,
                             startAngle = -90f,
-                            sweepAngle = fraction * 360f,
+                            sweepAngle = animatedUsedFraction * 360f,
                             useCenter = false,
                             topLeft = Offset(inset, inset),
                             size = arcSize,

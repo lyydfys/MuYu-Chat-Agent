@@ -1,10 +1,16 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaSlider
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -25,20 +31,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Image
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -58,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.mcaEnterReveal
 import com.muyuchat.core.designsystem.mcaPressScale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -66,6 +66,7 @@ import java.io.InputStream
 import kotlin.math.roundToInt
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S19：从 ChatChromeScreens.kt 等值移出的背景/设置页/新会话对话框/空态簇。
 // 原样逐字迁移，未做行为改动；入口原即 internal，双向扫描按协议处理。
@@ -181,10 +182,10 @@ internal fun ChatBackgroundSettingsPage(
             McaIconButton(
                 contentDescription = "返回应用菜单",
                 onClick = onDismiss,
-                glyphSize = 24.dp,
+                glyphSize = McaIconSize.L,
                 tint = LocalContentColor.current
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                Icon(McaIcons.Back, contentDescription = null)
             }
             Text("聊天背景", style = MaterialTheme.typography.titleLarge)
         }
@@ -197,17 +198,17 @@ internal fun ChatBackgroundSettingsPage(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    FilterChip(
+                    McaChip(
                         selected = scope == ChatBackgroundScope.GLOBAL,
                         onClick = { scope = ChatBackgroundScope.GLOBAL },
                         label = { Text("全局") }
                     )
-                    FilterChip(
+                    McaChip(
                         selected = scope == ChatBackgroundScope.ASSISTANT,
                         onClick = { scope = ChatBackgroundScope.ASSISTANT },
                         label = { Text("当前角色") }
                     )
-                    FilterChip(
+                    McaChip(
                         selected = scope == ChatBackgroundScope.SESSION,
                         onClick = { scope = ChatBackgroundScope.SESSION },
                         enabled = hasActiveSession,
@@ -228,21 +229,21 @@ internal fun ChatBackgroundSettingsPage(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.horizontalScroll(rememberScrollState())
                 ) {
-                    Button(onClick = { onChooseImage(scope) }, enabled = !importing) { Text("选择图片") }
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Primary,onClick = { onChooseImage(scope) }, enabled = !importing) { Text("选择图片") }
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = { onReset(scope) },
                         enabled = hasOverride && !importing
                     ) { Text(if (scope == ChatBackgroundScope.GLOBAL) "恢复默认" else "改为继承") }
                 }
                 Text("遮罩 ${((state.scrimAlpha.coerceIn(0f, 1f)) * 100).roundToInt()}%", style = MaterialTheme.typography.labelLarge)
-                Slider(
+                McaSlider(
                     value = state.scrimAlpha.coerceIn(0f, 0.9f),
                     onValueChange = { onChange(scope, state.copy(scrimAlpha = it)) },
                     enabled = !importing,
                     valueRange = 0f..0.9f
                 )
                 Text("模糊 ${state.blurRadius.roundToInt()} dp", style = MaterialTheme.typography.labelLarge)
-                Slider(
+                McaSlider(
                     value = state.blurRadius.coerceIn(0f, 24f),
                     onValueChange = { onChange(scope, state.copy(blurRadius = it)) },
                     enabled = !importing,
@@ -250,17 +251,17 @@ internal fun ChatBackgroundSettingsPage(
                 )
                 Text("缩放方式", style = MaterialTheme.typography.labelLarge)
                 Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
+                    McaChip(
                         selected = state.scaleMode == ChatBackgroundScaleMode.CROP,
                         onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.CROP)) },
                         label = { Text("裁剪填充") }
                     )
-                    FilterChip(
+                    McaChip(
                         selected = state.scaleMode == ChatBackgroundScaleMode.FIT,
                         onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.FIT)) },
                         label = { Text("完整显示") }
                     )
-                    FilterChip(
+                    McaChip(
                         selected = state.scaleMode == ChatBackgroundScaleMode.CENTER,
                         onClick = { onChange(scope, state.copy(scaleMode = ChatBackgroundScaleMode.CENTER)) },
                         label = { Text("居中") }
@@ -365,11 +366,11 @@ internal fun NewConversationAssistantDialog(
         },
         confirmButton = {
             if (selected != null) {
-                TextButton(onClick = { onCreate(selected.id) }) { Text("创建新会话") }
+                McaButton(style = McaButtonStyle.Text,onClick = { onCreate(selected.id) }) { Text("创建新会话") }
             }
         },
         dismissButton = {
-            TextButton(onClick = if (selected == null) onDismiss else onBack) {
+            McaButton(style = McaButtonStyle.Text,onClick = if (selected == null) onDismiss else onBack) {
                 Text(if (selected == null) "取消" else "返回角色卡")
             }
         }
@@ -386,12 +387,21 @@ internal fun EmptyChatPanel(
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(22.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         tonalElevation = 1.dp,
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .mcaEnterReveal()
     ) {
         Column(modifier = Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("MCA", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                McaLogoMark(size = 28.dp, cornerRadius = 9.dp)
+                Text("MCA", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            }
             Text(
                 displayModelName(modelName) ?: "还没有开始聊天，选择一个模型即可使用。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -399,13 +409,22 @@ internal fun EmptyChatPanel(
             )
 
             if (modelName == null && showSetup) {
-                Button(onClick = onChooseModel, modifier = Modifier.fillMaxWidth()) {
+                McaButton(style = McaButtonStyle.Primary,
+                    onClick = onChooseModel,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text("选择推荐模型")
                 }
-                OutlinedButton(onClick = onImportModel, modifier = Modifier.fillMaxWidth()) {
+                McaButton(style = McaButtonStyle.Outlined,
+                    onClick = onImportModel,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text("导入已有模型")
                 }
-                TextButton(onClick = onOpenQuickStart, modifier = Modifier.fillMaxWidth()) {
+                McaButton(style = McaButtonStyle.Text,
+                    onClick = onOpenQuickStart,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
                     Text("第一次使用？查看 3 步快速开始")
                 }
             }

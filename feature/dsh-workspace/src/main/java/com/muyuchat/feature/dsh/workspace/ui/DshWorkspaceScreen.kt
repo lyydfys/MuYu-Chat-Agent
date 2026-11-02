@@ -1,0 +1,301 @@
+package com.muyuchat.feature.dsh.workspace.ui
+
+import com.muyuchat.core.dsh.contract.DshFailureCode
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaEnterReveal
+import com.muyuchat.feature.dsh.workspace.DshFailureProjection
+import com.muyuchat.feature.dsh.workspace.DshPageError
+import com.muyuchat.feature.dsh.workspace.DshPageUiState
+import com.muyuchat.feature.dsh.workspace.DshWebErrorClassifier
+import com.muyuchat.feature.dsh.workspace.DshWorkspaceUiState
+
+/** Callbacks the stateless shell needs; the Route owns their ViewModel wiring. */
+data class DshWorkspaceActions(
+    val onRetry: () -> Unit,
+    val onReloadPage: () -> Unit,
+    val onDismissPageError: () -> Unit,
+    val onExit: () -> Unit
+)
+
+/**
+ * Outer MCA shell for the DSH workspace.
+ *
+ * Only host-level states are rendered here: starting, start/exited failure and the WebView slot.
+ * The official DSH settings, history, approvals, model picker and plugin pages are never
+ * re-implemented in Compose; they are rendered unchanged by the WebView in [webContent].
+ */
+@Composable
+fun DshWorkspaceScreen(
+    state: DshWorkspaceUiState,
+    page: DshPageUiState,
+    snackbarHostState: SnackbarHostState,
+    actions: DshWorkspaceActions,
+    modifier: Modifier = Modifier,
+    /**
+     * Maintenance console entry for the startup-recovery block. Without it an interrupted trial
+     * leaves the workspace on a screen whose only action is "返回", and the pending upgrade can
+     * never be resumed or abandoned from inside the app.
+     */
+    onOpenMaintenanceConsole: (() -> Unit)? = null,
+    webContent: @Composable (DshWorkspaceUiState.Web) -> Unit
+) {
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+    ) {
+        AnimatedContent(
+            targetState = state,
+            contentKey = { it::class },
+            transitionSpec = {
+                fadeIn(animationSpec = McaMotion.fade(millis = 160)) togetherWith
+                    fadeOut(animationSpec = McaMotion.fade(millis = 110))
+            },
+            label = "dshWorkspaceStateTransition",
+            modifier = Modifier.fillMaxSize()
+        ) { targetState ->
+            when (targetState) {
+                DshWorkspaceUiState.Starting -> DshStartingShell(onExit = actions.onExit)
+                is DshWorkspaceUiState.Failure -> DshFailureShell(
+                    projection = targetState.projection,
+                    onRetry = actions.onRetry,
+                    onExit = actions.onExit,
+                    onOpenConsole = onOpenMaintenanceConsole?.takeIf {
+                        targetState.projection.code == DshFailureCode.STARTUP_RECOVERY_REQUIRED
+                    }
+                )
+                is DshWorkspaceUiState.Web -> Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        // Same convention as the chat composer: adjustResize alone is not reliable on
+                        // every OEM/edge-to-edge combination, so keep the page above the IME too.
+                        .imePadding()
+                ) {
+                    webContent(targetState)
+                    if (page.loading) {
+                        LinearProgressIndicator(
+                            progress = { page.progress.coerceIn(0, 100) / 100f },
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .fillMaxWidth()
+                                .height(2.dp)
+                        )
+                    }
+                    page.error?.let { error ->
+                        DshPageErrorBanner(
+                            error = error,
+                            onReload = actions.onReloadPage,
+                            onDismiss = actions.onDismissPageError,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 8.dp)
+        )
+    }
+}
+
+@Composable
+private fun DshStartingShell(onExit: () -> Unit) {
+    val exitInteraction = remember { MutableInteractionSource() }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 24.dp)
+            .mcaEnterReveal(index = 0, travelDp = 10),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(40.dp), strokeWidth = 3.dp)
+        Text(
+            text = "正在启动 DSH",
+            modifier = Modifier.padding(top = 20.dp),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onBackground
+        )
+        Text(
+            text = "首次启动会准备官方 DSH 运行时，可能需要几秒。",
+            modifier = Modifier.padding(top = 8.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        McaButton(
+            style = McaButtonStyle.Text,
+            onClick = onExit,
+            interactionSource = exitInteraction,
+            modifier = Modifier.padding(top = 12.dp)
+        ) {
+            Text("返回")
+        }
+    }
+}
+
+@Composable
+private fun DshFailureShell(
+    projection: DshFailureProjection,
+    onRetry: () -> Unit,
+    onExit: () -> Unit,
+    onOpenConsole: (() -> Unit)? = null
+) {
+    val retryInteraction = remember { MutableInteractionSource() }
+    val exitInteraction = remember { MutableInteractionSource() }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp, vertical = 24.dp)
+            .mcaEnterReveal(index = 0, travelDp = 10),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = McaIcons.ErrorOutline,
+            contentDescription = null,
+            modifier = Modifier.size(44.dp),
+            tint = MaterialTheme.colorScheme.error
+        )
+        Text(
+            text = projection.title,
+            modifier = Modifier.padding(top = 16.dp),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center
+        )
+        Text(
+            text = projection.message,
+            modifier = Modifier.padding(top = 8.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+        Text(
+            text = "错误代码：${projection.code.name}",
+            modifier = Modifier.padding(top = 12.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.padding(top = 20.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (projection.retryable) {
+                McaButton(
+                    style = McaButtonStyle.Primary,
+                    onClick = onRetry,
+                    interactionSource = retryInteraction,
+                ) {
+                    Text(projection.primaryActionLabel)
+                }
+            }
+            if (onOpenConsole != null) {
+                McaButton(
+                    style = McaButtonStyle.Text,
+                    onClick = onOpenConsole,
+                ) {
+                    Text("维护控制台")
+                }
+            }
+            McaButton(
+                style = McaButtonStyle.Text,
+                onClick = onExit,
+                interactionSource = exitInteraction,
+            ) {
+                Text("返回")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DshPageErrorBanner(
+    error: DshPageError,
+    onReload: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val dismissInteraction = remember { MutableInteractionSource() }
+    val reloadInteraction = remember { MutableInteractionSource() }
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        tonalElevation = 3.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = error.messageFor(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                McaButton(
+                    style = McaButtonStyle.Text,
+                    onClick = onDismiss,
+                    interactionSource = dismissInteraction,
+                ) {
+                    Text("关闭")
+                }
+                McaButton(
+                    style = McaButtonStyle.Primary,
+                    onClick = onReload,
+                    interactionSource = reloadInteraction,
+                ) {
+                    Text("重新加载")
+                }
+            }
+        }
+    }
+}
+
+private fun DshPageError.messageFor(): String = when (this) {
+    is DshPageError.Network -> DshWebErrorClassifier.messageFor(kind)
+    is DshPageError.Http -> "官方页面返回 HTTP $statusCode。"
+}

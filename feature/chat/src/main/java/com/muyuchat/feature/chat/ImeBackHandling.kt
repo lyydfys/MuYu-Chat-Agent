@@ -9,7 +9,6 @@ import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.compose.foundation.layout.Box
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AlertDialogDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -21,6 +20,8 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.window.DialogProperties
+import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaShape
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -142,7 +143,7 @@ fun ImeAwareAlertDialog(
     icon: (@Composable () -> Unit)? = null,
     title: (@Composable () -> Unit)? = null,
     text: (@Composable () -> Unit)? = null,
-    shape: Shape = AlertDialogDefaults.shape,
+    shape: Shape = McaShape.Sheet,
     containerColor: Color = AlertDialogDefaults.containerColor,
     iconContentColor: Color = AlertDialogDefaults.iconContentColor,
     titleContentColor: Color = AlertDialogDefaults.titleContentColor,
@@ -152,7 +153,7 @@ fun ImeAwareAlertDialog(
 ) {
     val holder = remember { arrayOfNulls<WindowImeBackController>(1) }
     val currentDismiss = rememberUpdatedState(onDismissRequest)
-    AlertDialog(
+    McaDialog(
         onDismissRequest = { if (holder[0]?.consume() != true) currentDismiss.value() },
         confirmButton = confirmButton,
         modifier = modifier,

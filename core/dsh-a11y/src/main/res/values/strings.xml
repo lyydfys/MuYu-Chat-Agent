@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shown by the system Accessibility settings list. Product copy, not a capability claim. -->
+    <string name="dsh_a11y_service_label">DeepSeek Harness 屏幕助手</string>
+    <string name="dsh_a11y_service_description">让 DeepSeek Harness 读取当前屏幕内容并执行点击、滑动、输入与截图。仅在你主动开启后生效，可随时在此关闭。</string>
+</resources>

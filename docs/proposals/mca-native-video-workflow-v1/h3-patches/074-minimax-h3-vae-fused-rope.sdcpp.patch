@@ -1,0 +1,116 @@
+diff --git a/src/model/vae/minimax_h3_vae.hpp b/src/model/vae/minimax_h3_vae.hpp
+index ec65fa3..4a62f53 100644
+--- a/src/model/vae/minimax_h3_vae.hpp
++++ b/src/model/vae/minimax_h3_vae.hpp
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cmath>
++#include <cstdlib>
+ #include <memory>
+ #include <string>
+ #include <tuple>
+@@ -244,10 +245,41 @@ namespace MiniMaxH3VAE {
+         return ggml_concat(ctx, rotated, tail, 0);
+     }
+ 
++    // nightmare (dit/074): the decoder's weightless q/k RMSNorm and partial rope on the backend's fused qknorm+rope op
++    // (the HTP's ggml_qknorm_rope), as dit/071 does for the DiT: the rope is rotate-half over the first rot_dim (48) of 64
++    // dims, the kernel interleaved over all 64, so the first rot_dim channels are reordered j -> 2j, j + rot_dim/2 ->
++    // 2j+1 (q and k alike, q.k unchanged) and build_rope pads the table to 32 pairs with identity rotations. The weight
++    // is ones. The composed rope was ~315 ms of every layer on the S25 (REPEAT, MUL, ADD on [2, 24, L, 32] tensors), 36
++    // layers per chunk. Returns nullptr when the backend cannot take it.
++    static ggml_tensor* fused_qknorm_rope(GGMLRunnerContext* ctx,
++                                          ggml_tensor* x,
++                                          ggml_tensor* theta,
++                                          int64_t rot_dim,
++                                          float eps) {
++        const int64_t d = x->ne[0];
++        if (ctx->backend == nullptr || rot_dim <= 0 || rot_dim > d || rot_dim % 2 != 0 || theta->ne[2] * 2 != d) {
++            return nullptr;
++        }
++        ggml_context* c = ctx->ggml_ctx;
++        int64_t rows    = x->ne[1] * x->ne[2] * x->ne[3];
++        auto t2         = ggml_reshape_2d(c, ggml_is_contiguous(x) ? x : ggml_cont(c, x), d, rows);
++        auto rot        = ggml_cont(c, ggml_view_2d(c, t2, rot_dim, rows, t2->nb[1], 0));
++        rot             = ggml_reshape_3d(c, rot, rot_dim / 2, 2, rows);
++        rot             = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, rot, 1, 0, 2, 3)), rot_dim, rows);
++        if (rot_dim < d) {
++            auto tail = ggml_cont(c, ggml_view_2d(c, t2, d - rot_dim, rows, t2->nb[1], rot_dim * ggml_element_size(t2)));
++            rot       = ggml_concat(c, rot, tail, 0);
++        }
++        auto xi          = ggml_reshape_4d(c, rot, d, x->ne[1], x->ne[2], x->ne[3]);
++        ggml_tensor* out = ggml_qknorm_rope(c, xi, ggml_ext_ones(c, d, 1, 1, 1), theta, eps);
++        return ggml_backend_supports_op(ctx->backend, out) ? out : nullptr;
++    }
++
+     struct DecoderAttention : public GGMLBlock {
+         static constexpr int num_head = 32;
+         static constexpr int head_dim = 64;
+         static constexpr int dim      = num_head * head_dim;
++        static constexpr int rot_dim  = 48;  // dit/074: embed_nd's {16, 16, 16} axes, 24 pairs
+ 
+         DecoderAttention() {
+             blocks["to_qkv"] = std::make_shared<Linear>(dim, dim * 3, true);
+@@ -287,10 +319,33 @@ namespace MiniMaxH3VAE {
+                                                   num_head,
+                                                   sequence,
+                                                   batch_size);
++            static const bool composed = std::getenv("NM_H3_COMPOSED_ROPE") != nullptr;  // dit/074: the A/B control
++            if (!composed) {
++                auto q_rope = fused_qknorm_rope(ctx, q, pe, rot_dim, 1e-5f);
++                auto k_rope = q_rope != nullptr ? fused_qknorm_rope(ctx, k, pe, rot_dim, 1e-5f) : nullptr;
++                if (q_rope != nullptr && k_rope != nullptr) {
++                    auto out = ggml_ext_attention_ext(ctx->ggml_ctx,
++                                                      ctx->backend,
++                                                      q_rope,
++                                                      k_rope,
++                                                      v,
++                                                      num_head,
++                                                      nullptr,
++                                                      true,
++                                                      ctx->flash_attn_enabled);
++                    return to_out->forward(ctx, out);
++                }
++            }
++            // dit/074: build_rope pads the table to head_dim/2 pairs; the composed path rotates only the first rot_dim/2.
++            ggml_tensor* pe_rot = pe;
++            if (pe->ne[2] * 2 > rot_dim) {
++                pe_rot = ggml_view_4d(ctx->ggml_ctx, pe, pe->ne[0], pe->ne[1], rot_dim / 2, pe->ne[3],
++                                      pe->nb[1], pe->nb[2], pe->nb[3], 0);
++            }
+             q                   = ggml_rms_norm(ctx->ggml_ctx, q, 1e-5f);
+             k                   = ggml_rms_norm(ctx->ggml_ctx, k, 1e-5f);
+-            q                   = apply_partial_rope(ctx->ggml_ctx, q, pe);
+-            k                   = apply_partial_rope(ctx->ggml_ctx, k, pe);
++            q                   = apply_partial_rope(ctx->ggml_ctx, q, pe_rot);
++            k                   = apply_partial_rope(ctx->ggml_ctx, k, pe_rot);
+             auto out            = ggml_ext_attention_ext(ctx->ggml_ctx,
+                                                          ctx->backend,
+                                                          q,
+@@ -758,11 +813,23 @@ namespace MiniMaxH3VAE {
+                                          1,
+                                          100.f,
+                                          std::vector<int>{16, 16, 16});
++            // dit/074: identity rotations up to head_dim/2 pairs, so the fused kernel takes the table whole; the
++            // composed path views the first rot_dim/2 pairs back out (DecoderAttention::rot_dim).
++            constexpr int64_t pairs = 24, padded = DecoderAttention::head_dim / 2;
++            std::vector<float> table(static_cast<size_t>(4 * padded) * ids.size());
++            for (size_t i = 0; i < ids.size(); ++i) {
++                std::copy_n(values.begin() + static_cast<std::ptrdiff_t>(4 * pairs * i), 4 * pairs,
++                            table.begin() + static_cast<std::ptrdiff_t>(4 * padded * i));
++                for (int64_t j = pairs; j < padded; ++j) {
++                    float* m = table.data() + 4 * (padded * i + j);
++                    m[0] = 1.f, m[1] = 0.f, m[2] = 0.f, m[3] = 1.f;
++                }
++            }
+             return sd::Tensor<float>({2,
+                                       2,
+-                                      24,
++                                      padded,
+                                       static_cast<int64_t>(ids.size())},
+-                                     std::move(values));
++                                     std::move(table));
+         }
+ 
+         sd::Tensor<float> _compute(const int n_threads,

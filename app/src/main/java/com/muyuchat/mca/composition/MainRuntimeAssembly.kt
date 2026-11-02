@@ -15,55 +15,94 @@ import com.muyuchat.mca.ChatContextComposer
 import com.muyuchat.mca.ChatImageCommitJournal
 import com.muyuchat.mca.ChatImageRequestPort
 import com.muyuchat.mca.ChatImageRetryPort
-import com.muyuchat.mca.ChatLocalApiProviderPort
 import com.muyuchat.mca.ChatRunOwnership
-import com.muyuchat.mca.ChatSessionPersistencePort
-import com.muyuchat.mca.ChatStopGenerationPort
 import com.muyuchat.mca.ConversationMutationRollbackState
 import com.muyuchat.mca.DiagnosticsOperations
 import com.muyuchat.mca.ImageGenerationOwner
 import com.muyuchat.mca.ImageLibraryCommitPort
 import com.muyuchat.mca.ImageLibraryStartupReconciliation
 import com.muyuchat.mca.ImagePromptTranslationPort
-import com.muyuchat.mca.LocalApiAuxProviderPort
 import com.muyuchat.mca.LocalApiPayloadPort
-import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.LocalApiServerCoordinator
 import com.muyuchat.mca.LocalImageGenerationOptions
 import com.muyuchat.mca.MainUiState
 import com.muyuchat.mca.OfflinePromptTranslationAndChatImageCoordinator
 import com.muyuchat.mca.OfflinePromptTranslationService
 import com.muyuchat.mca.ReplyGenerationMetrics
-import com.muyuchat.mca.SendChatImageRequestPort
 import com.muyuchat.mca.TuningOwner
 import com.muyuchat.mca.UiGenerationCancellation
 import com.muyuchat.mca.UiStateStore
 import com.muyuchat.mca.VisionAttachmentPort
 import com.muyuchat.mca.markLocalConversationContextInvalidInto
 import com.muyuchat.mca.VerifiedOfflinePromptTranslationBundle
+import com.muyuchat.mca.dsh.createMcaDshGatewayBackend
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 
 /**
  * Composition-level owner of the concrete inference service.
  *
- * MainViewModel and its public command methods depend on this assembly rather than constructing or
- * naming the native-backed engine. The assembly is the only app-side construction point for engine
- * dependent coordinators, ports and facade adapters.
+ * MainViewModel delegates production service creation to this assembly and may supply an explicitly
+ * typed existing service. The production factory is evaluated only when that service is absent.
+ * The assembly constructs the engine-dependent coordinators, ports and facade adapters.
  */
 internal class MainRuntimeAssembly(
     private val application: Application,
     private val container: McaAppContainer,
     private val scope: CoroutineScope,
     installationScopeId: String,
-    injectedEngine: Any? = null
+    injectedEngine: McaInferenceService? = null
 ) {
     internal val engine: McaInferenceService =
-        (injectedEngine as? McaInferenceService) ?: container.createInferenceService(
+        injectedEngine ?: container.createInferenceService(
             runners = container.isolatedLocalChatRunners.runners,
             installationScopeId = installationScopeId
         )
+
+    /**
+     * Native video workflow: one process-level owner behind the contract port (V1-02a). The
+     * workspace UI, future API routes and the V1-02b worker all share this single instance;
+     * execution stays honestly unavailable until the worker adapter is injected here.
+     */
+    internal val videoHost: VideoHostAssembly = VideoHostAssembly(
+        application = application,
+        scope = scope,
+    )
+
+    /**
+     * Independent official-DSH mode: one app-process host assembly for the official runtime,
+     * gateway, capability bridge, maintenance, console and account lane (D00-D27).
+     */
+    internal val dshHost: DshHostAssembly = DshHostAssembly(
+        application = application,
+        scope = scope,
+        gatewayBackend = {
+            createMcaDshGatewayBackend(
+                engine = engine,
+                facade = container.chatExecutionFacadeFor(engine),
+                cloudStore = container.cloudApiStore,
+                cloudProvider = container.cloudChatProvider,
+                installedLocalModels = {
+                    // Live read of the existing model store: every downloaded local model becomes
+                    // selectable in DSH, not only the one loaded when the host started.
+                    runCatching {
+                        container.modelStore.listModels().map { model ->
+                            val window = com.muyuchat.mca.dsh.DshInstalledContextWindow.of(model)
+                            com.muyuchat.mca.dsh.DshLocalModel(
+                                modelId = model.id,
+                                displayName = model.displayName.ifBlank { model.fileName },
+                                contextWindow = window,
+                                maxOutputTokens = window?.let { (it / 4).coerceIn(256, 4096) } ?: 4096,
+                                runtimeValuesJson = "{}"
+                            )
+                        }
+                    }.getOrDefault(emptyList())
+                }
+            )
+        }
+    )
 
     val benchmarkRunner: BenchmarkRunner by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         BenchmarkRunner(engine, container.deviceProfileReader)
@@ -82,7 +121,7 @@ internal class MainRuntimeAssembly(
     ): DiagnosticsOperations = DiagnosticsOperations(
         engine = engine,
         currentState = { store.current },
-        updateUiState = { transform -> store.update(transform) },
+        updateUiState = { transform -> store.diagnosticsWriter().update(transform) },
         recentAgentLogs = { agentLogger.recent() },
         recentBenchmarkHistory = { container.benchmarkHistoryLogger.recent() },
         currentDeviceProfile = currentDeviceProfile,
@@ -96,7 +135,7 @@ internal class MainRuntimeAssembly(
         markLocalConversationContextInvalid: () -> Unit
     ): CacheManagementCoordinator = CacheManagementCoordinator(
         application = application,
-        store = store,
+        store = store.cacheSettingsWriter(),
         scope = scope,
         engine = engine,
         chatRuns = chatRuns,
@@ -147,7 +186,7 @@ internal class MainRuntimeAssembly(
         setForegroundRecoveryJob: (kotlinx.coroutines.Job?) -> Unit
     ): AppLifecycleCoordinator = AppLifecycleCoordinator(
         application = application,
-        uiStateStore = store,
+        uiStateStore = store.localApiSettingsWriter(),
         scope = scope,
         engine = engine,
         chatRuns = chatRuns,
@@ -163,6 +202,44 @@ internal class MainRuntimeAssembly(
     suspend fun stopGenerationAndReadStats(): RuntimeStats {
         engine.stopGeneration()
         return engine.stats.value
+    }
+
+    // --- Agent V1 composition ---------------------------------------------------------------
+
+    /**
+     * Native Kotlin Agent: one runtime owner with its data, model route, approval/tool chain and
+     * management services. DSH and the Agent stay independent; neither creates the other.
+     */
+    internal val agentHost: AgentHostAssembly = AgentHostAssembly(
+        application = application,
+        parentScope = scope,
+        engine = engine,
+        chatExecutionFacade = { container.chatExecutionFacadeFor(engine) },
+        runtimeProfileStore = container.runtimeProfileStore,
+        cloudApiStore = container.cloudApiStore
+    )
+
+    private var closed = false
+
+    /**
+     * Settles the process-owned DSH and Agent hosts exactly once. DSH stops before the engine so an
+     * in-flight apply cannot use a closed runtime; video runs share the process scope and are
+     * cancelled by [McaProcessRuntimeRoot] after this returns.
+     */
+    @Synchronized
+    fun close() {
+        if (closed) return
+        closed = true
+        ProcessCloseSequence(
+            "dsh" to { dshHost.closeAndStopBlocking() },
+            "agent" to { agentHost.close() }
+        ).close().forEach { failure ->
+            android.util.Log.e(
+                "MainRuntimeAssembly",
+                "close step '${failure.step}' failed",
+                failure.error
+            )
+        }
     }
 
     suspend fun invalidateConversationContext(): Result<Unit> = runCatching {
@@ -184,14 +261,9 @@ internal class MainRuntimeAssembly(
         imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
         chatImageRetryPort: ChatImageRetryPort,
         showStatus: (String?) -> Unit,
-        tryAcquireObservedImageGenerationLease: (String) -> com.muyuchat.mca.LocalImageGenerationCoordinator.Lease?,
-        releaseObservedImageGenerationLease: (com.muyuchat.mca.LocalImageGenerationCoordinator.Lease) -> Boolean,
         offlinePromptTranslationService: () -> OfflinePromptTranslationService,
         runtimeProfileStore: com.muyuchat.mca.ModelRuntimeProfileStore,
         selectCloudImageModel: (String) -> Unit,
-        registerLocalApiImageGenerationOwnership: (com.muyuchat.mca.LocalApiImageGenerationOwnership) -> Unit,
-        unregisterLocalApiImageGenerationOwnership: (com.muyuchat.mca.LocalApiImageGenerationOwnership) -> Boolean,
-        cancelOwnedLocalApiImageWorker: (com.muyuchat.mca.LocalApiImageGenerationOwnership) -> Boolean
     ): com.muyuchat.mca.ChatImageWorkflowCoordinator = container.createChatImageWorkflowCoordinator(
         scope = scope,
         store = store,
@@ -203,15 +275,10 @@ internal class MainRuntimeAssembly(
         imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
         chatImageRetryPort = chatImageRetryPort,
         showStatus = showStatus,
-        tryAcquireObservedImageGenerationLease = tryAcquireObservedImageGenerationLease,
-        releaseObservedImageGenerationLease = releaseObservedImageGenerationLease,
         offlinePromptTranslationService = offlinePromptTranslationService,
         runtimeProfileStore = runtimeProfileStore,
         engine = engine,
         selectCloudImageModel = selectCloudImageModel,
-        registerLocalApiImageGenerationOwnership = registerLocalApiImageGenerationOwnership,
-        unregisterLocalApiImageGenerationOwnership = unregisterLocalApiImageGenerationOwnership,
-        cancelOwnedLocalApiImageWorker = cancelOwnedLocalApiImageWorker
     )
 
     fun createPorts(
@@ -222,6 +289,8 @@ internal class MainRuntimeAssembly(
         benchmarkRunner: BenchmarkRunner,
         buildRecommendationAction: (UserPreference) -> AgentRecommendation,
         generateLocalApiImageAction: suspend (String, String) -> String,
+        generateLocalApiVideoAction: suspend (String, String) -> String,
+        stopLocalApiVideoAction: suspend (String) -> Boolean,
         cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
         chatContextComposer: ChatContextComposer,
         showStatus: (String?) -> Unit,
@@ -246,6 +315,8 @@ internal class MainRuntimeAssembly(
         benchmarkRunner = benchmarkRunner,
         buildRecommendationAction = buildRecommendationAction,
         generateLocalApiImageAction = generateLocalApiImageAction,
+        generateLocalApiVideoAction = generateLocalApiVideoAction,
+        stopLocalApiVideoAction = stopLocalApiVideoAction,
         cancelActiveLocalApiImageGenerationAction = cancelActiveLocalApiImageGenerationAction,
         chatContextComposer = chatContextComposer,
         showStatus = showStatus,

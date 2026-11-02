@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,26 +19,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.CheckCircle
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.UploadFile
-import androidx.compose.material.icons.rounded.Visibility
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -53,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
+import com.muyuchat.core.designsystem.McaIconSize
 
 private enum class LocalModelPendingAction {
     UNLOAD,
@@ -133,8 +122,8 @@ internal fun LocalModelsSection(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            FilterChip(selected = !imageOnly, onClick = { imageOnly = false }, label = { Text("聊天 (${state.localModels.size})") })
-            FilterChip(selected = imageOnly, onClick = { imageOnly = true }, label = { Text("生图 (${state.localImageModels.size})") })
+            McaChip(selected = !imageOnly, onClick = { imageOnly = false }, label = { Text("聊天 (${state.localModels.size})") })
+            McaChip(selected = imageOnly, onClick = { imageOnly = true }, label = { Text("生图 (${state.localImageModels.size})") })
         }
     LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         items(state.importTasks, key = { "import-${it.id}" }) { task ->
@@ -152,13 +141,13 @@ internal fun LocalModelsSection(
                 Text("本地推理引擎", fontWeight = FontWeight.Bold)
                 Text("高速引擎优先使用 MNN；兼容引擎继续支持 GGUF / llama.cpp 生态。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 localActionError?.let { StatusMessageCard(message = it, isError = true) }
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onImportClick,
                     enabled = !state.isBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(McaIcons.UploadFile, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     Spacer(Modifier.width(6.dp))
                     // The long engine list does not fit on one line at 2.0x; keep the action and
                     // its icon readable and leave the engine list to the description above.
@@ -207,13 +196,13 @@ internal fun LocalModelsSection(
                     Text("图像生成引擎", fontWeight = FontWeight.Bold)
                     Text("本地文生图模型独立管理，图片页会使用选中的引擎")
                     if (state.localImageModels.isEmpty()) Text("还没有本地图像生成引擎，可下载推荐包或导入完整引擎包。")
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onImportLocalImageModel,
                     enabled = !state.isBusy,
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(10.dp)
                 ) {
-                    Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(McaIcons.Image, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     Spacer(Modifier.width(6.dp))
                     Text("+ 导入本地生图引擎包", fontWeight = FontWeight.Bold)
                 }
@@ -353,7 +342,7 @@ private fun LocalModelCard(
             // 2.0x 下三按钮+删除同排会裁标签：大字号隐藏装饰图标、允许两行并改用最小高度
             val largeTextActions = LocalDensity.current.fontScale >= 1.5f
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = { if (isLoaded) onUnload() else onLoad() },
                     enabled = enabled && (isLoaded || canNormalLoad),
                     modifier = Modifier.weight(1f).heightIn(min = 44.dp),
@@ -365,9 +354,9 @@ private fun LocalModelCard(
                 ) {
                     if (!largeTextActions) {
                         Icon(
-                            imageVector = if (isLoaded) Icons.Rounded.Close else Icons.Rounded.PlayArrow,
+                            imageVector = if (isLoaded) McaIcons.Close else McaIcons.PlayArrow,
                             contentDescription = null,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(McaIconSize.S)
                         )
                         Spacer(Modifier.width(4.dp))
                     }
@@ -379,7 +368,7 @@ private fun LocalModelCard(
                         Text("加载", maxLines = if (largeTextActions) 2 else 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onVerify,
                     enabled = enabled,
                     modifier = Modifier.weight(1f).heightIn(min = 44.dp),
@@ -390,7 +379,7 @@ private fun LocalModelCard(
                     )
                 ) {
                     if (!largeTextActions) {
-                        Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(McaIcons.CheckCircle, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                         Spacer(Modifier.width(4.dp))
                     }
                     Text(
@@ -399,7 +388,7 @@ private fun LocalModelCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onAttachVisionProjector,
                     enabled = enabled,
                     modifier = Modifier.weight(1f).heightIn(min = 44.dp),
@@ -410,7 +399,7 @@ private fun LocalModelCard(
                     )
                 ) {
                     if (!largeTextActions) {
-                        Icon(Icons.Rounded.Visibility, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(McaIcons.Visibility, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                         Spacer(Modifier.width(4.dp))
                     }
                     Text(
@@ -419,14 +408,20 @@ private fun LocalModelCard(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                McaIconButton(
+                    contentDescription = localModelDeleteActionLabel(model.displayName),
+                    onClick = { confirmDelete = true },
+                    enabled = enabled,
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.S,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                ) {
                     // Same 18dp glyph box and muted tint as the sibling action icons; the trash was
                     // the only 24dp, full-contrast mark in the row.
                     Icon(
-                        Icons.Rounded.Delete,
-                        contentDescription = localModelDeleteActionLabel(model.displayName),
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        McaIcons.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }
@@ -459,7 +454,7 @@ private fun LocalModelDeleteDialog(
     onUnload: () -> Unit,
     onDelete: () -> Unit
 ) {
-    AlertDialog(
+    McaDialog(
         onDismissRequest = { if (enabled) onDismiss() },
         title = {
             Text(
@@ -479,11 +474,11 @@ private fun LocalModelDeleteDialog(
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (isLoaded) {
-                    TextButton(onClick = onUnload, enabled = enabled) {
+                    McaButton(style = McaButtonStyle.Text, onClick = onUnload, enabled = enabled) {
                         Text("仅卸载")
                     }
                 }
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = onDelete,
                     enabled = enabled,
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
@@ -493,7 +488,7 @@ private fun LocalModelDeleteDialog(
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = enabled) {
+            McaButton(style = McaButtonStyle.Text, onClick = onDismiss, enabled = enabled) {
                 Text("取消")
             }
         }
@@ -512,21 +507,21 @@ private fun LocalImageModelCard(
 ) {
     var confirmRemoval by remember { mutableStateOf(false) }
     if (confirmRemoval) {
-        AlertDialog(
+        McaDialog(
             onDismissRequest = { confirmRemoval = false },
             title = { Text("移除本地图像模型") },
             text = { Text(model.displayName) },
             confirmButton = {
-                TextButton(onClick = { confirmRemoval = false; onRemoveRecord() }) {
+                McaButton(style = McaButtonStyle.Text, onClick = { confirmRemoval = false; onRemoveRecord() }) {
                     Text("仅移除记录")
                 }
             },
             dismissButton = {
                 Row {
-                    TextButton(onClick = { confirmRemoval = false; onDelete() }) {
+                    McaButton(style = McaButtonStyle.Text, onClick = { confirmRemoval = false; onDelete() }) {
                         Text("删除文件")
                     }
-                    TextButton(onClick = { confirmRemoval = false }) { Text("取消") }
+                    McaButton(style = McaButtonStyle.Text, onClick = { confirmRemoval = false }) { Text("取消") }
                 }
             }
         )
@@ -592,13 +587,13 @@ private fun LocalImageModelCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onSelect,
                     enabled = enabled && !model.selected && model.readyForGeneration,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Rounded.Image, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(McaIcons.Image, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     Spacer(Modifier.width(6.dp))
                     Text(
                         when {
@@ -609,23 +604,29 @@ private fun LocalImageModelCard(
                         maxLines = 1
                     )
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onVerify,
                     enabled = enabled,
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(999.dp)
                 ) {
-                    Icon(Icons.Rounded.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(McaIcons.CheckCircle, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     Spacer(Modifier.width(6.dp))
                     Text("校验", maxLines = 1)
                 }
                 // 与本地聊天卡删除按钮统一：48dp 触达 + 18dp muted 字形
-                IconButton(onClick = { confirmRemoval = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                McaIconButton(
+                    contentDescription = localImageModelDeleteActionLabel(model.displayName),
+                    onClick = { confirmRemoval = true },
+                    enabled = enabled,
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.S,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                ) {
                     Icon(
-                        Icons.Rounded.Delete,
-                        contentDescription = localImageModelDeleteActionLabel(model.displayName),
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        McaIcons.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }

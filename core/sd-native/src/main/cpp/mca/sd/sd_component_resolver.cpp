@@ -148,7 +148,14 @@ bool execution_assets_match_consumers(
 
 bool likely_split_diffusion_family(const std::string &family, const std::string &path) {
     const std::string key = lower_copy_str(family + " " + path);
-    return contains_str(key, "z_image") ||
+    // Anima needs the diffusion slot; match the family or the anima-preview
+    // filenames, never the "animagine" SDXL checkpoints.
+    const bool anima_family = lower_copy_str(family).find("anima") != std::string::npos &&
+                              lower_copy_str(family).find("animagine") == std::string::npos;
+    return anima_family ||
+           contains_str(key, "anima-preview") ||
+           contains_str(key, "anima_preview") ||
+           contains_str(key, "z_image") ||
            contains_str(key, "z-image") ||
            contains_str(key, "qwen_image") ||
            contains_str(key, "qwen-image") ||

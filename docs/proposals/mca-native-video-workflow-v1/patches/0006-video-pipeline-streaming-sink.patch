@@ -1,0 +1,373 @@
+# Source: src/pipeline/video.cpp, src/pipeline/generation.h, src/pipeline/video_stream_result.h (new)
+# Change: add the frame-sink decode path to decode_video_outputs (per-tile delivery, cancel polling, requested-frame STOP), extend pipeline generate_video with sink/sink_user/delivered_frames_out, forward the AnimateDiff frames through the sink, add the MCA_PER_FRAME_DECODE per-latent-frame fallback, and decide success by delivered-frame count instead of a non-null frame array.
+# Why:    On device 98a five frames were written yet reported as "stream aborted" because the intentionally empty frame array was read as failure; streaming also needs per-tile release to cap peak memory.
+diff --git a/src/pipeline/generation.h b/src/pipeline/generation.h
+index 1210a8c..5c3d069 100644
+--- a/src/pipeline/generation.h
++++ b/src/pipeline/generation.h
+@@ -55,11 +55,19 @@ namespace sd::pipeline {
+                         sd_image_t** images_out,
+                         int* num_images_out);
+ 
++    // `sink == nullptr` keeps the original contract (frames_out receives one heap array).
++    // When `sink` is set the decoded frames are handed to it one at a time, no frame array is
++    // allocated, `frames_out` stays null, `*num_frames_out` reports the delivered count and
++    // `delivered_frames_out` (optional) receives the same number as int64.
++    // Returning false means nothing was published (a sink that rejects a frame aborts the run).
+     bool generate_video(StableDiffusionGGML* sd,
+                         const sd_vid_gen_params_t* sd_vid_gen_params,
+                         sd_image_t** frames_out,
+                         int* num_frames_out,
+-                        sd_audio_t** audio_out);
++                        sd_audio_t** audio_out,
++                        sd_video_frame_sink_t sink    = nullptr,
++                        void* sink_user               = nullptr,
++                        int64_t* delivered_frames_out = nullptr);
+ 
+     sd::Tensor<float> upscale_ltx_spatial_video_latent(StableDiffusionGGML* sd,
+                                                        const char* model_path,
+diff --git a/src/pipeline/video.cpp b/src/pipeline/video.cpp
+index cc979c0..843b662 100644
+--- a/src/pipeline/video.cpp
++++ b/src/pipeline/video.cpp
+@@ -14,6 +14,7 @@
+ #include "model/vae/vae.hpp"
+ #include "request.h"
+ #include "runtime/denoiser.hpp"
++#include "video_stream_result.h"
+ 
+ namespace sd::pipeline {
+ 
+@@ -1104,10 +1105,35 @@ namespace sd::pipeline {
+         return embeds;
+     }
+ 
++    // Decode the latent video into frames.
++    //
++    // `sink == nullptr` keeps the original contract exactly: one heap array of
++    // `num_frames_out` sd_image_t is returned and the caller owns it.
++    //
++    // `sink != nullptr` asks for incremental delivery: frames are handed to the sink one at a
++    // time (valid only for the duration of the call) and no `num_frames`-sized array is
++    // allocated. The return value is then nullptr by design; `*delivered_frames_out` carries the
++    // number of frames the consumer accepted and `*streamed_out` reports whether the VAE itself
++    // delivered per temporal tile (memory saving) or the whole tensor had to be decoded first
++    // (VAE without streaming support - still no frame array).
+     static sd_image_t* decode_video_outputs(StableDiffusionGGML* sd,
+                                             const GenerationRequest& request,
+                                             const sd::Tensor<float>& final_latent,
+-                                            int* num_frames_out) {
++                                            int* num_frames_out,
++                                            sd_video_frame_sink_t sink    = nullptr,
++                                            void* sink_user               = nullptr,
++                                            int64_t* delivered_frames_out = nullptr,
++                                            bool* streamed_out            = nullptr,
++                                            bool* aborted_out             = nullptr) {
++        if (delivered_frames_out != nullptr) {
++            *delivered_frames_out = 0;
++        }
++        if (streamed_out != nullptr) {
++            *streamed_out = false;
++        }
++        if (aborted_out != nullptr) {
++            *aborted_out = false;
++        }
+         if (final_latent.empty()) {
+             LOG_ERROR("no latent video to decode");
+             return nullptr;
+@@ -1126,6 +1152,167 @@ namespace sd::pipeline {
+                     (int)video_latent.shape()[1],
+                     (int)video_latent.shape()[2],
+                     (int)video_latent.shape()[3]);
++
++        if (sink != nullptr) {
++            int64_t delivered  = 0;
++            bool aborted       = false;
++            bool limit_reached = false;
++            const int64_t frame_limit = request.frames > 0 ? static_cast<int64_t>(request.frames)
++                                                           : INT64_MAX;
++
++            // Convert and forward every frame of one tile, then drop the tile.
++            // STOP means "the requested frame count is complete": a successful early stop.
++            auto deliver_tensor = [&](const sd::Tensor<float>& frames_tensor) -> VAETileSinkStatus {
++                const int64_t tile_frames = frames_tensor.shape()[2];
++                for (int64_t i = 0; i < tile_frames; ++i) {
++                    if (delivered >= frame_limit) {
++                        limit_reached = true;
++                        return VAETileSinkStatus::STOP;
++                    }
++                    sd_image_t image = tensor_to_sd_image(frames_tensor, static_cast<int>(i));
++                    const bool keep  = sink(sink_user, &image, delivered);
++                    if (image.data != nullptr) {
++                        free(image.data);
++                        image.data = nullptr;
++                    }
++                    if (!keep) {
++                        aborted = true;
++                        return VAETileSinkStatus::ABORT;
++                    }
++                    ++delivered;
++                    if (delivered_frames_out != nullptr) {
++                        *delivered_frames_out = delivered;
++                    }
++                }
++                if (delivered >= frame_limit) {
++                    // The requested frame count finished exactly at this tile boundary. Report a
++                    // successful stop instead of letting the next tile trip the limit check, which
++                    // is what made the device run treat five delivered frames as an abort.
++                    limit_reached = true;
++                    return VAETileSinkStatus::STOP;
++                }
++                return VAETileSinkStatus::CONTINUE;
++            };
++
++            VAETileSink tile_sink = [&](const VAETemporalTile& tile, const sd::Tensor<float>& frames) -> VAETileSinkStatus {
++                LOG_VERBOSE("streaming video tile %d: latent [%lld, %lld) -> %lld frame(s), %lld delivered so far",
++                            tile.index + 1,
++                            (long long)tile.start,
++                            (long long)tile.end,
++                            (long long)frames.shape()[2],
++                            (long long)delivered);
++                if (sd->get_cancel_flag() == SD_CANCEL_ALL) {
++                    LOG_ERROR("cancelling video decode after %lld frame(s)", (long long)delivered);
++                    aborted = true;
++                    return VAETileSinkStatus::ABORT;
++                }
++                const VAETileSinkStatus status = deliver_tensor(frames);
++                if (status != VAETileSinkStatus::CONTINUE) {
++                    return status;
++                }
++                // Checked again after delivery so a cancel that arrives while this tile is being
++                // forwarded stops the loop before the next tile is decoded.
++                if (sd->get_cancel_flag() == SD_CANCEL_ALL) {
++                    LOG_ERROR("cancelling video decode after %lld frame(s)", (long long)delivered);
++                    aborted = true;
++                    return VAETileSinkStatus::ABORT;
++                }
++                return VAETileSinkStatus::CONTINUE;
++            };
++
++            int64_t t4            = ggml_time_ms();
++            bool streamed         = false;
++            sd::Tensor<float> vid;
++        const bool per_frame_decode = getenv("MCA_PER_FRAME_DECODE") != nullptr &&
++                                      video_latent.shape()[2] > 1;
++        if (per_frame_decode) {
++            // Decode one latent frame at a time through the image path. The Wan video graph needs
++            // more device memory than the per-frame image graph, so this is the only way to run the
++            // decoder on an NPU with a small budget. Temporal continuity is traded away; callers
++            // must treat this as an approximation and verify frame-to-frame stability.
++            const int64_t total_latent = video_latent.shape()[2];
++            LOG_INFO("per-frame decode: %lld latent frame(s) through the image path", (long long)total_latent);
++            streamed = true;
++            for (int64_t i = 0; i < total_latent; ++i) {
++                if (aborted) {
++                    break;
++                }
++                auto one = sd::ops::slice(video_latent, 2, i, i + 1);
++                auto frame_tensor = sd->decode_first_stage(one, false);
++                if (frame_tensor.empty()) {
++                    LOG_ERROR("per-frame decode failed at latent frame %lld", (long long)i);
++                    aborted = true;
++                    break;
++                }
++                VAETemporalTile tile{};
++                tile.index   = static_cast<int>(i);
++                tile.start   = i;
++                tile.end     = i + 1;
++                tile.overlap = 0;
++                tile.first   = (i == 0);
++                tile.last    = (i + 1 == total_latent);
++                const VAETileSinkStatus status = tile_sink(tile, frame_tensor);
++                if (status != VAETileSinkStatus::CONTINUE) {
++                    if (status == VAETileSinkStatus::ABORT) {
++                        aborted = true;
++                    }
++                    break;
++                }
++            }
++        } else {
++            vid = sd->decode_first_stage(video_latent, true, tile_sink, &streamed);
++        }
++            int64_t t5            = ggml_time_ms();
++            LOG_INFO("decode_first_stage completed, taking %.2fs", (t5 - t4) * 1.0f / 1000);
++
++            if (streamed) {
++                if (streamed_out != nullptr) {
++                    *streamed_out = true;
++                }
++                if (num_frames_out != nullptr) {
++                    *num_frames_out = static_cast<int>(delivered);
++                }
++                if (limit_reached) {
++                    LOG_VERBOSE("video frame sink reached the requested %lld frame(s); stopped before decoding more tiles",
++                                (long long)frame_limit);
++                }
++                if (aborted) {
++                    if (aborted_out != nullptr) {
++                        *aborted_out = true;
++                    }
++                    LOG_ERROR("video frame sink aborted after %lld frame(s)", (long long)delivered);
++                    return nullptr;
++                }
++                return nullptr;  // frames were delivered one by one; no array by design
++            }
++
++            if (aborted) {
++                if (aborted_out != nullptr) {
++                    *aborted_out = true;
++                }
++                LOG_ERROR("video frame sink aborted after %lld frame(s)", (long long)delivered);
++                return nullptr;
++            }
++            if (vid.empty()) {
++                LOG_ERROR("decode_first_stage failed for video");
++                return nullptr;
++            }
++            if (request.frames > 0 && vid.shape()[2] > request.frames) {
++                vid = sd::ops::slice(vid, 2, 0, request.frames);
++            }
++            if (num_frames_out != nullptr) {
++                *num_frames_out = static_cast<int>(vid.shape()[2]);
++            }
++            if (deliver_tensor(vid) == VAETileSinkStatus::ABORT) {
++                if (aborted_out != nullptr) {
++                    *aborted_out = true;
++                }
++                LOG_ERROR("video frame sink aborted after %lld frame(s)", (long long)delivered);
++                return nullptr;
++            }
++            return nullptr;
++        }
++
+         // auto z = sd::load_tensor_from_file_as_tensor<float>("ltx_vae_z.bin");
+         int64_t t4            = ggml_time_ms();
+         sd::Tensor<float> vid = sd->decode_first_stage(video_latent, true);
+@@ -1422,11 +1609,57 @@ namespace sd::pipeline {
+                         const sd_vid_gen_params_t* sd_vid_gen_params,
+                         sd_image_t** frames_out,
+                         int* num_frames_out,
+-                        sd_audio_t** audio_out) {
++                        sd_audio_t** audio_out,
++                        sd_video_frame_sink_t sink,
++                        void* sink_user,
++                        int64_t* delivered_frames_out) {
+         if (sd->config_->animatediff_loaded && sd_version_supports_animatediff(sd->version)) {
+             LOG_INFO("AnimateDiff dispatch: %d frames, %dx%d",
+                      sd_vid_gen_params->video_frames, sd_vid_gen_params->width, sd_vid_gen_params->height);
+-            return generate_animatediff_video(sd, sd_vid_gen_params, frames_out, num_frames_out);
++            sd_image_t* animatediff_frames = nullptr;
++            int animatediff_count          = 0;
++            if (!generate_animatediff_video(sd, sd_vid_gen_params, &animatediff_frames, &animatediff_count)) {
++                return false;
++            }
++            if (sink == nullptr) {
++                if (frames_out != nullptr) {
++                    *frames_out = animatediff_frames;
++                }
++                if (num_frames_out != nullptr) {
++                    *num_frames_out = animatediff_count;
++                }
++                if (delivered_frames_out != nullptr) {
++                    *delivered_frames_out = static_cast<int64_t>(animatediff_count);
++                }
++                return true;
++            }
++            // AnimateDiff is a separate image-seq pipeline; it cannot stream per tile yet, so the
++            // already-generated frames are forwarded (same delivery contract, no memory win).
++            int64_t delivered = 0;
++            bool keep         = true;
++            for (int i = 0; i < animatediff_count && keep; ++i) {
++                keep = sink(sink_user, &animatediff_frames[i], delivered);
++                if (keep) {
++                    ++delivered;
++                }
++            }
++            for (int i = 0; i < animatediff_count; ++i) {
++                if (animatediff_frames[i].data != nullptr) {
++                    free(animatediff_frames[i].data);
++                    animatediff_frames[i].data = nullptr;
++                }
++            }
++            free(animatediff_frames);
++            if (frames_out != nullptr) {
++                *frames_out = nullptr;
++            }
++            if (num_frames_out != nullptr) {
++                *num_frames_out = static_cast<int>(delivered);
++            }
++            if (delivered_frames_out != nullptr) {
++                *delivered_frames_out = delivered;
++            }
++            return keep;
+         }
+ 
+         sd->reset_cancel_flag();
+@@ -1773,8 +2006,22 @@ namespace sd::pipeline {
+             free_sd_audio(generated_audio);
+             return false;
+         }
+-        auto result = decode_video_outputs(sd, latent_upscale_enabled ? hires_request : request, final_latent, num_frames_out);
+-        if (result == nullptr) {
++        bool streamed      = false;
++        bool sink_aborted  = false;
++        int64_t delivered  = 0;
++        auto result        = decode_video_outputs(sd,
++                                                  latent_upscale_enabled ? hires_request : request,
++                                                  final_latent,
++                                                  num_frames_out,
++                                                  sink,
++                                                  sink_user,
++                                                  &delivered,
++                                                  &streamed,
++                                                  &sink_aborted);
++        if (delivered_frames_out != nullptr) {
++            *delivered_frames_out = delivered;
++        }
++        if (!sd::pipeline::video_decode_succeeded({result != nullptr, streamed, sink_aborted, delivered})) {
+             free_sd_audio(generated_audio);
+             return false;
+         }
+diff --git a/src/pipeline/video_stream_result.h b/src/pipeline/video_stream_result.h
+new file mode 100644
+index 0000000..c834eee
+--- /dev/null
++++ b/src/pipeline/video_stream_result.h
+@@ -0,0 +1,37 @@
++#ifndef __SD_PIPELINE_VIDEO_STREAM_RESULT_H__
++#define __SD_PIPELINE_VIDEO_STREAM_RESULT_H__
++
++#include <cstdint>
++
++namespace sd::pipeline {
++
++// Outcome of decoding one video.
++//
++// The legacy path returns a whole-video sd_image_t array; the streaming path delivers frames to a
++// sink and never builds that array, so `frames_out` stays null while the run is perfectly healthy.
++struct VideoDecodeOutcome {
++    bool has_array           = false;  // legacy path produced an array (frames_out != nullptr)
++    bool streamed            = false;  // frames were delivered incrementally (no array by design)
++    bool aborted             = false;  // consumer rejected a frame, or cancellation hit
++    int64_t delivered_frames = 0;      // frames accepted by the consumer
++};
++
++// A decode succeeded when nothing aborted it and it produced something usable: either the legacy
++// array, or at least one incrementally delivered frame.
++//
++// This is the rule the streaming path was missing on device: five delivered frames with no abort
++// must count as success even though `frames_out` stayed null (device run 98a reported
++// "stream aborted after 5 frame(s)" while all five frames had in fact been written).
++inline bool video_decode_succeeded(const VideoDecodeOutcome& outcome) {
++    if (outcome.aborted) {
++        return false;
++    }
++    if (outcome.has_array) {
++        return true;
++    }
++    return outcome.delivered_frames > 0;
++}
++
++}  // namespace sd::pipeline
++
++#endif  // __SD_PIPELINE_VIDEO_STREAM_RESULT_H__

@@ -1,16 +1,17 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -55,13 +56,13 @@ internal fun ImageLibraryBackupDialog(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        FilterChip(
+                        McaChip(
                             selected = !favoritesOnly,
                             onClick = { onFavoritesOnlyChange(false) },
                             label = { Text("导出全部") },
                             modifier = Modifier.weight(1f)
                         )
-                        FilterChip(
+                        McaChip(
                             selected = favoritesOnly,
                             onClick = { onFavoritesOnlyChange(true) },
                             label = { Text("仅导出收藏") },
@@ -103,14 +104,14 @@ internal fun ImageLibraryBackupDialog(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = onExport,
                             enabled = if (favoritesOnly) favoriteCount > 0 else totalCount > 0,
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("导出 ZIP")
                         }
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = onImport,
                             modifier = Modifier.weight(1f)
                         ) {
@@ -122,9 +123,9 @@ internal fun ImageLibraryBackupDialog(
         },
         confirmButton = {
             if (state.running) {
-                TextButton(onClick = onCancel) { Text("取消") }
+                McaButton(style = McaButtonStyle.Text,onClick = onCancel) { Text("取消") }
             } else {
-                TextButton(onClick = onDismiss) { Text("关闭") }
+                McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("关闭") }
             }
         }
     )

@@ -26,7 +26,9 @@ import kotlinx.coroutines.launch
  * and cloud model configuration.
  */
 internal class ChatModelCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<RuntimeProfileFields>,
+    private val modelSelectionStore: UiStateWriter<ChatModelSelectionFields>,
+    private val modelCatalogStore: UiStateWriter<ModelCatalogFields>,
     private val scope: CoroutineScope,
     private val application: Application,
     private val engine: McaInferenceService,
@@ -71,6 +73,7 @@ internal class ChatModelCoordinator(
     fun updateCloudSupportsVision(value: Boolean) = applyCloudSupportsVision(cloudModelConfigPort, value)
     fun generationParamsForChatModel(modelId: String): GenerationParams = cloudChatModelGenerationParams(port = cloudModelConfigPort, modelId = modelId)
     fun updateCloudSupportsTools(value: Boolean) = applyCloudSupportsTools(port = cloudModelConfigPort, value = value)
+    fun updateCloudStreaming(value: Boolean) = applyCloudStreaming(port = cloudModelConfigPort, value = value)
     fun updateCloudImageModel(value: String) = applyCloudImageModel(port = cloudModelConfigPort, value = value)
     fun updateCloudResponsesReasoning(value: Boolean) = applyCloudResponsesReasoning(port = cloudModelConfigPort, value = value)
     fun updateCloudImageSize(value: String) = applyCloudImageSize(port = cloudModelConfigPort, value = value)
@@ -80,6 +83,10 @@ internal class ChatModelCoordinator(
     fun saveCloudChatModel() = saveCloudChatModelConfig(port = cloudModelConfigPort)
     fun saveCloudImageModel() = saveCloudImageModelConfig(port = cloudModelConfigPort)
     fun testCloudApiConfig() = runCloudApiConfigTest(port = cloudModelConfigPort, scope = scope)
+
+    /** Reads the editor draft and asks the provider for its model ids; writes no UI state. */
+    suspend fun fetchCloudModelOptions(): Result<List<String>> =
+        fetchCloudModelOptionsFor(cloudModelConfigPort)
 
     fun selectCloudImageModel(modelId: String) {
         if (rejectImageModelSwitchWhileGenerationIsActive()) return
@@ -144,7 +151,7 @@ internal class ChatModelCoordinator(
 
     fun selectCloudChatModel(modelId: String?) =
         selectCloudChatModelFor(
-            store,
+            modelSelectionStore,
             cloudApiStore,
             engine,
             scope,
@@ -184,7 +191,7 @@ internal class ChatModelCoordinator(
 
     fun verifyModel(model: ModelManifest) {
         verifyModelFor(
-            store = store,
+            store = modelCatalogStore,
             application = application,
             modelStore = modelStore,
             managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,

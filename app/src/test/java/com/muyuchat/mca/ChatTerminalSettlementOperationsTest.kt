@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -46,11 +47,28 @@ class ChatTerminalSettlementOperationsTest {
         val upsertCalls = mutableListOf<UpsertCall>()
         val discardedRuns = mutableListOf<Long?>()
         var chatModelIdForTurn: String? = "model-from-port"
+        var supersedingState: MainUiState? = null
+        var onSuperseded: () -> Unit = {}
 
         override fun uiState(): MainUiState = stateFlow.value
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-            stateFlow.update(transform)
+        override fun updateUiState(transform: (ConversationSettlementFields) -> ConversationSettlementFields) {
+            updateUiStateWithResult { fields -> transform(fields) to Unit }
+        }
+
+        override fun <Result> updateUiStateWithResult(
+            transform: (ConversationSettlementFields) -> Pair<ConversationSettlementFields, Result>
+        ): Result {
+            while (true) {
+                val snapshot = stateFlow.value
+                val (fields, result) = transform(snapshot.toConversationSettlementFields())
+                supersedingState?.let { newer ->
+                    supersedingState = null
+                    stateFlow.value = newer
+                    onSuperseded()
+                }
+                if (stateFlow.compareAndSet(snapshot, fields.mergeInto(snapshot))) return result
+            }
         }
 
         override val webSearchDiagnosticStore: WebSearchDiagnosticStore
@@ -59,6 +77,8 @@ class ChatTerminalSettlementOperationsTest {
         override fun currentChatModelId(state: MainUiState): String? = chatModelIdForTurn
 
         override fun upsertSession(
+            state: MainUiState,
+            occurredAt: Long,
             sessions: List<ChatSessionRecord>,
             sessionId: String,
             messages: List<ChatMessage>,
@@ -205,4 +225,38 @@ class ChatTerminalSettlementOperationsTest {
         settleWebSearchCitationAudit(missingRecordPort, recordId = "record-1", audit = audit, generationRunId = 7L)
         assertEquals(missingRecordState, missingRecordPort.stateFlow.value)
     }
+    @Test
+    fun answerAuditFromLosingCasAttemptDoesNotEscapeAfterRunIsSuperseded() {
+        val sources = listOf(ChatSourceReference(title = "source", url = "https://example.com", snippet = "evidence"))
+        val initial = conversationState("answer [99]").let { state ->
+            state.copy(messages = state.messages.map { message ->
+                if (message.role == Role.ASSISTANT) message.copy(sourceReferences = sources) else message
+            })
+        }
+        var current = true
+        val port = FakeSettlementPort(initial, runIsCurrent = { current })
+        val replacement = initial.copy(messages = listOf(ChatMessage(Role.USER, "new run")))
+        port.supersedingState = replacement
+        port.onSuperseded = { current = false }
+
+        assertNull(settleWebSearchAnswerGuards(port, generationRunId = 7L))
+        assertSame(replacement, port.stateFlow.value)
+    }
+
+    @Test
+    fun evidenceUsesOneSessionAndMessageIdentityAcrossCasRetry() {
+        val initial = MainUiState()
+        val port = FakeSettlementPort(initial)
+        port.supersedingState = initial.copy(revision = (initial.revision ?: 0L) + 1L)
+        val sources = listOf(ChatSourceReference(title = "source", url = "https://example.com", snippet = "evidence"))
+
+        // Use the result-capable transition as the retrying state writer for ordinary updates too.
+        settleWebSearchEvidenceAttachment(port, sources, trace = null)
+
+        assertEquals(2, port.upsertCalls.size)
+        assertEquals(port.upsertCalls[0].sessionId, port.upsertCalls[1].sessionId)
+        assertEquals(port.upsertCalls[0].messages.single().id, port.upsertCalls[1].messages.single().id)
+        assertEquals(port.upsertCalls[1].sessionId, port.stateFlow.value.activeChatSessionId)
+    }
+
 }

@@ -30,6 +30,12 @@ internal interface LocalApiAuxProviderPort {
     suspend fun benchmarkJsonText(): String
 
     suspend fun generateImage(requestId: String, body: String): String
+
+    /** Authenticated `POST /v1/video`: the single video owner's only API entry. */
+    suspend fun generateVideo(requestId: String, body: String): String
+
+    /** Cancels the video run bound to one Local API request id (client disconnect). */
+    suspend fun stopVideo(requestId: String): Boolean
 }
 
 internal fun installLocalApiAuxProviders(port: LocalApiAuxProviderPort) {
@@ -45,5 +51,11 @@ internal fun installLocalApiAuxProviders(port: LocalApiAuxProviderPort) {
     LocalApiRuntime.benchmarkJsonProvider = { port.benchmarkJsonText() }
     LocalApiRuntime.imageGenerationProvider = { requestId, body ->
         port.generateImage(requestId, body)
+    }
+    LocalApiRuntime.videoGenerationProvider = { requestId, body ->
+        port.generateVideo(requestId, body)
+    }
+    LocalApiRuntime.videoStopProvider = { requestId ->
+        port.stopVideo(requestId)
     }
 }

@@ -1,4 +1,5 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -30,29 +31,22 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Stop
+
+
+
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -84,6 +78,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 
 internal fun composerStatusIsError(message: String): Boolean =
@@ -108,9 +103,9 @@ internal fun ComposerStatusMessage(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            imageVector = Icons.Default.Info,
+            imageVector = McaIcons.Info,
             contentDescription = null,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size(McaIconSize.Xs),
             tint = contentColor
         )
         Spacer(modifier = Modifier.width(7.dp))
@@ -122,11 +117,16 @@ internal fun ComposerStatusMessage(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
-        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+        McaIconButton(
+            contentDescription = "关闭提示",
+            onClick = onDismiss,
+            modifier = Modifier.size(28.dp),
+            size = 28.dp,
+            glyphSize = McaIconSize.Xs
+        ) {
             Icon(
-                imageVector = Icons.Default.Close,
-                contentDescription = "关闭提示",
-                modifier = Modifier.size(16.dp),
+                imageVector = McaIcons.Close,
+                contentDescription = null,
                 tint = contentColor
             )
         }
@@ -150,9 +150,9 @@ internal fun WebSearchStatusChip(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                Icons.Default.Search,
+                McaIcons.Search,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(McaIconSize.Xs),
                 tint = if (active) McaPrimaryBlue else MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(modifier = Modifier.width(8.dp))

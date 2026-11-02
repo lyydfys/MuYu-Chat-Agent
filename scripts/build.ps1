@@ -456,12 +456,21 @@ try {
         "lib/arm64-v8a/libQnnHtpV81CalculatorStub.so",
         "lib/arm64-v8a/libQnnHtpV81Skel.so",
         "lib/arm64-v8a/libQnnHtpV81Stub.so",
+        "assets/dsh/MANIFEST.json",
+        "assets/dsh/payload.zip",
+        "lib/arm64-v8a/libdshnode.so",
+        "lib/arm64-v8a/libdshrg.so",
+        "lib/arm64-v8a/libdshcurl.so",
+        "lib/arm64-v8a/libdshgit.so",
+        "lib/arm64-v8a/libdshgitremotehttp.so",
+        "lib/arm64-v8a/libdshgitremotehttps.so",
+        "lib/arm64-v8a/libdshpython.so",
         "lib/x86_64/libmca_native.so",
         "lib/x86_64/libmca_qnn_native.so",
-        "lib/x86_64/libllama.so",
-        "lib/x86_64/libggml.so",
-        "lib/x86_64/libggml-base.so",
-        "lib/x86_64/libllama-common.so",
+        "lib/x86_64/libmca_llama.so",
+        "lib/x86_64/libmca_ggml.so",
+        "lib/x86_64/libmca_ggml-base.so",
+        "lib/x86_64/libmca_llama-common.so",
         "lib/x86_64/libmca_mnn_native.so",
         "lib/x86_64/libmca_sd_native.so",
         "lib/x86_64/liblitertlm_jni.so",
@@ -545,7 +554,29 @@ try {
             Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
             Select-Object -First 1
     }
-    $buildRecord.nativeArtifactManifest = @(Get-McaApkNativeManifest $zip $readElf)
+    $apkNativeArtifacts = @(Get-McaApkNativeManifest $zip $readElf)
+    $dshPayload = Get-McaDshPayloadNativeManifest $zip $readElf
+    $dshManifestEntry = $zip.GetEntry("assets/dsh/MANIFEST.json")
+    if ($dshManifestEntry) {
+        $manifestStream = $dshManifestEntry.Open()
+        $manifestReader = [IO.StreamReader]::new($manifestStream)
+        try { $dshManifest = $manifestReader.ReadToEnd() | ConvertFrom-Json } finally {
+            $manifestReader.Dispose()
+            $manifestStream.Dispose()
+        }
+        if (-not $dshPayload -or [int64]$dshManifest.archive.size -ne [int64]$dshPayload.size -or
+            [string]$dshManifest.archive.sha256 -ne [string]$dshPayload.sha256) {
+            $buildRecord.validationErrors += 'DSH MANIFEST.json payload size/SHA-256 does not match assets/dsh/payload.zip.'
+        }
+        $nodeArtifact = @($apkNativeArtifacts | Where-Object { $_.path -eq 'lib/arm64-v8a/libdshnode.so' }) | Select-Object -First 1
+        if (-not $nodeArtifact -or [int64]$dshManifest.node.size -ne [int64]$nodeArtifact.bytes -or
+            [string]$dshManifest.node.sha256 -ne [string]$nodeArtifact.sha256) {
+            $buildRecord.validationErrors += 'DSH MANIFEST.json Node size/SHA-256 does not match lib/arm64-v8a/libdshnode.so.'
+        }
+    }
+    $buildRecord.nativeArtifactManifest = @(
+        $apkNativeArtifacts + @($dshPayload.artifacts)
+    )
     $androidSystemLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     @(
         'libc.so', 'libdl.so', 'libm.so', 'liblog.so', 'libandroid.so',
@@ -560,8 +591,16 @@ try {
     $vendorDeviceLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     @('libcdsprpc.so', 'libOpenCL.so') |
         ForEach-Object { [void]$vendorDeviceLibraries.Add($_) }
+    $dshRuntimeLibraries = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
     foreach ($artifact in $buildRecord.nativeArtifactManifest) {
-        if ($artifact.path -match '/(arm64-v8a|x86_64)/') {
+        if ($artifact.path -match '^dsh-payload/arm64-v8a/runtime/lib/') {
+            [void]$dshRuntimeLibraries.Add(($artifact.path -split '/')[-1])
+            if ($artifact.soname) { [void]$dshRuntimeLibraries.Add([string]$artifact.soname) }
+        }
+    }
+    foreach ($artifact in $buildRecord.nativeArtifactManifest) {
+        if ($artifact.path -match '^lib/(arm64-v8a|x86_64)/' -or
+            $artifact.path -match '^dsh-payload/arm64-v8a/runtime/lib/') {
             $isDsp = Test-McaDspArtifactPath $artifact.path
             if (-not $artifact.elf) {
                 $buildRecord.validationErrors += "$($artifact.path) is not an ELF library."
@@ -581,6 +620,9 @@ try {
                     [void]$available.Add(($candidate.path -split '/')[-1])
                     if ($candidate.soname) { [void]$available.Add([string]$candidate.soname) }
                 }
+            }
+            if ($artifact.path -match '^lib/arm64-v8a/libdsh[^/]*\.so$') {
+                foreach ($name in $dshRuntimeLibraries) { [void]$available.Add($name) }
             }
             foreach ($needed in $artifact.needed) {
                 if ($available.Contains([string]$needed)) { continue }

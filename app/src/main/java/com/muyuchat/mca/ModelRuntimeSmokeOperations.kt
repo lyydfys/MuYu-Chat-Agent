@@ -119,7 +119,7 @@ internal suspend fun runLocalGenerationSmokeFor(
 internal suspend fun recoverInterruptedRuntimeProfilesFor(
     runtimeProfileStore: ModelRuntimeProfileStore,
     pendingRuntimeRecoveries: MutableMap<String, RuntimeRecoveryPlan>,
-    uiStateStore: UiStateStore
+    uiStateStore: UiStateWriter<RuntimeProfileFields>
 ) {
     runCatching {
         val plans = runtimeProfileStore.recoverInterruptedTransactions()

@@ -5,7 +5,6 @@ import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import com.muyuchat.core.engine.Role
 import java.util.UUID
-import kotlinx.coroutines.flow.update
 
 /**
  * The owner seam for terminal settlement: what happens to the message and the diagnostics when
@@ -21,7 +20,14 @@ internal interface ChatTerminalSettlementPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ConversationSettlementFields) -> ConversationSettlementFields) {
+        updateUiStateWithResult { fields -> transform(fields) to Unit }
+    }
+
+    /** Only the result from the successful CAS attempt may escape this transition. */
+    fun <Result> updateUiStateWithResult(
+        transform: (ConversationSettlementFields) -> Pair<ConversationSettlementFields, Result>
+    ): Result
 
     val webSearchDiagnosticStore: WebSearchDiagnosticStore
 
@@ -30,6 +36,8 @@ internal interface ChatTerminalSettlementPort {
 
     /** Inserts or replaces the session and returns the resulting list. */
     fun upsertSession(
+        state: MainUiState,
+        occurredAt: Long,
         sessions: List<ChatSessionRecord>,
         sessionId: String,
         messages: List<ChatMessage>,
@@ -50,17 +58,18 @@ internal interface ChatTerminalSettlementPort {
         generationRunId: Long? = null
     ): WebSearchCitationAudit? {
         if (generationRunId != null && !port.isRunCurrent(generationRunId)) return null
-        var citationAudit: WebSearchCitationAudit? = null
-        port.updateUiState { state ->
+        val occurredAt = System.currentTimeMillis()
+        return port.updateUiStateWithResult { state ->
             if (generationRunId != null && !port.isRunCurrent(generationRunId)) {
-                return@updateUiState state
+                return@updateUiStateWithResult state to null
             }
             val updated = state.messages.toMutableList()
             val index = updated.indexOfLast { it.role == Role.ASSISTANT }
-            if (index < 0) return@updateUiState state
+            if (index < 0) return@updateUiStateWithResult state to null
             val guardResult = updated[index].withWebSearchAnswerGuards()
-            citationAudit = guardResult.citationAudit
-            if (guardResult.message == updated[index]) return@updateUiState state
+            if (guardResult.message == updated[index]) {
+                return@updateUiStateWithResult state to guardResult.citationAudit
+            }
             updated[index] = guardResult.message
             val sessionId = state.activeChatSessionId
             state.copy(
@@ -69,22 +78,24 @@ internal interface ChatTerminalSettlementPort {
                     state.chatSessions
                 } else {
                     port.upsertSession(
+                        state = state.snapshot,
+                        occurredAt = occurredAt,
                         sessions = state.chatSessions,
                         sessionId = sessionId,
                         messages = updated,
                         assistantId = state.selectedAssistantId,
                         modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = port.currentChatModelId(state)
+                        modelId = port.currentChatModelId(state.snapshot)
                     )
                 }
-            )
+            ) to guardResult.citationAudit
         }
-        return citationAudit
     }
 
     internal fun settleVisibleAssistantReply(
     port: ChatTerminalSettlementPort,generationRunId: Long? = null) {
         if (generationRunId != null && !port.isRunCurrent(generationRunId)) return
+        val occurredAt = System.currentTimeMillis()
         port.updateUiState { state ->
             if (generationRunId != null && !port.isRunCurrent(generationRunId)) {
                 return@updateUiState state
@@ -98,12 +109,14 @@ internal interface ChatTerminalSettlementPort {
                     state.chatSessions
                 } else {
                     port.upsertSession(
+                        state = state.snapshot,
+                        occurredAt = occurredAt,
                         sessions = state.chatSessions,
                         sessionId = sessionId,
                         messages = updated,
                         assistantId = state.selectedAssistantId,
                         modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = port.currentChatModelId(state)
+                        modelId = port.currentChatModelId(state.snapshot)
                     )
                 }
             )
@@ -141,6 +154,7 @@ internal interface ChatTerminalSettlementPort {
     internal fun settlePendingAssistantPlaceholder(
     port: ChatTerminalSettlementPort,generationRunId: Long? = null) {
         port.discardPendingOutput(generationRunId)
+        val occurredAt = System.currentTimeMillis()
         port.updateUiState { state ->
             if (generationRunId != null && !port.isRunCurrent(generationRunId)) {
                 return@updateUiState state
@@ -157,12 +171,14 @@ internal interface ChatTerminalSettlementPort {
                     state.chatSessions
                 } else {
                     port.upsertSession(
+                        state = state.snapshot,
+                        occurredAt = occurredAt,
                         sessions = state.chatSessions,
                         sessionId = sessionId,
                         messages = updated,
                         assistantId = state.selectedAssistantId,
                         modelMode = state.selectedChatBackend.bindingValue(),
-                        modelId = port.currentChatModelId(state)
+                        modelId = port.currentChatModelId(state.snapshot)
                     )
                 }
             )
@@ -177,6 +193,11 @@ internal interface ChatTerminalSettlementPort {
     ) {
         if (sources.isEmpty() && trace?.hasContent != true) return
         if (generationRunId != null && !port.isRunCurrent(generationRunId)) return
+        val occurredAt = System.currentTimeMillis()
+        val fallbackSessionId = UUID.randomUUID().toString()
+        val fallbackMessage = ChatMessage(
+            role = Role.ASSISTANT, content = "", sourceReferences = sources, webSearchTrace = trace
+        )
         port.updateUiState { state ->
             if (generationRunId != null && !port.isRunCurrent(generationRunId)) {
                 return@updateUiState state
@@ -190,24 +211,21 @@ internal interface ChatTerminalSettlementPort {
                     webSearchTrace = trace ?: current.webSearchTrace
                 )
             } else {
-                updated += ChatMessage(
-                    role = Role.ASSISTANT,
-                    content = "",
-                    sourceReferences = sources,
-                    webSearchTrace = trace
-                )
+                updated += fallbackMessage
             }
-            val sessionId = state.activeChatSessionId ?: UUID.randomUUID().toString()
+            val sessionId = state.activeChatSessionId ?: fallbackSessionId
             state.copy(
                 messages = updated,
                 activeChatSessionId = sessionId,
                 chatSessions = port.upsertSession(
+                    state = state.snapshot,
+                    occurredAt = occurredAt,
                         sessions = state.chatSessions,
                     sessionId = sessionId,
                     messages = updated,
                     assistantId = state.selectedAssistantId,
                     modelMode = state.selectedChatBackend.bindingValue(),
-                    modelId = port.currentChatModelId(state)
+                    modelId = port.currentChatModelId(state.snapshot)
                 )
             )
         }

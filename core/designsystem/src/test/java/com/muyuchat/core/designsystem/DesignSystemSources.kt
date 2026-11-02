@@ -23,3 +23,15 @@ internal fun designSystemSource(fileName: String): String {
     }
     throw AssertionError("$fileName was not found while walking up from $workingDirectory")
 }
+
+internal fun mcaRepositoryRoot(): File {
+    val workingDirectory = System.getProperty("user.dir") ?: "."
+    var directory = File(workingDirectory).absoluteFile
+    while (true) {
+        if (File(directory, "settings.gradle.kts").isFile && File(directory, "core/designsystem").isDirectory) {
+            return directory
+        }
+        directory = directory.parentFile ?: break
+    }
+    throw AssertionError("MCA repository root was not found while walking up from $workingDirectory")
+}

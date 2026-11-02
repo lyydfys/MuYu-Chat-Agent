@@ -38,7 +38,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -61,6 +60,8 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.feature.chat.McaBrandLogo
 import kotlin.math.cos
 import kotlin.math.roundToInt
@@ -451,16 +452,16 @@ private fun NoticeCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
             ) {
-                TextButton(onClick = onPrimary, modifier = Modifier.heightIn(min = 44.dp)) {
+                McaButton(style = McaButtonStyle.Text, onClick = onPrimary, modifier = Modifier.heightIn(min = 44.dp)) {
                     Text(primaryLabel)
                 }
                 if (secondaryLabel != null && onSecondary != null) {
-                    TextButton(onClick = onSecondary, modifier = Modifier.heightIn(min = 44.dp)) {
+                    McaButton(style = McaButtonStyle.Text, onClick = onSecondary, modifier = Modifier.heightIn(min = 44.dp)) {
                         Text(secondaryLabel)
                     }
                 }
                 if (tertiaryLabel != null && onTertiary != null) {
-                    TextButton(onClick = onTertiary, modifier = Modifier.heightIn(min = 44.dp)) {
+                    McaButton(style = McaButtonStyle.Text, onClick = onTertiary, modifier = Modifier.heightIn(min = 44.dp)) {
                         Text(tertiaryLabel)
                     }
                 }

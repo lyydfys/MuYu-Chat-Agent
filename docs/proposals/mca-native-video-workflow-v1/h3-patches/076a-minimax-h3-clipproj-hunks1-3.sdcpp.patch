@@ -1,0 +1,183 @@
+diff --git a/src/conditioning/conditioner.hpp b/src/conditioning/conditioner.hpp
+index 2649b1a..731746d 100644
+--- a/src/conditioning/conditioner.hpp
++++ b/src/conditioning/conditioner.hpp
+@@ -16,6 +16,11 @@
+ #include "model/te/llm.hpp"
+ #include "model/te/t5.hpp"
+ #include "model_loader.h"
++#include "json.hpp"
++#include <algorithm>
++#include <cstring>
++#include <fstream>
++#include <thread>
+ 
+ struct SDCondition {
+     sd::Tensor<float> c_crossattn;
+@@ -1800,8 +1805,151 @@ struct AnimaConditioner : public Conditioner {
+     }
+ };
+ 
++// nightmare (dit/076): MiniMax-H3 conditioned by a small Qwen3-VL through a ClipProj projection
++// (NicoLab28/ClipProj-MiniMax-H3, MIT), in place of H3's 32B cut to 50 layers. The file holds W [d_in, d_out],
++// mean_in / std_in [d_in], mean_out / std_out [d_out], sink_out [d_out] and the layer to read (`tap`, metadata):
++//     cond = ((h - mean_in) / std_in) @ W * std_out + mean_out,   token 0 (the attention sink) = sink_out
++// `tap` counts as `out_layers` does (the state after `tap` blocks, no final norm), as ComfyUI's `layer=[tap]`.
++// Named by NM_H3_CLIPPROJ (no ABI change). A file carrying the residual network (`mlp.*`) is refused: applying its
++// matrix alone is the silent half-application the projection's author warns about.
++struct H3ClipProj {
++    int tap       = -1;
++    int64_t d_in  = 0;
++    int64_t d_out = 0;
++    std::vector<float> W, mean_in, std_in, mean_out, std_out, sink_out;
++
++    static std::shared_ptr<H3ClipProj> load(const std::string& path) {
++        std::ifstream f(path, std::ios::binary);
++        if (!f) {
++            throw std::runtime_error("ClipProj: cannot open " + path);
++        }
++        uint64_t header_len = 0;
++        f.read(reinterpret_cast<char*>(&header_len), 8);
++        if (!f || header_len == 0 || header_len > (64u << 20)) {
++            throw std::runtime_error("ClipProj: not a safetensors file: " + path);
++        }
++        std::string header(static_cast<size_t>(header_len), '\0');
++        f.read(header.data(), static_cast<std::streamsize>(header_len));
++        const auto j     = nlohmann::json::parse(header);
++        const auto base  = static_cast<std::streamoff>(8 + header_len);
++        auto proj        = std::make_shared<H3ClipProj>();
++        if (j.contains("__metadata__") && j["__metadata__"].contains("tap")) {
++            proj->tap = std::stoi(j["__metadata__"]["tap"].get<std::string>());
++        }
++        auto read = [&](const std::string& name, std::vector<int64_t>& shape) -> std::vector<float> {
++            if (!j.contains(name)) {
++                return {};
++            }
++            const auto& t     = j[name];
++            const auto dtype  = t["dtype"].get<std::string>();
++            shape             = t["shape"].get<std::vector<int64_t>>();
++            const auto begin  = t["data_offsets"][0].get<int64_t>();
++            const auto end    = t["data_offsets"][1].get<int64_t>();
++            const int64_t n   = sd::tensor_numel(shape);
++            const int64_t esz = dtype == "F32" ? 4 : (dtype == "F16" || dtype == "BF16") ? 2 : 0;
++            if (esz == 0 || end - begin != n * esz) {
++                throw std::runtime_error("ClipProj: " + name + " has dtype " + dtype + " or a bad size");
++            }
++            std::vector<uint8_t> raw(static_cast<size_t>(end - begin));
++            f.seekg(base + begin);
++            f.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
++            if (!f) {
++                throw std::runtime_error("ClipProj: short read of " + name);
++            }
++            std::vector<float> out(static_cast<size_t>(n));
++            for (int64_t i = 0; i < n; ++i) {
++                if (esz == 4) {
++                    memcpy(&out[i], raw.data() + 4 * i, 4);
++                } else {
++                    uint16_t v;
++                    memcpy(&v, raw.data() + 2 * i, 2);
++                    out[i] = dtype == "F16" ? ggml_fp16_to_fp32(v) : ggml_bf16_to_fp32(ggml_bf16_t{v});
++                }
++            }
++            return out;
++        };
++        for (const auto& item : j.items()) {
++            if (item.key().rfind("mlp.", 0) == 0) {
++                throw std::runtime_error("ClipProj: " + path + " carries a residual network (mlp.*), which this engine does "
++                                         "not run; use a file without it (mmh3-4b-ClipProj-v3.1)");
++            }
++        }
++        std::vector<int64_t> sw, si, sso, so, sm, ss;
++        proj->W        = read("W", sw);
++        proj->mean_in  = read("mean_in", si);
++        proj->std_in   = read("std_in", ss);
++        proj->mean_out = read("mean_out", so);
++        proj->std_out  = read("std_out", sm);
++        proj->sink_out = read("sink_out", sso);
++        if (proj->W.empty() || proj->mean_in.empty() || proj->std_in.empty() || proj->mean_out.empty() ||
++            proj->std_out.empty() || sw.size() != 2 || proj->tap < 0) {
++            throw std::runtime_error("ClipProj: " + path + " lacks W, a statistic or its tap");
++        }
++        proj->d_in  = sw[0];
++        proj->d_out = sw[1];
++        if (static_cast<int64_t>(proj->mean_in.size()) != proj->d_in || static_cast<int64_t>(proj->std_in.size()) != proj->d_in ||
++            static_cast<int64_t>(proj->mean_out.size()) != proj->d_out || static_cast<int64_t>(proj->std_out.size()) != proj->d_out ||
++            (!proj->sink_out.empty() && static_cast<int64_t>(proj->sink_out.size()) != proj->d_out)) {
++            throw std::runtime_error("ClipProj: " + path + " has statistics that do not match W");
++        }
++        LOG_INFO("ClipProj: %s, tap %d, %" PRId64 " -> %" PRId64 "%s", path.c_str(), proj->tap, proj->d_in, proj->d_out,
++                 proj->sink_out.empty() ? ", no sink" : "");
++        return proj;
++    }
++
++    // h: [d_in, seq, ...] (the state after `tap` blocks). Returns [d_out, seq, ...].
++    sd::Tensor<float> apply(const sd::Tensor<float>& h, int n_threads) const {
++        if (h.dim() < 2 || h.shape()[0] != d_in) {
++            throw std::runtime_error("ClipProj: the text encoder is " + std::to_string(h.empty() ? 0 : h.shape()[0]) +
++                                     " wide and the projection expects " + std::to_string(d_in) +
++                                     " (a 4B is 2560, an 8B 4096): load the encoder its file was fitted on");
++        }
++        std::vector<int64_t> shape = h.shape();
++        shape[0]                   = d_out;
++        sd::Tensor<float> out(shape);
++        const int64_t tokens       = h.numel() / d_in;
++        const int64_t seq          = h.shape()[1];
++        auto work                  = [&](int64_t first, int64_t last) {
++            std::vector<float> xn(static_cast<size_t>(d_in));
++            std::vector<float> yn(static_cast<size_t>(d_out));
++            for (int64_t t = first; t < last; ++t) {
++                const float* x = h.data() + t * d_in;
++                float* y       = out.data() + t * d_out;
++                if (t % seq == 0 && !sink_out.empty()) {
++                    memcpy(y, sink_out.data(), sizeof(float) * static_cast<size_t>(d_out));
++                    continue;
++                }
++                for (int64_t i = 0; i < d_in; ++i) {
++                    xn[i] = (x[i] - mean_in[i]) / std_in[i];
++                }
++                std::fill(yn.begin(), yn.end(), 0.f);
++                for (int64_t i = 0; i < d_in; ++i) {
++                    const float a    = xn[i];
++                    const float* row = W.data() + i * d_out;
++                    for (int64_t o = 0; o < d_out; ++o) {
++                        yn[o] += a * row[o];
++                    }
++                }
++                for (int64_t o = 0; o < d_out; ++o) {
++                    y[o] = yn[o] * std_out[o] + mean_out[o];
++                }
++            }
++        };
++        const int64_t workers = std::max<int64_t>(1, std::min<int64_t>(n_threads, tokens));
++        std::vector<std::thread> pool;
++        for (int64_t k = 0; k < workers; ++k) {
++            pool.emplace_back(work, tokens * k / workers, tokens * (k + 1) / workers);
++        }
++        for (auto& th : pool) {
++            th.join();
++        }
++        return out;
++    }
++};
++
+ struct LLMEmbedder : public Conditioner {
+     SDVersion version;
++    std::shared_ptr<H3ClipProj> h3_clipproj;
+     std::shared_ptr<BPETokenizer> tokenizer;
+     std::shared_ptr<LLM::LLMRunner> llm;
+     std::shared_ptr<T5Runner> byt5;
+@@ -2236,7 +2384,13 @@ struct LLMEmbedder : public Conditioner {
+             prompt_attn_range                = {0, 0};
+         } else if (sd_version_is_minimax_h3(version)) {
+             prompt_template_encode_start_idx = 0;
+-            out_layers                       = {50};
++            if (!h3_clipproj) {
++                const char* clipproj = getenv("NM_H3_CLIPPROJ");
++                if (clipproj != nullptr && *clipproj != '\0') {
++                    h3_clipproj = H3ClipProj::load(clipproj);
++                }
++            }
++            out_layers = {h3_clipproj ? h3_clipproj->tap : 50};
+             prompt_attn_range                = {0, 0};
+ 
+             if (llm->enable_vision) {

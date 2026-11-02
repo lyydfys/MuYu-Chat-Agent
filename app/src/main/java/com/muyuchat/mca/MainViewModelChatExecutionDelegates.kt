@@ -1,6 +1,9 @@
 package com.muyuchat.mca
 
 import androidx.lifecycle.viewModelScope
+import com.muyuchat.mca.composition.modelCatalogWriter
+import com.muyuchat.mca.composition.navigationWriter
+import com.muyuchat.mca.composition.uiOperationFeedbackWriter
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatToolExchange
@@ -43,11 +46,11 @@ internal fun MainViewModel.mimeTypeForUri(uriString: String): String =
     chatInputAndAttachmentCoordinator.mimeTypeForUri(uriString)
 
 internal fun MainViewModel.busy(message: String) {
-    uiStateStore.update { it.copy(busy = true, statusMessage = message) }
+    uiStateStore.uiOperationFeedbackWriter().update { it.copy(busy = true, statusMessage = message) }
 }
 
 internal fun MainViewModel.failDownload(message: String) {
-    uiStateStore.update {
+    uiStateStore.modelCatalogWriter().update {
         it.copy(
             busy = false,
             downloadStatus = DownloadStatus.FAILED,
@@ -60,7 +63,7 @@ internal fun MainViewModel.failDownload(message: String) {
 }
 
 internal fun MainViewModel.fail(message: String) {
-    uiStateStore.update { it.copy(busy = false, statusMessage = message) }
+    uiStateStore.uiOperationFeedbackWriter().update { it.copy(busy = false, statusMessage = message) }
 }
 
 internal fun MainViewModel.persistFiles(files: List<FileAssetRecord> = uiStateStore.current.files) =
@@ -93,7 +96,7 @@ internal fun MainViewModel.captureContentImportOwner(): ContentImportOwner = Con
 )
 
 fun MainViewModel.selectTab(tab: AppTab) {
-    uiStateStore.update { it.copy(tab = tab) }
+    uiStateStore.navigationWriter().update { it.copy(tab = tab) }
     if (tab == AppTab.MODELS) {
         viewModelScope.launch(Dispatchers.IO) {
             refreshRuntimeReadiness(managedRuntimeReadinessPort)
@@ -104,14 +107,7 @@ fun MainViewModel.selectTab(tab: AppTab) {
 internal fun MainViewModel.restorePendingContentImportPreview() =
     contentImportPreviewCoordinator.restorePendingContentImportPreview()
 
-/**
- * Canonical ViewModel entry for staging an import preview.
- *
- * Restored after the 76348a5b extraction dropped it (the host adapter already declares this VM
- * entry in [com.muyuchat.mca.composition.MainCoordinatorHost], so its absence made the snapshot
- * depend on a direct coordinator call instead). The body is the verbatim delegation the reference
- * ViewModel had at 02fc0181 (`MainViewModel.kt:1066`).
- */
+/** Canonical app entry; preview ownership and persistence remain with the content coordinator. */
 internal suspend fun MainViewModel.stageContentImportPreview(preview: ContentImportPreview) =
     contentImportPreviewCoordinator.stageContentImportPreview(preview)
 

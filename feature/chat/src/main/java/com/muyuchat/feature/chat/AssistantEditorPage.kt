@@ -1,10 +1,16 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,23 +27,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -60,6 +61,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import com.muyuchat.core.designsystem.McaIconSize
 
 private const val MAX_ASSISTANT_SYSTEM_PROMPT_CHARS = 12_000
 private const val ASSISTANT_SAVE_DRAFT_PRESERVED_MESSAGE =
@@ -73,6 +75,7 @@ internal fun AssistantEditorPage(
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
+    modelChoices: List<ChatModelChoice> = emptyList(),
     onDelete: (String) -> Unit,
     onSave: (AssistantEditorDraft) -> Boolean,
     onUpsertMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean> =
@@ -109,6 +112,7 @@ internal fun AssistantEditorPage(
     var webSearchEnabled by remember(assistant?.id) { mutableStateOf(assistant?.webSearchEnabled ?: false) }
     var fileContextEnabled by remember(assistant?.id) { mutableStateOf(assistant?.fileContextEnabled ?: true) }
     var roleplayPresetMenuExpanded by rememberSaveable { mutableStateOf(false) }
+    var modelPickerOpen by rememberSaveable(assistant?.id) { mutableStateOf(false) }
     var presetImportMessage by rememberSaveable(assistant?.id) { mutableStateOf<String?>(null) }
     var presetImporting by rememberSaveable(assistant?.id) { mutableStateOf(false) }
     var advancedSamplingExpanded by rememberSaveable(assistant?.id) { mutableStateOf(false) }
@@ -208,9 +212,9 @@ internal fun AssistantEditorPage(
             McaIconButton(
                 contentDescription = "返回助手列表",
                 onClick = onBack,
-                glyphSize = 24.dp
+                glyphSize = McaIconSize.L
             ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                Icon(McaIcons.Back, contentDescription = null)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(if (assistant == null) "新建助手" else "编辑助手", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -261,7 +265,7 @@ internal fun AssistantEditorPage(
                             )
                         }
                         Box {
-                            TextButton(onClick = { roleplayPresetMenuExpanded = true }) {
+                            McaButton(style = McaButtonStyle.Text,onClick = { roleplayPresetMenuExpanded = true }) {
                                 Text(
                                     RoleplayStylePresets.all.firstOrNull { it.id == roleplayPresetId }?.name
                                         ?: "选择预设"
@@ -307,7 +311,7 @@ internal fun AssistantEditorPage(
                         minLines = 6,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    TextButton(onClick = {
+                    McaButton(style = McaButtonStyle.Text,onClick = {
                         prompt = GenerationParams().systemPrompt
                         roleplayPresetId = null
                     }) {
@@ -322,7 +326,7 @@ internal fun AssistantEditorPage(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        FilterChip(
+                        McaChip(
                             selected = defaultModelMode == "follow_current",
                             onClick = {
                                 defaultModelMode = "follow_current"
@@ -330,7 +334,7 @@ internal fun AssistantEditorPage(
                             },
                             label = { Text("跟随当前") }
                         )
-                        FilterChip(
+                        McaChip(
                             selected = defaultModelMode != "follow_current",
                             enabled = selectedModelId != null,
                             onClick = {
@@ -357,12 +361,17 @@ internal fun AssistantEditorPage(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    if (modelChoices.isNotEmpty()) {
+                        McaButton(style = McaButtonStyle.Text, onClick = { modelPickerOpen = true }) {
+                            Text(if (defaultModelMode == "follow_current") "从模型列表选择默认模型" else "更换绑定的模型")
+                        }
+                    }
                 }
                 item {
                     Text("能力", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        FilterChip(selected = memoryEnabled, onClick = { memoryEnabled = !memoryEnabled }, label = { Text("记忆") })
-                        FilterChip(selected = webSearchEnabled, onClick = { webSearchEnabled = !webSearchEnabled }, label = { Text("联网检索") })
+                        McaChip(selected = memoryEnabled, onClick = { memoryEnabled = !memoryEnabled }, label = { Text("记忆") })
+                        McaChip(selected = webSearchEnabled, onClick = { webSearchEnabled = !webSearchEnabled }, label = { Text("联网检索") })
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     // 2.0x font: the second capability row is the one that overflows; FlowRow
@@ -371,8 +380,8 @@ internal fun AssistantEditorPage(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        FilterChip(selected = fileContextEnabled, onClick = { fileContextEnabled = !fileContextEnabled }, label = { Text("文件上下文") })
-                        FilterChip(selected = false, onClick = {}, enabled = false, label = { Text("本地工具预留") })
+                        McaChip(selected = fileContextEnabled, onClick = { fileContextEnabled = !fileContextEnabled }, label = { Text("文件上下文") })
+                        McaChip(selected = false, onClick = {}, enabled = false, label = { Text("本地工具预留") })
                     }
                     if (memoryEnabled) {
                         Spacer(modifier = Modifier.height(8.dp))
@@ -386,8 +395,8 @@ internal fun AssistantEditorPage(
                         )
                     }
                     if (assistant != null) {
-                        TextButton(onClick = { showMemoryManager = true }) {
-                            Icon(Icons.Default.Psychology, contentDescription = null, modifier = Modifier.size(18.dp))
+                        McaButton(style = McaButtonStyle.Text,onClick = { showMemoryManager = true }) {
+                            Icon(McaIcons.Psychology, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("管理记忆")
                         }
@@ -401,7 +410,7 @@ internal fun AssistantEditorPage(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.weight(1f)
                         )
-                        OutlinedButton(
+                        McaButton(style = McaButtonStyle.Outlined,
                             onClick = { presetPicker.launch(arrayOf("*/*")) },
                             enabled = !presetImporting,
                             // 2.0x font: keep the 40dp minimum, allow the button to grow.
@@ -451,7 +460,7 @@ internal fun AssistantEditorPage(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    TextButton(onClick = { advancedSamplingExpanded = !advancedSamplingExpanded }) {
+                    McaButton(style = McaButtonStyle.Text,onClick = { advancedSamplingExpanded = !advancedSamplingExpanded }) {
                         Text(if (advancedSamplingExpanded) "收起高级采样参数" else "高级采样参数")
                     }
                     if (advancedSamplingExpanded) {
@@ -509,7 +518,7 @@ internal fun AssistantEditorPage(
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                         ReasoningMode.entries.forEach { mode ->
-                            FilterChip(
+                            McaChip(
                                 selected = reasoningMode == mode,
                                 onClick = { reasoningMode = mode },
                                 label = { Text(mode.label) }
@@ -525,7 +534,7 @@ internal fun AssistantEditorPage(
                 item {
                     Text("角色卡", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 val copyName = name.trim().ifBlank { assistant?.name ?: "未命名助手" }.let { "$it 副本" }
                                 submitDraft(buildDraft(null, copyName), closeOnSuccess = false)
@@ -535,7 +544,7 @@ internal fun AssistantEditorPage(
                         ) {
                             Text("复制为新助手")
                         }
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = { assistant?.id?.let(onDelete) },
                             enabled = assistant != null && assistant.id != "default",
                             modifier = Modifier.weight(1f)
@@ -573,14 +582,14 @@ internal fun AssistantEditorPage(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = onBack,
                         // 2.0x font: keep the 48dp minimum, allow the button to grow.
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                     ) {
                         Text("取消")
                     }
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = { submitDraft(buildDraft(assistant?.id), closeOnSuccess = true) },
                         // Same 2.0x rule for the primary action.
                         modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
@@ -598,6 +607,53 @@ internal fun AssistantEditorPage(
                 onDismiss = { showMemoryManager = false },
                 onUpsert = onUpsertMemory,
                 onDelete = onDeleteMemory
+            )
+        }
+        if (modelPickerOpen) {
+            McaDialog(
+                onDismissRequest = { modelPickerOpen = false },
+                title = { Text("选择默认模型", fontWeight = FontWeight.Bold) },
+                text = {
+                    // Cloud ids carry the choice prefix here; the save path strips it, exactly
+                    // like the "绑定当前云端" chip that binds the chat page's active model.
+                    LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                        items(modelChoices, key = { it.id }) { choice ->
+                            val bound = defaultModelId == choice.id && defaultModelMode != "follow_current"
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        defaultModelMode = if (choice.cloud) "cloud" else "local"
+                                        defaultModelId = choice.id
+                                        modelPickerOpen = false
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp)
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        choice.displayName,
+                                        fontWeight = if (bound) FontWeight.Bold else FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (bound) {
+                                        Text("当前绑定", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                                    }
+                                }
+                                Text(
+                                    listOfNotNull(choice.quant, choice.subtitle.takeIf { it.isNotBlank() })
+                                        .joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    McaButton(style = McaButtonStyle.Text, onClick = { modelPickerOpen = false }) {
+                        Text("取消")
+                    }
+                }
             )
         }
 }

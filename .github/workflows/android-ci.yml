@@ -58,6 +58,11 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
+      - name: State write authority and typed composition boundaries
+        run: |
+          python3 -m unittest discover -s tools/architecture -p test_state_write_boundaries.py -v
+          python3 tools/architecture/check_state_write_boundaries.py
+
       # -PmcaQnnTypedBindingsRequired=false is the opt-in stub path the build script documents.
       # Every Gradle step below passes it, so no step can accidentally take the fail-closed path
       # and report a confusing SDK error instead of a real compile or test result.

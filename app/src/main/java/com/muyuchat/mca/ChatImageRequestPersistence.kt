@@ -20,7 +20,11 @@ internal interface ChatImageRequestPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun <Result> updateUiStateWithResult(transform: (ChatImageRequestFields) -> Pair<ChatImageRequestFields, Result>): Result
+
+    fun updateUiState(transform: (ChatImageRequestFields) -> ChatImageRequestFields) {
+        updateUiStateWithResult { transform(it) to Unit }
+    }
 
     fun persistChatSessions(
         sessions: List<ChatSessionRecord>?,
@@ -79,17 +83,27 @@ internal fun applyChatGeneratedImageRequest(
     port: ChatImageRequestPort,
         chatSessionId: String,
         requestId: String,
-        request: ChatGeneratedImageRequest
+        request: ChatGeneratedImageRequest,
+        expectedJobId: String? = null
     ) {
-        var persistedSessions: List<ChatSessionRecord>? = null
-        port.updateUiState { state ->
-            val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@updateUiState state
+        val occurredAt = System.currentTimeMillis()
+        val persistedSessions = port.updateUiStateWithResult { state ->
+            val owner = state.chatSessions.firstOrNull { it.id == chatSessionId } ?: return@updateUiStateWithResult state to null
             if (owner.mixedAssistantHistory || owner.assistantId == null ||
-                owner.assistantSnapshot?.assistantId != owner.assistantId) return@updateUiState state
+                owner.assistantSnapshot?.assistantId != owner.assistantId) return@updateUiStateWithResult state to null
             val sourceMessages = if (state.activeChatSessionId == chatSessionId) {
                 state.messages
             } else {
                 owner.messages
+            }
+            // A terminal callback may lose CAS to a retry of this same request. Validate the
+            // current binding on every attempt so the old job cannot replace the new one.
+            if (expectedJobId != null) {
+                val currentRequest = sourceMessages.firstOrNull {
+                    it.generatedImageRequest?.id == requestId
+                }?.generatedImageRequest ?: return@updateUiStateWithResult state to null
+                if (!currentRequest.currentJobId.isNullOrBlank() &&
+                    currentRequest.currentJobId != expectedJobId) return@updateUiStateWithResult state to null
             }
             var found = false
             val messages = sourceMessages.map { message ->
@@ -103,16 +117,15 @@ internal fun applyChatGeneratedImageRequest(
                     )
                 }
             }
-            if (!found) return@updateUiState state
-            val updatedOwner = owner.copy(messages = messages, updatedAt = System.currentTimeMillis())
+            if (!found) return@updateUiStateWithResult state to null
+            val updatedOwner = owner.copy(messages = messages, updatedAt = occurredAt)
             val updatedSessions = state.chatSessions
                 .map { session -> if (session.id == chatSessionId) updatedOwner else session }
                 .sortedForHistory()
-            persistedSessions = updatedSessions
             state.copy(
                 messages = if (state.activeChatSessionId == chatSessionId) messages else state.messages,
                 chatSessions = updatedSessions
-            )
+            ) to updatedSessions
         }
         persistedSessions?.let { sessions -> port.persistChatSessions(sessions) }
     }
@@ -202,5 +215,5 @@ internal fun persistFinalChatImageRequest(
                 emptyList()
             }
         )
-        applyChatGeneratedImageRequest(port, chatSessionId, requestId, request)
+        applyChatGeneratedImageRequest(port, chatSessionId, requestId, request, expectedJobId = jobId)
     }

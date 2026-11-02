@@ -1,5 +1,12 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaTonal
+import com.muyuchat.core.designsystem.McaShape
+import com.muyuchat.core.designsystem.McaPlateSize
+import com.muyuchat.core.designsystem.McaIconPlate
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalAnimationApi
@@ -11,10 +18,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,22 +51,15 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Clear
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Search
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.key
@@ -65,9 +68,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -88,7 +93,10 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.mcaEnterReveal
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import kotlinx.coroutines.delay
+import com.muyuchat.core.designsystem.McaIconSize
 
 /** Fraction of the drawer sheet that must be on screen before the content reveal starts. */
 private const val HISTORY_DRAWER_REVEAL_TRIGGER = 0.15f
@@ -135,6 +143,10 @@ internal fun ChatHistoryDrawer(
     onOpenImages: () -> Unit,
     /** Opens the independent Agent workspace; the smart-tuning entry is unchanged elsewhere. */
     onOpenAgentWorkspace: () -> Unit,
+    /** Opens the independent official-DSH workspace. Order is fixed: image -> Agent -> DSH. */
+    onOpenDshWorkspace: () -> Unit,
+    /** Opens the native video workspace. Order is fixed: image -> Agent -> DSH -> video. */
+    onOpenVideoWorkspace: () -> Unit,
     onSelectConversation: (String) -> Unit,
     onBranchMixedConversation: (String, String) -> Unit,
     onDeleteConversation: (String) -> Unit,
@@ -280,18 +292,17 @@ internal fun ChatHistoryDrawer(
                                     },
                                     leadingIcon = {
                                         Icon(
-                                            Icons.Rounded.Search,
+                                            McaIcons.Search,
                                             contentDescription = null,
-                                            modifier = Modifier.size(20.dp)
+                                            modifier = Modifier.size(McaIconSize.M)
                                         )
                                     },
                                     trailingIcon = if (query.isNotEmpty()) {
                                         {
-                                            IconButton(onClick = { query = "" }) {
+                                            McaIconButton(contentDescription = "清空搜索", onClick = { query = "" }, glyphSize = McaIconSize.M) {
                                                 Icon(
-                                                    Icons.Rounded.Clear,
-                                                    contentDescription = "清空搜索",
-                                                    modifier = Modifier.size(20.dp)
+                                                    McaIcons.Clear,
+                                                    contentDescription = null
                                                 )
                                             }
                                         }
@@ -307,14 +318,15 @@ internal fun ChatHistoryDrawer(
                                     )
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                IconButton(
+                                McaIconButton(
+                                    contentDescription = "关闭搜索",
                                     onClick = { closeSearch() },
-                                    modifier = Modifier.testTag("history.search.close")
+                                    modifier = Modifier.testTag("history.search.close"),
+                                    glyphSize = McaIconSize.M
                                 ) {
                                     Icon(
-                                        Icons.Rounded.Close,
-                                        contentDescription = "关闭搜索",
-                                        modifier = Modifier.size(22.dp)
+                                        McaIcons.Close,
+                                        contentDescription = null
                                     )
                                 }
                             }
@@ -332,30 +344,32 @@ internal fun ChatHistoryDrawer(
                                 Surface(
                                     color = MaterialTheme.colorScheme.surface,
                                     shape = CircleShape,
-                                    shadowElevation = 8.dp
+                                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+                                    shadowElevation = 3.dp
                                 ) {
                                     Row(
                                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
-                                        IconButton(
+                                        McaIconButton(
+                                            contentDescription = "搜索历史",
                                             onClick = { searchActive = true },
                                             modifier = Modifier
                                                 .size(48.dp)
                                                 .focusRequester(searchButtonFocusRequester)
-                                                .testTag("history.search")
+                                                .testTag("history.search"),
+                                            glyphSize = McaIconSize.M
                                         ) {
                                             Icon(
-                                                Icons.Rounded.Search,
-                                                contentDescription = "搜索历史",
-                                                modifier = Modifier.size(22.dp)
+                                                McaIcons.Search,
+                                                contentDescription = null
                                             )
                                         }
-                                        IconButton(
+                                        McaIconButton(
+                                            contentDescription = "打开应用菜单",
                                             onClick = onOpenAppMenu,
-                                            modifier = Modifier
-                                                .size(48.dp)
-                                                .semantics { contentDescription = "打开应用菜单" }
+                                            modifier = Modifier.size(48.dp),
+                                            glyphSize = 25.dp
                                         ) {
                                             McaLogoMark(size = 25.dp, cornerRadius = 9.dp)
                                         }
@@ -367,15 +381,45 @@ internal fun ChatHistoryDrawer(
                 }
 
                 Spacer(modifier = Modifier.height(28.dp))
-                AppFeatureButton(icon = { Icon(Icons.Rounded.Image, null) }, text = "图片", onClick = onOpenImages)
+                AppFeatureButton(
+                    icon = { Icon(McaIcons.Image, null) },
+                    text = "图片",
+                    onClick = onOpenImages,
+                    testTag = "drawer.images",
+                    accessibilityLabel = "打开图片工作区"
+                )
                 // Agent workspace sits directly below the image entry. The existing "recent" area,
                 // smart-tuning entry and image overlay behavior are unchanged.
                 AppFeatureButton(
-                    icon = { Icon(Icons.Rounded.AutoAwesome, null) },
+                    icon = { Icon(McaIcons.AutoAwesome, null) },
                     text = "Agent",
                     onClick = onOpenAgentWorkspace,
                     testTag = "drawer.agent_workspace",
                     accessibilityLabel = "打开 Agent 工作区"
+                )
+                // Independent official-DSH mode sits directly below Agent. It is a separate
+                // kernel/frontend/data mode and never opens the Kotlin Agent workspace.
+                AppFeatureButton(
+                    icon = {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_dsh_whale),
+                            contentDescription = null,
+                            modifier = Modifier.size(McaIconSize.L)
+                        )
+                    },
+                    text = "DSH",
+                    onClick = onOpenDshWorkspace,
+                    testTag = "drawer.dsh_workspace",
+                    accessibilityLabel = "打开 DSH 工作区"
+                )
+                // Native video workflow sits directly below DSH. It is a separate workspace with
+                // its own node editor and run views; leaving it never cancels a video run.
+                AppFeatureButton(
+                    icon = { Icon(McaIcons.PlayArrow, null) },
+                    text = "视频",
+                    onClick = onOpenVideoWorkspace,
+                    testTag = "drawer.video_workflow",
+                    accessibilityLabel = "打开视频工作区"
                 )
                 Spacer(modifier = Modifier.height(34.dp))
 
@@ -457,21 +501,32 @@ internal fun ChatHistoryDrawer(
                 }
             }
 
+            val haptics = rememberMcaHaptics()
+            val newChatPillInteraction = remember { MutableInteractionSource() }
             Surface(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(end = 24.dp, bottom = 24.dp)
                     .height(48.dp)
-                    .clickable(onClick = onNewConversation),
+                    .mcaPressScale(newChatPillInteraction)
+                    .clickable(
+                        interactionSource = newChatPillInteraction,
+                        indication = ripple(bounded = true),
+                        onClick = {
+                            haptics.tick()
+                            onNewConversation()
+                        }
+                    ),
                 color = MaterialTheme.colorScheme.onBackground,
                 shape = CircleShape,
-                shadowElevation = 12.dp
+                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f)),
+                shadowElevation = 6.dp
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 18.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(Icons.Rounded.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.background, modifier = Modifier.size(20.dp))
+                    Icon(McaIcons.Edit, contentDescription = null, tint = MaterialTheme.colorScheme.background, modifier = Modifier.size(McaIconSize.M))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         "聊天",
@@ -490,7 +545,7 @@ internal fun ChatHistoryDrawer(
             title = { Text("删除对话") },
             text = { Text("确定删除“${item.displayName}”吗？此操作不会删除模型文件。") },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         onDeleteConversation(item.id)
                         deleteTarget = null
@@ -500,7 +555,7 @@ internal fun ChatHistoryDrawer(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { deleteTarget = null }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { deleteTarget = null }) {
                     Text("取消")
                 }
             }
@@ -518,7 +573,7 @@ internal fun ChatHistoryDrawer(
                 ) {
                     Text("原始记录保持只读，新分支从空对话开始。")
                     state.assistants.forEach { assistant ->
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 onBranchMixedConversation(item.id, assistant.id)
                                 branchTarget = null
@@ -531,7 +586,7 @@ internal fun ChatHistoryDrawer(
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { branchTarget = null }) { Text("取消") } }
+            dismissButton = { McaButton(style = McaButtonStyle.Text,onClick = { branchTarget = null }) { Text("取消") } }
         )
     }
 
@@ -549,7 +604,7 @@ internal fun ChatHistoryDrawer(
                 )
             },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         onRenameConversation(item.id, renameText)
                         renameTarget = null
@@ -560,7 +615,7 @@ internal fun ChatHistoryDrawer(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { renameTarget = null }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { renameTarget = null }) {
                     Text("取消")
                 }
             }
@@ -573,7 +628,7 @@ internal fun ChatHistoryDrawer(
             title = { Text("清空全部历史") },
             text = { Text("确定清空所有聊天记录吗？当前模型和模型文件不会被删除。") },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         onClearHistory()
                         clearAllRequested = false
@@ -583,7 +638,7 @@ internal fun ChatHistoryDrawer(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { clearAllRequested = false }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { clearAllRequested = false }) {
                     Text("取消")
                 }
             }
@@ -630,12 +685,22 @@ private fun AppFeatureButton(
     testTag: String? = null,
     accessibilityLabel: String? = null
 ) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
+            .mcaPressScale(interactionSource)
             .clip(RoundedCornerShape(14.dp))
-            .clickable(onClick = onClick)
+            .clickable(
+                interactionSource = interactionSource,
+                indication = ripple(bounded = true),
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                }
+            )
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
             .then(
                 if (accessibilityLabel != null) {
@@ -647,8 +712,16 @@ private fun AppFeatureButton(
             .padding(horizontal = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(modifier = Modifier.size(29.dp), contentAlignment = Alignment.Center) {
-            icon()
+        McaIconPlate(
+            size = McaPlateSize.DrawerBadge,
+            shape = McaShape.Badge,
+            containerColor = McaTonal.badgeFill(),
+            borderColor = Color.Transparent,
+            animateColors = false,
+        ) {
+            Box(modifier = Modifier.size(McaIconSize.L), contentAlignment = Alignment.Center) {
+                icon()
+            }
         }
         Spacer(modifier = Modifier.width(8.dp))
         Text(

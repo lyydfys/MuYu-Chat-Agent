@@ -1,12 +1,12 @@
 package com.muyuchat.feature.chat
 
-import android.widget.Toast
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,6 +80,7 @@ internal fun BoxScope.ImageWorkspacePreviewSection(
     val image = images.firstOrNull { it.id == previewImageId } ?: return
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val notify = rememberMcaNotify()
     val selectedModel = imageModels.firstOrNull { it.id == selectedImageModelId }
     val generationActionsEnabled = jobs.none(ImageGenerationUiJob::isWorking) &&
         image.uriString.startsWith("content://", ignoreCase = true)
@@ -137,11 +138,7 @@ internal fun BoxScope.ImageWorkspacePreviewSection(
                 result
                     .mapCatching { intent -> context.startActivity(intent) }
                     .onFailure { error ->
-                        Toast.makeText(
-                            context,
-                            error.message?.takeIf(String::isNotBlank) ?: "图片分享失败",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        notify(error.message?.takeIf(String::isNotBlank) ?: "图片分享失败")
                     }
             }
         },
@@ -189,11 +186,7 @@ internal fun BoxScope.ImageWorkspacePreviewSection(
                     compositeUltraFix.targetWidth < currentSourceTarget.first ||
                     compositeUltraFix.targetHeight < currentSourceTarget.second
                 ) {
-                    Toast.makeText(
-                        context,
-                        "当前源图尺寸与这组 UltraFix 参数不兼容",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    notify("当前源图尺寸与这组 UltraFix 参数不兼容")
                     return@useParameters
                 }
                 if (!onUltraFixEnabledChange(true)) return@useParameters
@@ -273,7 +266,7 @@ internal fun BoxScope.ImageWorkspacePreviewSection(
                 }
             }
             onDismissPreview()
-            Toast.makeText(context, "已将所选参数应用到生成面板", Toast.LENGTH_SHORT).show()
+            notify("已将所选参数应用到生成面板")
         },
         onRecreate = {
             onSetPendingConversationPrompt(image.generationPrompt.ifBlank { image.prompt })

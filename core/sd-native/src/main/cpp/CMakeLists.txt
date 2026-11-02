@@ -43,6 +43,8 @@ set(SD_USE_SYSTEM_GGML OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(SD_VULKAN OFF CACHE BOOL "" FORCE)
 set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+set(SD_OPENCL OFF CACHE BOOL "" FORCE)
+set(GGML_OPENCL OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 set(GGML_LLAMAFILE OFF CACHE BOOL "" FORCE)
 
@@ -91,7 +93,9 @@ set_target_properties(mca_sd_runtime_backend_local PROPERTIES
 
 add_library(mca_sd_native SHARED
         stable_diffusion_bridge.cpp
+        sd_video_generate.cpp
         sd_prompt_token_measure.cpp
+        sd_anima_tokenize.cpp
         sd_generate_request.cpp
         sd_generate_context.cpp
         sd_generate_execute.cpp
@@ -135,3 +139,11 @@ elseif(DEFINED ANDROID_ABI AND ANDROID_ABI STREQUAL "x86_64")
     target_compile_definitions(mca_sd_native PRIVATE MCA_SD_X86_64=1)
 endif()
 target_link_libraries(mca_sd_native PRIVATE mca_sd_runtime_backend_local stable-diffusion android log)
+# The shipped APK also carries an out-of-tree HappyYzy libstable-diffusion.so (for the
+# external video engine) that exports a different build of the same sd_* C ABI. Keeping
+# this library's statically-linked copies exported would let the dynamic linker bind one
+# engine's internal calls to the other's implementation; the two sd_ctx_params_t layouts
+# differ, so that is silent memory corruption rather than an error. Hide every symbol
+# pulled in from a static archive; JNI entry points compiled directly into this target
+# stay exported. Gate: tools/verify-engine-abi.sh (check 1 must report no duplicates).
+target_link_options(mca_sd_native PRIVATE "-Wl,--exclude-libs,ALL")

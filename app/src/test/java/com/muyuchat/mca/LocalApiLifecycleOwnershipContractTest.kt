@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import java.io.File
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,6 +30,30 @@ class LocalApiLifecycleOwnershipContractTest {
         val viewModel = mainViewModelSource()
         assertTrue(viewModel.contains("LocalApiForegroundService.ensureListener("))
         assertTrue(viewModel.contains("LocalApiForegroundService.stopListener()"))
+    }
+
+    @Test
+    fun pageTeardownKeepsTheProcessScopedLocalApiRuntimeOwner() {
+        val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+        val onCleared = functionBody(viewModel, "override fun onCleared()")
+        val root = sourceFile("app/src/main/java/com/muyuchat/mca/composition/McaProcessRuntimeRoot.kt")
+
+        assertTrue(
+            "pages must consume the container-owned runtime owner",
+            viewModel.contains("container.localApiRuntimeOwner")
+        )
+        assertFalse(
+            "page teardown must not clear the process-scoped runtime bindings",
+            onCleared.contains("LocalApiRuntime.releaseOwner(")
+        )
+        assertFalse(
+            "page teardown must not release the process-scoped owner",
+            onCleared.contains("localApiRuntimeOwner.release()")
+        )
+        assertTrue(
+            "the process root is the only Local API settlement point",
+            root.contains("container.localApiRuntimeOwner.release()")
+        )
     }
 
     private fun functionBody(source: String, signature: String): String {

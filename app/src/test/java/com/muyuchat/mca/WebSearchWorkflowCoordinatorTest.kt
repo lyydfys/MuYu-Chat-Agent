@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -19,7 +20,10 @@ import org.junit.Test
  */
 class WebSearchWorkflowCoordinatorTest {
 
-    private class FakeConfigPort(initialState: MainUiState) : WebSearchConfigPort {
+    private class FakeConfigPort(
+        initialState: MainUiState,
+        private val replayReducers: Boolean = false,
+    ) : WebSearchConfigPort {
         val stateFlow = MutableStateFlow(initialState)
         var savedConfig: WebSearchConfig? = null
         val diagnostics = mutableListOf<WebSearchDiagnosticRecord>()
@@ -29,8 +33,13 @@ class WebSearchWorkflowCoordinatorTest {
 
         override fun uiState(): MainUiState = stateFlow.value
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-            stateFlow.update(transform)
+        override fun updateUiState(transform: (WebSearchFields) -> WebSearchFields) {
+            stateFlow.update { snapshot ->
+                val fields = snapshot.toWebSearchFields()
+                // A CAS retry may re-run a pure reducer; it must not append the journal again.
+                if (replayReducers) transform(fields)
+                transform(fields).mergeInto(snapshot)
+            }
         }
 
         override fun saveConfig(config: WebSearchConfig) {
@@ -56,8 +65,18 @@ class WebSearchWorkflowCoordinatorTest {
 
         override fun uiState(): MainUiState = stateFlow.value
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-            stateFlow.update(transform)
+        override fun updateUiState(transform: (ConversationSettlementFields) -> ConversationSettlementFields) {
+            stateFlow.update { snapshot -> transform(snapshot.toConversationSettlementFields()).mergeInto(snapshot) }
+        }
+
+        override fun <Result> updateUiStateWithResult(
+            transform: (ConversationSettlementFields) -> Pair<ConversationSettlementFields, Result>
+        ): Result {
+            while (true) {
+                val snapshot = stateFlow.value
+                val (fields, result) = transform(snapshot.toConversationSettlementFields())
+                if (stateFlow.compareAndSet(snapshot, fields.mergeInto(snapshot))) return result
+            }
         }
 
         override val webSearchDiagnosticStore: WebSearchDiagnosticStore
@@ -66,6 +85,8 @@ class WebSearchWorkflowCoordinatorTest {
         override fun currentChatModelId(state: MainUiState): String? = "test-model"
 
         override fun upsertSession(
+            state: MainUiState,
+            occurredAt: Long,
             sessions: List<ChatSessionRecord>,
             sessionId: String,
             messages: List<ChatMessage>,
@@ -174,6 +195,26 @@ class WebSearchWorkflowCoordinatorTest {
 
         coordinator.clearWebSearchDiagnostics()
         assertTrue(port.uiState().webSearchDiagnostics.isEmpty())
+    }
+
+    @Test
+    fun failedConfigTestAppendsOneDiagnosticWhenStateReducerRetries() = runBlocking {
+        val config = WebSearchConfig(enabled = true, apiKey = "key", endpoint = "https://example.com")
+        val port = FakeConfigPort(MainUiState(webSearchConfig = config), replayReducers = true)
+
+        // The provider seam deliberately fails; this exercises the failure journal and finally path.
+        val job = requireNotNull(runWebSearchConfigTest(
+            port = port,
+            scope = CoroutineScope(Dispatchers.Unconfined),
+            query = "test",
+            config = config
+        ))
+        job.join()
+
+        assertEquals(1, port.diagnostics.size)
+        assertEquals(1, port.uiState().webSearchDiagnostics.size)
+        assertEquals("联网检索测试失败", port.uiState().statusMessage)
+        assertEquals(null, port.uiState().settingsOperations.webSearch)
     }
 
     @Test

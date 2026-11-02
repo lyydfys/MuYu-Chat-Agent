@@ -29,6 +29,7 @@ val composeCompilerReportsEnabled = providers.gradleProperty("mca.composeCompile
     .map { value -> !value.trim().equals("false", ignoreCase = true) }
     .orElse(true)
 composeCompiler {
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("config/compose/stability.conf"))
     if (composeCompilerReportsEnabled.get()) {
         reportsDestination = layout.buildDirectory.dir("compose-compiler/reports")
         metricsDestination = layout.buildDirectory.dir("compose-compiler/metrics")
@@ -51,4 +52,5 @@ dependencies {
     implementation("org.jsoup:jsoup:1.18.3")
     testImplementation(libs.junit)
     testImplementation(libs.json)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

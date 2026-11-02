@@ -33,7 +33,7 @@ internal const val DOWNLOAD_REQUESTS_PREFERENCES = "mca_download_requests"
 internal suspend fun reconcileModelIdentitiesFor(
     chatSessionPersistenceMutex: Mutex,
     modelIdentityReferenceMigration: ModelIdentityReferenceMigration,
-    store: UiStateStore,
+    store: UiStateWriter<ModelIdentityFields>,
     getDurableChatSessions: () -> List<ChatSessionRecord>,
     setDurableChatSessions: (List<ChatSessionRecord>) -> Unit
 ) = chatSessionPersistenceMutex.withLock {
@@ -59,7 +59,7 @@ internal suspend fun reconcileModelIdentitiesFor(
 internal class ModelImportAndDownloadCoordinator(
     private val application: Application,
     private val scope: CoroutineScope,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ModelCatalogFields>,
     private val modelStore: ModelStoreRepository,
     private val localImageModelStore: LocalImageModelStore,
     private val getManagedRuntimeReadinessRefreshGate: () -> ManagedRuntimeReadinessRefreshGate,
@@ -205,9 +205,10 @@ internal class ModelImportAndDownloadCoordinator(
                 modelStore.attachVisionProjector(modelId, uri)
             }.onSuccess { model ->
                 getManagedRuntimeReadinessRefreshGate().invalidate()
+                val models = modelStore.listModels()
                 store.update {
                     it.copy(
-                        models = modelStore.listModels(),
+                        models = models,
                         busy = false,
                         statusMessage = if (shouldReload) {
                             "已绑定视觉投影器：${model.visionProjectorFileName ?: "mmproj"}，正在重新加载模型以启用本地识图。"
@@ -305,8 +306,7 @@ internal class ModelImportAndDownloadCoordinator(
                         ?: infos.firstOrNull { !it.state.isFinished }
                     if (active != null) {
                         val progress = active.progress
-                        store.update { state ->
-                            if (!state.busy) managedDownloadOwnedBusy = true
+                        val claimedBusy = store.updateWithResult { state ->
                             state.copy(
                                 busy = true,
                                 downloadTaskId = active.tags.firstOrNull { tag ->
@@ -335,8 +335,9 @@ internal class ModelImportAndDownloadCoordinator(
                                 downloadIntegrityMessage = progress.getString("integrityMessage") ?: state.downloadIntegrityMessage,
                                 downloadExecutionStatus = progress.getString("executionStatus") ?: state.downloadExecutionStatus,
                                 downloadExecutionMessage = progress.getString("executionMessage") ?: state.downloadExecutionMessage
-                            )
+                            ) to !state.busy
                         }
+                        if (claimedBusy) managedDownloadOwnedBusy = true
                     }
                     infos.filter { it.state.isFinished && it.id.toString() !in handled }
                         .sortedBy { work -> work.tags.firstOrNull { it.startsWith("created:") }?.removePrefix("created:")?.toLongOrNull() ?: 0L }.forEach { info ->

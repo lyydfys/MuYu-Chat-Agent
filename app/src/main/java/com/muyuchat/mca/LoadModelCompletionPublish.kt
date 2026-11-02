@@ -43,7 +43,7 @@ import com.muyuchat.core.tuning.AdaptiveTuningRecommendation
  * T2B22-T3（b 工位）拆片：完成发布段自 LoadModelOperations.kt 逐字节平移；壳内以登记 glue 调用。
  */
 internal suspend fun publishLoadedModelStateFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     engine: McaInferenceService,
     modelStore: ModelStoreRepository,
@@ -69,7 +69,6 @@ internal suspend fun publishLoadedModelStateFor(
                 preference = store.current.preference
             )
         }.getOrNull()
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
         val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
         val pendingTransaction = runtimeProfileStore.pendingTransaction(identity.identityHash)
         val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()
@@ -78,9 +77,12 @@ internal suspend fun publishLoadedModelStateFor(
         }.getOrDefault(false)
         val logsAfterLoad = engine.recentEngineLogsOrEmpty()
         managedRuntimeReadinessRefreshGate.invalidate()
-        store.update { state ->
-            cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
-            sessionsToPersist = state.chatSessions.bindSession(
+        val modelsAfterLoad = modelStore.listModels()
+        val statsAfterLoad = engine.stats.value
+        val executionProfileAfterLoad = engine.activeExecutionProfile()
+        cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
+        val sessionsToPersist = store.updateWithResult { state ->
+            val sessions = state.chatSessions.bindSession(
                 sessionId = state.activeChatSessionId,
                 assistantId = state.selectedAssistantId,
                 modelMode = ChatBackend.LOCAL.bindingValue(),
@@ -90,16 +92,16 @@ internal suspend fun publishLoadedModelStateFor(
                 loadedModelId = model.id,
                 loadedModelName = model.displayName,
                 selectedChatBackend = ChatBackend.LOCAL,
-                models = modelStore.listModels(),
-                chatSessions = sessionsToPersist,
+                models = modelsAfterLoad,
+                chatSessions = sessions,
                 busy = false,
-                stats = engine.stats.value,
+                stats = statsAfterLoad,
                 engineLifecycle = AgentEngineLifecycle.READY,
                 autoTuningInProgress = false,
                 deviceProfile = device,
                 agentRecommendation = recommendation ?: state.agentRecommendation,
-                profileId = engine.activeExecutionProfile()?.profileId,
-                revision = engine.activeExecutionProfile()?.revision,
+                profileId = executionProfileAfterLoad?.profileId,
+                revision = executionProfileAfterLoad?.revision,
                 profileRecordState = if (profileState?.activeProfile != null) {
                     AgentProfileRecordState.COMMITTED
                 } else {
@@ -147,8 +149,12 @@ internal suspend fun publishLoadedModelStateFor(
                         append("。安全基线和正确性校准通过，可继续文字聊天；图片输入需修复投影器后再用。性能调优可在 Agent 页单独启动。")
                     }
                 },
-                tab = AppTab.CHAT
-            )
+                // A model loaded from the DSH ball must not eject the user from DSH; the DSH
+                // page (and its host) stays composed and the gateway refresh makes the model
+                // serveable in place. The video workspace gets the same guarantee: an in-flight
+                // video run must keep its page. Other entry points keep their chat landing.
+                tab = tabAfterLateModelLoad(state.tab)
+            ) to sessions
         }
     persistChatSessions(sessionsToPersist)
 }

@@ -20,6 +20,7 @@ internal enum class ImageModelVariant {
     LONGCAT_IMAGE,
     CONTROLNET_CANNY,
     SANA_EDIT,
+    ANIMA_PREVIEW,
     GENERIC_COMPATIBLE
 }
 

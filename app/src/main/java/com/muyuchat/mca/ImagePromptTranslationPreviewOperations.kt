@@ -16,7 +16,7 @@ internal interface ImagePromptTranslationPreviewPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ImageTranslationFields) -> ImageTranslationFields)
 
     /** The offline translation service, lazily owned by the ViewModel. */
     val offlinePromptTranslationService: OfflinePromptTranslationService

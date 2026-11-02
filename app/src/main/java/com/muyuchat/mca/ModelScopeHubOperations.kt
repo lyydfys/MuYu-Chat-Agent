@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
  */
 internal class ModelScopeHubCoordinator(
     private val scope: CoroutineScope,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ModelHubFields>,
     private val client: ModelScopeClient,
     private val application: Application,
     private val currentDeviceProfile: () -> DeviceProfile,
@@ -41,8 +41,11 @@ internal class ModelScopeHubCoordinator(
             model
         )
 
-    fun downloadRecommended(model: ModelScopeRecommendedModel, useAfterDownload: Boolean = false) =
-        downloadRecommendedFor(model, useAfterDownload, fail, enqueueManagedDownload)
+    fun downloadRecommended(
+        model: ModelScopeRecommendedModel,
+        useAfterDownload: Boolean = false,
+        imageBundleVariantId: String? = null
+    ) = downloadRecommendedFor(model, useAfterDownload, imageBundleVariantId, fail, enqueueManagedDownload)
 
     fun searchHubModels(reset: Boolean = true) =
         searchHubModelsFor(
@@ -70,7 +73,7 @@ internal class ModelScopeHubCoordinator(
  */
 internal fun fetchRemoteFilesFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<ModelHubFields>,
     client: ModelScopeClient,
     busy: (String) -> Unit,
     fail: (String) -> Unit,
@@ -92,7 +95,7 @@ internal fun fetchRemoteFilesFor(
 
 internal fun fetchRecommendedFilesFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<ModelHubFields>,
     client: ModelScopeClient,
     busy: (String) -> Unit,
     fail: (String) -> Unit,
@@ -129,6 +132,7 @@ internal fun fetchRecommendedFilesFor(
 internal fun downloadRecommendedFor(
     model: ModelScopeRecommendedModel,
     useAfterDownload: Boolean,
+    imageBundleVariantId: String? = null,
     fail: (String) -> Unit,
     enqueueManagedDownload: (ManagedDownloadRequest, Boolean) -> Unit
 ) {
@@ -137,7 +141,7 @@ internal fun downloadRecommendedFor(
         fail(blocked)
         return
     }
-    enqueueManagedDownload(ManagedDownloadRequest.recommended(model), useAfterDownload)
+    enqueueManagedDownload(ManagedDownloadRequest.recommended(model, imageBundleVariantId), useAfterDownload)
 }
 
 internal fun recommendedDownloadBlockReason(model: ModelScopeRecommendedModel): String? {
@@ -146,7 +150,7 @@ internal fun recommendedDownloadBlockReason(model: ModelScopeRecommendedModel): 
 
 internal fun searchHubModelsFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<ModelHubFields>,
     client: ModelScopeClient,
     busy: (String) -> Unit,
     fail: (String) -> Unit,
@@ -179,7 +183,7 @@ internal fun searchHubModelsFor(
 
 internal fun fetchHubModelFilesFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<ModelHubFields>,
     client: ModelScopeClient,
     busy: (String) -> Unit,
     fail: (String) -> Unit,

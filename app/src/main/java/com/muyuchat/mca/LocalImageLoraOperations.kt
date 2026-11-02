@@ -6,7 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 internal fun downloadOfficialViggleLoraFor(
-    store: UiStateStore,
+    store: UiStateWriter<LocalImageAdapterFields>,
     scope: CoroutineScope,
     localImageLoraStore: LocalImageLoraStore
 ) {

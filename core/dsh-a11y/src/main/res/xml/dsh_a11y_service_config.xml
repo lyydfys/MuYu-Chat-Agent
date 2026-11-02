@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Accessibility service capability declaration for `:core:dsh-a11y` (D17).
+
+  - canRetrieveWindowContent: node tree reads (`/dump`) and node-targeted actions.
+  - canPerformGestures: tap/swipe/hold/touch/gesture injection (API 24+, minSdk is 26).
+  - canTakeScreenshot: `/screenshot` (framework only honours it on API 30+; the module reports
+    CAPABILITY_UNAVAILABLE instead of a fake success on older platforms).
+  - flagRetrieveInteractiveWindows + flagIncludeNotImportantViews: the reference reads the whole
+    active window; without them many list rows and compose semantics disappear.
+  - notificationTimeout=100: the service only tracks foreground package/window identity and
+    invalidates stale node references; it does not build a second UI.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/dsh_a11y_service_description"
+    android:notificationTimeout="100" />

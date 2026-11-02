@@ -45,3 +45,10 @@ android-sdk-cmdline-extract/
 tmp_*/
 *.obj
 *.exe
+
+# Official DSH payload staged from the pinned reference APK (scripts/dsh/stage.ps1).
+# These are third-party binaries/kernel files, never committed; the signed manifest and the
+# source URL/SHA live in docs/proposals/agent-dsh-embedded-v1/BASELINE.md.
+/third_party/dsh/
+/core/dsh-runtime/src/main/assets/dsh/
+/core/dsh-runtime/src/main/jniLibs/

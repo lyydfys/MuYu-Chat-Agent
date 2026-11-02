@@ -34,7 +34,11 @@ class McaGenerationForegroundServiceContractTest {
         assertTrue(start.contains("ServiceCompat.startForeground("))
         assertTrue(start.contains("leases.withCurrentTask"))
         assertTrue(start.contains("buildNotification(task)"))
-        assertEquals(1, Regex("return START_NOT_STICKY").findAll(start).count())
+        // One control-flow return for the Agent stop action and one final normal return. The stop
+        // branch must route to the owner without promoting a generation notification.
+        assertTrue(start.contains("AgentRunNotificationProtocol.ACTION_STOP_RUN"))
+        assertTrue(start.contains("agentStopActionHandler?.invoke(intent)"))
+        assertEquals(2, Regex("return START_NOT_STICKY").findAll(start).count())
     }
 
     private fun serviceSource(): String {

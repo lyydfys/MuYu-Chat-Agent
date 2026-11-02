@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,11 +12,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,7 +36,7 @@ internal fun ImageEditorLoadFailure(message: String, onBack: () -> Unit) {
             modifier = Modifier.padding(top = 8.dp),
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Button(
+        McaButton(style = McaButtonStyle.Primary,
             onClick = onBack,
             modifier = Modifier
                 .padding(top = 16.dp)
@@ -50,15 +50,15 @@ internal fun DiscardImageEditsDialog(
     onDiscard: () -> Unit,
     onKeepEditing: () -> Unit
 ) {
-    AlertDialog(
+    McaDialog(
         onDismissRequest = onKeepEditing,
         title = { Text("放弃本次编辑？") },
         text = { Text("未保存的裁剪或蒙版笔画将丢失。") },
         confirmButton = {
-            TextButton(onClick = onDiscard) { Text("放弃") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDiscard) { Text("放弃") }
         },
         dismissButton = {
-            TextButton(onClick = onKeepEditing) { Text("继续编辑") }
+            McaButton(style = McaButtonStyle.Text,onClick = onKeepEditing) { Text("继续编辑") }
         }
     )
 }

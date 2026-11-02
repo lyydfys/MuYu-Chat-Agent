@@ -226,6 +226,82 @@ class OpenAiCompatibleChatProvider(
         }
     }
 
+    /**
+     * Fetches the provider's model-id list from the standard `/models` endpoint.
+     *
+     * Only the Base URL (and key when the provider needs one) is required — the model name is what
+     * the caller is trying to discover. OpenAI-compatible and Responses gateways use
+     * `GET {base}/models` with a Bearer key; Anthropic uses `GET {base}/v1/models` with its own
+     * headers. The draft config comes straight from the editor form, before any save.
+     */
+    suspend fun listModels(config: CloudApiConfig): Result<List<String>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val baseUrl = config.baseUrl.trim().trimEnd('/')
+            if (baseUrl.isBlank()) {
+                error("请先填写 Base URL，再获取模型列表。")
+            }
+            val request = if (config.apiFormat == CloudApiFormat.ANTHROPIC) {
+                Request.Builder()
+                    .url(anthropicModelsUrl(baseUrl))
+                    .addHeader("x-api-key", config.apiKey)
+                    .addHeader("anthropic-version", "2023-06-01")
+                    .addHeader("Accept", "application/json")
+                    .get()
+                    .build()
+            } else {
+                Request.Builder()
+                    .url(openAiModelsUrl(baseUrl))
+                    .addHeader("Accept", "application/json")
+                    .addCloudApiKeyHeaders(config)
+                    .get()
+                    .build()
+            }
+            quickClient.newCall(request).execute().use { response ->
+                val body = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    error("云端接口错误 ${response.code}: ${parseErrorMessage(body)}")
+                }
+                parseModelsResponse(body)
+            }
+        }
+    }
+
+    private fun openAiModelsUrl(baseUrl: String): String =
+        if (baseUrl.endsWith("/models")) baseUrl else "$baseUrl/models"
+
+    private fun anthropicModelsUrl(baseUrl: String): String = when {
+        baseUrl.endsWith("/v1/models") -> baseUrl
+        baseUrl.endsWith("/models") -> baseUrl
+        baseUrl.endsWith("/v1") -> "$baseUrl/models"
+        baseUrl.contains("anthropic.com", ignoreCase = true) -> "$baseUrl/v1/models"
+        else -> "$baseUrl/models"
+    }
+
+    /** Accepts `data[].id` (OpenAI/Anthropic) plus lenient `models[]` shapes used by gateways. */
+    private fun parseModelsResponse(body: String): List<String> {
+        if (body.isBlank()) error("接口没有返回模型列表。")
+        val root = runCatching { JSONObject(body) }.getOrElse { error("接口返回的不是有效 JSON。") }
+        val models = mutableListOf<String>()
+        fun collect(array: JSONArray?) {
+            if (array == null) return
+            for (index in 0 until array.length()) {
+                when (val item = array.opt(index)) {
+                    is JSONObject -> item.optString("id")
+                        .takeIf { it.isNotBlank() && it != "null" }
+                        ?.let(models::add)
+                    is String -> item.trim().takeIf { it.isNotBlank() }?.let(models::add)
+                }
+            }
+        }
+        collect(root.optJSONArray("data"))
+        collect(root.optJSONArray("models"))
+        val unique = models.distinct().take(MAX_LISTED_MODELS)
+        if (unique.isEmpty()) {
+            error("接口返回的模型列表为空，请手动填写模型名。")
+        }
+        return unique
+    }
+
     private fun buildHttpRequest(config: CloudApiConfig, request: ChatRequest): Request =
         when (config.apiFormat) {
             CloudApiFormat.OPENAI_COMPATIBLE -> openAiRequest(config, request)
@@ -492,5 +568,6 @@ class OpenAiCompatibleChatProvider(
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val MAX_NON_STREAM_BODY_CHARS = 1_048_576
+        private const val MAX_LISTED_MODELS = 256
     }
 }

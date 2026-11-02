@@ -5,6 +5,7 @@ import com.muyuchat.core.download.MnnModelBundleInstallProfile
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.RecommendedModelStatus
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -141,6 +142,22 @@ class RecommendationPresentationTest {
             .copy(status = RecommendedModelStatus.PENDING_INTEGRATION)
 
         assertEquals("MCA 暂不支持此模型", recommendationCapabilityLine(pending))
+    }
+
+    @Test
+    fun mediatekAnimaShowsVerifiedV4ContractAndRemoteDownloadState() {
+        val planned = catalog.getValue("mediatek_anima_npu_np9")
+
+        assertEquals("实验", planned.status.label)
+        assertFalse(planned.manualImportRequired)
+        assertTrue(planned.downloadable)
+        assertTrue(planned.remoteImageBundle != null)
+        assertEquals("Anima 文生图", recommendationCapabilityLine(planned))
+        assertEquals("天玑 NPU", recommendedRouteLabel(planned))
+        assertEquals("格式：MCA Anima v4 · Anima · NPUG + DLA · w8/w16", recommendationSpecificationLine(planned))
+        assertEquals("建议内存：8 GB 及以上 · 通用设备", recommendationHardwareLine(planned, "通用设备"))
+        assertEquals("下载大小：固定约 1.8 GB / 动态约 3.3 GB（默认动态包）", recommendationDownloadSizeLine(planned, null))
+        assertTrue(recommendationHasModelPage(planned))
     }
 
     @Test

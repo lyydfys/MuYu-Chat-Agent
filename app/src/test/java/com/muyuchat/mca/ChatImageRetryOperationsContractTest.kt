@@ -399,8 +399,8 @@ class ChatImageRetryOperationsContractTest {
 
         override fun uiState(): MainUiState = state
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-            state = transform(state)
+        override fun updateUiState(transform: (CloudModelConfigFields) -> CloudModelConfigFields) {
+            state = transform(state.toCloudModelConfigFields()).mergeInto(state)
         }
 
         override val cloudApiStore: CloudApiStore get() = cloudStore

@@ -149,7 +149,7 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
 internal fun performUpdateParams(
     params: GenerationParams,
     context: Context,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<SettingsParameterFields>,
     engine: McaInferenceService,
     assistantProfileCoordinator: AssistantProfileCoordinator,
     runtimeUserOverrideFields: MutableSet<String>,

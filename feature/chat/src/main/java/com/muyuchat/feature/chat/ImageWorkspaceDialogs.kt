@@ -1,11 +1,12 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.AlertDialog
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +23,7 @@ internal fun ImageWorkspaceDeleteDialog(
     onDismiss: () -> Unit
 ) {
     if (pendingDeleteIds.isEmpty()) return
-    AlertDialog(
+    McaDialog(
         onDismissRequest = onDismiss,
         title = { Text(if (pendingDeleteIds.size == 1) "删除图片" else "批量删除") },
         text = {
@@ -35,12 +36,12 @@ internal fun ImageWorkspaceDeleteDialog(
             )
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = { onConfirmDelete(pendingDeleteIds.toList()) }
             ) { Text("删除", color = MaterialTheme.colorScheme.error) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("取消") }
         }
     )
 }

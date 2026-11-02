@@ -45,7 +45,7 @@ internal interface AppUpdatePort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (AppUpdateFields) -> AppUpdateFields)
 }
 
 /**

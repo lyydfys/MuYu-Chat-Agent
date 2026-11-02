@@ -1,4 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -13,19 +17,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S23：从 ImageWorkspaceScreens.kt 等值移出的图库资产簇（瓦片 + 预览浮层）。
 // 原样逐字迁移，未做行为改动；2 个跨区入口按协议提升 internal。
@@ -110,12 +108,12 @@ internal fun ImageAssetTile(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Icon(
-                    imageVector = Icons.Default.Image,
+                    imageVector = McaIcons.Image,
                     contentDescription = null,
                     tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
                     modifier = Modifier.size(26.dp)
                 )
-                TextButton(onClick = { retryKey += 1 }) { Text("重试") }
+                McaButton(style = McaButtonStyle.Text,onClick = { retryKey += 1 }) { Text("重试") }
             }
         }
         if (image.favorite && !selectionMode) {
@@ -136,15 +134,19 @@ internal fun ImageAssetTile(
                     },
                     shape = CircleShape
                 ) {}
-                IconButton(
+                McaIconButton(
+                    contentDescription = "取消收藏",
                     onClick = onToggleFavorite,
                     modifier = Modifier.fillMaxSize(),
-                    interactionSource = favoriteInteraction
+                    interactionSource = favoriteInteraction,
+                    pressScaleEnabled = false,
+                    size = 48.dp,
+                    glyphSize = McaIconSize.Xs
                 ) {
                     Icon(
-                        Icons.Default.Favorite,
-                        contentDescription = "取消收藏",
-                        modifier = Modifier.size(16.dp),
+                        McaIcons.Favorite,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.Xs),
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
@@ -164,9 +166,9 @@ internal fun ImageAssetTile(
                 shape = CircleShape
             ) {
                 Icon(
-                    if (selected) Icons.Default.Check else Icons.Default.Add,
+                    if (selected) McaIcons.Check else McaIcons.Add,
                     contentDescription = if (selected) "已选择" else "选择图片",
-                    modifier = Modifier.padding(6.dp).size(16.dp),
+                    modifier = Modifier.padding(6.dp).size(McaIconSize.Xs),
                     tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                 )
             }

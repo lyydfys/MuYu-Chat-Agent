@@ -32,7 +32,7 @@ import org.json.JSONObject
 internal class LiteRtLmChatRunner(
     private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock,
     internal val wallClockMs: () -> Long = System::currentTimeMillis
-) : LocalChatRunner {
+) : LocalChatRunner, NativeQuiescenceProbe {
     override val runtime: LocalChatRuntime = LocalChatRuntime.LITERT_LM
 
     override val isAvailable: Boolean
@@ -612,6 +612,18 @@ internal class LiteRtLmChatRunner(
     }
 
     override fun isGenerationRunning(): Boolean = generationRunning || cancellationGate.isPending() || cancellationRecoveryRequired
+
+    /**
+     * LiteRT-LM runs its JNI generation on [generationThread]. The existing running flag already
+     * covers the cancellation gate and a worker that could not be confirmed cancelled, so ACTIVE is
+     * reported until both the thread and every native cancel path are gone.
+     */
+    override fun nativeGenerationActivity(): NativeGenerationActivity =
+        if (isGenerationRunning() || generationThread?.isAlive == true) {
+            NativeGenerationActivity.ACTIVE
+        } else {
+            NativeGenerationActivity.IDLE
+        }
 
     override fun canReleasePreparedInputs(): Boolean =
         generationThread?.isAlive != true && !generationRunning &&

@@ -87,30 +87,27 @@ class ModelHubStatusAccessibilityContractTest {
         val cloud = sourceFile("CloudModelsSection.kt")
         val local = sourceFile("LocalModelsSection.kt")
 
-        // Cloud delete icon is now normalized with the local one (18dp glyph + muted tint), so
-        // check the semantic label and the style pieces instead of freezing one call formatting.
-        val cloudDelete = cloud.substringAfter(
-            "contentDescription = cloudModelDeleteActionLabel(model)"
-        )
-        assertTrue(cloudDelete.substringBefore("tint =").contains("Modifier.size(18.dp)"))
-        assertTrue(cloudDelete.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
-        assertTrue(cloud.contains("Icon(Icons.Rounded.Edit, contentDescription = null"))
+        // The button owns the normal tint so its disabled tint can reach the decorative glyph.
+        // Keep the same 18dp optical size and target-aware names while preventing tint bypasses.
+        assertDeleteActionInheritsButtonTint(cloud, "cloudModelDeleteActionLabel(model)")
+        assertTrue(cloud.contains("Icon(McaIcons.Edit, contentDescription = null"))
         assertFalse(cloud.contains("contentDescription = \"删除云端模型\""))
 
-        // The local delete icon now also carries an 18dp box and a muted tint, so the assertion
-        // checks the pieces instead of freezing one formatting of the call.
-        assertTrue(local.contains("Icons.Rounded.Delete,"))
+        assertTrue(local.contains("McaIcons.Delete,"))
         assertTrue(local.contains("contentDescription = localModelDeleteActionLabel(model.displayName)"))
-        assertTrue(local.contains("modifier = Modifier.size(18.dp)"))
-        assertTrue(local.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
-        val localImageDelete = local.substringAfter(
-            "contentDescription = localImageModelDeleteActionLabel(model.displayName)"
-        )
-        assertTrue(localImageDelete.substringBefore("tint =").contains("Modifier.size(18.dp)"))
-        assertTrue(localImageDelete.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
-        assertTrue(local.contains("Icon(Icons.Rounded.CheckCircle, contentDescription = null"))
+        assertDeleteActionInheritsButtonTint(local, "localModelDeleteActionLabel(model.displayName)")
+        assertDeleteActionInheritsButtonTint(local, "localImageModelDeleteActionLabel(model.displayName)")
+        assertTrue(local.contains("Icon(McaIcons.CheckCircle, contentDescription = null"))
         assertFalse(local.contains("contentDescription = \"删除本地模型\""))
         assertFalse(local.contains("contentDescription = \"删除本地图像生成引擎\""))
+    }
+
+    @Test
+    fun cloudModelSwitchesExposeTheirVisibleActionName() {
+        val cloud = sourceFile("CloudModelsSection.kt")
+        listOf("启用云端模型", "支持工具调用", "推理模型", "流式输出", "支持图片输入").forEach { name ->
+            assertTrue("cloud model switch must be named: $name", cloud.contains("contentDescription = \"$name\""))
+        }
     }
 
     @Test
@@ -157,9 +154,40 @@ class ModelHubStatusAccessibilityContractTest {
         assertFalse(tagBody.contains("heightIn(min = 48.dp)"))
         assertTrue(tagBody.contains("MaterialTheme.typography.labelLarge"))
 
-        assertTrue(source.contains("Button(onClick = onShowFiles, enabled = enabled"))
-        assertTrue(source.contains("OutlinedButton(onClick = onOpenPage"))
-        assertTrue(source.contains("Button(onClick = onDownload, enabled = enabled && isDownloadableModel"))
+        // RecommendedModelCard owns the real actions after the earlier file split. Keep the tag
+        // checks on MarketAndDownloads and inspect its delegated card for actions. The detail and
+        // compact views now share one action row, so `canDownload` reaches it through the shared
+        // card state; that state itself must still come from the real download-access decision.
+        val actions = sourceFile("RecommendedModelCard.kt")
+        assertTrue(actions.contains("McaButton(style = McaButtonStyle.Outlined, onClick = onShowFiles"))
+        assertTrue(actions.contains("enabled = enabled && state.canDownload"))
+        assertTrue(
+            "主操作的可下载性必须来自真实下载准入，而不是在 UI 层另算",
+            actions.contains("recommendationDownloadAccess(")
+        )
+        assertTrue(actions.contains("canDownload = downloadAccess.canDownload"))
+        assertTrue(
+            Regex("""McaIconButton\(\s*contentDescription = "打开页面",\s*onClick = onOpenPage""")
+                .containsMatchIn(actions)
+        )
+        assertTrue(
+            Regex("""McaButton\(style = McaButtonStyle\.Primary,\s*onClick = onDownload,\s*enabled = enabled && state\.canDownload""")
+                .containsMatchIn(actions)
+        )
+    }
+
+    private fun assertDeleteActionInheritsButtonTint(source: String, actionLabel: String) {
+        val action = source.substringAfter("contentDescription = $actionLabel,")
+        val header = action.substringBefore(") {")
+        assertTrue(header.contains("glyphSize = McaIconSize.S"))
+        assertTrue(header.contains("tint = MaterialTheme.colorScheme.onSurfaceVariant"))
+        val glyph = requireNotNull(
+            Regex("""Icon\(([\s\S]*?)\n\s*\)""").find(action.substringAfter(") {"))
+        ).groupValues[1]
+        assertTrue(glyph.contains("McaIcons.Delete,"))
+        assertTrue(glyph.contains("contentDescription = null"))
+        assertTrue(glyph.contains("modifier = Modifier.size(McaIconSize.S)"))
+        assertFalse("delete glyph must inherit the button's disabled tint", glyph.contains("tint ="))
     }
 
     private fun completedState(statusMessage: String): ModelHubUiState = ModelHubUiState(

@@ -53,7 +53,8 @@ class ImageExecutionProfileResolverTest {
             "qwen_image_2512_q2" to "sdcpp.qwen-image",
             "qwen_image_21_q4_k_m" to "sdcpp.qwen-image-2.1",
             "qwen_image_21_mnn_opencl" to "mnn.qwen-image-2.1.opencl",
-            "longcat_image_q4" to "sdcpp.longcat-image"
+            "longcat_image_q4" to "sdcpp.longcat-image",
+            "anima_preview_q4" to "sdcpp.anima-preview"
         )
 
         assertEquals(expected.keys, ImageExecutionProfileResolver.builtInTargets.map { it.recommendationId }.toSet())
@@ -71,8 +72,9 @@ class ImageExecutionProfileResolverTest {
     fun `all catalog profiles match runtime and legacy execution contracts`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .filter { it.imageEngineBundle != null }
 
-        assertEquals(20, models.size)
+        assertEquals(21, models.size)
         models.forEach { model ->
             val catalogProfile = requireNotNull(
                 materializeDownloadedImageExecutionProfile(
@@ -118,7 +120,8 @@ class ImageExecutionProfileResolverTest {
     fun `every fixed recommended image profile fixes capabilities to its configured default size`() {
         ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
-            .filterNot { it.id in setOf("qwen_image_21_mnn_opencl", "qwen_image_21_q4_k_m") }
+            .filter { it.imageEngineBundle != null }
+            .filterNot { it.id in setOf("qwen_image_21_mnn_opencl", "qwen_image_21_q4_k_m", "anima_preview_q4") }
             .forEach { model ->
                 val profile = resolve(model.id).profile
                 assertEquals("${model.id} fixed width", profile.defaults.width, profile.capabilities.minWidth)
@@ -143,8 +146,9 @@ class ImageExecutionProfileResolverTest {
     fun `all catalog primary fingerprints recover their exact profile despite a stale card id`() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .filter { it.imageEngineBundle != null }
 
-        assertEquals(20, models.size)
+        assertEquals(21, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val primary = bundle.requiredComponents.first {
@@ -543,7 +547,8 @@ class ImageExecutionProfileResolverTest {
             "sd15_mnn_512_quality" to RecommendedImageDefaults.SD15_NEGATIVE_PROMPT,
             "mnn_sana_edit_v2" to RecommendedImageDefaults.EDIT_NEGATIVE_PROMPT,
             "qwen_image_2512_q2" to RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT,
-            "longcat_image_q4" to RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
+            "longcat_image_q4" to RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT,
+            "anima_preview_q4" to ""
         )
 
         expectedNegativePrompts.forEach { (id, expected) ->

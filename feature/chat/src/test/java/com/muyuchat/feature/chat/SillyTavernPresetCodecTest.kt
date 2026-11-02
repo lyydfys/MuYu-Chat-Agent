@@ -100,4 +100,24 @@ class SillyTavernPresetCodecTest {
         assertTrue(!second.contains("说话简洁"))
         assertTrue(second.contains("新的内容"))
     }
+
+    @Test
+    fun presetsAboveOneMiBAreAcceptedBecauseRealTavernPresetFilesExceedIt() {
+        // 1.5 MiB of prompt filler: rejected by the old 1 MiB ceiling, accepted by the current one.
+        val filler = "x".repeat(1_572_864)
+        val raw = """{"name":"大预设","temperature":0.7,"prompts":[{"identifier":"main","content":"$filler"}]}"""
+        assertTrue(raw.toByteArray(Charsets.UTF_8).size > 1_048_576)
+
+        val preset = SillyTavernPresetCodec.parse(raw)
+        assertEquals("大预设", preset.name)
+    }
+
+    @Test
+    fun presetReaderStillRejectsFilesAboveTheRaisedCeiling() {
+        val filler = "x".repeat(8_388_640)
+        val raw = """{"name":"超大预设","temperature":0.7,"prompts":[{"identifier":"main","content":"$filler"}]}"""
+        val error = runCatching { SillyTavernPresetCodec.parse(raw) }.exceptionOrNull()
+        assertTrue(error is IllegalArgumentException)
+        assertEquals("预设文件超过 8 MiB。", error!!.message)
+    }
 }

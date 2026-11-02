@@ -38,7 +38,7 @@ internal interface ChatImageRetryPort : ChatImageCommitRecoveryPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (CloudModelConfigFields) -> CloudModelConfigFields)
 
     val cloudApiStore: CloudApiStore
 

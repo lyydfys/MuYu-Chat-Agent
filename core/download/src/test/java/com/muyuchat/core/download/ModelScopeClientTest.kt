@@ -169,7 +169,7 @@ class ModelScopeClientTest {
     fun includesDefaultRecommendedModels() {
         val recommendations = client.recommendedModels()
 
-        assertEquals(52, recommendations.size)
+        assertEquals(55, recommendations.size)
         assertEquals(ModelScopeRecommendedGroup.LIGHT_CHAT, recommendations[0].group)
         val qwen35ExperimentalMnn = recommendations.first { it.id == "qwen35_08b_uncensored_mnn" }
         assertEquals(RecommendedChatRuntime.MNN, qwen35ExperimentalMnn.chatRuntime)
@@ -312,7 +312,10 @@ class ModelScopeClientTest {
         assertEquals(RecommendedChatRuntime.GGUF, recommendations.first { it.id == "glm47_flash_tq1" }.chatRuntime)
         assertTrue(recommendations.any { it.group == ModelScopeRecommendedGroup.LOCAL_IMAGE && it.downloadable })
         assertEquals(
-            setOf("gemma4_e4b_litertlm_npu", "gemma4_12b_litertlm_npu"),
+            setOf(
+                "gemma4_e4b_litertlm_npu",
+                "gemma4_12b_litertlm_npu"
+            ),
             recommendations.filterNot { it.downloadable }.map { it.id }.toSet()
         )
         assertEquals("qwen-image-2512-Q2_K.gguf", recommendations.first { it.id == "qwen_image_2512_q2" }.recommendedFileName)
@@ -379,19 +382,28 @@ class ModelScopeClientTest {
         assertTrue(recommendations.none { it.id == "fastvlm_05b_sm8750_litert_qnn" })
         assertTrue(recommendations.none { it.kind == ModelScopeRecommendedKind.VISION })
         val imageRecommendations = recommendations.filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        val executableImageRecommendations = imageRecommendations.filter { it.imageEngineBundle != null }
         assertTrue(imageRecommendations.all { it.visibleInRecommendations })
-        assertTrue(imageRecommendations.all { it.downloadable })
-        assertTrue(imageRecommendations.none { it.status == RecommendedModelStatus.PENDING_INTEGRATION })
-        assertTrue(imageRecommendations.none { "待接入" in it.description })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle != null })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.requiredComponents.isNotEmpty() })
-        assertTrue(imageRecommendations.all { it.localImageEngineTier != null })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.requiresSmokeTest })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.smokeSpec.width >= 384 })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.smokeSpec.height >= 384 })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.smokeSpec.steps >= 1 })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.accelerator in ImageEngineAccelerator.entries })
-        assertTrue(imageRecommendations.all { it.imageEngineBundle!!.runtime in ImageEngineBundleRuntime.entries })
+        assertTrue(executableImageRecommendations.all { it.downloadable })
+        assertTrue(executableImageRecommendations.none { it.status == RecommendedModelStatus.PENDING_INTEGRATION })
+        assertTrue(executableImageRecommendations.none { "待接入" in it.description })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.requiredComponents.isNotEmpty() })
+        assertTrue(executableImageRecommendations.all { it.localImageEngineTier != null })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.requiresSmokeTest })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.smokeSpec.width >= 384 })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.smokeSpec.height >= 384 })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.smokeSpec.steps >= 1 })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.accelerator in ImageEngineAccelerator.entries })
+        assertTrue(executableImageRecommendations.all { it.imageEngineBundle!!.runtime in ImageEngineBundleRuntime.entries })
+        val plannedMediaTekImage = imageRecommendations.single { it.id == "mediatek_anima_npu_np9" }
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, plannedMediaTekImage.status)
+        assertTrue(plannedMediaTekImage.downloadable)
+        assertFalse(plannedMediaTekImage.manualImportRequired)
+        assertNull(plannedMediaTekImage.imageEngineBundle)
+        assertEquals("lyydfys/anima-npug-dla-mt6993-nc", plannedMediaTekImage.repoId)
+        val remoteBundle = requireNotNull(plannedMediaTekImage.remoteImageBundle)
+        assertEquals(setOf("fixed", "dynamic"), remoteBundle.variants.map { it.id }.toSet())
+        assertEquals("dynamic", remoteBundle.defaultVariantId)
         val cyberRealisticQnn = recommendations.first { it.id == "cyberrealistic_sd15_qnn228" }
         assertEquals(ModelRepositoryProvider.HUGGING_FACE, cyberRealisticQnn.provider)
         assertEquals("cyberrealistic_final_qnn2.28_min.zip", cyberRealisticQnn.recommendedFileName)
@@ -761,7 +773,7 @@ class ModelScopeClientTest {
         val userFacingChat = client.userFacingRecommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.CHAT }
 
-        assertEquals(23, userFacingChat.size)
+        assertEquals(24, userFacingChat.size)
         val cpuChat = userFacingChat.filter {
             it.computeBackend != RecommendedComputeBackend.NPU &&
                 it.chatRuntime != RecommendedChatRuntime.GENIEX_QAIRT
@@ -771,7 +783,7 @@ class ModelScopeClientTest {
                 it.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT
         }
         assertEquals(15, cpuChat.size)
-        assertEquals(8, npuChat.size)
+        assertEquals(9, npuChat.size)
         assertTrue(cpuChat.all { it.status == RecommendedModelStatus.EXPERIMENTAL })
         assertEquals(
             setOf(
@@ -828,7 +840,8 @@ class ModelScopeClientTest {
 
     @Test
     fun everyImageRecommendationPinsTheEffectiveExecutionContract() {
-        val models = client.recommendedModels().filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+        val models = client.recommendedModels()
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE && it.imageEngineBundle != null }
         val expected = expectedImageProfiles()
 
         assertEquals(expected.keys, models.map { it.id }.toSet())
@@ -984,7 +997,8 @@ class ModelScopeClientTest {
             "flux2_klein_4b_q4",
             "qwen_image_21_q4_k_m",
             "qwen_image_2512_q2",
-            "longcat_image_q4"
+            "longcat_image_q4",
+            "anima_preview_q4"
         )
         splitStableDiffusionCppIds.forEach { id ->
             val bundle = requireNotNull(models.single { it.id == id }.imageEngineBundle)
@@ -1001,7 +1015,7 @@ class ModelScopeClientTest {
         models.filter { it.imageEngineBundle?.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP }
             .forEach { model ->
                 val profile = requireNotNull(model.imageEngineBundle?.executionProfile)
-                val supportsPromptWeighting = model.id != "qwen_image_21_q4_k_m"
+                val supportsPromptWeighting = model.id !in setOf("qwen_image_21_q4_k_m", "anima_preview_q4")
                 assertEquals("${model.id} native conditioner token weights", supportsPromptWeighting, profile.tokenizer.supportsPromptWeighting)
                 assertEquals("${model.id} native prompt weighting", supportsPromptWeighting, profile.capabilities.supportsPromptWeighting)
                 assertEquals(ImageEngineTask.TEXT_TO_IMAGE, profile.task)
@@ -1063,7 +1077,7 @@ class ModelScopeClientTest {
     @Test
     fun everyUserFacingImageBundlePinsAllRequiredComponentBytes() {
         client.userFacingRecommendedModels()
-            .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
+            .filter { it.kind == ModelScopeRecommendedKind.IMAGE && it.imageEngineBundle != null }
             .forEach { model ->
                 val bundle = requireNotNull(model.imageEngineBundle) { model.id }
                 bundle.requiredComponents.forEach { component ->
@@ -1221,7 +1235,7 @@ class ModelScopeClientTest {
         val allRecommendations = client.recommendedModels()
         val recommendations = client.userFacingRecommendedModels()
 
-        assertEquals(43, recommendations.size)
+        assertEquals(46, recommendations.size)
         assertTrue(recommendations.all { it.visibleInRecommendations })
 
         val cpuChat = recommendations.filter {
@@ -1241,10 +1255,10 @@ class ModelScopeClientTest {
         val npuImage = recommendations.filter { it.section == RecommendedModelSection.NPU_IMAGE }
 
         assertEquals(15, cpuChat.size)
-        assertEquals(8, npuChat.size)
-        assertEquals(8, cpuImage.size)
+        assertEquals(9, npuChat.size)
+        assertEquals(9, cpuImage.size)
         assertEquals(1, gpuImage.size)
-        assertEquals(11, npuImage.size)
+        assertEquals(12, npuImage.size)
 
         fun cpuChatIds(group: ModelScopeRecommendedGroup): List<String> = cpuChat
             .filter { it.group == group }
@@ -1285,6 +1299,7 @@ class ModelScopeClientTest {
             listOf(
                 "qwen3_vl_4b_qairt_w4a16",
                 "qwen3_4b_2507_qairt_w4a16",
+                "ling30_tiny_qnn",
                 "qwen3_06b_qairt_w4a16",
                 "qwen3_8b_qairt_w4a16",
                 "qwen25_vl_7b_qairt_w4a16",
@@ -1304,7 +1319,8 @@ class ModelScopeClientTest {
                 "z_image_turbo_q4",
                 "qwen_image_21_q4_k_m",
                 "qwen_image_2512_q2",
-                "longcat_image_q4"
+                "longcat_image_q4",
+                "anima_preview_q4"
             ),
             cpuImage.map { it.id }.toSet()
         )
@@ -1324,7 +1340,8 @@ class ModelScopeClientTest {
                 "cyberrealisticxl_qnn228",
                 "qualcomm_sd15_gen5_qnn",
                 "qualcomm_sd21_gen5_qnn",
-                "qualcomm_controlnet_canny_gen5_qnn"
+                "qualcomm_controlnet_canny_gen5_qnn",
+                "mediatek_anima_npu_np9"
             ),
             npuImage.map { it.id }.toSet()
         )
@@ -1361,7 +1378,8 @@ class ModelScopeClientTest {
             recommendations.all {
                 it.downloadable || it.id in setOf(
                     "gemma4_e4b_litertlm_npu",
-                    "gemma4_12b_litertlm_npu"
+                    "gemma4_12b_litertlm_npu",
+                    "mediatek_anima_npu_np9"
                 )
             }
         )
@@ -2566,6 +2584,13 @@ class ModelScopeClientTest {
             20, 5.0, true, ImageEngineSchedulerAlgorithm.FLOW_MATCH, 1024, 1024,
             ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
             tokenizerMaxLength = 512
+        ),
+        "anima_preview_q4" to ExpectedImageProfile(
+            "sdcpp.anima-preview", ImageEngineModelFamily.ANIMA, ImageEngineModelVariant.ANIMA_PREVIEW,
+            8, 6.0, true, ImageEngineSchedulerAlgorithm.EULER, 512, 512,
+            ImageEngineTokenizerBackend.SDCPP_NATIVE, ImageEngineVaeScalingLocation.RUNTIME_NATIVE, 1.0,
+            tokenizerMaxLength = 512,
+            clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED
         )
     )
 
@@ -2585,6 +2610,7 @@ class ModelScopeClientTest {
         "qwen_image_21_q4_k_m" -> ""
         "qwen_image_2512_q2" -> RecommendedImageDefaults.QWEN_IMAGE_2512_NEGATIVE_PROMPT
         "longcat_image_q4" -> RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
+        "anima_preview_q4" -> ""
         in conditionalOnlyImageIds -> null
         else -> error("Missing expected image negative-prompt contract for $id")
     }

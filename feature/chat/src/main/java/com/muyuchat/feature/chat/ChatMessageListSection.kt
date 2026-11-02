@@ -1,9 +1,20 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,27 +29,42 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Search
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.semantics.Role as SemanticsRole
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.Role
+import com.muyuchat.core.designsystem.McaIconSize
 
 /**
  * Message-list item motion: spring fade for appearing/removed rows, damped spring for placement.
@@ -86,8 +112,10 @@ internal fun ChatMessageListSection(
     onMessageIntent: ((ChatMessageIntent) -> Unit)?,
     onBrowserTaskEvent: (BrowserTaskEvent) -> Unit,
     nestedScrollConnection: NestedScrollConnection,
+    onScrollToBottom: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val haptics = rememberMcaHaptics()
     val latestState = rememberUpdatedState(state)
     val latestOnDeleteMessage = rememberUpdatedState(onDeleteMessage)
     val latestOnRegenerate = rememberUpdatedState(onRegenerate)
@@ -112,12 +140,34 @@ internal fun ChatMessageListSection(
             assistant.id == state.selectedAssistantId && assistant.characterCardImported
         }
     }
+    val canScrollBackward by remember(listState) {
+        derivedStateOf { listState.canScrollBackward }
+    }
+    val showScrollToBottomPill by remember(listState, state.messages.size) {
+        derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward }
+    }
 
     Box(modifier = modifier.nestedScroll(nestedScrollConnection)) {
         LazyColumn(
             state = listState,
             modifier = Modifier
                 .fillMaxSize()
+                .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
+                .drawWithContent {
+                    drawContent()
+                    if (canScrollBackward) {
+                        val topFeatherPx = 20.dp.toPx().coerceAtMost(size.height * 0.1f)
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                0f to Color.Transparent,
+                                1f to Color.Black,
+                                startY = 0f,
+                                endY = topFeatherPx
+                            ),
+                            blendMode = BlendMode.DstIn
+                        )
+                    }
+                }
                 .padding(horizontal = 18.dp),
             contentPadding = PaddingValues(
                 top = 26.dp,
@@ -248,7 +298,7 @@ internal fun ChatMessageListSection(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(McaIcons.Search, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                             Spacer(Modifier.width(8.dp))
                             Text(
                                 task.query.orEmpty(),
@@ -257,13 +307,13 @@ internal fun ChatMessageListSection(
                                 overflow = TextOverflow.Ellipsis,
                                 style = MaterialTheme.typography.bodyMedium
                             )
-                            IconButton(onClick = {
+                            McaIconButton(contentDescription = "取消检索", onClick = {
                                 onBrowserTaskEvent(
                                     BrowserTaskEvent(
                                         task.taskId, task.navigationId, BrowserTaskAction.CANCEL
                                     )
                                 )
-                            }) { Icon(Icons.Default.Close, contentDescription = "取消检索") }
+                            }, glyphSize = McaIconSize.L) { Icon(McaIcons.Close, contentDescription = null) }
                         }
                         Text(
                             if (task.phase == BrowserTaskPhase.SEARCHING) "正在检索来源"
@@ -272,7 +322,7 @@ internal fun ChatMessageListSection(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         task.candidateUrls.forEach { url ->
-                            TextButton(onClick = {
+                            McaButton(style = McaButtonStyle.Text,onClick = {
                                 onBrowserTaskEvent(
                                     BrowserTaskEvent(
                                         task.taskId, task.navigationId,
@@ -296,5 +346,55 @@ internal fun ChatMessageListSection(
             state = state,
             modifier = Modifier.matchParentSize().padding(bottom = composerOverlap)
         )
+        AnimatedVisibility(
+            visible = showScrollToBottomPill,
+            enter = fadeIn(McaMotion.fade(150)) + scaleIn(
+                initialScale = 0.84f,
+                animationSpec = McaMotion.sizeChange
+            ),
+            exit = fadeOut(McaMotion.fade(110)) + scaleOut(
+                targetScale = 0.84f,
+                animationSpec = McaMotion.sizeChange
+            ),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = composerOverlap + 12.dp)
+        ) {
+            val pillInteraction = remember { MutableInteractionSource() }
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onSurface,
+                tonalElevation = 1.dp,
+                shadowElevation = 4.dp,
+                border = BorderStroke(
+                    0.5.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.72f)
+                ),
+                modifier = Modifier
+                    .size(38.dp)
+                    .mcaPressScale(pillInteraction)
+                    .clip(CircleShape)
+                    .clickable(
+                        interactionSource = pillInteraction,
+                        indication = ripple(bounded = true),
+                        role = SemanticsRole.Button,
+                        onClick = {
+                            haptics.confirm()
+                            onScrollToBottom()
+                        }
+                    )
+                    .semantics { contentDescription = "回到底部" }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = McaIcons.KeyboardArrowDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.M),
+                        tint = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+        }
     }
 }

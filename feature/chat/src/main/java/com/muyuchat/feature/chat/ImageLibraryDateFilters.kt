@@ -1,8 +1,9 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -32,7 +33,7 @@ internal fun ImageLibraryDateFilterDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
             val start = state.selectedStartDateMillis
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = { start?.let { onConfirm(it, state.selectedEndDateMillis ?: it) } },
                 enabled = start != null
             ) {
@@ -41,9 +42,9 @@ internal fun ImageLibraryDateFilterDialog(
         },
         dismissButton = {
             if (selectedStartDateMillis != null) {
-                TextButton(onClick = onClear) { Text("清除") }
+                McaButton(style = McaButtonStyle.Text,onClick = onClear) { Text("清除") }
             }
-            TextButton(onClick = onDismiss) { Text("取消") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("取消") }
         }
     ) {
         DateRangePicker(

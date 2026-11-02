@@ -8,10 +8,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.feature.chat.ImeAwareAlertDialog
 
 @Composable
@@ -43,7 +44,7 @@ internal fun ContentImportPreviewDialog(
                 if (committing) LinearProgressIndicator()
             }
         },
-        confirmButton = { TextButton(onClick = onConfirm, enabled = !committing) { Text("确认导入") } },
-        dismissButton = { TextButton(onClick = onCancel, enabled = !committing) { Text("取消") } }
+        confirmButton = { McaButton(style = McaButtonStyle.Text, onClick = onConfirm, enabled = !committing) { Text("确认导入") } },
+        dismissButton = { McaButton(style = McaButtonStyle.Text, onClick = onCancel, enabled = !committing) { Text("取消") } }
     )
 }

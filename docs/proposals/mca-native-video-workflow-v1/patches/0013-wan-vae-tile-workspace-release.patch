@@ -1,0 +1,52 @@
+--- a/src/core/ggml_runner.h
++++ b/src/core/ggml_runner.h
+@@ -279,6 +279,11 @@
+ public:
+     void free_cache_ctx_and_buffer();
+ 
++    // Returns the reusable graph workspace to the OS. The workspace is kept across
++    // computes for reuse, but independent temporal tiles must not hold two
++    // multi-gigabyte workspaces at once (the next tile re-measures the graph).
++    void release_graph_workspace() { workspace_.release(); }
++
+     // do copy after alloc graph
+     void set_backend_tensor_data(ggml_tensor* tensor, const void* data);
+ 
+--- a/src/model/vae/wan_vae.hpp
++++ b/src/model/vae/wan_vae.hpp
+@@ -1,6 +1,7 @@
+ #ifndef __SD_MODEL_VAE_WAN_VAE_HPP__
+ #define __SD_MODEL_VAE_WAN_VAE_HPP__
+ 
++#include <cstdio>
+ #include <map>
+ #include <memory>
+ #include <utility>
+@@ -1539,11 +1540,25 @@
+                 auto decoded = restore_trailing_singleton_dims(
+                     GGMLRunner::compute(get_graph, n_threads, false),
+                     static_cast<size_t>(input.dim()));
+-                LOG_VERBOSE("Wan VAE tile %d/%d memory: workspace=%.1fMB cache_resident=%.1fMB",
++                double rss_mb = 0.0;
++                if (FILE* statm = std::fopen("/proc/self/statm", "r")) {
++                    long total_pages = 0;
++                    long resident    = 0;
++                    if (std::fscanf(statm, "%ld %ld", &total_pages, &resident) == 2) {
++                        rss_mb = static_cast<double>(resident) * 4096.0 / (1024.0 * 1024.0);
++                    }
++                    std::fclose(statm);
++                }
++                LOG_VERBOSE("Wan VAE tile %d/%d memory: workspace=%.1fMB rss=%.1fMB",
+                             tile.index + 1,
+                             (int)plan.tiles.size(),
+                             workspace_.bytes(runtime_backend) / (1024.0 * 1024.0),
+-                            cache_.resident_bytes(ggml_backend_get_device(runtime_backend)) / (1024.0 * 1024.0));
++                            rss_mb);
++                // The workspace is kept for reuse across computes, but temporal tiles are
++                // independent graphs: holding the finished tile's multi-gigabyte workspace
++                // while the next tile measures and allocates its own doubles the peak and
++                // has killed 480p runs at tile 2. Return it before the next measurement.
++                release_graph_workspace();
+                 return decoded;
+             };
+ 

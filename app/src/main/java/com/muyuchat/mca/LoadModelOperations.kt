@@ -9,7 +9,6 @@ import com.muyuchat.core.engine.recycleIsolatedWorkerAfterUnload
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.feature.agent.AgentEngineLifecycle
-import com.muyuchat.mca.presentation.afterGenerationTerminated
 import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -47,7 +46,7 @@ import kotlinx.coroutines.CancellationException
      */
 internal suspend fun CoroutineScope.runLoadModelBody(
     requestedModel: ModelManifest,
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     pendingRuntimeRecoveries: MutableMap<String, RuntimeRecoveryPlan>,
     engine: McaInferenceService,
@@ -77,7 +76,7 @@ internal suspend fun CoroutineScope.runLoadModelBody(
         // generation projected as active in the UI.
         val stats = engine.stats.value
         store.update {
-            it.afterGenerationTerminated(
+            it.afterRuntimeGenerationTerminated(
                 stats = stats,
                 statusMessage = message
             ).copy(

@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.agent
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,18 +12,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ExpandLess
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -37,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LlamaAdvancedParams
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun AdvancedParamsCard(
@@ -68,12 +65,12 @@ internal fun AdvancedParamsCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                TextButton(onClick = { expanded = !expanded }) {
+                McaButton(style = McaButtonStyle.Text, onClick = { expanded = !expanded }) {
                     Text(if (expanded) "收起" else "展开")
                     Icon(
-                        if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        if (expanded) McaIcons.ExpandLess else McaIcons.ExpandMore,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }
@@ -356,7 +353,7 @@ private fun AdvancedChoiceChips(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 rowChoices.forEach { choice ->
-                    FilterChip(
+                    McaChip(
                         selected = selected == choice,
                         onClick = { onSelected(choice) },
                         label = { Text(labels[choice] ?: choice) }
@@ -390,7 +387,7 @@ private fun CompactIntSlider(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text("$title：$value", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-        Slider(
+        McaSlider(
             value = value.toFloat().coerceIn(range.start, range.endInclusive),
             onValueChange = { onValue(it.toInt()) },
             valueRange = range
@@ -436,7 +433,7 @@ private fun ContextLengthEditor(
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Slider(
+        McaSlider(
             value = nearestContextLengthShortcutStep(value).toFloat(),
             onValueChange = { position ->
                 val shortcut = contextLengthShortcutValue(position.roundToInt())
@@ -463,7 +460,7 @@ private fun CompactFloatSlider(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text("$title：${"%.2f".format(value)}", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-        Slider(
+        McaSlider(
             value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onValue,
             valueRange = range

@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
 import android.net.Uri
+import com.muyuchat.mca.composition.cloudModelConfigWriter
+import com.muyuchat.mca.composition.knowledgeLibraryWriter
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.core.engine.ReasoningMode
 import kotlinx.coroutines.Deferred
@@ -61,6 +63,9 @@ fun MainViewModel.importWorldBookFile(
 fun MainViewModel.deleteWorldBook(worldBookId: String) =
     assistantProfileCoordinator.deleteWorldBook(worldBookId)
 
+fun MainViewModel.setWorldBookEnabled(worldBookId: String, enabled: Boolean) =
+    assistantProfileCoordinator.setWorldBookEnabled(worldBookId, enabled)
+
 fun MainViewModel.createKnowledgeBase(name: String, description: String = "") =
     assistantProfileCoordinator.createKnowledgeBase(name, description)
 
@@ -74,7 +79,7 @@ fun MainViewModel.importKnowledgeDocument(uriString: String) =
     documentImportCoordinator.importKnowledgeDocument(uriString)
 
 fun MainViewModel.setKnowledgeBaseSelected(knowledgeBaseId: String, selected: Boolean) =
-    setKnowledgeBaseSelectedFor(uiStateStore, { uiStateStore.current }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
+    setKnowledgeBaseSelectedFor(uiStateStore.knowledgeLibraryWriter(), { uiStateStore.current }, ::persistKnowledgeBaseBindings, knowledgeBaseId, selected)
 
 fun MainViewModel.deleteKnowledgeBase(knowledgeBaseId: String) =
     assistantProfileCoordinator.deleteKnowledgeBase(knowledgeBaseId)
@@ -84,7 +89,7 @@ fun MainViewModel.updateReasoningMode(mode: ReasoningMode) =
         uiStateStore.current,
         getApplication(),
         modelGenerationProfileStore,
-        uiStateStore,
+        uiStateStore.cloudModelConfigWriter(),
         ::showStatus,
         mode
     )

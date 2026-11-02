@@ -29,6 +29,7 @@ val composeCompilerReportsEnabled = providers.gradleProperty("mca.composeCompile
     .map { value -> !value.trim().equals("false", ignoreCase = true) }
     .orElse(true)
 composeCompiler {
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("config/compose/stability.conf"))
     if (composeCompilerReportsEnabled.get()) {
         reportsDestination = layout.buildDirectory.dir("compose-compiler/reports")
         metricsDestination = layout.buildDirectory.dir("compose-compiler/metrics")

@@ -3,11 +3,7 @@ package com.muyuchat.mca
 fun MainViewModel.toggleApi(enabled: Boolean) {
     val restEnabled = if (enabled) uiStateStore.current.restEnabled else false
     persistApiPreferences(apiEnabled = enabled, restEnabled = restEnabled)
-    uiStateStore.update {
-        it.copy(
-            statusMessage = if (enabled) "正在启动本机 API..." else "正在停止本机 API..."
-        )
-    }
+    showStatus(if (enabled) "正在启动本机 API..." else "正在停止本机 API...")
     requestLocalApiState(
         enabled = enabled,
         restEnabled = restEnabled,
@@ -18,11 +14,7 @@ fun MainViewModel.toggleApi(enabled: Boolean) {
 fun MainViewModel.toggleRest(enabled: Boolean) {
     val apiEnabled = enabled || uiStateStore.current.apiEnabled
     persistApiPreferences(apiEnabled = apiEnabled, restEnabled = enabled)
-    uiStateStore.update {
-        it.copy(
-            statusMessage = if (enabled) "正在开放局域网 REST..." else "正在关闭局域网 REST..."
-        )
-    }
+    showStatus(if (enabled) "正在开放局域网 REST..." else "正在关闭局域网 REST...")
     requestLocalApiState(
         enabled = apiEnabled,
         restEnabled = enabled,

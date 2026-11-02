@@ -59,7 +59,7 @@ internal fun qnnVerificationPersistence(
 }
 
 internal fun verifyLocalImageModelFor(
-    store: UiStateStore,
+    store: UiStateWriter<ModelCatalogFields>,
     scope: CoroutineScope,
     application: Application,
     localImageModelStore: LocalImageModelStore,
@@ -161,7 +161,7 @@ internal fun verifyLocalImageModelFor(
 }
 
 internal fun verifyModelFor(
-    store: UiStateStore,
+    store: UiStateWriter<ModelCatalogFields>,
     application: Application,
     modelStore: ModelStoreRepository,
     managedRuntimeReadinessRefreshGate: ManagedRuntimeReadinessRefreshGate,

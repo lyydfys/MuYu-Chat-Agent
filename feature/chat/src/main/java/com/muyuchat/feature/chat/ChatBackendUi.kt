@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LlamaAdvancedParams
 import com.muyuchat.core.engine.RuntimeStats
@@ -12,6 +13,7 @@ import org.json.JSONObject
  * the model's execution profile; the native load/readback path remains the
  * authority for whether the requested transport can actually run.
  */
+@Immutable
 data class ChatBackendOption(
     val id: String,
     val label: String,

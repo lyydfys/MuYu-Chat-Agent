@@ -75,7 +75,7 @@ import com.muyuchat.mca.presentation.lifecycleAfterGeneration
  */
 
 internal class LocalImageAdapterPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<LocalImageAdapterFields>,
     private val loraStoreRef: LocalImageLoraStore,
     private val textualInversionStoreRef: TextualInversionStore,
     private val loraLifecycleLock: Any,
@@ -83,7 +83,7 @@ internal class LocalImageAdapterPortAdapter(
 ) : LocalImageAdapterPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (LocalImageAdapterFields) -> LocalImageAdapterFields) {
         store.update(transform)
     }
 
@@ -101,7 +101,7 @@ internal class LocalImageAdapterPortAdapter(
 }
 
 internal class WebSearchConfigPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<WebSearchFields>,
     private val appContext: Application,
     private val webSearchStoreRef: WebSearchStore,
     private val diagnosticStoreRef: WebSearchDiagnosticStore,
@@ -112,7 +112,7 @@ internal class WebSearchConfigPortAdapter(
 
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (WebSearchFields) -> WebSearchFields) {
         store.update(transform)
     }
 
@@ -132,7 +132,7 @@ internal class WebSearchConfigPortAdapter(
 }
 
 internal class VisionAttachmentPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<VisionAttachmentFields>,
     private val appContext: Application,
     private val engineRef: McaInferenceService,
     private val admissionRef: RuntimeAdmissionState
@@ -142,7 +142,7 @@ internal class VisionAttachmentPortAdapter(
 
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (VisionAttachmentFields) -> VisionAttachmentFields) {
         store.update(transform)
     }
 
@@ -156,7 +156,7 @@ internal class VisionAttachmentPortAdapter(
 }
 
 internal class LocalApiPayloadPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateReadPort,
     private val engineRef: McaInferenceService,
     private val runtimeProfileStoreRef: ModelRuntimeProfileStore,
     private val tuningRef: TuningOwner,
@@ -187,7 +187,7 @@ internal class LocalApiPayloadPortAdapter(
 }
 
 internal class ImagePromptTokenMeasurementHostAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateReadPort,
     private val measurementCacheRef: ImagePromptTokenMeasurementCache,
     private val tokenizerDescriptorsRef: java.util.concurrent.ConcurrentHashMap<String, LocalImagePromptTokenizerDescriptor>
 ) : ImagePromptTokenMeasurementHost {

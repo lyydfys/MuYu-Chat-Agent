@@ -22,7 +22,8 @@ import java.security.MessageDigest
                 }
                 true
             }
-            ChatModelRuntime.LLAMA_CPP -> {
+            ChatModelRuntime.LLAMA_CPP,
+            ChatModelRuntime.GENIEX_LLAMA_CPP -> {
                 if (!file.isFile || file.length() != model.sizeBytes) return false
                 val actualSha256 = runCatching { sha256(file) }.getOrNull() ?: return false
                 val mainVerified = isFastRecoveryFingerprint(model.sha256) ||

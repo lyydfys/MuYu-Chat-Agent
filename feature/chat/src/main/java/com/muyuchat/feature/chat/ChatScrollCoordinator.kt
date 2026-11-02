@@ -307,6 +307,18 @@ internal class ChatScrollCoordinator(
         apply(ChatScrollIntentAction.UserSentMessage)
     }
 
+    /** Explicit user action ("scroll to bottom" pill) that resumes following and scrolls to tail. */
+    internal fun scrollToBottomNow() {
+        onUserSentMessage()
+        val totalItems = listState.layoutInfo.totalItemsCount
+        if (totalItems > 0 && listState.canScrollForward) {
+            enqueue(
+                kind = ChatScrollRequestKind.FollowGrowth,
+                targetItemIndex = totalItems - 1,
+            )
+        }
+    }
+
     internal fun onLayoutObservation(observation: ChatScrollLayoutObservation) {
         if (programmaticScrollRunning) {
             if (intentState.mode != ChatScrollFollowMode.DetachedByUser &&
@@ -404,7 +416,18 @@ internal class ChatScrollCoordinator(
             val layout = listState.layoutInfo
             val viewport = (layout.viewportEndOffset - layout.viewportStartOffset)
                 .coerceAtLeast(1)
-            val consumed = listState.scrollBy(viewport.toFloat())
+            val lastVisible = layout.visibleItemsInfo.lastOrNull()
+            val exactRemainingPx = if (
+                lastVisible != null &&
+                lastVisible.index == layout.totalItemsCount - 1
+            ) {
+                val contentEnd = layout.viewportEndOffset - layout.afterContentPadding
+                (lastVisible.offset + lastVisible.size - contentEnd).coerceAtLeast(1)
+            } else {
+                viewport
+            }
+            val stepPx = exactRemainingPx.coerceAtMost(viewport).toFloat()
+            val consumed = listState.scrollBy(stepPx)
             if (consumed <= 0f) break
             passes += 1
         }

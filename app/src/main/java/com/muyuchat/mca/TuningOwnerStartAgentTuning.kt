@@ -507,12 +507,15 @@ internal fun TuningOwner.startAgentTuning(
                 val refreshedModels = modelStore.listModels()
                 readinessGate.invalidate()
                 val profileState = runtimeProfileStore.currentRuntimeState(identity.identityHash)
+                val benchmarkHistory = benchmarkHistoryLogger.recent()
+                val nativeStats = engine.nativeStatsJson()
+                val logs = engine.recentLogs()
                 store.update { state ->
                     state.copy(
                         models = refreshedModels,
                         params = mergedExecutionProfile(state.params, candidateProfile.engineProfile),
                         benchmark = benchmark,
-                        benchmarkHistory = benchmarkHistoryLogger.recent(),
+                        benchmarkHistory = benchmarkHistory,
                         profileId = candidateProfile.profileId,
                         revision = candidateProfile.revision,
                         profileRecordState = AgentProfileRecordState.COMMITTED,
@@ -535,8 +538,8 @@ internal fun TuningOwner.startAgentTuning(
                         busy = false,
                         autoTuningInProgress = false,
                         lastAutoTuningSummary = "${debugMode.label}按 ${searchStages.joinToString(" → ") { stage -> stage.label }} 完成逐阶段搜索并提交本机 profile：$finalExecutionSummary",
-                        nativeStatsJson = engine.nativeStatsJson(),
-                        logs = engine.recentLogs(),
+                        nativeStatsJson = nativeStats,
+                        logs = logs,
                         statusMessage = "智能调参完成：逐阶段候选通过正确性、安全和签名核对，已原子提交：$finalExecutionSummary"
                     )
                 }

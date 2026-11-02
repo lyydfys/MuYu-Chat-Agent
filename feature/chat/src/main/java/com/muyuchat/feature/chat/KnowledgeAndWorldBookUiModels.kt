@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.Immutable
 
 /**
  * T2B22-T1（b 工位）拆片：ImageAssetUiItem / WorldBookUiItem /
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.width
  * ChatUiItemModels.kt 逐字节平移；零改写。
  */
 
+@Immutable
 data class ImageAssetUiItem(
     val id: String,
     val name: String,
@@ -38,6 +40,7 @@ data class ImageAssetUiItem(
     val generationDevice: String = ""
 )
 
+@Immutable
 data class WorldBookUiItem(
     val id: String,
     val name: String,
@@ -55,6 +58,7 @@ enum class WorldBookImportScope(val label: String) {
     CHAT("当前对话")
 }
 
+@Immutable
 data class KnowledgeBaseUiItem(
     val id: String,
     val name: String,

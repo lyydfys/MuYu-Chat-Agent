@@ -14,12 +14,12 @@ import com.muyuchat.feature.chat.BrowserTaskStateMachine
 import com.muyuchat.mca.AssistantConversationSnapshot
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.ContextSummaryRecord
-import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.GenerationExecutionFields
+import com.muyuchat.mca.UiStateWriter
 import com.muyuchat.mca.WebSearchDiagnosticRecord
 import com.muyuchat.mca.WebSearchTurnMode
 import com.muyuchat.mca.activateContextSummaryCandidate
 import com.muyuchat.mca.withReplyGenerationMetrics
-import kotlinx.coroutines.flow.StateFlow
 
 private const val STREAM_CHUNK_STATS_INTERVAL_NANOS = 100_000_000L
 
@@ -32,7 +32,7 @@ private const val STREAM_CHUNK_STATS_INTERVAL_NANOS = 100_000_000L
 // names and fixed signatures, so the eventual owner depends on this surface instead of on the
 // transform type.
 //
-// Two deliberate write classes live here:
+// Three deliberate write classes live here:
 //
 // 1. Run-gated publications (status, stream progress, completion bookkeeping, refusals). Each is
 //    a verbatim move of one call site: same fields, same values, same guard shape. The gate is
@@ -59,19 +59,26 @@ private const val STREAM_CHUNK_STATS_INTERVAL_NANOS = 100_000_000L
 internal class ChatGenerationUiPublisher(
     private val chatRuns: ChatRunOwnership,
     private val generationRunId: Long,
-    private val uiState: StateFlow<MainUiState>,
-    // R3/S27: 写入经调用方注入的具名更新（同 run 门控语义不变）。
-    private val updateUiState: (transform: (MainUiState) -> MainUiState) -> Unit,
+    private val writer: UiStateWriter<GenerationExecutionFields>,
     // Virtual-time tests can replace this clock; production stays on the monotonic clock.
     private val monotonicClock: () -> Long = System::nanoTime
 ) {
 
     private var lastStreamChunkStatsPublishedAtNanos: Long? = null
 
-    private fun updateGenerationUi(transform: (MainUiState) -> MainUiState) {
+    private fun updateGenerationUi(transform: (GenerationExecutionFields) -> GenerationExecutionFields) {
         if (!chatRuns.matches(generationRunId)) return
-        updateUiState { state ->
+        writer.update { state ->
             if (chatRuns.matches(generationRunId)) transform(state) else state
+        }
+    }
+
+    private fun updateGenerationUiWithResult(
+        transform: (GenerationExecutionFields) -> Pair<GenerationExecutionFields, Boolean>
+    ): Boolean {
+        if (!chatRuns.matches(generationRunId)) return false
+        return writer.updateWithResult { state ->
+            if (chatRuns.matches(generationRunId)) transform(state) else state to false
         }
     }
 
@@ -175,18 +182,20 @@ internal class ChatGenerationUiPublisher(
     /**
      * The stream ended without a terminal event: release the lock only while the UI still reports a
      * running generation, and attach the reply metrics under the same gate. The metrics are finished
-     * lazily -- [finishMetrics] runs only when the state is actually settled -- so a superseded or
-     * already-settled generation does not consume the metrics snapshot.
+     * lazily after the initial run/active-state checks, before the retryable reducer. A CAS retry
+     * reuses the frozen snapshot and never finishes metrics a second time.
      */
     fun publishFallbackTermination(
         stats: RuntimeStats,
         statusMessage: String,
         finishMetrics: () -> ChatGenerationMetrics?
     ) {
+        if (!chatRuns.matches(generationRunId) || !writer.current.isGenerating) return
+        val metrics = finishMetrics()
         updateGenerationUi { state ->
             if (state.isGenerating) {
                 state.afterGenerationTerminated(stats, statusMessage)
-                    .withReplyGenerationMetrics(finishMetrics())
+                    .withReplyGenerationMetrics(metrics)
             } else {
                 state
             }
@@ -198,17 +207,17 @@ internal class ChatGenerationUiPublisher(
      * reasoning overrides). Not run-gated: see write class 2 in the file comment.
      */
     fun publishNormalizedTurnParams(params: GenerationParams) {
-        updateUiState { it.copy(params = params) }
+        writer.update { it.copy(params = params) }
     }
 
     /** The manual-compression flag flips off once the queued request is consumed. Not run-gated. */
     fun publishManualCompressionConsumed() {
-        updateUiState { it.copy(contextCompressionPending = false) }
+        writer.update { it.copy(contextCompressionPending = false) }
     }
 
     /** One-shot / research-override switches reset to FOLLOW for the next turn. Not run-gated. */
     fun publishWebSearchTurnReset() {
-        updateUiState {
+        writer.update {
             it.copy(
                 webSearchTurnMode = WebSearchTurnMode.FOLLOW,
                 webSearchResearchModeOverride = null,
@@ -227,7 +236,7 @@ internal class ChatGenerationUiPublisher(
         diagnostics: List<WebSearchDiagnosticRecord>?,
         statusMessage: String?
     ) {
-        updateUiState {
+        writer.update {
             it.copy(
                 webSearchStatusMessage = webSearchStatusMessage ?: it.webSearchStatusMessage,
                 webSearchDiagnostics = diagnostics ?: it.webSearchDiagnostics,
@@ -243,16 +252,13 @@ internal class ChatGenerationUiPublisher(
      * can retain its task id for the cancellation path.
      */
     fun publishBrowserSearchTaskStart(task: BrowserTask): Boolean {
-        var published = false
-        updateGenerationUi { current ->
+        return updateGenerationUiWithResult { current ->
             if (current.browserTask?.windowVisible != true) {
-                published = true
-                current.copy(browserTask = task)
+                current.copy(browserTask = task) to true
             } else {
-                current
+                current to false
             }
         }
-        return published
     }
 
     /**
@@ -261,7 +267,7 @@ internal class ChatGenerationUiPublisher(
      * left untouched rather than overwritten with another turn's results.
      */
     fun publishBrowserSearchResults(taskId: String, urls: List<String>, message: String?) {
-        updateUiState { current ->
+        writer.update { current ->
             val task = current.browserTask
             if (task?.taskId != taskId || task.phase != BrowserTaskPhase.SEARCHING) {
                 current
@@ -284,25 +290,23 @@ internal class ChatGenerationUiPublisher(
         frozenAssistantId: String,
         frozenAssistantSnapshot: AssistantConversationSnapshot
     ): Boolean {
-        var activated = false
-        updateGenerationUi { current ->
-            if (current.activeChatSessionId != expectedSessionId) {
-                current
+        return updateGenerationUiWithResult { current ->
+            if (current.snapshot.activeChatSessionId != expectedSessionId) {
+                current to false
             } else {
-                current.copy(chatSessions = current.chatSessions.map { session ->
+                val transitions = current.chatSessions.map { session ->
                     if (session.id != frozenSessionId || session.mixedAssistantHistory ||
                         session.assistantId != frozenAssistantId ||
                         session.assistantSnapshot != frozenAssistantSnapshot
-                    ) session else {
+                    ) session to false else {
                         val records = activateContextSummaryCandidate(
                             session.contextSummaries, candidate, current.messages, scope
                         )
-                        activated = records !== session.contextSummaries
-                        session.copy(contextSummaries = records)
+                        session.copy(contextSummaries = records) to (records !== session.contextSummaries)
                     }
-                })
+                }
+                current.copy(chatSessions = transitions.map { it.first }) to transitions.any { it.second }
             }
         }
-        return activated
     }
 }

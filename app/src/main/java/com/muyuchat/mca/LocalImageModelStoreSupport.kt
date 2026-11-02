@@ -93,6 +93,9 @@ fun LocalImageModelRecord.localImageStructuralReadinessMessage(): String? {
     if (runtime == LocalImageRuntime.QNN_HTP) {
         return qnnImageBundleReadinessMessage()
     }
+    if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        return mediaTekAnimaBundleReadinessMessage()
+    }
     if (runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP) {
         return "当前仅支持 stable-diffusion.cpp 或 MNN-Diffusion 本地图像引擎。"
     }
@@ -374,7 +377,8 @@ private fun LocalImageModelFamily.requiresCompanionComponents(): Boolean =
         LocalImageModelFamily.LONGCAT_IMAGE,
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.FLUX,
-        LocalImageModelFamily.WAN -> true
+        LocalImageModelFamily.WAN,
+        LocalImageModelFamily.ANIMA -> true
         LocalImageModelFamily.SANA,
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.SDXL,
@@ -394,6 +398,7 @@ private fun LocalImageModelFamily.requiredCompanionComponentHint(): String =
         LocalImageModelFamily.GLM_IMAGE,
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.WAN -> "VAE/AE 和文本编码器/LLM"
+        LocalImageModelFamily.ANIMA -> "Qwen-Image VAE/AE 和 Qwen3-0.6B 文本编码器/LLM"
         LocalImageModelFamily.SDXL,
         LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
@@ -475,7 +480,7 @@ internal fun String.isPrimaryImageModelName(): Boolean {
 internal const val QWEN_IMAGE_21_RECOMMENDATION_ID = "qwen_image_21_mnn_opencl"
 
 internal fun settleAndApplyLocalImageModelCatalogUpdate(
-    store: UiStateStore,
+    store: UiStateWriter<ImageModelSelectionFields>,
     localImageModelStore: LocalImageModelStore,
     context: Context,
     managedRuntimeReadinessRefreshGate: ManagedRuntimeReadinessRefreshGate,

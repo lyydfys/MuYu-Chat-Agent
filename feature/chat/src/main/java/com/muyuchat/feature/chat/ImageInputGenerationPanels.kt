@@ -1,4 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -11,19 +15,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoLibrary
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +33,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -44,14 +42,12 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Replay
+
+
+
+
+
+
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +61,7 @@ import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ImageInputTaskModePanel(
@@ -109,7 +106,7 @@ internal fun ImageInputTaskModePanel(
                         color = MaterialTheme.colorScheme.error,
                         style = MaterialTheme.typography.bodySmall
                     )
-                    TextButton(onClick = onAcceptLoraRestore) {
+                    McaButton(style = McaButtonStyle.Text,onClick = onAcceptLoraRestore) {
                         Text(if (supportsLora) "按当前选择继续" else "继续不带 LoRA")
                     }
                 }
@@ -119,7 +116,7 @@ internal fun ImageInputTaskModePanel(
                     ImageGenerationUiTaskMode.entries.filter(supportedTaskModes::contains),
                     key = { it.name }
                 ) { mode ->
-                    FilterChip(
+                    McaChip(
                         selected = mode == taskMode,
                         onClick = { onTaskModeChange(mode) },
                         label = { Text(mode.label) }
@@ -171,15 +168,15 @@ internal fun ImageInputTaskModePanel(
                     )
                     ImageInputRoleRow("蒙版", "mask", maskImageUri, onPickImageRole, onClearImageRole)
                     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = onDrawImageMask,
                             enabled = inputImageUri != null,
                             modifier = Modifier.heightIn(min = 48.dp)
                         ) {
                             Icon(
-                                Icons.Default.Edit,
+                                McaIcons.Edit,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(McaIconSize.S)
                             )
                             Spacer(Modifier.width(6.dp))
                             Text("绘制蒙版")
@@ -365,7 +362,7 @@ internal fun ImageInputGenerationParametersPanel(
                 Text("采样器", style = MaterialTheme.typography.labelMedium)
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(executionModel.imageSupportedSamplersForTask(taskMode)) { method ->
-                        FilterChip(
+                        McaChip(
                             selected = method == sampler,
                             onClick = { onSamplerChange(method) },
                             label = { Text(method) }
@@ -420,7 +417,7 @@ internal fun ImageInputUltraFixPanel(
                         )
                     }
                     if (supportsVaeTiling) {
-                        FilterChip(
+                        McaChip(
                             selected = vaeTilingEnabled,
                             onClick = { onVaeTilingEnabledChange(!vaeTilingEnabled) },
                             enabled = !ultraFixEnabled,
@@ -434,7 +431,7 @@ internal fun ImageInputUltraFixPanel(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FilterChip(
+                    McaChip(
                         selected = ultraFixEnabled,
                         onClick = { onUltraFixEnabledChange(!ultraFixEnabled) },
                         enabled = ultraFixEnabled || ultraFixInputReady,
@@ -515,13 +512,13 @@ internal fun ImageInputUltraFixPanel(
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = onResetUltraFix
                         ) {
                             Icon(
-                                Icons.Default.Replay,
+                                McaIcons.Replay,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(McaIconSize.S)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("恢复默认")

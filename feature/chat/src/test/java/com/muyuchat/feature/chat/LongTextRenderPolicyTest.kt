@@ -31,9 +31,16 @@ class LongTextRenderPolicyTest {
         // page-bound behaviour it pins is unchanged.
         assertTrue(source.contains("internal fun PagedPlainMessageText("))
         // P9/S8: PagedAssistantRichText moved to ChatMarkdownBlockRenderers.kt and had to widen from
-        // private to internal there (cross-file entry). The assertion tracks the declaration; the
-        // signature and the bound it enforces are unchanged.
-        assertTrue(source.contains("internal fun PagedAssistantRichText(content: String, modifier: Modifier = Modifier)"))
+        // private to internal there (cross-file entry). R00 then added the explicit
+        // contentIdentity parameter (the message-row callers pass it) while keeping the previous
+        // positional call shape usable. The assertion tracks the declaration; the bound it enforces
+        // (MESSAGE_RENDER_PAGE_CHARS, safePrefix, "display more" accumulation) is unchanged below.
+        assertTrue(
+            source.contains(
+                "internal fun PagedAssistantRichText(content: String, modifier: Modifier = Modifier, contentIdentity: ChatMessageIdentity? = null)"
+            )
+        )
+        assertTrue(source.contains("rememberSaveable(contentIdentity)"))
         // P9/S15: ReasoningPanel moved to ChatReasoningPerformanceScreens.kt and had to widen from
         // private to internal there (cross-file entry from the message block). The assertion tracks
         // the declaration; the paged reasoning text it renders is unchanged.

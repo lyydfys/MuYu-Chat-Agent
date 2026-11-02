@@ -119,6 +119,8 @@ data class CloudApiConfig(
     val supportsVision: Boolean = false,
     val supportsTools: Boolean = false,
     val responsesReasoningEnabled: Boolean = false,
+    /** True = request SSE; false = one JSON body (for gateways whose SSE never terminates). */
+    val streaming: Boolean = true,
     val imageApiFormat: CloudImageApiFormat = CloudImageApiFormat.OPENAI_IMAGES,
     val imageModel: String = "",
     val imageSize: String = "1024x1024",
@@ -159,6 +161,8 @@ data class CloudModelRecord(
     val supportsVision: Boolean = false,
     val supportsTools: Boolean = false,
     val responsesReasoningEnabled: Boolean = false,
+    /** False disables SSE for this record (compatibility with non-terminating gateways). */
+    val streaming: Boolean = true,
     val imageApiFormat: CloudImageApiFormat = CloudImageApiFormat.OPENAI_IMAGES,
     val imageEndpointPath: String = "",
     val imageSize: String = "1024x1024",
@@ -188,6 +192,7 @@ data class CloudModelRecord(
             supportsVision = supportsVision,
             supportsTools = supportsTools && kind == CloudModelKind.CHAT,
             responsesReasoningEnabled = responsesReasoningEnabled,
+            streaming = streaming,
             imageApiFormat = imageApiFormat,
             imageModel = imageApiFormat.defaultImageModel,
             imageSize = imageSize,
@@ -235,6 +240,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             },
             supportsTools = prefs.getBoolean(KEY_CHAT_SUPPORTS_TOOLS, false),
             responsesReasoningEnabled = prefs.getBoolean(KEY_RESPONSES_REASONING, false),
+            streaming = prefs.getBoolean(KEY_CHAT_STREAMING, true),
             imageApiFormat = imageFormat,
             imageModel = if (prefs.contains(KEY_IMAGE_MODEL)) {
                 prefs.getString(KEY_IMAGE_MODEL, null).orEmpty()
@@ -266,6 +272,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             .putBoolean(KEY_CHAT_SUPPORTS_VISION, normalized.supportsVision)
             .putBoolean(KEY_CHAT_SUPPORTS_TOOLS, normalized.supportsTools)
             .putBoolean(KEY_RESPONSES_REASONING, normalized.responsesReasoningEnabled)
+            .putBoolean(KEY_CHAT_STREAMING, normalized.streaming)
             .putString(KEY_IMAGE_API_FORMAT, normalized.imageApiFormat.name)
             .putString(KEY_IMAGE_MODEL, normalized.imageModel)
             .putString(KEY_IMAGE_SIZE, normalized.imageSize)
@@ -292,6 +299,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
                             supportsVision = legacy.supportsVision,
                             supportsTools = legacy.supportsTools,
                             responsesReasoningEnabled = legacy.responsesReasoningEnabled,
+                            streaming = legacy.streaming,
                             imageSize = legacy.imageSize
                         )
                     )
@@ -392,6 +400,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             supportsTools = kind == CloudModelKind.CHAT && optBoolean("supportsTools", false),
             imageApiFormat = parseImageFormat(optString("imageApiFormat", optString("apiFormat"))),
             responsesReasoningEnabled = optBoolean("responsesReasoningEnabled", false),
+            streaming = optBoolean("streaming", true),
             imageEndpointPath = optString("imageEndpointPath"),
             imageSize = optString("imageSize", DEFAULT_IMAGE_SIZE),
             createdAt = optLong("createdAt", System.currentTimeMillis()),
@@ -414,6 +423,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
             .put("supportsVision", supportsVision)
             .put("supportsTools", kind == CloudModelKind.CHAT && supportsTools)
             .put("responsesReasoningEnabled", responsesReasoningEnabled)
+            .put("streaming", streaming)
             .put("imageApiFormat", imageApiFormat.name)
             .put("imageEndpointPath", imageEndpointPath)
             .put("imageSize", imageSize)
@@ -533,6 +543,7 @@ class CloudApiStore internal constructor(private val prefs: SharedPreferences) {
         private const val KEY_CHAT_SUPPORTS_VISION = "cloud_chat_supports_vision"
         private const val KEY_CHAT_SUPPORTS_TOOLS = "cloud_chat_supports_tools"
         private const val KEY_RESPONSES_REASONING = "cloud_responses_reasoning"
+        private const val KEY_CHAT_STREAMING = "cloud_chat_streaming"
         private const val KEY_IMAGE_API_FORMAT = "cloud_image_api_format"
         private const val KEY_IMAGE_MODEL = "cloud_image_model"
         private const val KEY_IMAGE_SIZE = "cloud_image_size"

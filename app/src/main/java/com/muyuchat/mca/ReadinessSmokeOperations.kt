@@ -29,7 +29,7 @@ internal data class LocalApiStreamSmokeResult(
 
 internal fun runAgentStabilitySmokeFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     engine: McaInferenceService,
     modelStore: ModelStoreRepository,
     cloudApiStore: CloudApiStore,
@@ -85,28 +85,33 @@ internal fun runAgentStabilitySmokeFor(
                 modelStore.markLoaded(model.id)
                 cloudApiStore.saveSelectedBackend(ChatBackend.LOCAL)
                 readinessGate.invalidate()
+                val currentModels = modelStore.listModels()
+                val currentLogs = engine.recentLogs()
+                val diagnosticReport = diagnostics.buildDiagnosticReport()
                 store.update { state ->
                     state.copy(
                         loadedModelId = model.id,
                         loadedModelName = model.displayName,
                         selectedChatBackend = ChatBackend.LOCAL,
-                        models = modelStore.listModels(),
+                        models = currentModels,
                         busy = false,
                         nativeStatsJson = nativeStats,
-                        logs = engine.recentLogs(),
+                        logs = currentLogs,
                         localStabilitySmokeSummary = summary,
-                        diagnosticReport = diagnostics.buildDiagnosticReport(),
+                        diagnosticReport = diagnosticReport,
                         statusMessage = "稳定性自检通过：$summary"
                     )
                 }
             }.onFailure { error ->
                 val message = "稳定性自检失败：${error.message ?: "未知错误"}"
+                val nativeStats = engine.nativeStatsJson()
+                val diagnosticReport = diagnostics.buildDiagnosticReport()
                 store.update {
                     it.copy(
                         busy = false,
-                        nativeStatsJson = engine.nativeStatsJson(),
+                        nativeStatsJson = nativeStats,
                         localStabilitySmokeSummary = message,
-                        diagnosticReport = diagnostics.buildDiagnosticReport(),
+                        diagnosticReport = diagnosticReport,
                         statusMessage = message
                     )
                 }

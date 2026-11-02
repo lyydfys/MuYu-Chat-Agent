@@ -162,7 +162,7 @@ internal interface LocalApiTuningControlPort {
     fun localApiTuningConflict(action: String, activeJobId: String?, message: String): LocalApiControlResult.Rejected
     fun localApiExclusiveLifecycleConflict(action: String, allowedStagedJobId: String? = null): LocalApiControlResult.Rejected?
     fun assignActiveTuningJobId(jobId: String?)
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (RuntimeProfileFields) -> RuntimeProfileFields)
     fun tuningJobPublicJson(job: TuningJobEntity): JSONObject
     fun startAgentTuning(
         debugMode: AgentDebugMode,

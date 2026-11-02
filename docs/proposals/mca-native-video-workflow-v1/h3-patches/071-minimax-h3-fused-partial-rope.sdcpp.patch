@@ -1,0 +1,142 @@
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index 3e2b69d..f3b69a2 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -4,6 +4,7 @@
+ #include <algorithm>
+ #include <cinttypes>
+ #include <cmath>
++#include <cstdlib>
+ #include <set>
+ #include <string>
+ #include <tuple>
+@@ -176,19 +177,59 @@ namespace MiniMaxH3 {
+         return ggml_concat(ctx, rotated, tail, 0);
+     }
+ 
++    // nightmare (dit/071): q/k RMSNorm on the backend's fused qknorm+rope op (the HTP's ggml_qknorm_rope). H3's rope is
++    // rotate-half over the first rot_dim (96) of 128 dims, pairs (j, j + rot_dim/2); the kernel is interleaved over all
++    // 128, pairs (2j, 2j+1). So the first rot_dim channels (and the norm weight) are reordered j -> 2j, j + rot_dim/2 ->
++    // 2j+1, the tail stays, and the table is padded to 64 pairs with identity rotations (zero angles, build_rope). q and
++    // k get the same reordering, which leaves q.k (all attention reads) unchanged. The composed rope was 82 s of a 110 s
++    // step on the S25 (REPEAT 54 s, MUL 20 s, ADD 10 s on [2, 48, L, 56] tensors); the matmuls were 7.7 s.
++    class H3QKNorm : public RMSNorm {
++    public:
++        using RMSNorm::RMSNorm;
++
++        ggml_tensor* try_forward_rope_partial(GGMLRunnerContext* ctx, ggml_tensor* x, ggml_tensor* theta, int64_t rot_dim) {
++            const int64_t d = x->ne[0];
++            if (ctx->backend == nullptr || rot_dim <= 0 || rot_dim > d || rot_dim % 2 != 0 || theta->ne[2] * 2 != d) {
++                return nullptr;
++            }
++            ggml_context* c = ctx->ggml_ctx;
++            ggml_tensor* w  = params["weight"];
++            if (ctx->weight_adapter) {
++                w = ctx->weight_adapter->patch_weight(c, ctx->backend, w, prefix + "weight");
++            }
++            auto reorder = [&](ggml_tensor* t, int64_t rows) {
++                auto t2  = ggml_reshape_2d(c, t, d, rows);
++                auto rot = ggml_cont(c, ggml_view_2d(c, t2, rot_dim, rows, t2->nb[1], 0));
++                rot      = ggml_reshape_3d(c, rot, rot_dim / 2, 2, rows);
++                rot      = ggml_reshape_2d(c, ggml_cont(c, ggml_permute(c, rot, 1, 0, 2, 3)), rot_dim, rows);
++                if (rot_dim == d) {
++                    return rot;
++                }
++                auto tail = ggml_cont(c, ggml_view_2d(c, t2, d - rot_dim, rows, t2->nb[1], rot_dim * ggml_element_size(t2)));
++                return ggml_concat(c, rot, tail, 0);
++            };
++            auto xi          = ggml_reshape_4d(c, reorder(x, x->ne[1] * x->ne[2] * x->ne[3]), d, x->ne[1], x->ne[2], x->ne[3]);
++            auto wi          = ggml_reshape_1d(c, reorder(w, 1), d);
++            ggml_tensor* out = ggml_qknorm_rope(c, xi, wi, theta, eps);
++            return ggml_backend_supports_op(ctx->backend, out) ? out : nullptr;
++        }
++    };
++
+     struct Attention : public GGMLBlock {
+         int64_t heads;
+         int64_t head_dim;
++        int64_t rot_dim = 0;  // dit/071: the rotated channels (96); 0 = the table is not padded
+ 
+         Attention(int64_t hidden_size,
+                   int64_t heads,
+                   int64_t head_dim,
+-                  float eps)
+-            : heads(heads), head_dim(head_dim) {
++                  float eps,
++                  int64_t rot_dim = 0)
++            : heads(heads), head_dim(head_dim), rot_dim(rot_dim) {
+             int64_t inner      = heads * head_dim;
+             blocks["qkv_proj"] = std::make_shared<Linear>(hidden_size, inner * 3, false);
+-            blocks["q_norm"]   = std::make_shared<RMSNorm>(head_dim, eps);
+-            blocks["k_norm"]   = std::make_shared<RMSNorm>(head_dim, eps);
++            blocks["q_norm"]   = std::make_shared<H3QKNorm>(head_dim, eps);
++            blocks["k_norm"]   = std::make_shared<H3QKNorm>(head_dim, eps);
+             blocks["out_proj"] = std::make_shared<Linear>(inner, hidden_size, false);
+         }
+ 
+@@ -196,8 +237,8 @@ namespace MiniMaxH3 {
+                              ggml_tensor* x,
+                              ggml_tensor* pe = nullptr) {
+             auto qkv_proj = std::dynamic_pointer_cast<Linear>(blocks["qkv_proj"]);
+-            auto q_norm   = std::dynamic_pointer_cast<RMSNorm>(blocks["q_norm"]);
+-            auto k_norm   = std::dynamic_pointer_cast<RMSNorm>(blocks["k_norm"]);
++            auto q_norm   = std::dynamic_pointer_cast<H3QKNorm>(blocks["q_norm"]);
++            auto k_norm   = std::dynamic_pointer_cast<H3QKNorm>(blocks["k_norm"]);
+             auto out_proj = std::dynamic_pointer_cast<Linear>(blocks["out_proj"]);
+ 
+             int64_t sequence = x->ne[1];
+@@ -206,11 +247,27 @@ namespace MiniMaxH3 {
+             auto q           = ggml_reshape_4d(ctx->ggml_ctx, qkv[0], head_dim, heads, sequence, batch);
+             auto k           = ggml_reshape_4d(ctx->ggml_ctx, qkv[1], head_dim, heads, sequence, batch);
+             auto v           = ggml_reshape_4d(ctx->ggml_ctx, qkv[2], head_dim, heads, sequence, batch);
++            // dit/071: build_rope pads the table to head_dim/2 pairs; the composed path rotates only the first rot_dim/2.
++            ggml_tensor* pe_rot = pe;
++            if (pe != nullptr && rot_dim > 0 && rot_dim / 2 < pe->ne[2]) {
++                pe_rot = ggml_view_4d(ctx->ggml_ctx, pe, pe->ne[0], pe->ne[1], rot_dim / 2, pe->ne[3],
++                                      pe->nb[1], pe->nb[2], pe->nb[3], 0);
++            }
++            static const bool composed = getenv("NM_H3_COMPOSED_ROPE") != nullptr;  // the A/B control
++            if (pe != nullptr && rot_dim > 0 && !composed) {
++                auto q_rope = q_norm->try_forward_rope_partial(ctx, q, pe, rot_dim);
++                auto k_rope = q_rope != nullptr ? k_norm->try_forward_rope_partial(ctx, k, pe, rot_dim) : nullptr;
++                if (q_rope != nullptr && k_rope != nullptr) {
++                    auto out = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q_rope, k_rope, v, static_cast<int>(heads),
++                                                      nullptr, true, ctx->flash_attn_enabled, 1.f / 128.f);
++                    return out_proj->forward(ctx, out);
++                }
++            }
+             q                = q_norm->forward(ctx, q);
+             k                = k_norm->forward(ctx, k);
+             if (pe != nullptr) {
+-                q = apply_partial_rope(ctx->ggml_ctx, q, pe);
+-                k = apply_partial_rope(ctx->ggml_ctx, k, pe);
++                q = apply_partial_rope(ctx->ggml_ctx, q, pe_rot);
++                k = apply_partial_rope(ctx->ggml_ctx, k, pe_rot);
+             } else {
+                 q = attention_layout(ctx->ggml_ctx, q);
+                 k = attention_layout(ctx->ggml_ctx, k);
+@@ -390,7 +447,8 @@ namespace MiniMaxH3 {
+             blocks["attn"]       = std::make_shared<Attention>(config.hidden_size,
+                                                          config.num_attention_heads,
+                                                          config.attention_head_dim,
+-                                                         config.qk_norm_eps);
++                                                         config.qk_norm_eps,
++                                                         config.rope_inv_freq_len * 3 * 2);  // dit/071
+             blocks["mlp"]        = std::make_shared<MLP>(config.hidden_size,
+                                                   config.ffn_hidden_size);
+             blocks["adaln_proj"] = std::make_shared<AdaLayerNormModulation>(config.time_embed_dim,
+@@ -566,6 +624,14 @@ namespace MiniMaxH3 {
+                 auto a            = ggml_mul(ctx->ggml_ctx, expanded_inv, pos);
+                 angles            = angles == nullptr ? a : ggml_concat(ctx->ggml_ctx, angles, a, 0);
+             }
++            // dit/071: zero angles up to head_dim/2 pairs, identity rotations the fused kernel can take whole; the
++            // composed path views the first rope_inv_freq_len * 3 pairs back out (Attention::rot_dim).
++            if (angles->ne[0] * 2 < config.attention_head_dim) {
++                angles = ggml_concat(ctx->ggml_ctx, angles,
++                                     ggml_ext_zeros(ctx->ggml_ctx, config.attention_head_dim / 2 - angles->ne[0],
++                                                    angles->ne[1], angles->ne[2], angles->ne[3]),
++                                     0);
++            }
+             auto c  = ggml_reshape_4d(ctx->ggml_ctx, ggml_cos(ctx->ggml_ctx, angles), 1, angles->ne[0], angles->ne[1], 1);
+             auto s  = ggml_reshape_4d(ctx->ggml_ctx, ggml_sin(ctx->ggml_ctx, angles), 1, angles->ne[0], angles->ne[1], 1);
+             auto ns = ggml_neg(ctx->ggml_ctx, s);

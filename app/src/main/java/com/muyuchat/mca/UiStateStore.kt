@@ -6,35 +6,53 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 
 /**
- * R1/S10：MainUiState 的唯一状态源持有者（方案 §14.3 最小契约，行为不变）。
- *
- * 责任：持有唯一 [MutableStateFlow]；对外只暴露只读 [state]；写入必须经 [update]（CAS 语义）。
- *
- * 过渡说明：MainViewModel 与其 inner port 暂时通过 [ownerFlow] 访问同一可变流，逐字保留既有
- * CAS/读取语义（含 port 契约中的 `MutableStateFlow` 型 `uiState` 属性）。该访问器是过渡 adapter，
- * 退出条件 = 全部 `_uiState.update`/`_uiState.value` 站点迁移到 [update]/[current]（R2–R4 收口），
- * 之后删除 [ownerFlow] 并收敛 port 契约到只读 [state]。
+ * Owns the app's single atomic state. Composition issues field-limited writers; readers and writers
+ * share the same read-only flow. The mutable source and arbitrary root-state reducer never escape.
  */
-class UiStateStore(initial: MainUiState) {
+class UiStateStore(initial: MainUiState) : UiStatusWriter {
     private val mutable = MutableStateFlow(initial)
 
-    val state: StateFlow<MainUiState> = mutable.asStateFlow()
+    override val state: StateFlow<MainUiState> = mutable.asStateFlow()
 
-    val current: MainUiState
+    override val current: MainUiState
         get() = mutable.value
 
-    fun update(reducer: (MainUiState) -> MainUiState) {
-        mutable.update(reducer)
-    }
-
     /**
-     * R3/C2：状态行唯一写入口（自 MainViewModel.showStatus 下移，体逐字等价）。
-     * 单字段写入必须经此漏斗（StatusMessageWriterContractTest 的规则不变，只换了漏斗的家）。
+     * Issues a writer for one domain's fields. Only trusted composition factories supply [project]
+     * and [merge]; business callers receive the resulting writer rather than this store.
+     *
+     * Projection, reduction and merge all run inside the same CAS attempt. A retry must project the
+     * latest snapshot again so concurrent updates in both this domain and other domains survive.
+     * All three functions must be pure because contention can cause them to run more than once.
      */
-    fun showStatus(message: String?) {
-        update { it.copy(statusMessage = message) }
+    internal fun <Fields> writer(
+        project: (MainUiState) -> Fields,
+        merge: (MainUiState, Fields) -> MainUiState,
+    ): UiStateWriter<Fields> = UiStateWriter(
+        source = this,
+        committer = object : UiFieldCommitter<Fields> {
+            override fun <Result> commit(
+                reducer: (MainUiState, Fields) -> UiFieldCommit<Fields, Result>,
+            ): UiFieldCommit<Fields, Result> = commitFields(project, merge, reducer)
+        },
+        writeStatus = ::showStatus,
+    )
+
+    private fun <Fields, Result> commitFields(
+        project: (MainUiState) -> Fields,
+        merge: (MainUiState, Fields) -> MainUiState,
+        reducer: (MainUiState, Fields) -> UiFieldCommit<Fields, Result>,
+    ): UiFieldCommit<Fields, Result> {
+        while (true) {
+            val snapshot = mutable.value
+            val outcome = reducer(snapshot, project(snapshot))
+            val committed = merge(snapshot, outcome.fields)
+            if (mutable.compareAndSet(snapshot, committed)) return UiFieldCommit(project(committed), outcome.result)
+        }
     }
 
-    internal val ownerFlow: MutableStateFlow<MainUiState>
-        get() = mutable
+    /** The named status-only command preserves all other fields in the same atomic state. */
+    override fun showStatus(message: String?) {
+        mutable.update { it.copy(statusMessage = message) }
+    }
 }

@@ -1,6 +1,12 @@
 @file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaSlider
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
@@ -20,19 +26,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Redo
-import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +64,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.McaIconSize
 
 private enum class MaskEditorInteractionMode {
     DRAW,
@@ -199,14 +197,14 @@ internal fun MaskEditor(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                FilterChip(
+                McaChip(
                     selected = interactionMode == MaskEditorInteractionMode.DRAW,
                     onClick = { interactionMode = MaskEditorInteractionMode.DRAW },
                     enabled = !saving,
                     label = { Text("绘制") },
                     modifier = Modifier.heightIn(min = 48.dp)
                 )
-                FilterChip(
+                McaChip(
                     selected = interactionMode == MaskEditorInteractionMode.PAN,
                     onClick = { interactionMode = MaskEditorInteractionMode.PAN },
                     enabled = !saving,
@@ -230,17 +228,21 @@ internal fun MaskEditor(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                IconButton(
+                McaIconButton(
+                    contentDescription = "缩小画布",
                     onClick = { setViewportZoom(viewportState.zoom / 1.25) },
                     enabled = viewportState.zoom > ImageEditingViewportState.MIN_ZOOM && !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.Default.ZoomOut, contentDescription = "缩小画布") }
-                IconButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.ZoomOut, contentDescription = null) }
+                McaIconButton(
+                    contentDescription = "放大画布",
                     onClick = { setViewportZoom(viewportState.zoom * 1.25) },
                     enabled = viewportState.zoom < ImageEditingViewportState.MAX_ZOOM && !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.Default.ZoomIn, contentDescription = "放大画布") }
-                TextButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.ZoomIn, contentDescription = null) }
+                McaButton(style = McaButtonStyle.Text,
                     onClick = { viewportState = ImageEditingViewportState() },
                     enabled = viewportState != ImageEditingViewportState() && !saving,
                     modifier = Modifier.heightIn(min = 48.dp)
@@ -251,14 +253,14 @@ internal fun MaskEditor(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                FilterChip(
+                McaChip(
                     selected = strokeMode == ImageMaskStrokeMode.BRUSH,
                     onClick = { strokeMode = ImageMaskStrokeMode.BRUSH },
                     enabled = !saving,
                     label = { Text("画笔") },
                     modifier = Modifier.heightIn(min = 48.dp)
                 )
-                FilterChip(
+                McaChip(
                     selected = strokeMode == ImageMaskStrokeMode.ERASER,
                     onClick = { strokeMode = ImageMaskStrokeMode.ERASER },
                     enabled = !saving,
@@ -266,7 +268,7 @@ internal fun MaskEditor(
                     modifier = Modifier.heightIn(min = 48.dp)
                 )
                 Spacer(Modifier.weight(1f))
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         positionedDrawingError = null
                         showPositionedDrawing = true
@@ -280,27 +282,33 @@ internal fun MaskEditor(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = { commitMaskState(fullRepaintState) },
                     enabled = fullRepaintState != maskState && !saving,
                     modifier = Modifier.heightIn(min = 48.dp)
                 ) { Text("全图重绘") }
                 Spacer(Modifier.weight(1f))
-                IconButton(
+                McaIconButton(
+                    contentDescription = "撤销上一笔",
                     onClick = ::undoMaskState,
                     enabled = undoStates.isNotEmpty() && !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "撤销上一笔") }
-                IconButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.Undo, contentDescription = null) }
+                McaIconButton(
+                    contentDescription = "重做下一笔",
                     onClick = ::redoMaskState,
                     enabled = redoStates.isNotEmpty() && !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "重做下一笔") }
-                IconButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.Redo, contentDescription = null) }
+                McaIconButton(
+                    contentDescription = "清空蒙版",
                     onClick = { commitMaskState(maskState.clear()) },
                     enabled = maskState != emptyMaskState && !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.Default.Clear, contentDescription = "清空蒙版") }
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.Clear, contentDescription = null) }
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -308,7 +316,7 @@ internal fun MaskEditor(
             ) {
                 Text("笔刷", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.width(12.dp))
-                Slider(
+                McaSlider(
                     value = radius.toFloat(),
                     onValueChange = { radius = it.toDouble() },
                     valueRange = 0.01f..0.16f,

@@ -1,4 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
@@ -7,6 +10,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
@@ -17,6 +21,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -36,26 +41,20 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
+
+
+
+
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
@@ -66,7 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -75,6 +74,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatGeneratedImageOrigin
 import com.muyuchat.core.engine.ChatImageToolContinuationStatus
@@ -82,6 +84,7 @@ import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 // P9/S17: private→internal（跨区入口：迁移的消息气泡复合区引用）
@@ -92,12 +95,14 @@ internal fun WebSearchSourcesRow(
     messageId: String,
     onOpenBrowserTask: (BrowserTaskLaunch) -> Unit
 ) {
+    val haptics = rememberMcaHaptics()
     var selectedUrl by remember(sources) { mutableStateOf<String?>(null) }
     val selectedSource = sources.firstOrNull { it.url == selectedUrl }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (trace?.hasContent == true) {
             WebSearchTraceCard(
                 trace = trace,
+                messageIdentity = ChatMessageIdentity(sessionId, messageId),
                 onOpenBrowser = { query ->
                     InternalBrowserUrlPolicy.buildSearchUrl("https://www.google.com/search?q={query}", query)?.let { url ->
                         onOpenBrowserTask(BrowserTaskLaunch(
@@ -112,9 +117,9 @@ internal fun WebSearchSourcesRow(
         if (sources.isEmpty()) return@Column
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
-                Icons.Default.Search,
+                McaIcons.Search,
                 contentDescription = null,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(McaIconSize.Xs),
                 tint = McaPrimaryBlue
             )
             Spacer(modifier = Modifier.width(6.dp))
@@ -126,20 +131,30 @@ internal fun WebSearchSourcesRow(
             )
         }
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(sources.take(8)) { source ->
+            items(sources.take(8), key = { it.url }) { source ->
                 val trustLabel = source.displayTrustLabel()
                 val hostLabel = source.displayHostLabel()
                 val selected = source.url == selectedUrl
+                val sourceInteraction = remember(source.url) { MutableInteractionSource() }
                 Surface(
                     modifier = Modifier
                         .widthIn(min = 188.dp, max = 256.dp)
+                        .mcaPressScale(sourceInteraction)
                         .clip(RoundedCornerShape(18.dp))
-                        .clickable {
+                        .clickable(
+                            interactionSource = sourceInteraction,
+                            indication = ripple(bounded = true)
+                        ) {
+                            haptics.tick()
                             selectedUrl = if (selected) null else source.url
                         },
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.62f),
                     shape = RoundedCornerShape(18.dp),
-                    border = if (selected) BorderStroke(1.dp, McaPrimaryBlue.copy(alpha = 0.46f)) else null
+                    border = if (selected) {
+                        BorderStroke(1.dp, McaPrimaryBlue.copy(alpha = 0.46f))
+                    } else {
+                        BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+                    }
                 ) {
                     Column(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
@@ -207,8 +222,8 @@ internal fun WebSearchSourcesRow(
         }
         AnimatedVisibility(
             visible = selectedSource != null,
-            enter = fadeIn(tween(120)) + expandVertically(animationSpec = tween(180)),
-            exit = fadeOut(tween(90)) + shrinkVertically(animationSpec = tween(140))
+            enter = fadeIn(McaMotion.fade(120)) + expandVertically(animationSpec = McaMotion.sizeChangePx),
+            exit = fadeOut(McaMotion.fade(90)) + shrinkVertically(animationSpec = McaMotion.sizeChangePx)
         ) {
             selectedSource?.let { source ->
                 WebSearchSourceDetailCard(
@@ -229,13 +244,21 @@ internal fun WebSearchSourcesRow(
 @Composable
 private fun WebSearchTraceCard(
     trace: ChatWebSearchTrace,
+    messageIdentity: ChatMessageIdentity,
     onOpenBrowser: (String) -> Unit
 ) {
-    var expanded by rememberSaveable(trace.query, trace.message, trace.elapsedMs, trace.running) { mutableStateOf(false) }
+    val haptics = rememberMcaHaptics()
+    // Progress updates belong to the same disclosure. Only changing its message resets it.
+    var expanded by rememberSaveable(messageIdentity) { mutableStateOf(false) }
     val statusColor = trace.webSearchTraceColor()
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = McaMotion.press,
+        label = "webSearchTraceChevron"
+    )
     val runningRotation = if (trace.running) {
         val transition = rememberInfiniteTransition(label = "web-search-running")
-        val angle by transition.animateFloat(
+        transition.animateFloat(
             initialValue = 0f,
             targetValue = 360f,
             animationSpec = infiniteRepeatable(
@@ -244,18 +267,25 @@ private fun WebSearchTraceCard(
             ),
             label = "web-search-running-angle"
         )
-        angle
     } else {
-        0f
+        null
     }
+    val traceInteraction = remember { MutableInteractionSource() }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .mcaPressScale(traceInteraction)
             .clip(RoundedCornerShape(20.dp))
-            .clickable { expanded = !expanded },
+            .clickable(
+                interactionSource = traceInteraction,
+                indication = ripple(bounded = true)
+            ) {
+                haptics.tick()
+                expanded = !expanded
+            },
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
         shape = RoundedCornerShape(20.dp),
-        border = BorderStroke(1.dp, statusColor.copy(alpha = 0.16f))
+        border = BorderStroke(0.5.dp, statusColor.copy(alpha = 0.24f))
     ) {
         Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -269,11 +299,15 @@ private fun WebSearchTraceCard(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            Icons.Default.Search,
+                            McaIcons.Search,
                             contentDescription = null,
                             modifier = Modifier
-                                .size(18.dp)
-                                .rotate(runningRotation),
+                                .size(McaIconSize.S)
+                                .graphicsLayer {
+                                    // Read the animation in the layer phase: a rotating glyph must
+                                    // not recompose the trace text and expanded results each frame.
+                                    rotationZ = runningRotation?.value ?: 0f
+                                },
                             tint = statusColor
                         )
                     }
@@ -295,9 +329,10 @@ private fun WebSearchTraceCard(
                     )
                 }
                 Icon(
-                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    imageVector = McaIcons.KeyboardArrowDown,
                     contentDescription = if (expanded) "收起检索过程" else "展开检索过程",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.graphicsLayer { rotationZ = chevronRotation }
                 )
             }
             if (trace.running) {
@@ -321,8 +356,8 @@ private fun WebSearchTraceCard(
             }
             AnimatedVisibility(
                 visible = expanded,
-                enter = fadeIn(tween(120)) + expandVertically(animationSpec = tween(180)),
-                exit = fadeOut(tween(90)) + shrinkVertically(animationSpec = tween(140))
+                enter = fadeIn(McaMotion.fade(120)) + expandVertically(animationSpec = McaMotion.sizeChangePx),
+                exit = fadeOut(McaMotion.fade(90)) + shrinkVertically(animationSpec = McaMotion.sizeChangePx)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (trace.query.isNotBlank() && !trace.running) {
@@ -331,11 +366,11 @@ private fun WebSearchTraceCard(
                             horizontalArrangement = Arrangement.End,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            TextButton(onClick = { onOpenBrowser(trace.query) }) {
+                            McaButton(style = McaButtonStyle.Text,onClick = { onOpenBrowser(trace.query) }) {
                                 Icon(
-                                    Icons.Default.Search,
+                                    McaIcons.Search,
                                     contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(McaIconSize.Xs)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text("在内置浏览器中查看搜索")

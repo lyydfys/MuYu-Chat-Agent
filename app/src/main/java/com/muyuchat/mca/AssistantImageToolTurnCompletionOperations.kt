@@ -8,7 +8,7 @@ import com.muyuchat.core.engine.ChatGeneratedImageStatus
  * R3-S29：图片工具续写回合的完成结算自 MainViewModel 迁出（体逐字；请求端口注入、续写经 lambda）。
  */
 internal fun completeAssistantImageToolTurnForJobFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     requestPort: ChatImageRequestPort,
     findRequest: (String) -> Pair<String, ChatGeneratedImageRequest>?,
     continueTurn: (String, String) -> Unit,
@@ -33,7 +33,7 @@ internal fun completeAssistantImageToolTurnForJobFor(
 }
 
 internal fun continueAssistantImageTurnFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     findRequest: (String) -> Pair<String, ChatGeneratedImageRequest>?,
     continueTurn: (String, String) -> Unit,
     requestId: String

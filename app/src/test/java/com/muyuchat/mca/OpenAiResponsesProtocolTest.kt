@@ -306,4 +306,17 @@ class OpenAiResponsesProtocolTest {
         event(JSONObject().put("type", "response.function_call_arguments.done").put("output_index", 0)
             .put("item_id", item.getString("id")).put("arguments", args).toString())
     }
+    @Test
+    fun responseFormatIsSerializedWhenTheAgentAsksForJson() {
+        val constrained = buildOpenAiResponsesJson(
+            config,
+            ChatRequest(emptyList(), responseFormatJson = """{"type":"json_object"}""")
+        )
+        assertEquals(
+            "json_object",
+            constrained.getJSONObject("text").getJSONObject("format").getString("type")
+        )
+        assertFalse(buildOpenAiResponsesJson(config, ChatRequest(emptyList())).has("text"))
+    }
+
 }

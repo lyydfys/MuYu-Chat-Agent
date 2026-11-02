@@ -7,8 +7,10 @@ import org.json.JSONObject
 private const val MAX_WORLD_BOOK_REGEX_CHARS = 512
 
 object WorldBookCodec {
-    private const val MAX_ENTRIES = 512
-    private const val MAX_BOOK_CHARS = 1_048_576
+    // Real Tavern lorebooks ship well past 1 MiB (embedded reference books, translated packs);
+    // 8 MiB keeps the bounded per-entry and entry-count guards as the real safety net.
+    private const val MAX_IMPORT_BYTES = 8_388_608
+    private const val MAX_ENTRIES = 1024
     private const val MAX_ENTRY_CHARS = 65_536
 
     fun parse(
@@ -18,8 +20,8 @@ object WorldBookCodec {
         chatSessionId: String? = null,
         fallbackName: String = "Imported World Book"
     ): WorldBookImportResult = runCatching {
-        require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_BOOK_CHARS) {
-            "世界书文件超过 1 MiB。"
+        require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_IMPORT_BYTES) {
+            "世界书文件超过 8 MiB。"
         }
         require(CharacterCardCodec.validateJsonBounds(rawJson) == null) {
             "世界书 JSON 结构无效或嵌套超过 ${CharacterCardCodec.MAX_JSON_NESTING} 层。"

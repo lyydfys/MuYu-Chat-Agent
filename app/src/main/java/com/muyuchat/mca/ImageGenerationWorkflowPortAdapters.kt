@@ -21,13 +21,14 @@ import com.muyuchat.core.engine.GenerationParams
 
 /** R3/C3-S27/S31：图片提示词翻译端口具名化（service 经 provider 保 lazy；verifiedBundle 直调 operations，删除过渡 lambda）。 */
 internal class ImagePromptTranslationPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageTranslationFields>,
+    private val offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
     private val admission: RuntimeAdmissionState,
     private val downloader: OfflinePromptTranslationBundleDownloader,
     private val serviceProvider: () -> OfflinePromptTranslationService
 ) : ImagePromptTranslationPort {
     override suspend fun verifiedBundle(): VerifiedOfflinePromptTranslationBundle? =
-        verifiedOfflineTranslationBundleFor(store, admission, downloader)
+        verifiedOfflineTranslationBundleFor(offlineTranslationStore, admission, downloader)
 
     override suspend fun translate(
         bundle: VerifiedOfflinePromptTranslationBundle?,
@@ -80,7 +81,7 @@ internal class LocalGeneratedImageWorkerGatewayAdapter(
  * 唯一租约/取消/清理生命周期。这里不暴露任何 tryAcquire/register/cancel 回调。
  */
 internal class LocalApiImageGenerationOwnerPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<LocalApiImageFields>,
     private val imageGenerationOwner: ImageGenerationOwner,
     override val localImageLoraLifecycleLock: Any,
     override val localImageTextualInversionLifecycleLock: Any,
@@ -95,7 +96,7 @@ internal class LocalApiImageGenerationOwnerPortAdapter(
 ) : OwnerBackedLocalApiImageGenerationPort {
     override val uiState: StateFlow<MainUiState> get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (LocalApiImageFields) -> LocalApiImageFields) {
         store.update(transform)
     }
 
@@ -153,7 +154,7 @@ internal class LocalApiImageGenerationOwnerPortAdapter(
 
 /** R3-S30：本地生图资产生成端口具名化（worker 代际经 holder；两助手经顶层 For）。 */
 internal class CreateLocalGeneratedImageAssetPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageModelSelectionFields>,
     private val admission: RuntimeAdmissionState,
     private val gateway: LocalGeneratedImageWorkerGateway,
     private val localImageModelStoreRef: LocalImageModelStore,
@@ -201,7 +202,8 @@ internal class CreateLocalGeneratedImageAssetPortAdapter(
  * 彻底消除 MainViewModel 内 97 行匿名 object 与 33 处 this@MainViewModel 捕获。
  */
 internal class ImageGenerationHostAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageGenerationFields>,
+    private val runtimeStore: UiStateWriter<RuntimeProfileFields>,
     private val scopeRef: CoroutineScope,
     private val applicationRef: Application,
     private val runtimeAdmission: RuntimeAdmissionState,
@@ -224,11 +226,18 @@ internal class ImageGenerationHostAdapter(
     private val imagePromptTranslationPortProvider: () -> ImagePromptTranslationPort,
     private val completeAssistantImageToolTurnForJobRef: (String) -> Unit
 ) : ImageGenerationHost {
+    private val jobStore = store.restrict(
+        project = { fields -> ImageJobCancellationFields(
+            snapshot = fields.snapshot, imageJobs = fields.imageJobs, statusMessage = fields.statusMessage
+        ) },
+        merge = { fields, jobs -> fields.copy(imageJobs = jobs.imageJobs, statusMessage = jobs.statusMessage) }
+    )
+
     override val scope: CoroutineScope get() = scopeRef
     override val application: Application get() = applicationRef
 
     override fun currentState(): MainUiState = store.current
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) = store.update(transform)
+    override fun updateUiState(transform: (ImageGenerationFields) -> ImageGenerationFields) = store.update(transform)
     override fun showStatus(message: String?) = store.showStatus(message)
 
     override val imageGenerationJob: Job? get() = runtimeAdmission.imageGenerationJob
@@ -290,7 +299,7 @@ internal class ImageGenerationHostAdapter(
 
     override fun tryAcquireObservedImageGenerationLease(requestId: String): LocalImageGenerationCoordinator.Lease? =
         tryAcquireObservedImageGenerationLeaseFor(
-            store = store,
+            setDeferGenerationImageGrantRelease = { defer -> updateGenerationImageGrantReleaseDeferInto(store, defer) },
             coordinator = coordinator,
             observationLock = coordinatorObservationLock,
             requestId = requestId
@@ -299,7 +308,7 @@ internal class ImageGenerationHostAdapter(
     override fun releaseObservedImageGenerationLease(
         lease: LocalImageGenerationCoordinator.Lease
     ): Boolean = releaseObservedImageGenerationLeaseFor(
-        store = store,
+        setDeferGenerationImageGrantRelease = { defer -> updateGenerationImageGrantReleaseDeferInto(store, defer) },
         coordinator = coordinator,
         observationLock = coordinatorObservationLock,
         lease = lease
@@ -330,15 +339,15 @@ internal class ImageGenerationHostAdapter(
 
     override suspend fun prepareLocalImageRuntimeMemory(): EngineLifecycleLease =
         prepareLocalImageRuntimeMemoryFor(
-            store, runtimeAdmission, runtimeProfileStoreRef, engineRef
+            runtimeStore, runtimeAdmission, runtimeProfileStoreRef, engineRef
         )
 
     override fun startLocalImageGenerationWatchdog(jobId: String) =
-        startLocalImageGenerationWatchdogFor(store, scopeRef, jobId)
+        startLocalImageGenerationWatchdogFor(jobStore, scopeRef, jobId)
 
     override fun publishLocalImagePreview(jobId: String, progress: LocalImageProgress): PublishedLocalImagePreview? =
         publishLocalImagePreviewTo(
-            store,
+            jobStore,
             runtimeAdmission,
             applicationRef,
             imageAssetWriteMutex,
@@ -397,14 +406,14 @@ internal class ImageGenerationHostAdapter(
  * R3-S32：图片放大模型目录端口具名适配器（store / preferences / ownerLockProvider 真实依赖注入）。
  */
 internal class LocalImageUpscalerPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageUpscalerCatalogFields>,
     private val upscalerStoreRef: LocalImageUpscalerStore,
     private val preferences: android.content.SharedPreferences,
     private val imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
 ) : LocalImageUpscalerPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageUpscalerCatalogFields) -> ImageUpscalerCatalogFields) {
         store.update(transform)
     }
 
@@ -424,14 +433,15 @@ internal class LocalImageUpscalerPortAdapter(
  * R3-S33：提示词翻译预览端口具名适配器（直调 operations；service 以 provider 保 lazy 时机）。
  */
 internal class ImagePromptTranslationPreviewPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageTranslationFields>,
+    private val offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
     private val admission: RuntimeAdmissionState,
     private val downloader: OfflinePromptTranslationBundleDownloader,
     private val serviceProvider: () -> OfflinePromptTranslationService
 ) : ImagePromptTranslationPreviewPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageTranslationFields) -> ImageTranslationFields) {
         store.update(transform)
     }
 
@@ -439,14 +449,14 @@ internal class ImagePromptTranslationPreviewPortAdapter(
         get() = serviceProvider()
 
     override suspend fun verifiedOfflineTranslationBundle(): VerifiedOfflinePromptTranslationBundle? =
-        verifiedOfflineTranslationBundleFor(store, admission, downloader)
+        verifiedOfflineTranslationBundleFor(offlineTranslationStore, admission, downloader)
 }
 
 /**
  * R3-S34：助手生图工具轮次端口具名适配器（运行态注册直调 holder；授权直查 store；聊天操作由 lambda 委托）。
  */
 internal class AssistantImageToolTurnPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateReadPort,
     private val admission: RuntimeAdmissionState,
     private val authorizationStore: ChatImageToolAuthorizationStore,
     private val chatImageNegativePromptSupportedRef: (MainUiState) -> Boolean,

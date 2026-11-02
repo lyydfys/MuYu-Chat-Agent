@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.composition.hubInputWriter
+
 import android.net.Uri
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 
@@ -90,8 +92,8 @@ fun MainViewModel.verifyLocalImageModel(modelId: String) =
 fun MainViewModel.removeLocalImageModelRecord(modelId: String) =
     localImageLibraryAndModelCoordinator.removeLocalImageModelRecord(modelId)
 
-fun MainViewModel.onRepoInputChange(value: String) = uiStateStore.update { it.copy(repoInput = value) }
-fun MainViewModel.onHubQueryChange(value: String) = uiStateStore.update { it.copy(hubQuery = value) }
+fun MainViewModel.onRepoInputChange(value: String) = uiStateStore.hubInputWriter().update { it.copy(repoInput = value) }
+fun MainViewModel.onHubQueryChange(value: String) = uiStateStore.hubInputWriter().update { it.copy(hubQuery = value) }
 
 fun MainViewModel.buildChatImageRetrySnapshot(
     request: ChatGeneratedImageRequest,

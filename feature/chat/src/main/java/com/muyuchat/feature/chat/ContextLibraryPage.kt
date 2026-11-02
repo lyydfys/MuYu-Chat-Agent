@@ -1,4 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaSwitch
 
 import android.content.ContentValues
 import android.content.Context
@@ -14,7 +18,6 @@ import android.os.BatteryManager
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.BackHandler
@@ -86,39 +89,30 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
@@ -127,23 +121,19 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.rememberDateRangePickerState
@@ -260,6 +250,7 @@ import org.json.JSONObject
 import kotlin.math.roundToInt
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ContextLibraryPage(
@@ -270,6 +261,7 @@ internal fun ContextLibraryPage(
     onBack: () -> Unit,
     onImportWorldBook: (WorldBookImportScope) -> Unit,
     onDeleteWorldBook: (String) -> Unit,
+    onSetWorldBookEnabled: (String, Boolean) -> Unit = { _, _ -> },
     onCreateKnowledgeBase: (String) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
     onSetKnowledgeBaseSelected: (String, Boolean) -> Unit,
@@ -287,8 +279,13 @@ internal fun ContextLibraryPage(
             .navigationBarsPadding()
     ) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回助手列表")
+            McaIconButton(
+                contentDescription = "返回助手列表",
+                onClick = onBack,
+                modifier = Modifier.size(48.dp),
+                glyphSize = McaIconSize.L
+            ) {
+                Icon(McaIcons.Back, contentDescription = null)
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text("上下文资料", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -298,8 +295,8 @@ internal fun ContextLibraryPage(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            TextButton(onClick = { showUsageGuide = true }) {
-                Icon(Icons.Default.Info, contentDescription = null, modifier = Modifier.size(18.dp))
+            McaButton(style = McaButtonStyle.Text,onClick = { showUsageGuide = true }) {
+                Icon(McaIcons.Info, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                 Spacer(modifier = Modifier.width(5.dp))
                 Text("使用说明")
             }
@@ -331,8 +328,8 @@ internal fun ContextLibraryPage(
                 ) {
                     Text("世界书", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     Box {
-                        TextButton(onClick = { worldBookScopeMenuOpen = true }) {
-                            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+                        McaButton(style = McaButtonStyle.Text,onClick = { worldBookScopeMenuOpen = true }) {
+                            Icon(McaIcons.Folder, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("导入")
                         }
@@ -390,7 +387,16 @@ internal fun ContextLibraryPage(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(book.name, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                book.name,
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (book.enabled) {
+                                    MaterialTheme.colorScheme.onSurface
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
                             Text(
                                 buildString {
                                     append(book.scopeLabel).append(" · ").append(book.entryCount).append(" 条")
@@ -400,22 +406,28 @@ internal fun ContextLibraryPage(
                                     if (book.keywordEntryCount > 0) {
                                         append(" · 关键词触发 ").append(book.keywordEntryCount)
                                     }
+                                    if (!book.enabled) append(" · 已停用")
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                if (book.constantEntryCount > 0) {
-                                    "常驻条目每轮注入；其余条目需要消息命中关键词。"
-                                } else {
-                                    "本轮消息命中关键词后才会注入。"
+                                when {
+                                    !book.enabled -> "已停用，不会注入任何条目。"
+                                    book.constantEntryCount > 0 -> "常驻条目每轮注入；其余条目需要消息命中关键词。"
+                                    else -> "本轮消息命中关键词后才会注入。"
                                 },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        IconButton(onClick = { onDeleteWorldBook(book.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "删除世界书")
+                        McaSwitch(
+                            checked = book.enabled,
+                            onCheckedChange = { enabled -> onSetWorldBookEnabled(book.id, enabled) },
+                            contentDescription = if (book.enabled) "停用世界书：${book.name}" else "启用世界书：${book.name}"
+                        )
+                        McaIconButton(contentDescription = "删除世界书", onClick = { onDeleteWorldBook(book.id) }, glyphSize = McaIconSize.L) {
+                            Icon(McaIcons.Delete, contentDescription = null)
                         }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
@@ -439,7 +451,8 @@ internal fun ContextLibraryPage(
                         modifier = Modifier.weight(1f)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "创建知识库",
                         onClick = {
                             val name = knowledgeBaseName.trim()
                             if (name.isNotEmpty()) {
@@ -447,9 +460,10 @@ internal fun ContextLibraryPage(
                                 knowledgeBaseName = ""
                             }
                         },
-                        enabled = knowledgeBaseName.isNotBlank()
+                        enabled = knowledgeBaseName.isNotBlank(),
+                        glyphSize = McaIconSize.L
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = "创建知识库")
+                        Icon(McaIcons.Add, contentDescription = null)
                     }
                 }
             }
@@ -492,9 +506,11 @@ internal fun ContextLibraryPage(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        IconButton(
+                        McaIconButton(
+                            contentDescription = "导入知识库文档",
                             onClick = { onImportKnowledgeDocument(knowledgeBase.id) },
-                            enabled = !knowledgeBase.importing
+                            enabled = !knowledgeBase.importing,
+                            glyphSize = McaIconSize.L
                         ) {
                             if (knowledgeBase.importing) {
                                 CircularProgressIndicator(
@@ -502,11 +518,11 @@ internal fun ContextLibraryPage(
                                     strokeWidth = 2.dp
                                 )
                             } else {
-                                Icon(Icons.Default.Folder, contentDescription = "导入知识库文档")
+                                Icon(McaIcons.Folder, contentDescription = null)
                             }
                         }
-                        IconButton(onClick = { onDeleteKnowledgeBase(knowledgeBase.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "删除知识库")
+                        McaIconButton(contentDescription = "删除知识库", onClick = { onDeleteKnowledgeBase(knowledgeBase.id) }, glyphSize = McaIconSize.L) {
+                            Icon(McaIcons.Delete, contentDescription = null)
                         }
                     }
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
@@ -533,7 +549,7 @@ internal fun ContextLibraryPage(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { showUsageGuide = false }) { Text("知道了") }
+                McaButton(style = McaButtonStyle.Text,onClick = { showUsageGuide = false }) { Text("知道了") }
             }
         )
     }

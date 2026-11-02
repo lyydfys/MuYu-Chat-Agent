@@ -21,7 +21,7 @@ import kotlinx.coroutines.sync.withLock
 internal interface ChatSessionPersistencePort {
     // R3/S24: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法（对齐姊妹端口模式）。
     val uiState: StateFlow<MainUiState>
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ConversationPersistenceFields) -> ConversationPersistenceFields)
     val scope: CoroutineScope
     val chatRuns: ChatRunOwnership
     val chatSessionStore: ChatSessionStore
@@ -263,4 +263,24 @@ internal fun runPersistConversationMutation(
     port.conversationMutationBarrier = mutation
     port.localConversationContextInvalidationJob = mutation
     return mutation
+}
+
+/** Restores only the persistence domain; the root helper is read as a pure transition. */
+private fun ConversationPersistenceFields.restoreAfterConversationMutationFailure(
+    durableSessions: List<ChatSessionRecord>,
+    rollback: ConversationMutationRollbackState,
+    statusMessage: String,
+): ConversationPersistenceFields {
+    val restored = snapshot.restoreAfterConversationMutationFailure(durableSessions, rollback, statusMessage)
+    return copy(
+        messages = restored.messages,
+        activeChatSessionId = restored.activeChatSessionId,
+        chatSessions = restored.chatSessions,
+        selectedKnowledgeBaseIds = restored.selectedKnowledgeBaseIds,
+        isGenerating = restored.isGenerating,
+        generationPhase = restored.generationPhase,
+        generationTokenProgress = restored.generationTokenProgress,
+        promptContextUsage = restored.promptContextUsage,
+        statusMessage = restored.statusMessage
+    )
 }

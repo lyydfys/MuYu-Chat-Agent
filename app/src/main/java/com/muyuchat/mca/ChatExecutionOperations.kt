@@ -54,17 +54,18 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         statusMessage: String? = null
     ) {
         if (!generationStillOwnsUi()) return
-        updateUiState { state ->
+        val metrics = replyMetrics.finish()
+        generationUiWriter.update { state ->
             if (!generationStillOwnsUi()) {
                 state
             } else {
                 state.afterGenerationTerminated(stats, statusMessage)
-                    .withReplyGenerationMetrics(replyMetrics.finish())
+                    .withReplyGenerationMetrics(metrics)
             }
         }
     }
 
-    val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, uiState, { transform -> updateUiState(transform) })
+    val generationUiPublisher = ChatGenerationUiPublisher(chatRuns, generationRunId, generationUiWriter)
 
     try {
     if (!generationStillOwnsUi()) return
@@ -309,6 +310,16 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
         }
         val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
         localUiRequestId = uiRequestId
+        // P03: register the exact engine request before it is admitted or dispatched. It is frozen
+        // here, before the run becomes stoppable, so the user stop never has to infer its target
+        // from whichever token the engine happens to own later. The id encodes this run id and a
+        // fresh UUID, so it can never name another run's attempt.
+        val registered = chatRuns.markLocalAttempt(
+            generationRunId,
+            selfJob,
+            ChatAttemptIdentity(generationRunId, uiRequestId)
+        )
+        if (!registered) return
         val executionContext = LocalChatExecutionContext(requestId = uiRequestId)
         // The editor may contain a not-yet-applied load-bound value.
         // Ordinary chat must continue with the committed profile until

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The isolated AI browser loads real pages. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      The browser WebView lives in the :browser process, which has no Activity and therefore no
+      window. An invisible TYPE_APPLICATION_OVERLAY window is the only legal way to give those
+      WebViews a layout; without this permission the engine reports engine-unavailable instead of
+      pretending to work. The permission is user-granted in system settings.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application>
+        <!--
+          Declared process ownership of the browser host. A separate process is crash containment
+          for a renderer failure, NOT a security boundary: the process still shares the app UID.
+          The service is not exported; only the app composition can bind to it, and every call is
+          additionally authorized by the capability server before it reaches this route.
+        -->
+        <service
+            android:name="com.muyuchat.core.dsh.browser.DshBrowserService"
+            android:exported="false"
+            android:process=":browser"
+            android:stopWithTask="true" />
+    </application>
+
+</manifest>

@@ -14,6 +14,18 @@ import org.json.JSONObject
 internal fun LocalImageBundleManifest.resolveRuntimeComponentContract(
     root: File
 ): LocalImageRuntimeComponentContract {
+    if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        if ((mediatekAnimaManifest == null && mediatekAotManifest == null) || mediatekAnimaManifestPath == null) {
+            return LocalImageRuntimeComponentContract.Invalid(
+                "MediaTek component manifest was not strictly parsed from the bundle contract."
+            )
+        }
+        val paths = mediatekAnimaRequiredPaths
+        val missing = paths.filter { path ->
+            root.safeDescendantOrNull(path)?.let { it.isFile && it.canRead() && it.length() > 0L } != true
+        }
+        return LocalImageRuntimeComponentContract.Ready(paths, missing)
+    }
     fun exists(relativePath: String): Boolean = root.safeDescendantOrNull(relativePath)
         ?.let { file -> file.isFile && file.length() > 0L }
         ?: false
@@ -187,7 +199,22 @@ internal fun JSONArray.toLocalImageBundleComponentContracts(): List<LocalImageBu
                 LocalImageBundleComponentContract(
                     role = role,
                     relativePath = path,
-                    required = required
+                    required = required,
+                    expectedSizeBytes = component.opt("expectedSizeBytes")?.let { value ->
+                        require(value is Number) {
+                            "Image bundle manifest components[$index].expectedSizeBytes must be numeric."
+                        }
+                        value.toLong().takeIf { it > 0L }
+                            ?: throw IllegalArgumentException(
+                                "Image bundle manifest components[$index].expectedSizeBytes must be positive."
+                            )
+                    },
+                    sha256 = component.opt("sha256")?.let { value ->
+                        require(value is String && value.matches(Regex("^[0-9a-fA-F]{64}$"))) {
+                            "Image bundle manifest components[$index].sha256 must be a SHA-256 hex string."
+                        }
+                        value
+                    }
                 )
             )
         }

@@ -2,7 +2,11 @@
 
 package com.muyuchat.feature.agent
 
+import com.muyuchat.core.designsystem.*
+
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,24 +23,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.AutoFixHigh
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,9 +49,11 @@ import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.deviceprofile.DeviceProfile
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.tuning.UserPreference
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.SmoothRightToLeftPage
 import com.muyuchat.core.designsystem.mcaEnterReveal
+import com.muyuchat.core.designsystem.McaIconSize
 
 private const val MAX_VISIBLE_BENCHMARK_HISTORY = 10
 internal const val MIN_CUSTOM_CONTEXT_LENGTH = 128
@@ -106,6 +103,7 @@ internal fun nearestContextLengthShortcutStep(value: Int): Int {
     return bestStep
 }
 
+@Immutable
 data class AgentUiState(
     val deviceProfile: DeviceProfile? = null,
     val recommendation: AgentRecommendation? = null,
@@ -172,6 +170,7 @@ enum class AgentTuningJobState(val label: String) {
     RECOVERING("恢复中")
 }
 
+@Immutable
 data class AgentPendingProfile(
     val profileId: String? = null,
     val revision: Long? = null,
@@ -179,6 +178,7 @@ data class AgentPendingProfile(
     val readyToApply: Boolean = false
 )
 
+@Immutable
 data class AgentRollbackProfile(
     val targetProfileId: String? = null,
     val targetRevision: Long? = null,
@@ -186,6 +186,7 @@ data class AgentRollbackProfile(
     val available: Boolean = false
 )
 
+@Immutable
 data class AgentCandidateProgress(
     val completed: Int = 0,
     val total: Int = 0,
@@ -209,6 +210,7 @@ private enum class AgentInfoDialog {
     RESULT
 }
 
+@Immutable
 data class BenchmarkHistoryItem(
     val timeText: String,
     val modelName: String,
@@ -219,6 +221,7 @@ data class BenchmarkHistoryItem(
     val stable: Boolean
 )
 
+@Immutable
 data class TuningTrialItem(
     val threads: Int,
     val decodeTps: Double,
@@ -228,6 +231,7 @@ data class TuningTrialItem(
     val selected: Boolean
 )
 
+@Immutable
 data class AgentDecisionItem(
     val timeText: String,
     val title: String,
@@ -417,10 +421,10 @@ fun AgentScreen(
                     onPauseTuning = onPauseTuning,
                     onResumeTuning = onResumeTuning,
                     onCancelTuning = onCancelTuning,
-                onQueryTuningJob = onQueryTuningJob,
-                onApplyPendingProfile = onApplyPendingProfile,
-                onDiscardPendingProfile = onDiscardPendingProfile,
-                onRollbackProfile = onRollbackProfile
+                    onQueryTuningJob = onQueryTuningJob,
+                    onApplyPendingProfile = onApplyPendingProfile,
+                    onDiscardPendingProfile = onDiscardPendingProfile,
+                    onRollbackProfile = onRollbackProfile
                 )
             }
 
@@ -504,6 +508,7 @@ private fun AgentInfoPage(
     modifier: Modifier = Modifier
 ) {
     val isGuide = type == AgentInfoDialog.GUIDE
+    val confirmInteraction = remember { MutableInteractionSource() }
     LazyColumn(
         modifier = modifier
             .fillMaxSize()
@@ -513,8 +518,12 @@ private fun AgentInfoPage(
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回智能调参")
+                McaIconButton(
+                    onClick = onBack,
+                    contentDescription = "返回智能调参",
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(McaIcons.Back, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(if (isGuide) "调参说明" else "调试解释", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -527,7 +536,8 @@ private fun AgentInfoPage(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-                shape = RoundedCornerShape(18.dp)
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (isGuide) {
@@ -546,9 +556,12 @@ private fun AgentInfoPage(
             }
         }
         item {
-            Button(
+            McaButton(style = McaButtonStyle.Primary,
                 onClick = onBack,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                interactionSource = confirmInteraction,
                 shape = RoundedCornerShape(999.dp)
             ) {
                 Text("知道了")
@@ -565,6 +578,9 @@ private fun AgentHeader(
     onScan: () -> Unit,
     onBenchmark: () -> Unit
 ) {
+    val scanTextInteraction = remember { MutableInteractionSource() }
+    val scanButtonInteraction = remember { MutableInteractionSource() }
+    val benchmarkButtonInteraction = remember { MutableInteractionSource() }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -572,18 +588,22 @@ private fun AgentHeader(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
+                McaIconButton(
+                    onClick = onBack,
+                    contentDescription = "返回聊天",
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(McaIcons.Close, contentDescription = null)
                 }
                 Spacer(modifier = Modifier.width(6.dp))
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
                     Icon(
-                        Icons.Rounded.AutoFixHigh,
+                        McaIcons.AutoFixHigh,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
                         modifier = Modifier
                             .padding(8.dp)
-                            .size(22.dp)
+                            .size(McaIconSize.M)
                     )
                 }
                 Spacer(modifier = Modifier.width(10.dp))
@@ -592,19 +612,37 @@ private fun AgentHeader(
                     Text("本机体检、测速和参数优化", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            TextButton(onClick = onScan, enabled = !isBusy) {
-                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+            McaButton(style = McaButtonStyle.Text,
+                onClick = onScan,
+                enabled = !isBusy,
+                interactionSource = scanTextInteraction
+            ) {
+                Icon(McaIcons.Refresh, contentDescription = null, modifier = Modifier.size(McaIconSize.Xs))
                 Spacer(modifier = Modifier.width(4.dp))
                 Text("体检")
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(onClick = onScan, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Rounded.AutoFixHigh, contentDescription = null)
+            McaButton(style = McaButtonStyle.Primary,
+                onClick = onScan,
+                enabled = !isBusy,
+                modifier = Modifier
+                    .weight(1f),
+                interactionSource = scanButtonInteraction,
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(McaIcons.AutoFixHigh, contentDescription = null)
                 Text("体检", modifier = Modifier.padding(start = 6.dp))
             }
-            OutlinedButton(onClick = onBenchmark, enabled = !isBusy, modifier = Modifier.weight(1f), shape = RoundedCornerShape(8.dp)) {
-                Icon(Icons.Rounded.Speed, contentDescription = null)
+            McaButton(style = McaButtonStyle.Outlined,
+                onClick = onBenchmark,
+                enabled = !isBusy,
+                modifier = Modifier
+                    .weight(1f),
+                interactionSource = benchmarkButtonInteraction,
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Icon(McaIcons.Speed, contentDescription = null)
                 Text("测速", modifier = Modifier.padding(start = 6.dp))
             }
         }

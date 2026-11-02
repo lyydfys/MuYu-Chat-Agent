@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      The virtual-screen owner runs inside the app process and is reached only through the
+      authenticated capability route table the app composition installs. The single declared
+      component is the mediaProjection foreground service Android 14+ requires before
+      MediaProjectionManager.getMediaProjection: it is not exported, renders nothing and holds no
+      display. No host service is declared, so a second owner cannot be created by a bind.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application>
+        <service
+            android:name=".DshVscreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="true" />
+    </application>
+
+</manifest>

@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import com.muyuchat.core.engine.ReasoningMode
 
 /**
@@ -9,6 +10,7 @@ import com.muyuchat.core.engine.ReasoningMode
 
 enum class ChatImageActionKind { AMBIGUOUS, CLOUD_TRANSLATION }
 
+@Immutable
 data class ChatImageActionDraftUi(
     val id: String,
     val sourceText: String,
@@ -16,6 +18,7 @@ data class ChatImageActionDraftUi(
     val reason: String
 )
 
+@Immutable
 data class AssistantEditorDraft(
     val id: String?,
     val name: String,

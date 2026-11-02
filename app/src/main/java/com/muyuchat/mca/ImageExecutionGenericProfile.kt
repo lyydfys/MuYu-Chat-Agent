@@ -16,6 +16,17 @@ internal fun genericProfile(
     family: LocalImageModelFamily,
     fingerprint: String
 ): ImageExecutionProfile {
+    require(runtime != LocalImageRuntime.MEDIATEK_NEURON) {
+        "MediaTek Anima profiles must be projected from the validated v3 bundle manifest."
+    }
+    if (runtime == LocalImageRuntime.STABLE_DIFFUSION_CPP && family == LocalImageModelFamily.ANIMA) {
+        return animaSdcppProfile("generic.compat.sdcpp.anima", fingerprint).copy(
+            provenance = ImageProfileProvenance(
+                primarySource = ImageProfileSource.GENERIC_FALLBACK,
+                sources = listOf(ImageProfileSource.GENERIC_FALLBACK)
+            )
+        )
+    }
     val flowFamily = family in setOf(
         LocalImageModelFamily.Z_IMAGE,
         LocalImageModelFamily.QWEN_IMAGE,

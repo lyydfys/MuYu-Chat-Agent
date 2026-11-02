@@ -1,0 +1,54 @@
+{
+  "schema": "mca.controlled-replay.manifest/1",
+  "fixture": "stream-edge-cases.json",
+  "fixtureSha256": "3ab0ddfa0c10b769e71779ca397282fee54a2a1b8c612f084be7bf6e51124dab",
+  "fixtureBytes": 26323,
+  "caseCount": 12,
+  "cases": [
+    "normal-small-chunks",
+    "burst-2048",
+    "early-finish",
+    "no-content-wait",
+    "reasoning-only",
+    "tail-flush",
+    "cancel-then-new-run",
+    "duplicate-terminal",
+    "late-chunk-after-terminal",
+    "content-unicode",
+    "content-code-table-math-link",
+    "content-100k"
+  ],
+  "chain": {
+    "intended": [
+      "production publisher",
+      "MainUiState",
+      "chat projection/mapping",
+      "ChatRoute",
+      "Compose renderer"
+    ],
+    "status": "BLOCKED",
+    "reason": "This benchmark module still cannot drive publisher -> state -> mapping -> ChatRoute -> renderer in-process: the real publisher (app/src/main/java/com/muyuchat/mca/presentation/ChatGenerationUiPublisher.kt) is internal to :app, a com.android.test module cannot reference :app classes, and the release manifest must not expose a session-injection entry. The parts that CAN be driven without a device are now covered by app-module unit tests (see coveredElsewhere); the status stays BLOCKED because that is a different harness, not this one.",
+    "notCovered": [
+      "publisher write class (run gating, stats throttling)",
+      "MainUiState projection",
+      "ChatRoute mapping",
+      "Compose renderer frame timing for replayed events"
+    ],
+    "minimalFollowUp": [
+      "Add an internal replay driver in :app androidTest (same module, friend path to internal declarations) that constructs ChatGenerationUiPublisher against the real MainActivity view model and replays this fixture on the monotonic clock.",
+      "Expose the driver result (planned/consumed events, final text SHA, visible chars, copy SHA, scroll operations) as an instrumentation argument-driven test, or move the replay scenario into :app androidTest entirely.",
+      "Do not add an exported activity/service/receiver for replay: the release manifest must stay free of external session injection."
+    ],
+    "coveredElsewhere": [
+      "fixture contract (SHA, event plan, terminal/cancel/late-chunk plan): tools/evidence/verify-replay-fixture.py",
+      "accumulator semantics over the 12 cases: app/src/test/java/com/muyuchat/mca/ControlledReplayFixtureTest.kt",
+      "projection + renderer branch selection per frame: feature/chat/src/test/java/com/muyuchat/feature/chat/ChatReplayUiChainTest.kt (driver: ChatReplayUiChain.kt)"
+    ]
+  },
+  "observations": "Split by harness. PROVEN offline: fixture contract (verifier), accumulator semantics and per-frame digests (ControlledReplayFixtureTest), and frame -> page budget -> parser -> renderer-branch selection with the shipped canDisplay gate (ChatReplayUiChainTest). NOT_RUN: publisher write classes (run gating, stats throttling), MainUiState projection, ChatRoute composition, and actual Compose frames/drawing -- the last one needs a device and a build that includes the current sources.",
+  "timing": {
+    "clock": "System.nanoTime (monotonic)",
+    "replay": "real-time playback scheduled by event offsets; virtual time is allowed only in pure behavior tests, never for frame measurement",
+    "noIdleFastForward": true
+  }
+}

@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.composition.conversationSessionWriter
+
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
 import com.muyuchat.feature.chat.ChatMessageIdentity
@@ -19,7 +21,7 @@ class ChatMessageDeleteIntentTest {
         var persisted = false
 
         deleteMessageFor(
-            store = store,
+            store = store.conversationSessionWriter(),
             rejectWhileConversationMutationInProgress = { false },
             showStatus = {},
             isChatImageRequestActive = { false },
@@ -49,7 +51,7 @@ class ChatMessageDeleteIntentTest {
         var persisted = false
 
         deleteMessageFor(
-            store = store,
+            store = store.conversationSessionWriter(),
             rejectWhileConversationMutationInProgress = { false },
             showStatus = {},
             isChatImageRequestActive = { false },
@@ -71,7 +73,7 @@ class ChatMessageDeleteIntentTest {
         var persisted = false
 
         deleteMessageFor(
-            store = store,
+            store = store.conversationSessionWriter(),
             rejectWhileConversationMutationInProgress = { false },
             showStatus = {},
             isChatImageRequestActive = { false },

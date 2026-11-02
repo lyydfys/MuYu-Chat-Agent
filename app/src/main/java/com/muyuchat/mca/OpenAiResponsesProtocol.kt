@@ -59,6 +59,9 @@ internal fun buildOpenAiResponsesJson(config: CloudApiConfig, request: ChatReque
                 put("temperature", request.params.temperature.toDouble().coerceIn(0.0, 2.0))
                 put("top_p", request.params.topP.toDouble().coerceIn(0.0, 1.0))
             }
+            request.responseFormatJson?.let { formatJson ->
+                put("text", JSONObject().put("format", JSONObject(formatJson)))
+            }
             if (request.tools.isNotEmpty()) {
                 require(config.apiFormat == CloudApiFormat.OPENAI_RESPONSES) {
                     "当前聊天协议不支持 Responses 工具调用，请切换到 OpenAI Responses 并在模型设置中启用工具调用。"
@@ -233,6 +236,11 @@ internal class ResponsesDecoder {
                 } else addAll(item(value, index))
             }
         }.also {
+            // A zero-argument tool legitimately streams `arguments: ""`. Normalizing it here keeps
+            // the call usable instead of failing the whole turn as "invalid JSON object".
+            toolCallsByOutput.values
+                .filter { tool -> tool.complete && tool.arguments.isEmpty() }
+                .forEach { tool -> tool.arguments.append("{}") }
             val incompleteTool = toolCallsByOutput.values.firstOrNull { tool -> !tool.complete || tool.callId.isBlank() || tool.name.isBlank() }
             if (incompleteTool != null && error == null) {
                 error = "Responses 工具调用未完整返回，请检查服务商的 function_call 事件。"

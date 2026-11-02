@@ -1,0 +1,33 @@
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -2020,16 +2020,21 @@
+                                                  size_t total_steps,
+                                                  bool terminal_sigma_is_zero,
+                                                  int64_t* last_progress_us) {
+-    if (sd::preview::sample_step_is_complete(step, total_steps, terminal_sigma_is_zero)) {
+-        int64_t now        = ggml_time_us();
+-        int showstep       = std::abs(step);
+-        float step_seconds = last_progress_us != nullptr && *last_progress_us > 0
+-                                 ? (now - *last_progress_us) / 1000000.f
+-                                 : 0.f;
++    const int64_t now        = ggml_time_us();
++    const int showstep       = std::abs(step);
++    const float step_seconds = last_progress_us != nullptr && *last_progress_us > 0
++                                   ? (now - *last_progress_us) / 1000000.f
++                                   : 0.f;
++    if (sd_progress_cb_t progress_cb = sd_get_progress_callback()) {
++        // Negative step values only mean "this step does not render a preview"; the denoise step
++        // still completed. The public progress contract must see every step (callers gate cancel
++        // and UI on it), so report the logical step even when preview gating would skip it.
++        progress_cb(showstep, (int)total_steps, step_seconds, sd_get_progress_callback_data());
++    } else if (sd::preview::sample_step_is_complete(step, total_steps, terminal_sigma_is_zero)) {
+         pretty_progress(showstep, (int)total_steps, step_seconds);
+-        if (last_progress_us != nullptr) {
+-            *last_progress_us = now;
+-        }
++    }
++    if (last_progress_us != nullptr) {
++        *last_progress_us = now;
+     }
+ }
+ 

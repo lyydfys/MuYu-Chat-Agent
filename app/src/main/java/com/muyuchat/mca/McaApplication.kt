@@ -1,9 +1,13 @@
 ﻿package com.muyuchat.mca
 
+import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.muyuchat.mca.composition.McaProcessRuntimeOwner
+import com.muyuchat.mca.composition.ProcessRuntimeSettlement
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -51,6 +55,33 @@ internal object BackgroundDownloadHealth {
 }
 
 class McaApplication : Application(), DefaultLifecycleObserver, androidx.work.Configuration.Provider {
+    /**
+     * Composition-owned single-flight holder for the application-only container and the one
+     * Agent/engine execution root (ADR-0008). The Application only owns this holder; it never
+     * names the container type or a second runtime.
+     */
+    internal val processRuntimeOwner = McaProcessRuntimeOwner(this)
+    private val activityTracker = ProcessActivityTracker()
+    private val runtimeSettlement = ProcessRuntimeSettlement(
+        hasLiveActivities = activityTracker::hasLiveActivities,
+        closeRoot = processRuntimeOwner::close,
+        hasLiveProcessService = LocalApiForegroundService::isForegroundReady
+    )
+
+    /**
+     * Settles the process root when the last Activity finishes (user removed the task) or the app
+     * process terminates. A plain background transition does not destroy the Activity and keeps the
+     * root alive, which is what background Agent work relies on. An active Worker also keeps it.
+     */
+    internal fun closeProcessRuntimeRoot() = runtimeSettlement.forceClose()
+
+    /** A worker-only process has no page to finish, so it settles its own root after the wake. */
+    internal fun beginBackgroundWork() = runtimeSettlement.beginBackgroundWork()
+
+    internal fun finishBackgroundWork() = runtimeSettlement.finishBackgroundWork()
+
+    internal fun closeProcessRuntimeRootIfUnused() = runtimeSettlement.settleIfIdle()
+
     override val workManagerConfiguration: androidx.work.Configuration
         get() = androidx.work.Configuration.Builder()
             .setInitializationExceptionHandler { error ->
@@ -65,6 +96,41 @@ class McaApplication : Application(), DefaultLifecycleObserver, androidx.work.Co
         // The signer set is process-local and fail-closed if Android cannot expose it.
         ImagePromptLanguageProofTrust.initialize(this)
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                activityTracker.started()
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                activityTracker.stopped()
+            }
+
+            override fun onActivityDestroyed(activity: Activity) {
+                activityTracker.destroyed()
+                if (activityTracker.shouldCloseOnDestroyed(
+                        isFinishing = activity.isFinishing,
+                        isChangingConfigurations = activity.isChangingConfigurations
+                    )
+                ) {
+                    closeProcessRuntimeRootIfUnused()
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
+                activityTracker.created()
+            }
+
+            override fun onActivityResumed(activity: Activity) = Unit
+
+            override fun onActivityPaused(activity: Activity) = Unit
+
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) = Unit
+        })
+    }
+
+    override fun onTerminate() {
+        closeProcessRuntimeRoot()
+        super.onTerminate()
     }
 
     override fun onStart(owner: LifecycleOwner) {

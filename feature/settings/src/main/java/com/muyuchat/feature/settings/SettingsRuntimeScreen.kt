@@ -1,5 +1,7 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -12,24 +14,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.FileDownload
-import androidx.compose.material.icons.rounded.InstallMobile
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -130,12 +121,12 @@ fun RuntimeScreen(
                 }
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (offlineTranslationDownloading || !offlineTranslationInstalled) {
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = if (offlineTranslationDownloading) onCancelOfflineTranslationDownload else onDownloadOfflineTranslation,
                             enabled = offlineTranslationDownloading || !offlineTranslationInstalling,
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(if (offlineTranslationDownloading) Icons.Rounded.Close else Icons.Rounded.Download, contentDescription = null)
+                            Icon(if (offlineTranslationDownloading) McaIcons.Close else McaIcons.Download, contentDescription = null)
                             Text(
                                 if (offlineTranslationDownloading) "取消下载" else if (offlineStatus.downloadFailed) "重试下载" else "下载",
                                 modifier = Modifier.padding(start = 6.dp)
@@ -149,12 +140,12 @@ fun RuntimeScreen(
                             modifier = Modifier.weight(1f)
                         )
                     }
-                    OutlinedButton(
+                    McaButton(style = McaButtonStyle.Outlined,
                         onClick = if (offlineTranslationInstalling) onCancelOfflineTranslationImport else onImportOfflineTranslation,
                         enabled = !offlineTranslationDownloading,
                         modifier = Modifier.weight(1f)
                     ) {
-                        Icon(if (offlineTranslationInstalling) Icons.Rounded.Close else Icons.Rounded.FileDownload, contentDescription = null)
+                        Icon(if (offlineTranslationInstalling) McaIcons.Close else McaIcons.FileDownload, contentDescription = null)
                         Text(if (offlineTranslationInstalling) "取消导入" else "本地导入", modifier = Modifier.padding(start = 6.dp))
                     }
                 }
@@ -384,9 +375,10 @@ private fun AppUpdateCard(
                 ) {
                     Text("应用更新", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(12.dp))
-                    Switch(
+                    McaSwitch(
                         checked = state.autoCheckEnabled,
-                        onCheckedChange = onAutoCheckChanged
+                        onCheckedChange = onAutoCheckChanged,
+                        contentDescription = "应用更新"
                     )
                 }
                 Text(
@@ -448,7 +440,7 @@ private fun AppUpdateCard(
             }
 
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onCheckUpdate,
                     enabled = !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
@@ -457,11 +449,11 @@ private fun AppUpdateCard(
                     if (checking) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Rounded.Refresh, contentDescription = null)
+                        Icon(McaIcons.Refresh, contentDescription = null)
                     }
                     Text("检查", modifier = Modifier.padding(start = 6.dp))
                 }
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onDownloadUpdate,
                     enabled = hasUpdate && !checking && !downloading && !verifying && !readyToInstall,
                     modifier = Modifier.weight(1f)
@@ -470,13 +462,13 @@ private fun AppUpdateCard(
                     if (downloading) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Rounded.Download, contentDescription = null)
+                        Icon(McaIcons.Download, contentDescription = null)
                     }
                     Text("下载", modifier = Modifier.padding(start = 6.dp))
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onInstallUpdate,
                     enabled = readyToInstall && !verifying,
                     modifier = Modifier.weight(1f)
@@ -485,16 +477,16 @@ private fun AppUpdateCard(
                     if (verifying) {
                         CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                     } else {
-                        Icon(Icons.Rounded.InstallMobile, contentDescription = null)
+                        Icon(McaIcons.InstallMobile, contentDescription = null)
                     }
                     Text("安装", modifier = Modifier.padding(start = 6.dp))
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onOpenRelease,
                     enabled = state.releaseUrl.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
+                    Icon(McaIcons.OpenInNew, contentDescription = null)
                     Text("打开 Release", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -610,7 +602,7 @@ private fun ReleaseNotes(notes: String) {
             }
         }
         if (lines.size > RELEASE_NOTES_COLLAPSED_LINES) {
-            TextButton(onClick = { expanded = !expanded }) {
+            McaButton(style = McaButtonStyle.Text, onClick = { expanded = !expanded }) {
                 Text(if (expanded) "收起" else "展开全部")
             }
         }

@@ -1,0 +1,14 @@
+--- a/src/conditioning/conditioner.hpp
++++ b/src/conditioning/conditioner.hpp
+@@ -2968,6 +2968,11 @@
+                                            max_length,
+                                            deepstack_image_embeds,
+                                            image_grids);
++        if (sd_version_is_minimax_h3(version) && h3_clipproj && !hidden_states.empty()) {
++            int64_t tp    = ggml_time_ms();
++            hidden_states = h3_clipproj->apply(hidden_states, n_threads);
++            LOG_INFO("ClipProj: %" PRId64 " tokens projected in %" PRId64 " ms", hidden_states.shape()[1], ggml_time_ms() - tp);
++        }
+         std::vector<sd::Tensor<float>> extra_hidden_states_vec;
+         if (sd_version_is_hunyuan_video(version) && byt5) {
+             std::vector<std::string> quoted_texts;

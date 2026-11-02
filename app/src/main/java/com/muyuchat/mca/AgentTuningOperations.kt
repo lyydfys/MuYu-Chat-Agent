@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal class AgentTuningCoordinator(
     private val application: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<RuntimeProfileFields>,
     private val scope: CoroutineScope,
     private val engine: McaInferenceService,
     private val tuningOwner: TuningOwner,
@@ -413,7 +413,7 @@ internal fun sortRecommendedModels(
 }
 
 internal fun scanAgentFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     scope: CoroutineScope,
     tuningOwner: TuningOwner,
     modelScopeClient: ModelScopeClient,
@@ -447,15 +447,14 @@ internal fun scanAgentFor(
                 }
             }
             agentLogger.append(device, recommendation)
+            val recommendedModels = sortRecommendedModels(modelScopeClient.userFacingRecommendedModels(), device)
+            val agentLogs = agentLogger.recent()
             store.update {
                 it.copy(
                     deviceProfile = device,
                     agentRecommendation = recommendation,
-                    recommendedRemoteModels = sortRecommendedModels(
-                        modelScopeClient.userFacingRecommendedModels(),
-                        device
-                    ),
-                    agentLogs = agentLogger.recent(),
+                    recommendedRemoteModels = recommendedModels,
+                    agentLogs = agentLogs,
                     busy = false,
                     statusMessage = recommendation.explanation
                 )
@@ -467,7 +466,7 @@ internal fun scanAgentFor(
 }
 
 internal fun applyAgentRecommendationFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     application: Application,
     agentLogger: AgentDecisionLogger,
     activeAdaptiveRecommendation: AdaptiveTuningRecommendation?,
@@ -499,18 +498,19 @@ internal fun applyAgentRecommendationFor(
     )
     GenerationPreferences.persistGenerationParams(application, updatedParams)
     persistModelGenerationParams(state, updatedParams)
+    val agentLogs = agentLogger.recent()
     store.update {
         it.copy(
             params = updatedParams,
             rollbackParams = previousParams,
-            agentLogs = agentLogger.recent(),
+            agentLogs = agentLogs,
             statusMessage = "已应用助手生成建议；模型加载、线程、模板和 native 参数未被静默修改。"
         )
     }
 }
 
 internal fun rollbackAgentParamsFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     application: Application,
     persistModelGenerationParams: (MainUiState, GenerationParams) -> Unit
 ) {
@@ -528,7 +528,7 @@ internal fun rollbackAgentParamsFor(
 }
 
 internal fun loadAgentRecommendedModelFor(
-    store: UiStateStore,
+    store: UiStatusWriter,
     loadModel: (ModelManifest) -> Unit
 ) {
     val recommendation = store.current.agentRecommendation?.recommended
@@ -537,16 +537,12 @@ internal fun loadAgentRecommendedModelFor(
     if (model != null) {
         loadModel(model)
     } else {
-        store.update {
-            it.copy(
-                statusMessage = "推荐模型尚未在本机。请先到模型页下载或导入，再由 Agent 加载。"
-            )
-        }
+        store.showStatus("推荐模型尚未在本机。请先到模型页下载或导入，再由 Agent 加载。")
     }
 }
 
 internal fun runAgentBenchmarkFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     scope: CoroutineScope,
     engine: McaInferenceService,
     benchmarkRunner: BenchmarkRunner,
@@ -562,11 +558,12 @@ internal fun runAgentBenchmarkFor(
             val device = currentDeviceProfile()
             val result = benchmarkRunner.runCurrentParamsBenchmark(currentParams)
             appendBenchmarkHistoryFor(store.current, benchmarkHistoryLogger, device, result, currentParams)
+            val benchmarkHistory = benchmarkHistoryLogger.recent()
             store.update {
                 it.copy(
                     deviceProfile = device,
                     benchmark = result,
-                    benchmarkHistory = benchmarkHistoryLogger.recent(),
+                    benchmarkHistory = benchmarkHistory,
                     busy = false,
                     statusMessage = result.error
                         ?: "当前参数测速完成：decode ${"%.2f".format(result.decodeTps)} token/s，threads=${currentParams.nThreads}"

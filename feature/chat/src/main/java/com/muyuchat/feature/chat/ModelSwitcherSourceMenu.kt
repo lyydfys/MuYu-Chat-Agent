@@ -1,5 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,23 +10,22 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.NetworkWifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaIconSize
 
 internal enum class InferenceSource(
     val title: String,
@@ -42,12 +44,17 @@ internal fun InferenceSourceMenuRow(
     onClick: () -> Unit
 ) {
     val selectedColor = if (isSystemInDarkTheme()) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) -90f else 0f,
+        animationSpec = McaMotion.press,
+        label = "inferenceSourceChevronRotation"
+    )
     CapsuleMenuRow(
         leading = {
             if (selected) {
-                Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(21.dp))
+                Icon(McaIcons.Check, contentDescription = null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(McaIconSize.Optical.Menu))
             } else if (source == InferenceSource.CLOUD) {
-                Icon(Icons.Default.NetworkWifi, contentDescription = null, tint = selectedColor, modifier = Modifier.size(21.dp))
+                Icon(McaIcons.NetworkWifi, contentDescription = null, tint = selectedColor, modifier = Modifier.size(McaIconSize.Optical.Menu))
             } else {
                 McaLogoMark(size = 22.dp, cornerRadius = 7.dp)
             }
@@ -63,12 +70,12 @@ internal fun InferenceSourceMenuRow(
                 modifier = Modifier.weight(1f)
             )
             Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
+                imageVector = McaIcons.KeyboardArrowDown,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
-                    .rotate(if (expanded) -90f else 0f)
-                    .size(18.dp)
+                    .graphicsLayer { rotationZ = chevronRotation }
+                    .size(McaIconSize.S)
             )
         }
     }
@@ -89,6 +96,7 @@ internal fun ModelSourceInlineCapsule(
         modifier = modifier,
         color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
         shape = RoundedCornerShape(28.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         shadowElevation = 14.dp
     ) {
         Column(

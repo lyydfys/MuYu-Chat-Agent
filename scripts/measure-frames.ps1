@@ -131,6 +131,9 @@ param(
     [ValidateRange(0.0, 100.0)]
     [double] $MaxJankyPercent = 3.0,
     [string] $AdbPath = '',
+    # Controlled build record that proves which source produced the installed APK.
+    # Empty means: the installed hashes are recorded but no source binding is claimed.
+    [string] $BuildRecord = '',
     [switch] $NoLaunch
 )
 
@@ -375,6 +378,10 @@ $gfxinfoPath = Join-Path $outDirectory 'gfxinfo.txt'
 $resetPath = Join-Path $outDirectory 'gfxinfo-reset.txt'
 $summaryPath = Join-Path $outDirectory 'summary.json'
 
+# Read-only evidence helpers: workspace observation, installed APK identity, build-record
+# binding, environment capture and the summary writer. FrameEvidence.ps1 loads BuildProvenance.ps1.
+. (Join-Path $PSScriptRoot 'FrameEvidence.ps1')
+
 $script:abortStatus = $null
 $script:abortReason = $null
 $state = [ordered]@{
@@ -403,6 +410,10 @@ $state = [ordered]@{
     device        = $null
     app           = [ordered]@{ packageName = $Package; versionName = '' }
     tools         = [ordered]@{ adb = '' }
+    # Three facts that are never merged: what the workspace looks like, which binary is installed,
+    # and which source that binary came from (only a passing build record can say).
+    evidence      = [ordered]@{ source = $null; installedApks = @(); buildBinding = $null; environment = $null }
+    evidenceWrite = $null
     reset         = $null
     steps         = @()
     gfxinfo       = $null
@@ -420,6 +431,22 @@ $state = [ordered]@{
         'The settings action measures the default settings section reached from the app menu; it does not switch settings section tabs and relies on the 打开应用菜单 / 系统设置 / 返回聊天 selectors.',
         'PASS applies only to this device, package, build and run; compare before/after on the same device and conditions.'
     )
+}
+
+# --- source observation (never proof of the installed binary's source) ---------------------
+# Full input hashing walks the whole build input set, so it only runs when a build record is
+# supplied: without one there is no binding to compare the observation against.
+if ($BuildRecord) {
+    try {
+        $state.evidence.source = Get-McaFrameWorkspaceEvidence -RepoRoot $repo
+    } catch {
+        $state.evidence.source = [ordered]@{ status = 'ERROR'; reason = $_.Exception.Message }
+    }
+} else {
+    $state.evidence.source = [ordered]@{
+        status = 'NOT_RUN'
+        reason = 'No -BuildRecord supplied: the installed binary cannot be bound to this source, so the full input observation is not claimed.'
+    }
 }
 
 try {
@@ -455,6 +482,23 @@ try {
         Stop-FrameRun -Status 'BLOCKED' -Reason ("package '$Package' is not installed on '$DeviceSerial'")
     }
 
+    # --- binary identity + build binding + environment (before any reset) -------------------
+    try {
+        $state.evidence.installedApks = @(Get-McaFrameApkEvidence -Adb $adb -Serial $DeviceSerial -AppPackage $Package)
+        $state.evidence.buildBinding = Get-McaFrameBuildBinding -BuildRecordPath $BuildRecord `
+            -InstalledApks $state.evidence.installedApks
+    } catch {
+        # A binary whose hash cannot be read, or a record that does not bind it, is not a run we
+        # may report as attributable.
+        Stop-FrameRun -Status 'BLOCKED' -Reason ('build/source attribution failed: ' + $_.Exception.Message)
+    }
+    try {
+        $state.evidence.environment = Save-McaFrameEnvironment -Adb $adb -Serial $DeviceSerial `
+            -EvidenceDirectory $outDirectory
+    } catch {
+        $state.evidence.environment = [ordered]@{ status = 'ERROR'; reason = $_.Exception.Message }
+    }
+
     # --- foreground chat surface -------------------------------------------------------------
     if (-not $NoLaunch) {
         & $adb -s $DeviceSerial shell input keyevent KEYCODE_WAKEUP 2>&1 | Out-Null
@@ -480,14 +524,25 @@ try {
         $plan.drawer = $drawerNode
     }
     if ($requestedActions -contains 'model') {
-        $modelNode = Find-NodeCenter -Raw $surface -Attribute 'content-desc' -Value '选择模型'
+        # The model capsule no longer repeats '选择模型' as a content description. Its visible
+        # subtitle is the current state, so the trigger is resolved from that text instead: the
+        # placeholder while nothing is chosen, the loading/failure labels, and the ready labels for
+        # a selected local or cloud model. Tapping the subtitle lands on the capsule that owns it.
+        $modelNode = $null
+        foreach ($modelNeedle in @('选择模型', '待加载', '需要重载', '加载失败', '正在读取模型权重', '已就绪', '云端 API')) {
+            $modelNode = Find-NodeCenterContaining -Raw $surface -Needle $modelNeedle
+            if ($modelNode) { $modelSelectorUsed = $modelNeedle; break }
+        }
         if (-not $modelNode) {
             # The capsule no longer carries a contentDescription: its visible model name/subtitle
             # names it for accessibility, so accept a text node containing 选择模型 as the target.
             $modelNode = Find-NodeCenterContaining -Raw $surface -Needle '选择模型'
         }
-        if (-not $modelNode) { Stop-FrameRun -Status 'BLOCKED' -Reason 'model action requested but the 选择模型 node was not found on the chat surface' }
+        if (-not $modelNode) {
+            Stop-FrameRun -Status 'BLOCKED' -Reason ('model action requested but no model capsule trigger was found; tried: ' + (@('选择模型', '待加载', '需要重载', '加载失败', '正在读取模型权重', '已就绪', '云端 API') -join ', '))
+        }
         $plan.model = $modelNode
+        $plan.modelSelector = $modelSelectorUsed
     }
     if ($requestedActions -contains 'scroll') {
         $scrollBox = Find-ScrollableBox -Raw $surface
@@ -711,11 +766,20 @@ elseif ($state.verdict -eq 'FAIL') { $state.exitCode = 1 }
 else { $state.exitCode = 3 }
 $state.generatedAt = (Get-Date).ToString('o')
 
-try {
-    $json = $state | ConvertTo-Json -Depth 12
-    [System.IO.File]::WriteAllText($summaryPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-} catch {
-    [Console]::Error.WriteLine('measure-frames: cannot write summary.json: ' + $_.Exception.Message)
+# The evidence write is part of the result: a run whose summary cannot be written must not print
+# PASS and exit 0, because the only record of the sample would be missing.
+# The write result is itself evidence, so it has to be inside the file it describes. The summary is
+# written once to learn the outcome and once with that outcome recorded; the recorded value is the
+# first attempt, which is the one that proved the directory is writable.
+$state.evidenceWrite = [ordered]@{ written = $false; path = $summaryPath; error = 'not attempted' }
+$firstWrite = Save-McaFrameSummary -Path $summaryPath -State $state
+$state.evidenceWrite = $firstWrite
+[void](Save-McaFrameSummary -Path $summaryPath -State $state)
+if ($state.evidenceWrite.written -ne $true) {
+    [Console]::Error.WriteLine('measure-frames: cannot write summary.json: ' + [string]$state.evidenceWrite.error)
+    $state.verdict = 'FAIL'
+    $state.reason = 'evidence write failed: ' + [string]$state.evidenceWrite.error
+    $state.exitCode = 4
 }
 
 Write-Output ('VERDICT: ' + $state.verdict)

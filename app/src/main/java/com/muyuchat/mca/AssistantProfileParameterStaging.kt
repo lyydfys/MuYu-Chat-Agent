@@ -21,7 +21,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 internal fun stageDirectParameterProfileFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantProfileFields>,
     scope: CoroutineScope,
     engine: McaInferenceService,
     runtimeProfileStore: ModelRuntimeProfileStore,

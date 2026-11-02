@@ -1,7 +1,10 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.os.SystemClock
-import android.widget.Toast
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -33,18 +36,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,6 +59,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
@@ -73,6 +73,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S22：从 ImageWorkspaceScreens.kt 等值移出的结果渲染簇。
 // 原样逐字迁移，未做行为改动；2 个跨区入口按协议提升 internal。
@@ -90,8 +91,13 @@ internal fun ImageGalleryTitleBar(onBack: () -> Unit) {
             shape = CircleShape,
             shadowElevation = 7.dp
         ) {
-            IconButton(onClick = onBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", modifier = Modifier.size(27.dp))
+            McaIconButton(
+                contentDescription = "返回",
+                onClick = onBack,
+                size = 48.dp,
+                glyphSize = McaIconSize.Optical.Navigation
+            ) {
+                Icon(McaIcons.Back, contentDescription = null, modifier = Modifier.size(McaIconSize.Optical.Navigation))
             }
         }
         Text(
@@ -148,7 +154,7 @@ internal fun ImageGenerationCanvas(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回图片", modifier = Modifier.size(24.dp))
+                        Icon(McaIcons.Back, contentDescription = "返回图片", modifier = Modifier.size(McaIconSize.L))
                         Text("图片", fontSize = 17.sp, color = if (darkTheme) MaterialTheme.colorScheme.onSurface else Color(0xFF202124))
                     }
                 }
@@ -238,7 +244,10 @@ private fun ImageAssistantResultCard(
                         previewUriString = job?.previewUriString,
                         previewStep = job?.previewStep ?: 0,
                         previewRevision = job?.previewRevision ?: 0L,
-                        onCancel = onCancelGeneration
+                        onCancel = onCancelGeneration,
+                        // R06: the live preview is owned by this generation task. The existing job id is
+                        // the task identity all the way down into the preview display owner.
+                        jobId = job?.id
                     )
                     job?.translationPreview?.takeIf(String::isNotBlank)?.let { translated ->
                         Column(
@@ -275,17 +284,26 @@ internal fun ImageCreatingPlaceholder(
     previewUriString: String?,
     previewStep: Int,
     previewRevision: Long,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    // R06: job id is the task identity for the live preview. Callers without a created job leave it
+    // null and get a local, stable placeholder identity below; it must never be replaced by a start
+    // time, the preview step or the URI.
+    jobId: String? = null
 ) {
     val context = LocalContext.current
     val darkTheme = isSystemInDarkTheme()
-    val previewBitmap by rememberChatImageBitmap(
+    val previewTaskIdentity = jobId ?: remember { Any() }
+    var previewRetry by remember(jobId, previewUriString) { mutableStateOf(0) }
+    val previewDisplay = rememberChatImageBitmap(
         context = context,
+        // A blank URI is the "no frame produced yet" state: the projection reports ABSENT instead of
+        // pretending to load, and a failed read later gets a retry without cancelling the generation.
         uriString = previewUriString.orEmpty(),
         maxDimensionPx = 1_024,
-        revisionKey = previewRevision
+        revisionKey = previewRevision to previewRetry,
+        taskIdentity = previewTaskIdentity
     )
-    val previewBitmapValue = previewBitmap
+    val previewBitmapValue = previewDisplay.readyValue
     val showingPreview = previewBitmapValue != null
     val cardColor = if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF5F8FF)
     val titleColor = if (showingPreview) {
@@ -383,7 +401,22 @@ internal fun ImageCreatingPlaceholder(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold
                 )
-                TextButton(onClick = onCancel, modifier = Modifier.testTag("image.cancel")) {
+                if (previewDisplay.phase == ImageDisplayPhase.FAILED) {
+                    // A preview read failure is not a generation failure: the background task keeps
+                    // running, no task error is shown, and only the frame offers a retry.
+                    McaButton(style = McaButtonStyle.Text,
+                        onClick = { previewRetry += 1 },
+                        modifier = Modifier.testTag("image.preview.retry"),
+                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            "预览读取失败，点此重试",
+                            color = if (showingPreview) Color.White else McaPrimaryBlue,
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+                McaButton(style = McaButtonStyle.Text,onClick = onCancel, modifier = Modifier.testTag("image.cancel")) {
                     Text("取消生成")
                 }
             }
@@ -453,7 +486,7 @@ private fun ImageGenerationFailureCard(job: ImageGenerationUiJob, onRetry: () ->
                 }
                 Text(job.message.ifBlank { "图片生成失败" }, maxLines = 2, color = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF5F6368), fontSize = 13.sp)
             }
-            TextButton(onClick = onRetry) { Text("重试") }
+            McaButton(style = McaButtonStyle.Text,onClick = onRetry) { Text("重试") }
         }
     }
 }
@@ -466,11 +499,20 @@ private fun ImageGenerationResultImage(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val notify = rememberMcaNotify()
     val darkTheme = isSystemInDarkTheme()
     // Chat bubbles can contain user-selected photos straight from the gallery.
     // Never decode their full source dimensions synchronously during Compose:
     // large camera images can exhaust the UI process while the message is sent.
-    val bitmap by rememberChatImageBitmap(context, image.uriString, maxDimensionPx = 512)
+    var imageRetry by remember(image.id) { mutableStateOf(0) }
+    val imageDisplay = rememberChatImageBitmap(
+        context = context,
+        uriString = image.uriString,
+        maxDimensionPx = 512,
+        revisionKey = imageRetry,
+        taskIdentity = image.id
+    )
+    val bitmap = imageDisplay.readyValue
     val ratio = remember(image.width, image.height) {
         if (image.width > 0 && image.height > 0) {
             (image.width.toFloat() / image.height.toFloat()).coerceIn(0.72f, 1.78f)
@@ -486,20 +528,62 @@ private fun ImageGenerationResultImage(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 images.forEach { item ->
-                    val thumbnail by rememberChatImageBitmap(
-                        context,
-                        item.uriString,
-                        maxDimensionPx = 192
-                    )
-                    Box(
-                        modifier = Modifier
-                            .size(72.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
-                            .clickable { onUseImageAsset(item.id) }
-                    ) {
-                        thumbnail?.let {
-                            Image(it.asImageBitmap(), contentDescription = item.name, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                    // Stable per-asset identity: inserting or reordering the strip never lets a
+                    // neighbour's decoded frame or retry epoch leak into another item.
+                    key(item.id) {
+                        var thumbnailRetry by remember(item.id) { mutableStateOf(0) }
+                        val thumbnailDisplay = rememberChatImageBitmap(
+                            context = context,
+                            uriString = item.uriString,
+                            maxDimensionPx = 192,
+                            revisionKey = thumbnailRetry,
+                            taskIdentity = item.id
+                        )
+                        val thumbnail = thumbnailDisplay.readyValue
+                        val thumbnailFailed = thumbnailDisplay.phase == ImageDisplayPhase.FAILED
+                        Box(
+                            modifier = Modifier
+                                .size(72.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (darkTheme) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFEDEFF1))
+                                // A tile whose file cannot be read retries instead of opening an
+                                // empty editor; a ready tile keeps its original select action.
+                                .clickable {
+                                    if (thumbnailFailed) thumbnailRetry += 1 else onUseImageAsset(item.id)
+                                }
+                        ) {
+                            when {
+                                thumbnail != null -> Image(
+                                    thumbnail.asImageBitmap(),
+                                    contentDescription = item.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                                thumbnailFailed -> Column(
+                                    modifier = Modifier.fillMaxSize(),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Center
+                                ) {
+                                    Icon(
+                                        McaIcons.Image,
+                                        contentDescription = "图片无法读取，点按重试",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(McaIconSize.M)
+                                    )
+                                    Text(
+                                        "重试",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 11.sp
+                                    )
+                                }
+                                thumbnailDisplay.phase == ImageDisplayPhase.LOADING -> CircularProgressIndicator(
+                                    modifier = Modifier
+                                        .align(Alignment.Center)
+                                        .size(18.dp),
+                                    strokeWidth = 2.dp
+                                )
+                                else -> Unit
+                            }
                         }
                     }
                 }
@@ -521,14 +605,36 @@ private fun ImageGenerationResultImage(
                 modifier = Modifier.fillMaxSize()
             )
         } ?: run {
-            Icon(
-                imageVector = Icons.Default.Image,
-                contentDescription = null,
-                tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .size(34.dp)
-            )
+            when (imageDisplay.phase) {
+                ImageDisplayPhase.LOADING -> CircularProgressIndicator(
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(McaIconSize.Optical.Action),
+                    strokeWidth = 2.dp
+                )
+                // The displayed bitmap is a bounded sampling of the original; saving and sharing
+                // still read the original file, so this copy only describes the preview read.
+                ImageDisplayPhase.FAILED -> Column(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "图片文件暂时无法读取",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    McaButton(style = McaButtonStyle.Text,onClick = { imageRetry += 1 }) { Text("重试") }
+                }
+                else -> Icon(
+                    imageVector = McaIcons.Image,
+                    contentDescription = null,
+                    tint = if (darkTheme) MaterialTheme.colorScheme.onSurfaceVariant else Color(0xFF9AA0A6),
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .size(34.dp)
+                )
+            }
         }
         Surface(
             modifier = Modifier
@@ -559,7 +665,8 @@ private fun ImageGenerationResultImage(
                 color = Color.Black.copy(alpha = 0.54f),
                 shape = CircleShape
             ) {}
-            IconButton(
+            McaIconButton(
+                contentDescription = "分享图片",
                 onClick = {
                     scope.launch {
                         val result = withContext(Dispatchers.IO) {
@@ -572,21 +679,18 @@ private fun ImageGenerationResultImage(
                         result
                             .mapCatching { intent -> context.startActivity(intent) }
                             .onFailure { error ->
-                                Toast.makeText(
-                                    context,
-                                    error.message?.takeIf(String::isNotBlank) ?: "图片分享失败",
-                                    Toast.LENGTH_SHORT
-                                ).show()
+                                notify(error.message?.takeIf(String::isNotBlank) ?: "图片分享失败")
                             }
                     }
                 },
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier.fillMaxSize(),
+                glyphSize = McaIconSize.M
             ) {
                 Icon(
-                    Icons.Default.Share,
-                    contentDescription = "分享图片",
+                    McaIcons.Share,
+                    contentDescription = null,
                     tint = Color.White,
-                    modifier = Modifier.size(22.dp)
+                    modifier = Modifier.size(McaIconSize.M)
                 )
             }
         }

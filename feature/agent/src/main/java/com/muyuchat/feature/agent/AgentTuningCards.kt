@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.agent
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,23 +13,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.Science
-import androidx.compose.material.icons.rounded.Speed
-import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -84,7 +76,7 @@ internal fun SmartDebugCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Science, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(McaIcons.Science, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text("智能调试", fontWeight = FontWeight.Bold)
                 }
                 Surface(
@@ -115,7 +107,7 @@ internal fun SmartDebugCard(
                 SectionTitle("调试目标")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(PerformanceMode.PowerSave, PerformanceMode.Balanced, PerformanceMode.Speed).forEach { mode ->
-                        FilterChip(
+                        McaChip(
                             selected = state.preference.mode == mode,
                             onClick = { onPreferenceChange(state.preference.copy(mode = mode)) },
                             label = { Text(mode.label) }
@@ -124,7 +116,7 @@ internal fun SmartDebugCard(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                     listOf(PerformanceMode.Quality, PerformanceMode.LongContext).forEach { mode ->
-                        FilterChip(
+                        McaChip(
                             selected = state.preference.mode == mode,
                             onClick = { onPreferenceChange(state.preference.copy(mode = mode)) },
                             label = { Text(mode.label) }
@@ -134,7 +126,7 @@ internal fun SmartDebugCard(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onQuickDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
                     modifier = Modifier.weight(1f),
@@ -142,7 +134,7 @@ internal fun SmartDebugCard(
                 ) {
                     Text("快速调试")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onStandardDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
                     modifier = Modifier.weight(1f),
@@ -152,7 +144,7 @@ internal fun SmartDebugCard(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onDeepDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
                     modifier = Modifier.weight(1f),
@@ -160,7 +152,7 @@ internal fun SmartDebugCard(
                 ) {
                     Text("深度调试")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onPowerDebug,
                     enabled = !state.isBusy && state.loadedModelName != null,
                     modifier = Modifier.weight(1f),
@@ -169,10 +161,10 @@ internal fun SmartDebugCard(
                     Text("省电调试")
                 }
             }
-            TextButton(onClick = onAgentInfo, modifier = Modifier.fillMaxWidth()) {
+            McaButton(style = McaButtonStyle.Text, onClick = onAgentInfo, modifier = Modifier.fillMaxWidth()) {
                 Text(if (!state.hasBenchmark || !state.hasRecommendation) "调参说明" else "调试解释")
             }
-            OutlinedButton(
+            McaButton(style = McaButtonStyle.Outlined,
                 onClick = { onStabilitySmoke?.invoke() },
                 enabled = onStabilitySmoke != null && !state.isBusy && state.loadedModelName != null,
                 modifier = Modifier.fillMaxWidth(),
@@ -200,7 +192,7 @@ internal fun CurrentModelReportCard(
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Rounded.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Icon(McaIcons.Bolt, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 Text("当前模型体检", fontWeight = FontWeight.Bold)
             }
             Text(shortName(loadedModelName) ?: "尚未加载模型", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -350,7 +342,7 @@ internal fun RuntimeProfileCard(
                 Text("调优模式", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium)
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
                     AgentTuningMode.entries.forEach { mode ->
-                        FilterChip(
+                        McaChip(
                             selected = selectedMode == mode,
                             onClick = { selectedMode = mode },
                             enabled = !jobState.isActive && !state.isBusy,
@@ -372,16 +364,17 @@ internal fun RuntimeProfileCard(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Switch(
+                    McaSwitch(
                         checked = autoApply,
                         onCheckedChange = { autoApply = it },
+                        contentDescription = "通过后自动应用",
                         enabled = !jobState.isActive && !state.isBusy
                     )
                 }
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = { onStartTuning?.invoke(selectedMode, autoApply) },
                     enabled = onStartTuning != null && !state.isBusy && state.loadedModelName != null && jobState.canStart,
                     modifier = Modifier.weight(1f),
@@ -389,7 +382,7 @@ internal fun RuntimeProfileCard(
                 ) {
                     Text("开始调优")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = { onPauseTuning?.invoke() },
                     enabled = onPauseTuning != null &&
                         jobState.canPauseSearch(pending?.readyToApply == true),
@@ -400,7 +393,7 @@ internal fun RuntimeProfileCard(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = { onResumeTuning?.invoke() },
                     enabled = onResumeTuning != null &&
                         jobState.canResumeSearch(pending?.readyToApply == true),
@@ -409,7 +402,7 @@ internal fun RuntimeProfileCard(
                 ) {
                     Text("续跑")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = { onCancelTuning?.invoke() },
                     enabled = onCancelTuning != null &&
                         jobState.canCancelSearch(pending?.readyToApply == true),
@@ -420,7 +413,7 @@ internal fun RuntimeProfileCard(
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = { onApplyPendingProfile?.invoke() },
                     enabled = onApplyPendingProfile != null &&
                         pending?.readyToApply == true &&
@@ -431,7 +424,7 @@ internal fun RuntimeProfileCard(
                 ) {
                     Text("应用并重载")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = { onDiscardPendingProfile?.invoke() },
                     enabled = onDiscardPendingProfile != null && pending?.readyToApply == true && !state.isBusy,
                     modifier = Modifier.weight(1f),
@@ -440,7 +433,7 @@ internal fun RuntimeProfileCard(
                     Text("撤销修改")
                 }
             }
-            OutlinedButton(
+            McaButton(style = McaButtonStyle.Outlined,
                 onClick = { onRollbackProfile?.invoke() },
                 enabled = onRollbackProfile != null && rollback?.available == true && !state.isBusy,
                 modifier = Modifier.fillMaxWidth(),
@@ -448,7 +441,7 @@ internal fun RuntimeProfileCard(
             ) {
                 Text("回滚稳定配置")
             }
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = { onQueryTuningJob?.invoke() },
                 enabled = onQueryTuningJob != null,
                 modifier = Modifier.fillMaxWidth()
@@ -546,7 +539,7 @@ internal fun RecommendationCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Rounded.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(McaIcons.Tune, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                     Text("推荐参数", fontWeight = FontWeight.Bold)
                 }
                 RiskBadge(ui.riskLabel)
@@ -560,7 +553,7 @@ internal fun RecommendationCard(
             if (ui.reason.isNotBlank()) {
                 Text(ui.reason, style = MaterialTheme.typography.bodySmall)
             }
-            Button(
+            McaButton(style = McaButtonStyle.Primary,
                 onClick = onApplyRecommendation,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)

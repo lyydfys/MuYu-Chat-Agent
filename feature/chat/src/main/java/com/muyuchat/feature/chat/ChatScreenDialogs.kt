@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,7 +13,6 @@ import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,7 +69,7 @@ internal fun ChatImageTranslationDraftDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = {
                     onConfirm(
                         draft.id,
@@ -84,7 +85,7 @@ internal fun ChatImageTranslationDraftDialog(
             ) { Text("使用提示词") }
         },
         dismissButton = {
-            TextButton(onClick = { onCancel(draft.id) }) {
+            McaButton(style = McaButtonStyle.Text,onClick = { onCancel(draft.id) }) {
                 Text("取消")
             }
         }
@@ -114,13 +115,13 @@ internal fun ChatImageActionDraftDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = { onResolve(draft.id, true, editedText) },
                 enabled = editedText.isNotBlank()
             ) { Text(if (draft.kind == ChatImageActionKind.AMBIGUOUS) "生成图片" else "使用云端整理") }
         },
         dismissButton = {
-            TextButton(onClick = { onResolve(draft.id, false, editedText) }) {
+            McaButton(style = McaButtonStyle.Text,onClick = { onResolve(draft.id, false, editedText) }) {
                 Text(if (draft.kind == ChatImageActionKind.AMBIGUOUS) "继续聊天" else "取消")
             }
         }
@@ -153,12 +154,12 @@ internal fun ChatUltraFixSubmissionDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = { onConfirm(prompt, options) }
             ) { Text("开始精修") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) {
                 Text("取消")
             }
         }

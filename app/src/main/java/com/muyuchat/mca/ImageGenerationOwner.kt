@@ -173,10 +173,18 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
     ): Boolean {
         val cleanPrompt = (jobSnapshot?.prompt ?: prompt).trim()
         if (cleanPrompt.isBlank()) {
+            Log.i(
+                IMAGE_COMMIT_LOG_TAG,
+                "image_admit_reject code=empty_prompt jobId=${requestedJobId ?: "unassigned"}"
+            )
             host.showStatus("请输入图片描述")
             return false
         }
         if (cleanPrompt.length > LocalImagePromptExecution.MAX_ORIGINAL_PROMPT_CHARS) {
+            Log.i(
+                IMAGE_COMMIT_LOG_TAG,
+                "image_admit_reject code=prompt_too_long jobId=${requestedJobId ?: "unassigned"}"
+            )
             host.updateUiState {
                 it.copy(
                     statusMessage = "图片提示词超过 " +
@@ -186,6 +194,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
             return false
         }
         if (host.imageGenerationJob?.isActive == true) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=ui_job_active jobId=${requestedJobId ?: "unassigned"}")
             host.showStatus("已有图片生成任务正在运行，请先停止当前任务")
             return false
         }
@@ -200,6 +209,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
         if (enqueueState.isGenerating && requestedBackend == ImageBackend.LOCAL &&
             enqueueState.selectedChatBackend == ChatBackend.LOCAL
         ) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=chat_generating jobId=$jobId")
             host.updateUiState {
                 it.copy(statusMessage = "本地聊天正在生成，请等本轮结束后再启动本地生图，避免设备内存冲突。")
             }
@@ -211,16 +221,19 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
             null
         }
         if (requestedBackend == ImageBackend.LOCAL && requestedLocalModel == null) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=no_local_model jobId=$jobId")
             host.showStatus("请先在模型管理的本地页导入并选择图像生成引擎。")
             return false
         }
         requestedLocalModel?.localImageStructuralReadinessMessage()?.let { readiness ->
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=local_readiness jobId=$jobId")
             host.updateUiState {
                 it.copy(statusMessage = "图片生成尚未启动：$readiness")
             }
             return false
         }
         if (requestedBackend == ImageBackend.CLOUD && requestedCloudConfig == null) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=no_cloud_config jobId=$jobId")
             host.showStatus("请先在模型管理的云端页接入并选择图像生成模型。")
             return false
         }
@@ -240,6 +253,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
             baseOptions.textualInversionIds.isNotEmpty() &&
             enqueueState.localImageTextualInversionLoading
         ) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=ti_loading jobId=$jobId")
             host.updateUiState {
                 it.copy(statusMessage = "Textual Inversion 库仍在加载，请稍后重试。")
             }
@@ -265,6 +279,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
                     )
                 }
             } catch (error: Exception) {
+                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=local_extension jobId=$jobId")
                 host.updateUiState {
                     it.copy(statusMessage = "图片任务的本地扩展不可用：${error.message ?: "请重新选择"}")
                 }
@@ -274,6 +289,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
             if (baseOptions.loras.isNotEmpty() || baseOptions.textualInversionIds.isNotEmpty() ||
                 baseOptions.ultraFix != null
             ) {
+                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=cloud_local_extensions jobId=$jobId")
                 host.showStatus("云端图片连接器不接受本地模型扩展。")
                 return false
             }
@@ -296,6 +312,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
                     sampleMethod = imageSchedulerProductName(resolvedSampler)
                 )
             } catch (error: Exception) {
+                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=sampler jobId=$jobId")
                 host.updateUiState {
                     it.copy(
                         statusMessage = "图片采样器不可用：${error.message ?: "请重新选择采样器"}"
@@ -324,6 +341,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
         )
         val generationLease = host.tryAcquireObservedImageGenerationLease(jobId)
         if (generationLease == null) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=lease_busy jobId=$jobId")
             host.updateUiState {
                 it.copy(statusMessage = "已有 UI 或 Local API 图片任务正在运行，请等待完成或先停止当前任务")
             }
@@ -348,6 +366,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
                 }
             }
         if (textualInversionReservationError != null) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=ti_reservation jobId=$jobId")
             check(host.releaseObservedImageGenerationLease(generationLease)) {
                 "UI image generation lease was replaced during Textual Inversion reservation."
             }
@@ -380,6 +399,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
             }.exceptionOrNull()
         }
         if (leasedLoraRefreshError != null) {
+            Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=lora_refresh jobId=$jobId")
             check(host.releaseObservedImageGenerationLease(generationLease)) {
                 "UI image generation lease was replaced during LoRA refresh."
             }
@@ -402,6 +422,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
                     requestedOptions = queuedOptions
                 )
             }.getOrElse { error ->
+                Log.i(IMAGE_COMMIT_LOG_TAG, "image_admit_reject code=batch_plan jobId=$jobId")
                 check(host.releaseObservedImageGenerationLease(generationLease)) {
                     "UI image generation lease was replaced during batch planning."
                 }
@@ -533,7 +554,7 @@ internal class ImageGenerationOwner(private val host: ImageGenerationHost) {
 
 
 /** R3/C3-S8：自 MainViewModel 顶层化的租约延迟位写入（体逐字等价，store 参数化）。 */
-internal fun updateGenerationImageGrantReleaseDeferInto(store: UiStateStore, defer: Boolean) {
+internal fun updateGenerationImageGrantReleaseDeferInto(store: UiStateWriter<ImageGenerationFields>, defer: Boolean) {
     store.update { state ->
         if (state.deferGenerationImageGrantRelease == defer) {
             state
@@ -545,32 +566,29 @@ internal fun updateGenerationImageGrantReleaseDeferInto(store: UiStateStore, def
 
 /** R3/C3-S15：租约观测对顶层化（自 VM 迁出；体逐字，仅依赖参数化）。 */
 internal fun tryAcquireObservedImageGenerationLeaseFor(
-    store: UiStateStore,
+    setDeferGenerationImageGrantRelease: (Boolean) -> Unit,
     coordinator: LocalImageGenerationCoordinator,
     observationLock: Any,
     requestId: String
 ): LocalImageGenerationCoordinator.Lease? =
     synchronized(observationLock) {
-        updateGenerationImageGrantReleaseDeferInto(store, true)
+        setDeferGenerationImageGrantRelease(true)
         coordinator.tryAcquire(requestId).also { lease ->
             if (lease == null && coordinator.activeRequestId() == null) {
-                updateGenerationImageGrantReleaseDeferInto(store, false)
+                setDeferGenerationImageGrantRelease(false)
             }
         }
     }
 
 /** A stale epoch cannot clear the observable protection for the current lease holder. */
 internal fun releaseObservedImageGenerationLeaseFor(
-    store: UiStateStore,
+    setDeferGenerationImageGrantRelease: (Boolean) -> Unit,
     coordinator: LocalImageGenerationCoordinator,
     observationLock: Any,
     lease: LocalImageGenerationCoordinator.Lease
 ): Boolean = synchronized(observationLock) {
     val released = coordinator.release(lease)
-    updateGenerationImageGrantReleaseDeferInto(
-        store,
-        coordinator.activeRequestId() != null
-    )
+    setDeferGenerationImageGrantRelease(coordinator.activeRequestId() != null)
     released
 }
 

@@ -29,6 +29,22 @@ class GenerationParamsTest {
     }
 
     @Test
+    fun explicitSystemTextCanSuppressMcaReasoningInstruction() {
+        val request = ChatRequest(
+            messages = listOf(
+                ChatMessage(Role.SYSTEM, "PROTOCOL"),
+                ChatMessage(Role.USER, "run")
+            ),
+            params = GenerationParams(reasoningMode = ReasoningMode.OFF),
+            appendReasoningInstruction = false
+        )
+        val system = JSONArray(request.messagesJson()).getJSONObject(0).getString("content")
+
+        assertTrue(system.contains("PROTOCOL"))
+        assertFalse(system.contains("请直接回答"))
+    }
+
+    @Test
     fun reasoningInstructionDoesNotInjectScaffoldOrThinkSlashCommands() {
         val request = ChatRequest(
             messages = listOf(ChatMessage(Role.USER, "Who are you?")),

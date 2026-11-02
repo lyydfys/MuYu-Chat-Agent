@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.core.mediatek.MediaTekAnimaManifest
+import com.muyuchat.core.mediatek.MediaTekAotManifest
 import com.muyuchat.core.download.ImageEngineMinDeviceTier
 import java.io.File
 
@@ -20,6 +22,7 @@ enum class LocalImageRuntime(val label: String) {
     STABLE_DIFFUSION_CPP("stable-diffusion.cpp"),
     MNN_DIFFUSION("MNN Diffusion"),
     QNN_HTP("骁龙 NPU"),
+    MEDIATEK_NEURON("MediaTek Neuron NPU"),
     ONNX_RUNTIME("ONNX Runtime"),
     CUSTOM("自定义本地图像引擎");
 
@@ -29,6 +32,7 @@ enum class LocalImageRuntime(val label: String) {
                 "MEDIAPIPE", "NCNN", "DIFFUSERS" -> STABLE_DIFFUSION_CPP
                 "MNN", "MNN_DIFFUSION", "MNN_DIFFUSION_ENGINE" -> MNN_DIFFUSION
                 "QNN", "QNN_HTP", "QAIRT", "HTP" -> QNN_HTP
+                "MEDIATEK", "MEDIATEK_NEURON", "NEURON", "NEUROPILOT" -> MEDIATEK_NEURON
                 "ONNX" -> ONNX_RUNTIME
                 else -> CUSTOM
             }
@@ -37,6 +41,7 @@ enum class LocalImageRuntime(val label: String) {
             val lower = fileName.lowercase()
             return when {
                 "qnn" in lower || "qairt" in lower || "htp" in lower -> QNN_HTP
+                "mediatek" in lower || "neuron" in lower || "neuropilot" in lower -> MEDIATEK_NEURON
                 lower.endsWith(".mnn") -> MNN_DIFFUSION
                 lower.endsWith(".zip") && "mnn" in lower -> MNN_DIFFUSION
                 lower.endsWith(".onnx") -> ONNX_RUNTIME
@@ -65,6 +70,7 @@ enum class LocalImageModelFamily(val label: String) {
     SD21("Stable Diffusion 2.1"),
     SD15("Stable Diffusion 1.5"),
     WAN("Wan"),
+    ANIMA("Anima"),
     CUSTOM("自定义");
 
     companion object {
@@ -79,6 +85,10 @@ enum class LocalImageModelFamily(val label: String) {
         fun infer(fileName: String): LocalImageModelFamily {
             val lower = fileName.lowercase()
             return when {
+                // Anima files are anima-preview.* / anima_preview.* / anima.*; the
+                // animagine SDXL checkpoints must not be captured by this token.
+                "anima-preview" in lower || "anima_preview" in lower ||
+                    lower.startsWith("anima.") || lower.startsWith("anima-") -> ANIMA
                 "z-image" in lower || "z_image" in lower || "zimage" in lower -> Z_IMAGE
                 "qwen-image" in lower || "qwen_image" in lower -> QWEN_IMAGE
                 "glm-image" in lower || "glm_image" in lower -> GLM_IMAGE
@@ -115,7 +125,9 @@ enum class LocalImageVerificationStatus {
 internal data class LocalImageBundleComponentContract(
     val role: String,
     val relativePath: String,
-    val required: Boolean
+    val required: Boolean,
+    val expectedSizeBytes: Long? = null,
+    val sha256: String? = null
 )
 
 internal data class LocalImageBundleManifest(
@@ -144,7 +156,11 @@ internal data class LocalImageBundleManifest(
     val executionProfileGraphPaths: Map<String, String> = emptyMap(),
     val executionProfileQnnSdk: String? = null,
     val executionProfileDeclared: Boolean = false,
-    val componentCount: Int = 0
+    val componentCount: Int = 0,
+    val mediatekAnimaManifestPath: String? = null,
+    val mediatekAnimaManifest: MediaTekAnimaManifest? = null,
+    val mediatekAotManifest: MediaTekAotManifest? = null,
+    val mediatekAnimaRequiredPaths: List<String> = emptyList()
 )
 
 internal sealed interface LocalImageBundleManifestInspection {

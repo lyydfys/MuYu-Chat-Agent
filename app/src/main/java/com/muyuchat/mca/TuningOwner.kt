@@ -57,7 +57,7 @@ import org.json.JSONObject
  * VM 只保留 intent 委托与别名。内嵌调参端口为具名适配器（不再新增 VM 匿名端口）。
  */
 internal class TuningOwner(
-    internal val store: UiStateStore,
+    internal val store: UiStateWriter<RuntimeProfileFields>,
     internal val scope: CoroutineScope,
     internal val engine: McaInferenceService,
     internal val runtimeProfileStore: ModelRuntimeProfileStore,

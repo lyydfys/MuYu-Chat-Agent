@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  feature:dsh-workspace intentionally declares no permission, provider, service or activity.
+
+  * INTERNET and the app-wide `usesCleartextTraffic` flag belong to app/AndroidManifest.xml and
+    already admit the loopback http://127.0.0.1:<port> DSH origin.
+  * Uploads use the Storage Access Framework (ACTION_GET_CONTENT / ACTION_OPEN_DOCUMENT) and
+    downloads use DownloadManager's public Downloads destination on API 29+ or the app-specific
+    external files directory on API 26-28, so no storage permission is required.
+  * The WebView requests camera/microphone only through WebChromeClient.onPermissionRequest; the
+    module denies them because no dangerous permission is declared. Adding one is an app-level
+    decision (see README.md), never something this library does on its own.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />

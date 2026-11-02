@@ -12,3 +12,5 @@
 [submodule "third_party/tokenizers-cpp"]
 	path = third_party/tokenizers-cpp
 	url = https://github.com/mlc-ai/tokenizers-cpp.git
+	# MCA changes are kept as a pinned source patch under third_party/patches.
+	ignore = dirty

@@ -21,6 +21,12 @@ internal const val STOP_GENERATION_JOIN_TIMEOUT_MS = 2_000L
  * stop at a time, cancel the current UI run, cancel its browser task, bound the native stop
  * request and the join, settle the UI state, and persist the settled conversation.
  *
+ * P03: the stop captures the run's exact local attempt identity atomically with the cancellation,
+ * before any engine call. The engine stop is then dispatched for that frozen request only -- never
+ * for "whatever token is current" -- so a late chat stop can never stop an Agent, Local API or
+ * image request that has since taken the engine, and a chat run with no dispatched attempt never
+ * touches the engine at all. The user feedback and the settlement/persist tail are unchanged.
+ *
  * Moved verbatim out of `MainViewModel.stopGeneration` (R1 item 2, stop path). The ViewModel
  * keeps `stopGenerationInProgress` as the re-entrancy latch and supplies every collaborator
  * through this port; the orchestration below has no direct field access.
@@ -29,7 +35,7 @@ internal interface ChatStopGenerationPort {
 
     fun currentState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (GenerationStopFields) -> GenerationStopFields): GenerationStopFields
 
     /** The scope a stop runs in (the ViewModel scope). */
     fun stopScope(): CoroutineScope
@@ -47,16 +53,26 @@ internal interface ChatStopGenerationPort {
 
     fun isRunCurrent(runId: Long?): Boolean
 
-    fun currentRunId(): Long
-
     /** Cancels the owning UI run and cancels its Job; returns the ownership cancellation verbatim. */
     fun cancelCurrentGeneration(): UiGenerationCancellation
 
-    /** The request id of the active native stop target, when the runtime exposes one. */
-    fun activeUiStopRequestId(): String?
+    /**
+     * The exact local engine attempt frozen with [cancellation], or null when no engine stop is
+     * needed.
+     *
+     * The decision is made only from the [UiGenerationCancellation] captured under the ownership
+     * lock: never from the engine's current token and never from the phase of some other run. Cloud
+     * turns and reservations that never dispatched a local request return null.
+     */
+    fun frozenLocalAttempt(cancellation: UiGenerationCancellation): ChatAttemptIdentity?
 
-    /** The runtime stop is suspend: the service stop call suspends its caller. */
-    suspend fun requestRuntimeStop()
+    /**
+     * Stops only [attempt], the identity frozen before the run was cancelled.
+     *
+     * Implementations must not look up a current token/target at call time. A stop for an attempt
+     * that already ended is a no-op.
+     */
+    suspend fun requestRuntimeStop(attempt: ChatAttemptIdentity)
 
     fun runtimeLifecycle(): AgentEngineLifecycle
 
@@ -77,31 +93,44 @@ internal fun stopActiveGeneration(port: ChatStopGenerationPort) {
     // Stop must invalidate that reservation even while the mutation barrier
     // is active; its eventual onCommitted callback cannot reactivate it.
     if (!port.tryEnterStop()) return
+    if (!port.currentState().isGenerating) {
+        port.exitStop()
+        return
+    }
+    val metrics = port.currentReplyMetrics()?.takeIf { port.isRunCurrent(it.runId) }?.finish()
+    // Freeze the exact attempt atomically with the ownership cancellation, on the caller's
+    // thread, before the stop coroutine can race a replacement run. `cancellation.localAttempt`
+    // is the only engine target this stop may ever use (P03).
+    val cancellation = port.cancelCurrentGeneration()
+    val stoppedJob = cancellation.owner as? Job
+    // The epoch captured by the cancellation itself, not a later "current" read: a replacement
+    // that starts after this point must invalidate the stop instead of being mistaken for it.
+    val cancelledEpoch = cancellation.invalidatedRunId
     port.stopScope().launch {
         try {
-            if (!port.currentState().isGenerating) return@launch
-            val metrics = port.currentReplyMetrics()?.takeIf { port.isRunCurrent(it.runId) }
-                ?.finish()
-            val cancellation = port.cancelCurrentGeneration()
-            val stoppedJob = cancellation.owner as? Job
-            val stopLocalRuntime = cancellation.stopLocalRuntime ||
-                (cancellation.pendingCancelled &&
-                    port.activeUiStopRequestId()?.startsWith("ui-") == true)
-            val cancelledEpoch = port.currentRunId()
-            port.updateUiState { state ->
-                val task = state.browserTask
-                if (task?.phase != BrowserTaskPhase.SEARCHING) state
-                else state.copy(browserTask = BrowserTaskStateMachine.cancel(task, "Generation stopped"))
+            // A replacement run may have started between the synchronous freeze and this
+            // dispatcher hop. The exact attempt stop below is still safe (it can only name the
+            // frozen request), but the UI and browser task belong to the replacement now.
+            val ownsUiAtEntry = port.isRunCurrent(cancelledEpoch)
+            if (ownsUiAtEntry) {
+                port.updateUiState { state ->
+                    val task = state.browserTask
+                    if (task?.phase != BrowserTaskPhase.SEARCHING) state
+                    else state.copy(browserTask = BrowserTaskStateMachine.cancel(task, "Generation stopped"))
+                }
             }
             // The worker stop request is one-way and must not wait behind a
             // native decode mutex. A wedged Binder decode is bounded here so
             // the UI can recover even before the isolated worker watchdog
             // finishes reclaiming its process.
-            val stopRequested = !stopLocalRuntime ||
+            val frozenAttempt = port.frozenLocalAttempt(cancellation)
+            val stopRequested = frozenAttempt?.let { attempt ->
                 withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS) {
-                    port.requestRuntimeStop()
+                    port.requestRuntimeStop(attempt)
                     true
                 } == true
+            } ?: true
+            if (!ownsUiAtEntry || !port.isRunCurrent(cancelledEpoch)) return@launch
             val joined = withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS) {
                 stoppedJob?.join()
                 true
@@ -109,13 +138,12 @@ internal fun stopActiveGeneration(port: ChatStopGenerationPort) {
             if (!port.isRunCurrent(cancelledEpoch)) return@launch
             port.flushPendingAssistantOutput()
             val rollback = port.rollbackState()
-            var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-            port.updateUiState {
+            val stoppedLifecycle = port.runtimeLifecycle()
+            val settled = port.updateUiState {
                 val updated = it.withReplyGenerationMetrics(metrics)
-                sessionsToPersist = updated.chatSessions
                 updated.copy(
                     isGenerating = false,
-                    engineLifecycle = port.runtimeLifecycle(),
+                    engineLifecycle = stoppedLifecycle,
                     statusMessage = if (stopRequested && joined) {
                         "已停止生成"
                     } else {
@@ -123,7 +151,7 @@ internal fun stopActiveGeneration(port: ChatStopGenerationPort) {
                     }
                 ).withGenerationProgressCleared()
             }
-            port.persistConversationMutation(sessionsToPersist, rollback)
+            port.persistConversationMutation(settled.chatSessions, rollback)
         } finally {
             port.exitStop()
         }

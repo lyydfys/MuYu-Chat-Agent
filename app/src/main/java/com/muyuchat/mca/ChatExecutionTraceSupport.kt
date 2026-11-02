@@ -18,7 +18,7 @@ internal suspend fun ChatGenerationExecutionPort.attachTurnContextAssemblyTraceF
 }
 
 internal fun attachContextAssemblyTrace(
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<ConversationTraceFields>,
     chatRuns: ChatRunOwnership,
     traceJson: String?,
     generationRunId: Long,

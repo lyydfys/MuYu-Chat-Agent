@@ -1,5 +1,6 @@
 package com.muyuchat.mca.presentation
 
+import com.muyuchat.mca.*
 import com.muyuchat.core.engine.EngineLifecycleLease
 import com.muyuchat.mca.ImageGenerationBatchLineage
 import com.muyuchat.mca.LocalApiImageGenerationOwnership
@@ -70,7 +71,7 @@ internal interface LocalApiImageGenerationBasePort {
     val uiState: StateFlow<MainUiState>
 
     /** 写方向：原 `_uiState.update { }`。宿主机必须委托给 `MutableStateFlow.update`。 */
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (LocalApiImageFields) -> LocalApiImageFields)
 
     /** 原 `private fun MainUiState.selectedLocalImageModel()`。 */
     fun selectedLocalImageModel(): LocalImageModelRecord?

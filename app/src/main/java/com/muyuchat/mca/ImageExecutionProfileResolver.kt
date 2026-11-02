@@ -28,7 +28,8 @@ internal object ImageExecutionProfileResolver {
         BuiltInImageProfileTarget("qwen_image_2512_q2", "sdcpp.qwen-image"),
         BuiltInImageProfileTarget("qwen_image_21_q4_k_m", "sdcpp.qwen-image-2.1"),
         BuiltInImageProfileTarget("qwen_image_21_mnn_opencl", "mnn.qwen-image-2.1.opencl"),
-        BuiltInImageProfileTarget("longcat_image_q4", "sdcpp.longcat-image")
+        BuiltInImageProfileTarget("longcat_image_q4", "sdcpp.longcat-image"),
+        BuiltInImageProfileTarget("anima_preview_q4", "sdcpp.anima-preview")
     )
 
     private val targetByRecommendationId = builtInTargets.associateBy(BuiltInImageProfileTarget::recommendationId)

@@ -2,9 +2,14 @@
 
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.designsystem.*
+
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -21,17 +26,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Folder
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,9 +53,12 @@ import com.muyuchat.core.download.ModelScopeRecommendedModel
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.SmoothRightToLeftPage
 import com.muyuchat.core.designsystem.mcaPressScale
 import com.muyuchat.core.designsystem.rememberEnterVisibility
+import com.muyuchat.core.designsystem.rememberMcaHaptics
+import com.muyuchat.core.designsystem.McaIconSize
 
 private enum class ModelHubSection(val title: String) {
     LOCAL("本地"),
@@ -157,6 +160,9 @@ fun ModelHubScreen(
     onFetchHubModelFiles: (ModelScopeHubModel) -> Unit,
     onShowRecommendedFiles: (ModelScopeRecommendedModel) -> Unit,
     onDownloadRecommended: (ModelScopeRecommendedModel) -> Unit,
+    onDownloadRecommendedVariant: (ModelScopeRecommendedModel, String) -> Unit = { model, _ ->
+        onDownloadRecommended(model)
+    },
     onOpenModelPage: (String) -> Unit,
     onOpenLocalModel: (String) -> Unit = {},
     onVerifyLocalModel: (String) -> Unit = {},
@@ -182,6 +188,7 @@ fun ModelHubScreen(
     onCloudSupportsVisionChange: (Boolean) -> Unit,
     onCloudSupportsToolsChange: (Boolean) -> Unit = {},
     onCloudResponsesReasoningChange: (Boolean) -> Unit = {},
+    onCloudStreamingChange: (Boolean) -> Unit = {},
     onCloudImageFormatChange: (String) -> Unit,
     onCloudImageModelChange: (String) -> Unit,
     onCloudImageSizeChange: (String) -> Unit,
@@ -190,6 +197,7 @@ fun ModelHubScreen(
     onSaveCloudChatModel: () -> Unit,
     onSaveCloudImageModel: () -> Unit,
     onTestCloudApi: () -> Unit,
+    onFetchCloudModels: suspend () -> Result<List<String>> = { Result.failure(UnsupportedOperationException("获取模型列表未接入")) },
     onSelectCloudChat: (String) -> Unit,
     onSelectCloudImage: (String) -> Unit,
     onDeleteCloudModel: (String) -> Unit,
@@ -201,6 +209,7 @@ fun ModelHubScreen(
     onResumeImport: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val haptics = rememberMcaHaptics()
     var section by rememberSaveable(startInRecommended) {
         mutableStateOf(if (startInRecommended) ModelHubSection.RECOMMENDED else ModelHubSection.LOCAL)
     }
@@ -217,7 +226,10 @@ fun ModelHubScreen(
             ModelHubHeader(
                 state = state,
                 selected = section,
-                onSection = { section = it },
+                onSection = {
+                    if (section != it) haptics.tick()
+                    section = it
+                },
                 onBack = onBack,
                 onRefreshLocal = onRefreshLocal,
                 onPauseDownloads = onPauseDownloads,
@@ -227,80 +239,91 @@ fun ModelHubScreen(
             if (startInRecommended && section == ModelHubSection.RECOMMENDED) {
                 Text("下载完成后自动加入本地模型；是否可加载以完整性、兼容性和首次真实执行状态为准。", style = MaterialTheme.typography.bodySmall)
             }
-            when (section) {
-                ModelHubSection.LOCAL -> LocalModelsSection(
-                    state = state,
-                    onImportClick = onImportClick,
-                    onPauseImport = onPauseImport,
-                    onResumeImport = onResumeImport,
-                    onLoad = onLoad,
-                    onUnload = onUnload,
-                    onVerify = onVerify,
-                    onDelete = onDelete,
-                    onAttachVisionProjector = onAttachVisionProjector,
-                    onImportLocalImageModel = onImportLocalImageModel,
-                    onSelectLocalImageModel = onSelectLocalImageModel,
-                    onVerifyLocalImageModel = onVerifyLocalImageModel,
-                    onDeleteLocalImageModel = onDeleteLocalImageModel,
-                    onRemoveLocalImageModelRecord = onRemoveLocalImageModelRecord,
-                    modifier = Modifier.weight(1f)
-                )
-                ModelHubSection.CLOUD -> CloudModelsSection(
-                    state = state,
-                    onBeginAddCloudModel = { kind ->
-                        onBeginAddCloudModel(kind)
-                        cloudEditorKind = kind
-                    },
-                    onEditCloudModel = { modelId ->
-                        onEditCloudModel(modelId)
-                        cloudEditorKind = state.cloudApi.connectedModels.firstOrNull { it.id == modelId }?.kind ?: "CHAT"
-                    },
-                    onSelectCloudChat = onSelectCloudChat,
-                    onSelectCloudImage = onSelectCloudImage,
-                    onDeleteCloudModel = onDeleteCloudModel,
-                    modifier = Modifier.weight(1f)
-                )
-                ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
-                    state = state,
-                    onShowFiles = { model ->
-                        section = ModelHubSection.FILES
-                        onShowRecommendedFiles(model)
-                    },
-                    onDownload = onDownloadRecommended,
-                    onOpenPage = onOpenModelPage,
-                    onOpenLocalModel = { modelId ->
-                        section = ModelHubSection.LOCAL
-                        onOpenLocalModel(modelId)
-                    },
-                    onVerifyLocalModel = onVerifyLocalModel,
-                    onLoadLocalChatModel = { model ->
-                        section = ModelHubSection.LOCAL
-                        onLoad(model)
-                    },
-                    onVerifyLocalChatModel = onVerify,
-                    modifier = Modifier.weight(1f)
-                )
-                ModelHubSection.MARKET -> MarketSection(
-                    state = state,
-                    onHubQueryChange = onHubQueryChange,
-                    onSearchHubModels = onSearchHubModels,
-                    onShowFiles = { model ->
-                        section = ModelHubSection.FILES
-                        onFetchHubModelFiles(model)
-                    },
-                    onOpenPage = onOpenModelPage,
-                    modifier = Modifier.weight(1f)
-                )
-                ModelHubSection.FILES -> RemoteFilesSection(
-                    state = state,
-                    onImportClick = onImportClick,
-                    onPauseImport = onPauseImport,
-                    onResumeImport = onResumeImport,
-                    onRepoInputChange = onRepoInputChange,
-                    onFetchRemoteFiles = onFetchRemoteFiles,
-                    onDownload = onDownload,
-                    modifier = Modifier.weight(1f)
-                )
+            AnimatedContent(
+                targetState = section,
+                transitionSpec = {
+                    fadeIn(McaMotion.fade(150)) togetherWith fadeOut(McaMotion.fade(100))
+                },
+                label = "modelHubSectionContent",
+                modifier = Modifier.weight(1f)
+            ) { targetSection ->
+                when (targetSection) {
+                    ModelHubSection.LOCAL -> LocalModelsSection(
+                        state = state,
+                        onImportClick = onImportClick,
+                        onPauseImport = onPauseImport,
+                        onResumeImport = onResumeImport,
+                        onLoad = onLoad,
+                        onUnload = onUnload,
+                        onVerify = onVerify,
+                        onDelete = onDelete,
+                        onAttachVisionProjector = onAttachVisionProjector,
+                        onImportLocalImageModel = onImportLocalImageModel,
+                        onSelectLocalImageModel = onSelectLocalImageModel,
+                        onVerifyLocalImageModel = onVerifyLocalImageModel,
+                        onDeleteLocalImageModel = onDeleteLocalImageModel,
+                        onRemoveLocalImageModelRecord = onRemoveLocalImageModelRecord,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    ModelHubSection.CLOUD -> CloudModelsSection(
+                        state = state,
+                        onBeginAddCloudModel = { kind ->
+                            onBeginAddCloudModel(kind)
+                            cloudEditorKind = kind
+                        },
+                        onEditCloudModel = { modelId ->
+                            onEditCloudModel(modelId)
+                            cloudEditorKind = state.cloudApi.connectedModels.firstOrNull { it.id == modelId }?.kind ?: "CHAT"
+                        },
+                        onSelectCloudChat = onSelectCloudChat,
+                        onSelectCloudImage = onSelectCloudImage,
+                        onDeleteCloudModel = onDeleteCloudModel,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
+                        state = state,
+                        onShowFiles = { model ->
+                            section = ModelHubSection.FILES
+                            onShowRecommendedFiles(model)
+                        },
+                        onDownload = onDownloadRecommended,
+                        onDownloadVariant = onDownloadRecommendedVariant,
+                        onOpenPage = onOpenModelPage,
+                        onOpenLocalModel = { modelId ->
+                            section = ModelHubSection.LOCAL
+                            onOpenLocalModel(modelId)
+                        },
+                        onVerifyLocalModel = onVerifyLocalModel,
+                        onImportLocalImageModel = onImportLocalImageModel,
+                        onLoadLocalChatModel = { model ->
+                            section = ModelHubSection.LOCAL
+                            onLoad(model)
+                        },
+                        onVerifyLocalChatModel = onVerify,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    ModelHubSection.MARKET -> MarketSection(
+                        state = state,
+                        onHubQueryChange = onHubQueryChange,
+                        onSearchHubModels = onSearchHubModels,
+                        onShowFiles = { model ->
+                            section = ModelHubSection.FILES
+                            onFetchHubModelFiles(model)
+                        },
+                        onOpenPage = onOpenModelPage,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    ModelHubSection.FILES -> RemoteFilesSection(
+                        state = state,
+                        onImportClick = onImportClick,
+                        onPauseImport = onPauseImport,
+                        onResumeImport = onResumeImport,
+                        onRepoInputChange = onRepoInputChange,
+                        onFetchRemoteFiles = onFetchRemoteFiles,
+                        onDownload = onDownload,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
             }
         }
 
@@ -323,6 +346,7 @@ fun ModelHubScreen(
                 onSupportsVisionChange = onCloudSupportsVisionChange,
                 onSupportsToolsChange = onCloudSupportsToolsChange,
                 onResponsesReasoningChange = onCloudResponsesReasoningChange,
+                onStreamingChange = onCloudStreamingChange,
                 onImageModelChange = onCloudImageModelChange,
                 onImageSizeChange = onCloudImageSizeChange,
                 onImageEndpointPathChange = onCloudImageEndpointPathChange,
@@ -336,6 +360,7 @@ fun ModelHubScreen(
                     closePage()
                 },
                 onTest = onTestCloudApi,
+                onFetchModels = onFetchCloudModels,
                 modifier = pageModifier
             )
         }
@@ -363,8 +388,13 @@ private fun ModelHubHeader(
         ) {
             // 2.0x 大字号下给标题列限宽，副标题省略而不是把右侧刷新/图标挤出屏幕
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Rounded.Close, contentDescription = "返回聊天")
+                McaIconButton(
+                    onClick = onBack,
+                    contentDescription = "返回聊天",
+                    glyphSize = McaIconSize.L,
+                    tint = LocalContentColor.current
+                ) {
+                    Icon(McaIcons.Close, contentDescription = null, modifier = Modifier.size(McaIconSize.L))
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("模型管理", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -378,16 +408,22 @@ private fun ModelHubHeader(
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onRefreshLocal, enabled = !state.isBusy) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = "刷新本地模型")
+                McaIconButton(
+                    onClick = onRefreshLocal,
+                    enabled = !state.isBusy,
+                    contentDescription = "刷新本地模型",
+                    glyphSize = McaIconSize.L,
+                    tint = LocalContentColor.current
+                ) {
+                    Icon(McaIcons.Refresh, contentDescription = null, modifier = Modifier.size(McaIconSize.L))
                 }
                 Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = CircleShape) {
                     Icon(
-                        Icons.Rounded.Folder,
+                        McaIcons.Folder,
                         contentDescription = null,
                         // 容器配对前景色：primary 在暗色 primaryContainer 上仅约 2.1:1，非文本图标也不足 3:1
                         tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        modifier = Modifier.padding(9.dp).size(20.dp)
+                        modifier = Modifier.padding(9.dp).size(McaIconSize.M)
                     )
                 }
             }
@@ -425,7 +461,7 @@ private fun ModelHubHeader(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             presentation.downloadSummaryKey?.let { dismissedCompletedDownloadKey = it }
                         },

@@ -2,6 +2,7 @@
 
 package com.muyuchat.feature.modelhub
 
+import androidx.compose.runtime.Immutable
 import com.muyuchat.core.download.DownloadStatus
 import com.muyuchat.core.download.ModelScopeHubModel
 import com.muyuchat.core.download.ModelScopeRecommendedModel
@@ -24,6 +25,7 @@ enum class ModelHubDownloadFailureSource(val label: String) {
     EXECUTION("运行检查")
 }
 
+@Immutable
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,
@@ -86,6 +88,7 @@ data class ModelHubUiState(
 internal fun localChatModelCardIsLoaded(state: ModelHubUiState, modelId: String): Boolean =
     modelId == state.loadedModelId && state.localChatEngineReady
 
+@Immutable
 data class ModelImportTaskUi(
     val id: String,
     val message: String,
@@ -96,6 +99,7 @@ data class ModelImportTaskUi(
     val resumable: Boolean = false
 )
 
+@Immutable
 data class LocalImageModelUiItem(
     val id: String,
     val displayName: String,
@@ -115,6 +119,7 @@ data class LocalImageModelUiItem(
     val verificationMessage: String = ""
 )
 
+@Immutable
 data class CloudApiUiState(
     val enabled: Boolean = false,
     val apiFormat: String = "OPENAI_COMPATIBLE",
@@ -131,6 +136,8 @@ data class CloudApiUiState(
     val supportsVision: Boolean = false,
     val supportsTools: Boolean = false,
     val responsesReasoningEnabled: Boolean = false,
+    /** False asks the gateway for one JSON body; for gateways whose SSE never terminates. */
+    val streaming: Boolean = true,
     val imageApiFormat: String = "OPENAI_IMAGES",
     val availableImageFormats: List<Pair<String, String>> = listOf(
         "OPENAI_IMAGES" to "OpenAI Images",
@@ -150,6 +157,7 @@ data class CloudApiUiState(
     val imageSupported: Boolean = true
 )
 
+@Immutable
 data class CloudProviderPresetUi(
     val key: String,
     val title: String,

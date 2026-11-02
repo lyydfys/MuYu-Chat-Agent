@@ -1,5 +1,8 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIconSize
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -36,26 +39,22 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
+
+
+
+
+
+
+
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
@@ -150,8 +149,8 @@ internal fun ChatGeneratedImageContent(
                     )
                     if (!readOnly) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            TextButton(onClick = onApprove) { Text("同意生成") }
-                            TextButton(onClick = onReject) { Text("拒绝") }
+                            McaButton(style = McaButtonStyle.Text,onClick = onApprove) { Text("同意生成") }
+                            McaButton(style = McaButtonStyle.Text,onClick = onReject) { Text("拒绝") }
                         }
                     }
                 }
@@ -184,6 +183,10 @@ internal fun ChatGeneratedImageContent(
                         previewUriString = job.previewUriString,
                         previewStep = job.previewStep,
                         previewRevision = job.previewRevision,
+                        // R06: the live preview is bound to the generation job, not to the URI or
+                        // the preview step, so a replacement job with the same URI/revision can
+                        // never project the previous task's frame.
+                        jobId = job.id,
                         onCancel = onCancel
                     )
                 } else {
@@ -201,7 +204,7 @@ internal fun ChatGeneratedImageContent(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(onClick = onCancel) { Text("取消") }
+                        McaButton(style = McaButtonStyle.Text,onClick = onCancel) { Text("取消") }
                     }
                 }
             }
@@ -300,10 +303,10 @@ internal fun ChatGeneratedImageContent(
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    TextButton(onClick = { imageRetryEpoch++ }) { Text("重试") }
+                                    McaButton(style = McaButtonStyle.Text,onClick = { imageRetryEpoch++ }) { Text("重试") }
                                 }
                                 ChatImageLoadState.Loading -> CircularProgressIndicator(
-                                    modifier = Modifier.size(22.dp),
+                                    modifier = Modifier.size(McaIconSize.Optical.Action),
                                     strokeWidth = 2.dp
                                 )
                             }
@@ -322,11 +325,11 @@ internal fun ChatGeneratedImageContent(
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        TextButton(onClick = { previewImageId = selectedImage.id }) { Text("查看") }
+                        McaButton(style = McaButtonStyle.Text,onClick = { previewImageId = selectedImage.id }) { Text("查看") }
                         if (!readOnly) {
-                            TextButton(onClick = { onUseImageAsset(selectedImage.id) }) { Text("编辑") }
-                            TextButton(onClick = onRetry) { Text("再生成") }
-                            TextButton(onClick = { onDeleteImageAsset(selectedImage.id) }) { Text("删除") }
+                            McaButton(style = McaButtonStyle.Text,onClick = { onUseImageAsset(selectedImage.id) }) { Text("编辑") }
+                            McaButton(style = McaButtonStyle.Text,onClick = onRetry) { Text("再生成") }
+                            McaButton(style = McaButtonStyle.Text,onClick = { onDeleteImageAsset(selectedImage.id) }) { Text("删除") }
                         }
                         if (!readOnly && request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
                             request.toolContinuationStatus in setOf(
@@ -334,7 +337,7 @@ internal fun ChatGeneratedImageContent(
                                 ChatImageToolContinuationStatus.FAILED
                             )
                         ) {
-                            TextButton(onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
+                            McaButton(style = McaButtonStyle.Text,onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
                         }
                     }
                 }
@@ -388,15 +391,15 @@ internal fun ChatGeneratedImageContent(
                         overflow = TextOverflow.Ellipsis
                     )
                     if (!readOnly) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = onRetry) { Text("重试") }
-                        TextButton(onClick = onOpenImageModels) { Text("生图模型") }
+                        McaButton(style = McaButtonStyle.Text,onClick = onRetry) { Text("重试") }
+                        McaButton(style = McaButtonStyle.Text,onClick = onOpenImageModels) { Text("生图模型") }
                         if (request.origin == ChatGeneratedImageOrigin.ASSISTANT_TOOL &&
                             request.toolContinuationStatus in setOf(
                                 ChatImageToolContinuationStatus.NOT_STARTED,
                                 ChatImageToolContinuationStatus.FAILED
                             )
                         ) {
-                            TextButton(onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
+                            McaButton(style = McaButtonStyle.Text,onClick = onContinueAssistantImageTurn) { Text("继续角色回复") }
                         }
                     }
                 }
@@ -437,7 +440,7 @@ internal fun ChatGeneratedImageContent(
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(onClick = { previewImageId = null }) { Text("关闭") }
+                        McaButton(style = McaButtonStyle.Text,onClick = { previewImageId = null }) { Text("关闭") }
                     }
                     when (previewState) {
                         is ChatImageLoadState.Ready -> Image(
@@ -464,7 +467,7 @@ internal fun ChatGeneratedImageContent(
                             verticalArrangement = Arrangement.Center
                         ) {
                             Text("图片文件暂时无法读取。")
-                            TextButton(onClick = { previewRetry += 1 }) { Text("重试") }
+                            McaButton(style = McaButtonStyle.Text,onClick = { previewRetry += 1 }) { Text("重试") }
                         }
                     }
                 }

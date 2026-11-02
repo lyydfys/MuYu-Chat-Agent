@@ -15,7 +15,7 @@ import com.muyuchat.mca.LocalImageModelFamily
 import com.muyuchat.mca.LocalImageModelRecord
 import com.muyuchat.mca.LocalImageRuntime
 import com.muyuchat.mca.LocalImageVerificationStatus
-import com.muyuchat.mca.LocalImageExecutionGate
+import com.muyuchat.mca.NativeMediaExecutionGate
 import com.muyuchat.mca.LocalImageGenerationOptions
 import com.muyuchat.mca.LocalImageProvider
 import com.muyuchat.mca.LocalImageWorkerClient
@@ -339,7 +339,7 @@ class LocalImageSmokeActivity : Activity() {
                 val resolvedBundleRoot = bundleRoot.ifBlank { File(modelPath).parent.orEmpty() }
                 val (verificationEvidence, verificationStamp) = if (isQnnHtp) {
                     runBlocking {
-                        LocalImageExecutionGate.withLease(applicationContext) {
+                        NativeMediaExecutionGate.withLease(applicationContext) {
                             val evidence = verifyQnnWorkerPrerequisite(
                                 bundleRoot = resolvedBundleRoot,
                                 requestJson = requestJson,
@@ -650,7 +650,7 @@ class LocalImageSmokeActivity : Activity() {
             Thread {
                 try {
                     runBlocking {
-                        LocalImageExecutionGate.withLease(applicationContext) {
+                        NativeMediaExecutionGate.withLease(applicationContext) {
                             val acquiredAt = System.currentTimeMillis()
                             mainLeaseHeld.set(true)
                             write(

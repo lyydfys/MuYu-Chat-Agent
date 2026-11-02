@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.muyuchat.mca.composition.McaAppContainer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -129,7 +128,7 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
             var prepared: MainViewModel? = null
             var published = false
             try {
-                val app = getApplication<Application>()
+                val app = getApplication<McaApplication>()
                 val previous = withContext(Dispatchers.IO) { StartupDiagnostics.read(app) }
                 stamp("diagnostics-read")
                 mark(AppStartupPhase.PREPARING, 0.05f)
@@ -150,9 +149,11 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                 stamp("migration")
                 mark(AppStartupPhase.ASSEMBLING, 0.22f)
                 prepared = withContext(Dispatchers.IO) {
-                    val container = McaAppContainer(app)
+                    val container = app.processRuntimeOwner.container()
                     stamp("container")
                     val installationScopeId = container.runtimeProfileStore.installationScopeId()
+                    val runtimeRoot = app.processRuntimeOwner.root(installationScopeId)
+                    stamp("runtime-root")
                     MainViewModel(
                         app,
                         deferStartup = true,
@@ -160,7 +161,8 @@ class AppStartupViewModel(application: Application) : AndroidViewModel(applicati
                         injectedStartupContext = MainViewModelStartupContext(
                             container = container,
                             installationScopeId = installationScopeId,
-                            modelIdentityReferencesMigrated = migrated
+                            modelIdentityReferencesMigrated = migrated,
+                            runtimeRoot = runtimeRoot
                         )
                     )
                 }

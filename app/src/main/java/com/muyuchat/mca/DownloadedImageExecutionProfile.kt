@@ -118,7 +118,13 @@ internal fun materializeDownloadedImageExecutionProfile(
     val defaults = source.defaults
     val qwen21Gguf = bundle.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP &&
         source.variant.name == ImageModelVariant.QWEN_IMAGE_21.name
-    val latentChannels = if (qwen21Gguf) 64 else 4
+    val animaGguf = bundle.runtime == ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP &&
+        source.variant.name == ImageModelVariant.ANIMA_PREVIEW.name
+    val latentChannels = when {
+        qwen21Gguf -> 64
+        animaGguf -> 16
+        else -> 4
+    }
     val latentDownsample = if (qwen21Gguf) 16 else 8
     val profile = ImageExecutionProfile(
         profileId = source.profileId,
@@ -128,6 +134,7 @@ internal fun materializeDownloadedImageExecutionProfile(
             ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP -> LocalImageRuntime.STABLE_DIFFUSION_CPP
             ImageEngineBundleRuntime.MNN_DIFFUSION -> LocalImageRuntime.MNN_DIFFUSION
             ImageEngineBundleRuntime.QNN_HTP -> LocalImageRuntime.QNN_HTP
+            ImageEngineBundleRuntime.MEDIATEK_NEURON -> LocalImageRuntime.MEDIATEK_NEURON
         },
         family = LocalImageModelFamily.from(source.family.name),
         variant = ImageModelVariant.valueOf(source.variant.name),
@@ -144,7 +151,7 @@ internal fun materializeDownloadedImageExecutionProfile(
             eosId = source.tokenizer.eosId,
             padId = source.tokenizer.padId,
             maxLength = source.tokenizer.maxLength,
-            lowercase = !qwen21Gguf,
+            lowercase = !(qwen21Gguf || animaGguf),
             clip1PadRule = ImageClipPadRule.valueOf(source.tokenizer.clip1PadRule.name),
             clip2PadRule = source.tokenizer.clip2PadRule?.let { ImageClipPadRule.valueOf(it.name) },
             supportsPromptWeighting = source.tokenizer.supportsPromptWeighting,

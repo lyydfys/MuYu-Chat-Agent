@@ -65,7 +65,15 @@ json build_generation_effective_json(
             contract.width,
             contract.height);
     native_effective["actualModelVersion"] = actual_model_version;
-    native_effective["actualModelVariant"] = actual_qwen_image_21 ? "QWEN_IMAGE_21" : "";
+    const bool actual_anima = actual_model_version == "Anima";
+    native_effective["actualModelFamily"] = actual_anima ? "ANIMA" : "";
+    native_effective["actualModelVariant"] =
+            actual_qwen_image_21 ? "QWEN_IMAGE_21" : (actual_anima ? "ANIMA_PREVIEW" : "");
+    if (actual_anima) {
+        // Anima is a 16-channel DiT decoded by the Qwen-image VAE (8x).
+        native_effective["actualLatentChannels"] = 16;
+        native_effective["actualLatentDownsample"] = 8;
+    }
     native_effective["nativeScheduler"] = sd_scheduler_name(gen.sample_params.scheduler);
     if (!contract.qwen_turbo_schedule.empty()) {
         native_effective["qwenTurboSchedule"] = contract.qwen_turbo_schedule;

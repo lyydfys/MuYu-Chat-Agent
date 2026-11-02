@@ -10,7 +10,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** R3/C3-S15：资产生成端口具名化（owner 真实对象注入；注释中的 requestedJobId 丢弃为现存行为）。 */
 internal class ImageAssetCreationPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageAssetCreationFields>,
     private val application: Application,
     private val admission: RuntimeAdmissionState,
     private val imageGenerationOwner: ImageGenerationOwner,
@@ -20,7 +20,7 @@ internal class ImageAssetCreationPortAdapter(
 ) : ImageAssetCreationPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageAssetCreationFields) -> ImageAssetCreationFields) {
         store.update(transform)
     }
 
@@ -41,7 +41,12 @@ internal class ImageAssetCreationPortAdapter(
     }
 
     override fun invalidatePendingChatImagePreparation() {
-        invalidatePendingChatImagePreparationInto(store, admission)
+        invalidatePendingChatImagePreparationFor(admission) {
+            store.update { it.copy(
+                pendingChatImageTranslationDraft = null,
+                pendingChatImageActionDraft = null
+            ) }
+        }
     }
 
     override fun canReadGenerationHistoryInput(reference: String): Boolean =
@@ -81,7 +86,7 @@ internal class ImageAssetCreationPortAdapter(
 
 /** R3/C3-S15：图像放大端口具名化（对账 owner 经 S13 注入；createUpscaledAsset 走资产生成端口）。 */
 internal class ImageUpscalePortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageUpscaleFields>,
     private val application: Application,
     private val coordinator: LocalImageGenerationCoordinator,
     private val observationLock: Any,
@@ -92,14 +97,15 @@ internal class ImageUpscalePortAdapter(
     private val chatSessionStoreRef: ChatSessionStore,
     private val upscalerStoreRef: LocalImageUpscalerStore,
     private val assetDirectory: File,
-    private val mutationMutex: Mutex
+    private val mutationMutex: Mutex,
+    private val setDeferGenerationImageGrantRelease: (Boolean) -> Unit
 ) : ImageUpscalePort {
     override val context: Application
         get() = application
 
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageUpscaleFields) -> ImageUpscaleFields) {
         store.update(transform)
     }
 
@@ -137,17 +143,21 @@ internal class ImageUpscalePortAdapter(
     override fun tryAcquireObservedImageGenerationLease(
         requestId: String
     ): LocalImageGenerationCoordinator.Lease? =
-        tryAcquireObservedImageGenerationLeaseFor(store, coordinator, observationLock, requestId)
+        tryAcquireObservedImageGenerationLeaseFor(
+            setDeferGenerationImageGrantRelease, coordinator, observationLock, requestId
+        )
 
     override fun releaseObservedImageGenerationLease(
         lease: LocalImageGenerationCoordinator.Lease
     ): Boolean =
-        releaseObservedImageGenerationLeaseFor(store, coordinator, observationLock, lease)
+        releaseObservedImageGenerationLeaseFor(
+            setDeferGenerationImageGrantRelease, coordinator, observationLock, lease
+        )
 }
 
 /** R3/C3-S16：图片库提交端口具名化（journal 以 provider 传入，保持原 lazy 时机）。 */
 internal class ImageLibraryCommitPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageLibraryCommitFields>,
     private val persistenceState: ChatSessionPersistenceState,
     private val chatSessionStoreRef: ChatSessionStore,
     private val journalProvider: () -> ChatImageCommitJournal,
@@ -158,7 +168,7 @@ internal class ImageLibraryCommitPortAdapter(
     override val uiState: StateFlow<MainUiState>
         get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageLibraryCommitFields) -> ImageLibraryCommitFields) {
         store.update(transform)
     }
 
@@ -214,7 +224,7 @@ internal class ImageLibraryCommitPortAdapter(
 
 /** R3/C3-S16：图片删除端口具名化（放大 owner 与 S13 对账 owner 均真实对象注入）。 */
 internal class ImageAssetDeletionPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageAssetDeletionFields>,
     private val scopeRef: CoroutineScope,
     private val admissionRef: RuntimeAdmissionState,
     private val imageUpscaleOwnerRef: ImageUpscaleOwner,
@@ -226,7 +236,7 @@ internal class ImageAssetDeletionPortAdapter(
     override val uiState: StateFlow<MainUiState>
         get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ImageAssetDeletionFields) -> ImageAssetDeletionFields) {
         store.update(transform)
     }
 

@@ -1,0 +1,19 @@
+--- a/src/model/vae/wan_vae.hpp	2026-10-31 18:39:08.501372300 +0800
++++ b/src/model/vae/wan_vae.hpp	2026-10-31 18:39:08.612443600 +0800
+@@ -1536,9 +1536,15 @@
+                     // tile.start is the global chunk index; it must not be renumbered per tile.
+                     return build_temporal_tile_graph(input_tile, static_cast<int>(tile.start));
+                 };
+-                return restore_trailing_singleton_dims(
++                auto decoded = restore_trailing_singleton_dims(
+                     GGMLRunner::compute(get_graph, n_threads, false),
+                     static_cast<size_t>(input.dim()));
++                LOG_VERBOSE("Wan VAE tile %d/%d memory: workspace=%.1fMB cache_resident=%.1fMB",
++                            tile.index + 1,
++                            (int)plan.tiles.size(),
++                            workspace_.bytes(runtime_backend) / (1024.0 * 1024.0),
++                            cache_.resident_bytes(ggml_backend_get_device(runtime_backend)) / (1024.0 * 1024.0));
++                return decoded;
+             };
+ 
+             if (on_tile) {

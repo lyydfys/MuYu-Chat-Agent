@@ -8,12 +8,16 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
-import androidx.compose.foundation.Image
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.InputStream
@@ -56,6 +60,22 @@ internal fun loadImageBitmap(
     decode(BitmapFactory.Options().apply { inSampleSize = sampleSize })
 }.getOrNull()
 
+/**
+ * Cache policy or metadata failure must never remove the image path, but a cancelled decode must
+ * not silently fall through to a second, uncached decode either: cancellation is rethrown before
+ * the fallback is considered.
+ */
+internal suspend fun <T : Any> loadCachedImageOrFallback(
+    cached: suspend () -> T?,
+    fallback: suspend () -> T?
+): T? = try {
+    cached()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Throwable) {
+    fallback()
+}
+
 internal suspend fun loadChatImageBitmap(
     context: Context,
     uriString: String,
@@ -69,19 +89,23 @@ internal suspend fun loadChatImageBitmap(
             loadImageBitmap(appContext, uriString, maxDimensionPx)
         }
     }
-    return try {
-        ChatImageBitmapStore.load(appContext, uriString, maxDimensionPx, revisionKey)
-    } catch (cancelled: CancellationException) {
-        throw cancelled
-    } catch (_: Throwable) {
-        // Cache policy or metadata failure must never remove the image path.
-        withContext(Dispatchers.IO) {
-            loadImageBitmap(appContext, uriString, maxDimensionPx)
+    return loadCachedImageOrFallback(
+        cached = { ChatImageBitmapStore.load(appContext, uriString, maxDimensionPx, revisionKey) },
+        fallback = {
+            withContext(Dispatchers.IO) {
+                loadImageBitmap(appContext, uriString, maxDimensionPx)
+            }
         }
-    }
+    )
 }
 
-/** Honest load state: a failed decode must not keep rendering "loading" forever. */
+/**
+ * Honest load state: a failed decode must not keep rendering "loading" forever.
+ *
+ * Legacy three-state projection kept for the call sites that only need Loading/Ready/Failed. New
+ * surfaces that must also distinguish "no source yet" and that need request identity use
+ * [rememberChatImageBitmap] with [ImageDisplayProjection] instead of widening this sealed type.
+ */
 internal sealed interface ChatImageLoadState {
     data object Loading : ChatImageLoadState
     data class Ready(val bitmap: Bitmap) : ChatImageLoadState
@@ -93,42 +117,98 @@ internal fun rememberChatImageLoadState(
     context: Context,
     uriString: String,
     maxDimensionPx: Int? = null,
-    revisionKey: Any? = null
+    revisionKey: Any? = null,
+    taskIdentity: Any? = null
 ): ChatImageLoadState {
     val state = produceState<ChatImageLoadState>(
         initialValue = ChatImageLoadState.Loading,
         key1 = uriString,
         key2 = maxDimensionPx,
-        key3 = revisionKey
+        key3 = chatImageRevisionToken(revisionKey) to taskIdentity
     ) {
         // A retry (revisionKey change) restarts the producer; reset to Loading so the failed
         // appearance does not persist while the new decode runs.
         value = ChatImageLoadState.Loading
-        value = runCatching { loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey) }
-            .fold(
-                onSuccess = { bitmap ->
-                    if (bitmap != null) ChatImageLoadState.Ready(bitmap) else ChatImageLoadState.Failed
-                },
-                onFailure = { ChatImageLoadState.Failed }
-            )
+        val bitmap = try {
+            loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey)
+        } catch (cancelled: CancellationException) {
+            // A cancelled producer must never publish Failed: it is a superseded request, not a
+            // user-visible decode failure.
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+        // The effect may already be disposed (asset removed, screen left, request superseded);
+        // a terminal value must not be written back into a surface that no longer owns it.
+        if (!coroutineContext.isActive) return@produceState
+        value = if (bitmap != null) ChatImageLoadState.Ready(bitmap) else ChatImageLoadState.Failed
     }
     return state.value
 }
 
+/**
+ * Request-identified image projection for one surface.
+ *
+ * The historical name is kept for the existing product-closure contract; the function now returns
+ * the full [ImageDisplayProjection] instead of a nullable bitmap, because "unreadable", "no frame
+ * produced yet" and "still decoding" must not all collapse into `null`:
+ *
+ * - [ImageDisplayPhase.ABSENT] no source configured yet (nothing exists to render or retry);
+ * - [ImageDisplayPhase.LOADING] a matching decode is running;
+ * - [ImageDisplayPhase.READY] a result committed for *this* request (URI, size, revision, owner);
+ * - [ImageDisplayPhase.FAILED] the read failed and can be retried by bumping the revision key.
+ *
+ * A request identity mismatch projects Loading synchronously on the first frame, the decode checks
+ * cancellation and request identity before committing, and the cache/concurrency owner stays
+ * [ChatImageBitmapStore] -- no second cache or runtime is introduced.
+ */
 @Composable
 internal fun rememberChatImageBitmap(
     context: Context,
     uriString: String,
     maxDimensionPx: Int? = null,
-    revisionKey: Any? = null
-) = produceState<Bitmap?>(
-    initialValue = null,
-    key1 = uriString,
-    key2 = maxDimensionPx,
-    key3 = revisionKey
-) {
-        value = loadChatImageBitmap(context, uriString, maxDimensionPx, revisionKey)
+    revisionKey: Any? = null,
+    taskIdentity: Any? = null
+): ImageDisplayProjection<Bitmap> {
+    val request = remember(
+        uriString,
+        maxDimensionPx?.coerceAtLeast(1),
+        chatImageRevisionToken(revisionKey),
+        taskIdentity
+    ) {
+        ImageDisplayRequest(
+            uriString = uriString,
+            maxDimensionPx = maxDimensionPx,
+            revisionKey = revisionKey,
+            taskIdentity = taskIdentity
+        )
     }
+    val committed = remember { mutableStateOf<ImageDisplayProjection<Bitmap>?>(null) }
+    val slot = remember {
+        ImageDisplaySlot<Bitmap>(
+            read = { committed.value },
+            write = { next -> committed.value = next }
+        )
+    }
+    val latestRequest by rememberUpdatedState(request)
+    LaunchedEffect(request) {
+        if (!request.isPresent) return@LaunchedEffect
+        driveImageDisplay(
+            slot = slot,
+            request = request,
+            currentRequest = { latestRequest },
+            decode = { decodeRequest ->
+                loadChatImageBitmap(
+                    context = context,
+                    uriString = decodeRequest.uriString,
+                    maxDimensionPx = decodeRequest.maxDimensionPx,
+                    revisionKey = decodeRequest.revisionKey
+                )
+            }
+        )
+    }
+    return slot.project(request)
+}
 
 // P9/S4: private→internal（纯工具；跨文件被 ImageWorkspaceScreens 复合区引用）
 internal fun downloadImageAssetToGallery(context: Context, image: ImageAssetUiItem): Result<String> =

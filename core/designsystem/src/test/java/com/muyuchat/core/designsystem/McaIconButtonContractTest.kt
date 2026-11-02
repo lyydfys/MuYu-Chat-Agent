@@ -10,7 +10,7 @@ import org.junit.Test
  * `core:designsystem`.
  *
  * The task is deliberately not to build a new button: the existing glyph surface must stay a
- * 48 dp circular target with a 22 dp glyph, a required accessible name and the shared
+ * 48 dp circular target with a tokenized 20 dp glyph, a required accessible name and the shared
  * [mcaPressScale] weight feedback. The content lambda is intentionally parameterless and the
  * accessible name is applied once on the button, so a caller cannot end up with two live
  * descriptions on the same node. Disabled buttons must downgrade both their content and any
@@ -54,8 +54,8 @@ class McaIconButtonContractTest {
             Regex("""size: Dp = 48\.dp""").containsMatchIn(source)
         )
         assertTrue(
-            "the default glyph box must stay 22 dp",
-            Regex("""glyphSize: Dp = 22\.dp""").containsMatchIn(source)
+            "the default glyph box must use the medium icon-size token",
+            Regex("""glyphSize: Dp = McaIconSize\.M""").containsMatchIn(source)
         )
         assertTrue(
             "the button role must be explicit",

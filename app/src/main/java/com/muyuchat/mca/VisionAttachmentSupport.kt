@@ -182,7 +182,7 @@ internal interface VisionAttachmentPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (VisionAttachmentFields) -> VisionAttachmentFields)
 
     /** The engine's raw native stats document. The caller reads it; this file judges it. */
     fun nativeStatsJson(): String

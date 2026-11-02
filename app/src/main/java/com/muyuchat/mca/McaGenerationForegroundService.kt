@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.muyuchat.mca.agent.platform.AgentRunNotificationProtocol
 
 /**
  * Protects caller-side chat/image generation and persistence while the activity is backgrounded.
@@ -43,6 +44,12 @@ class McaGenerationForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == AgentRunNotificationProtocol.ACTION_STOP_RUN) {
+            // The Agent stop action is a control command, not a generation lease. Route it to the
+            // process owner and never start/promote a foreground generation for it.
+            agentStopActionHandler?.invoke(intent)
+            return START_NOT_STICKY
+        }
         runCatching {
             // Keep this call even though onCreate promotes the service. Some OEMs recreate a
             // service instance without delivering the original notification state; promoting
@@ -86,8 +93,8 @@ class McaGenerationForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun buildNotification(task: GenerationForegroundLeaseRegistry.Snapshot) =
-        NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(task: GenerationForegroundLeaseRegistry.Snapshot): android.app.Notification {
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_mca_api)
             .setContentTitle("MCA 正在生成")
             .setContentText(
@@ -97,6 +104,7 @@ class McaGenerationForegroundService : Service() {
                     when (task.kind) {
                         KIND_IMAGE -> "图像任务在后台继续运行"
                         KIND_API -> "本地 API 请求在后台继续运行"
+                        KIND_AGENT -> "Agent 任务在后台继续运行"
                         else -> "聊天生成在后台继续运行"
                     }
                 }
@@ -107,7 +115,21 @@ class McaGenerationForegroundService : Service() {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .build()
+        task.agentStopAction?.let { action ->
+            val stopIntent = Intent(this, McaGenerationForegroundService::class.java)
+                .setAction(AgentRunNotificationProtocol.ACTION_STOP_RUN)
+                .putExtra(AgentRunNotificationProtocol.EXTRA_RUN_ID, action.runId)
+                .putExtra(AgentRunNotificationProtocol.EXTRA_RUN_EPOCH, action.epoch)
+            val stopPendingIntent = PendingIntent.getService(
+                this,
+                STOP_ACTION_REQUEST_CODE,
+                stopIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            builder.addAction(R.drawable.ic_stat_mca_api, "停止", stopPendingIntent)
+        }
+        return builder.build()
+    }
 
     private fun buildBootstrapNotification() =
         NotificationCompat.Builder(this, CHANNEL_ID)
@@ -150,17 +172,27 @@ class McaGenerationForegroundService : Service() {
         // Package-wide IDs must not collide with the isolated chat worker (11436),
         // image worker (11437), or Local API (11435), even across processes.
         private const val NOTIFICATION_ID = 11438
+        private const val STOP_ACTION_REQUEST_CODE = 11439
         private val leases = GenerationForegroundLeaseRegistry()
         const val KIND_CHAT = "chat"
         const val KIND_IMAGE = "image"
         const val KIND_API = "api"
+        const val KIND_AGENT = "agent"
+
+        /**
+         * Process-local Agent stop-action sink. The Agent owner installs it when the runtime is
+         * created and clears it on close; null means no Agent owner is alive, so the action is a no-op.
+         */
+        @Volatile
+        internal var agentStopActionHandler: ((Intent) -> Unit)? = null
 
         /** Returns null if Android synchronously rejects foreground service admission. */
         internal fun acquire(
             context: Context,
-            kind: String = KIND_CHAT
+            kind: String = KIND_CHAT,
+            agentStopAction: com.muyuchat.mca.agent.platform.AgentStopAction? = null
         ): GenerationForegroundLease? = runCatching {
-            leases.acquire(kind) {
+            leases.acquire(kind, agentStopAction) {
                 ContextCompat.startForegroundService(
                     context.applicationContext,
                     Intent(context.applicationContext, McaGenerationForegroundService::class.java)

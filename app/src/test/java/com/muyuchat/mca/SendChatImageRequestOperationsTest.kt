@@ -4,6 +4,7 @@ import com.muyuchat.core.engine.ChatGeneratedImageRequest
 import com.muyuchat.core.engine.ChatGeneratedImageStatus
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.Role
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotSame
@@ -15,8 +16,8 @@ import org.junit.Test
 /**
  * Pins the extracted chat-image send path ([SendChatImageRequestOperations.sendChatImageRequest]).
  *
- * The port is a hand-written recording fake on purpose: the production collaborator is a 19,600-line
- * `AndroidViewModel` that needs a real `Application`, and this operation is a decision sequence, not
+ * The port is a hand-written recording fake on purpose: the production adapter needs application
+ * collaborators, and this operation is a decision sequence, not
  * a suspend flow. Every test drives one branch and asserts what the port observed -- the status the
  * user sees, the state transaction that was published, the ids that reached admission, and the
  * request rewrite that follows a rejected admission.
@@ -26,6 +27,8 @@ class SendChatImageRequestOperationsTest {
     // ── the fake port ───────────────────────────────────────────────────────────────────────────
 
     private data class UpsertCall(
+        val state: MainUiState,
+        val occurredAt: Long,
         val sessions: List<ChatSessionRecord>,
         val sessionId: String,
         val messages: List<ChatMessage>,
@@ -46,7 +49,7 @@ class SendChatImageRequestOperationsTest {
     )
 
     private class RecordingPort(
-        var state: MainUiState,
+        state: MainUiState,
         var writable: Boolean = true,
         var submissionBlockMessage: String? = null,
         var mutationInProgress: Boolean = false,
@@ -63,9 +66,18 @@ class SendChatImageRequestOperationsTest {
         var onEnqueue: ((RecordingPort) -> Unit)? = null,
         /** Runs before a transaction transform, so a test can stage a concurrent publication. */
         var onBeforeTransform: ((RecordingPort) -> Unit)? = null,
+        /** Runs before CAS, allowing one attempt to lose to a competing publication. */
+        var onAfterTransform: ((RecordingPort) -> Unit)? = null,
+        /** Runs after CAS, before the operation can consume the committed transaction result. */
+        var onAfterCommit: ((RecordingPort) -> Unit)? = null,
         /** Derives the answer from the state argument, so the test can tell which state was asked. */
         var modelIdFromState: ((MainUiState) -> String?)? = null
     ) : SendChatImageRequestPort {
+
+        private val stateFlow = MutableStateFlow(state)
+        var state: MainUiState
+            get() = stateFlow.value
+            set(value) { stateFlow.value = value }
 
         val statuses = mutableListOf<String>()
         val publishedStates = mutableListOf<MainUiState>()
@@ -84,12 +96,22 @@ class SendChatImageRequestOperationsTest {
             return state
         }
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+        override fun <Result> updateUiStateWithResult(
+            transform: (SendChatImageFields) -> Pair<SendChatImageFields, Result>
+        ): Result {
             onBeforeTransform?.invoke(this)
-            val input = state
-            transformInputs += input
-            state = transform(input)
-            publishedStates += state
+            while (true) {
+                val input = state
+                transformInputs += input
+                val (fields, result) = transform(input.toSendChatImageFields())
+                val committed = fields.mergeInto(input)
+                onAfterTransform?.invoke(this)
+                if (stateFlow.compareAndSet(input, committed)) {
+                    publishedStates += committed
+                    onAfterCommit?.invoke(this)
+                    return result
+                }
+            }
         }
 
         override fun showStatus(message: String) {
@@ -123,6 +145,8 @@ class SendChatImageRequestOperationsTest {
             optionsFailure?.let { throw it } ?: liveOptions
 
         override fun upsertSession(
+            state: MainUiState,
+            occurredAt: Long,
             sessions: List<ChatSessionRecord>,
             sessionId: String,
             messages: List<ChatMessage>,
@@ -132,6 +156,8 @@ class SendChatImageRequestOperationsTest {
             modelId: String?
         ): List<ChatSessionRecord> {
             upsertCalls += UpsertCall(
+                state = state,
+                occurredAt = occurredAt,
                 sessions = sessions,
                 sessionId = sessionId,
                 messages = messages,
@@ -517,6 +543,55 @@ class SendChatImageRequestOperationsTest {
         )
     }
 
+    @Test
+    fun `CAS retry persists and admits only the winning session even after a later publication`() {
+        val initial = localState(activeChatSessionId = null).copy(loadedModelId = "model-initial")
+        val winningSessions = listOf(ChatSessionRecord("session-live", "live", emptyList()))
+        val laterSessions = listOf(ChatSessionRecord("session-later", "later", emptyList()))
+        val port = RecordingPort(initial, localImageModel = localModel())
+        port.modelIdFromState = { it.loadedModelId }
+        port.onAfterTransform = {
+            it.onAfterTransform = null
+            it.state = it.state.copy(
+                activeChatSessionId = "session-live",
+                chatSessions = winningSessions,
+                selectedKnowledgeBaseIds = setOf("kb-live"),
+                loadedModelId = "model-live"
+            )
+        }
+        port.onAfterCommit = {
+            it.onAfterCommit = null
+            it.state = it.state.copy(
+                activeChatSessionId = "session-later",
+                chatSessions = laterSessions,
+                selectedKnowledgeBaseIds = setOf("kb-later"),
+                loadedModelId = "model-later"
+            )
+        }
+
+        operate(port)
+
+        assertEquals("one failed attempt must be retried", 2, port.upsertCalls.size)
+        val failed = port.upsertCalls[0]
+        val winning = port.upsertCalls[1]
+        assertTrue(Regex("[0-9a-f-]{36}").matches(failed.sessionId))
+        assertEquals("session-live", winning.sessionId)
+        assertEquals("model-initial", failed.modelId)
+        assertEquals("model-live", winning.modelId)
+        assertSame(port.transformInputs[0], failed.state)
+        assertSame(port.transformInputs[1], winning.state)
+        assertEquals("retry must reuse the frozen timestamp", failed.occurredAt, winning.occurredAt)
+        assertSame("retry must reuse the user turn", failed.messages[2], winning.messages[2])
+        assertSame("retry must reuse the request identity", failed.messages[3], winning.messages[3])
+        assertEquals(1, port.publishedStates.size)
+        assertEquals(winningSessions, port.publishedStates.single().chatSessions)
+        assertEquals(winningSessions to ("session-live" to setOf("kb-live")), port.persistCalls.single())
+        assertEquals("session-live", port.enqueueCalls.single().requestedChatSessionId)
+        assertEquals("session-live", port.jobBackfills.single().first)
+        assertEquals("a later publication must survive persistence", laterSessions, port.state.chatSessions)
+        assertEquals("session-later", port.state.activeChatSessionId)
+    }
+
     // ── the selected image backend branch ───────────────────────────────────────────────────────
 
     @Test
@@ -690,8 +765,10 @@ class SendChatImageRequestOperationsTest {
         private var value = MainUiState(input = "host")
         private val statuses = mutableListOf<String>()
 
-        private fun writeValue(transform: (MainUiState) -> MainUiState) {
-            value = transform(value)
+        private fun <Result> writeValue(transform: (SendChatImageFields) -> Pair<SendChatImageFields, Result>): Result {
+            val (fields, result) = transform(value.toSendChatImageFields())
+            value = fields.mergeInto(value)
+            return result
         }
 
         private fun publishStatus(message: String) {
@@ -704,9 +781,9 @@ class SendChatImageRequestOperationsTest {
             val port = object : SendChatImageRequestPort {
                 override fun uiState(): MainUiState = this@AdapterShapeHost.value
 
-                override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-                    this@AdapterShapeHost.writeValue(transform)
-                }
+                override fun <Result> updateUiStateWithResult(
+                    transform: (SendChatImageFields) -> Pair<SendChatImageFields, Result>
+                ): Result = this@AdapterShapeHost.writeValue(transform)
 
                 override fun showStatus(message: String) {
                     this@AdapterShapeHost.publishStatus(message)
@@ -732,6 +809,8 @@ class SendChatImageRequestOperationsTest {
                 ): LocalImageGenerationOptions = error("unused")
 
                 override fun upsertSession(
+                    state: MainUiState,
+                    occurredAt: Long,
                     sessions: List<ChatSessionRecord>,
                     sessionId: String,
                     messages: List<ChatMessage>,

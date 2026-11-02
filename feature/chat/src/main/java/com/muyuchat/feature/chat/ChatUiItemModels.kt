@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.Immutable
 import org.json.JSONObject
 
 // P9/S2：从 ChatScreen.kt 等值移出的聊天/图像 UI 条目模型与小助手簇。
@@ -17,6 +18,7 @@ internal val IMAGE_TEXTUAL_INVERSION_ALL_FORMATS: Set<String> = setOf(
 internal fun ImageTextualInversionUiItem.isSupportedBy(formats: Set<String>): Boolean =
     format.trim().lowercase() in formats
 
+@Immutable
 data class ImageUpscalerUiItem(
     val id: String,
     val name: String,
@@ -27,6 +29,7 @@ data class ImageUpscalerUiItem(
     val deleting: Boolean = false
 )
 
+@Immutable
 data class ImageUpscaleUiJob(
     val id: String,
     val sourceImageId: String,
@@ -60,11 +63,13 @@ internal fun upscaleOutputDimensionsOrNull(width: Int, height: Int, scale: Int):
     }.getOrNull()
 }
 
+@Immutable
 data class ImageGenerationUiLoraSelection(
     val id: String,
     val multiplier: Double
 )
 
+@Immutable
 internal data class ImageGenerationUiLoraDraft(
     val id: String,
     val multiplierText: String

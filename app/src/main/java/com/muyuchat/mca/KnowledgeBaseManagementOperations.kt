@@ -8,7 +8,6 @@ import com.muyuchat.mca.presentation.KnowledgeLibrarySnapshot
 import com.muyuchat.mca.presentation.WorldBookImportOutcome
 import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
-import com.muyuchat.mca.presentation.withKnowledgeLibraryChange
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -19,7 +18,7 @@ import kotlinx.coroutines.withContext
 
 internal fun createKnowledgeBaseFor(
     knowledgeLibraryPort: KnowledgeLibraryPort,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     scope: CoroutineScope,
     currentSnapshot: () -> KnowledgeLibrarySnapshot,
     name: String,
@@ -38,7 +37,7 @@ internal fun createKnowledgeBaseFor(
 
 internal fun deleteKnowledgeBaseFor(
     knowledgeLibraryPort: KnowledgeLibraryPort,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     scope: CoroutineScope,
     currentSnapshot: () -> KnowledgeLibrarySnapshot,
     knowledgeBaseId: String
@@ -55,7 +54,7 @@ internal fun deleteKnowledgeBaseFor(
 
 internal fun deleteWorldBookFor(
     knowledgeLibraryPort: KnowledgeLibraryPort,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     scope: CoroutineScope,
     currentSnapshot: () -> KnowledgeLibrarySnapshot,
     worldBookId: String
@@ -70,8 +69,42 @@ internal fun deleteWorldBookFor(
     }
 }
 
+/**
+ * Toggles a book's enabled flag and invalidates the live context when that book is in scope for
+ * the current conversation, mirroring the import's invalidation rule.
+ */
+internal fun setWorldBookEnabledFor(
+    knowledgeLibraryPort: KnowledgeLibraryPort,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
+    scope: CoroutineScope,
+    currentSnapshot: () -> KnowledgeLibrarySnapshot,
+    currentState: () -> MainUiState,
+    markLocalConversationContextInvalid: () -> Unit,
+    worldBookId: String,
+    enabled: Boolean
+) {
+    scope.launch(Dispatchers.IO) {
+        val snapshot = currentSnapshot()
+        val book = snapshot.worldBooks.firstOrNull { it.id == worldBookId }
+        val change = KnowledgeLibraryOperations.setWorldBookEnabled(
+            knowledgeLibraryPort,
+            snapshot,
+            worldBookId,
+            enabled
+        ) ?: return@launch
+        val state = currentState()
+        val affectsCurrentContext = book?.let {
+            it.scope == WorldBookScope.GLOBAL ||
+                (it.scope == WorldBookScope.ASSISTANT && it.assistantId == state.selectedAssistantId) ||
+                (it.scope == WorldBookScope.CHAT && it.chatSessionId == state.activeChatSessionId)
+        } ?: true
+        if (affectsCurrentContext) markLocalConversationContextInvalid()
+        uiStateStore.update { it.withKnowledgeLibraryChange(change) }
+    }
+}
+
 internal fun setKnowledgeBaseSelectedFor(
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     currentState: () -> MainUiState,
     persistKnowledgeBaseBindings: (sessionId: String, updatedIds: Set<String>) -> Unit,
     knowledgeBaseId: String,
@@ -90,7 +123,7 @@ internal fun setKnowledgeBaseSelectedFor(
 
 internal suspend fun importWorldBookOwnedFor(
     knowledgeLibraryPort: KnowledgeLibraryPort,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     currentState: () -> MainUiState,
     stageContentImportPreview: suspend (ContentImportPreview) -> Unit,
     markLocalConversationContextInvalid: () -> Unit,
@@ -98,7 +131,8 @@ internal suspend fun importWorldBookOwnedFor(
     rawJson: String,
     scope: WorldBookScope,
     owner: ContentImportOwner,
-    commitId: String? = null
+    commitId: String? = null,
+    fallbackName: String? = null
 ): Boolean {
     val state = currentState()
     val request = WorldBookImportRequest(
@@ -106,6 +140,7 @@ internal suspend fun importWorldBookOwnedFor(
         scope = scope,
         owner = owner,
         commitId = commitId,
+        fallbackName = fallbackName?.takeIf { it.isNotBlank() },
         hasActiveSession = owner.sessionId != null,
         ownerStillExists = when (scope) {
             WorldBookScope.GLOBAL -> true
@@ -136,13 +171,27 @@ internal suspend fun importWorldBookOwnedFor(
     }
 }
 
+/** Same ceiling as [WorldBookCodec]'s byte guard so the read fails before the parse does. */
+internal const val WORLD_BOOK_IMPORT_MAX_BYTES = 8_388_608
+
+/**
+ * Tavern World Info exports carry no top-level name, so the picked file name becomes the book
+ * name; the extension is dropped and a blank result means "no fallback" (the codec default).
+ */
+internal fun worldBookFallbackNameFromFile(displayName: String): String? = displayName
+    .trim()
+    .takeIf { it.isNotBlank() }
+    ?.substringBeforeLast('.')
+    ?.takeIf { it.isNotBlank() }
+
 internal fun importWorldBookFileFor(
     scope: CoroutineScope,
     isGenerating: () -> Boolean,
     showStatus: (String) -> Unit,
     captureContentImportOwner: () -> ContentImportOwner,
-    importWorldBookOwned: suspend (String, WorldBookScope, ContentImportOwner) -> Boolean,
+    importWorldBookOwned: suspend (String, WorldBookScope, ContentImportOwner, String?) -> Boolean,
     readAttachmentText: (Uri, Int) -> Pair<String, Boolean>,
+    resolveFallbackName: (Uri) -> String,
     uriString: String,
     scopeKind: WorldBookScope = WorldBookScope.ASSISTANT,
     importOwner: ContentImportOwner? = null
@@ -154,20 +203,23 @@ internal fun importWorldBookFileFor(
     val owner = importOwner ?: captureContentImportOwner()
     scope.launch {
         val result = withContext(Dispatchers.IO) { runCatching {
-            val (text, truncated) = readAttachmentText(Uri.parse(uriString), 1_048_576)
-            require(!truncated) { "世界书文件超过 1 MiB。" }
-            text
+            val uri = Uri.parse(uriString)
+            val fallbackName = worldBookFallbackNameFromFile(resolveFallbackName(uri))
+            val (text, truncated) = readAttachmentText(uri, WORLD_BOOK_IMPORT_MAX_BYTES)
+            require(!truncated) { "世界书文件超过 8 MiB。" }
+            fallbackName to text
         } }
-        result.onSuccess { text -> importWorldBookOwned(text, scopeKind, owner) }
-            .onFailure { error ->
-                showStatus("世界书导入失败：${error.message ?: "无法读取文件"}")
-            }
+        result.onSuccess { (fallbackName, text) ->
+            importWorldBookOwned(text, scopeKind, owner, fallbackName)
+        }.onFailure { error ->
+            showStatus("世界书导入失败：${error.message ?: "无法读取文件"}")
+        }
     }
 }
 
 internal fun persistFilesFor(
     chatSessionStore: ChatSessionStore,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStatusWriter,
     scope: CoroutineScope,
     files: List<FileAssetRecord>
 ): Deferred<Result<Unit>> =
@@ -178,9 +230,17 @@ internal fun persistFilesFor(
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (error: Exception) {
-            uiStateStore.update {
-                it.copy(statusMessage = "文件库保存失败：${error.message}")
-            }
+            uiStateStore.showStatus("文件库保存失败：${error.message}")
             Result.failure(error)
         }
     }
+
+/** Applies the library's atomic change without granting a root-state write capability. */
+private fun KnowledgeLibraryFields.withKnowledgeLibraryChange(change: KnowledgeLibraryChange): KnowledgeLibraryFields = copy(
+    worldBooks = change.worldBooks ?: worldBooks,
+    knowledgeBases = change.knowledgeBases ?: knowledgeBases,
+    knowledgeDocumentCounts = change.knowledgeDocumentCounts ?: knowledgeDocumentCounts,
+    knowledgeBaseImportingIds = change.knowledgeBaseImportingIds ?: knowledgeBaseImportingIds,
+    selectedKnowledgeBaseIds = change.selectedKnowledgeBaseIds ?: selectedKnowledgeBaseIds,
+    statusMessage = change.statusMessage
+)

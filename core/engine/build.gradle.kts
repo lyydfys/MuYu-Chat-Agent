@@ -5,9 +5,9 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
-val vendoredGenieXAar = rootProject.file("vendor/geniex/geniex-android-0.3.12-mca1.aar")
+val vendoredGenieXAar = rootProject.file("vendor/geniex/geniex-android-0.10.0-mca1.aar")
 val expectedVendoredGenieXSha256 =
-    "089F266569D1D9BAFBC7F5D5748FBDCE332FE0EB4077B9D49DBE3F1D50950401"
+    "3A40DEF4890FE4991D3547ACF8BCFA9F1BE491AD7790A1CB5D26BBECB2DDE69B"
 val vendoredLiteRtQualcommJniDir = rootProject.file("vendor/litert/qualcomm/jniLibs")
 val vendoredLiteRtQualcommDispatch =
     vendoredLiteRtQualcommJniDir.resolve("arm64-v8a/libLiteRtDispatch_Qualcomm.so")
@@ -32,10 +32,10 @@ fun sha256(file: File): String {
 }
 
 check(vendoredGenieXAar.isFile) {
-    "Missing patched GenieX AAR: ${vendoredGenieXAar.absolutePath}"
+    "Missing vendored GenieX AAR: ${vendoredGenieXAar.absolutePath}"
 }
 check(sha256(vendoredGenieXAar) == expectedVendoredGenieXSha256) {
-    "Patched GenieX AAR failed SHA-256 verification: ${vendoredGenieXAar.absolutePath}"
+    "Vendored GenieX AAR failed SHA-256 verification: ${vendoredGenieXAar.absolutePath}"
 }
 check(vendoredLiteRtQualcommDispatch.isFile) {
     "Missing LiteRT Qualcomm dispatch runtime: ${vendoredLiteRtQualcommDispatch.absolutePath}"

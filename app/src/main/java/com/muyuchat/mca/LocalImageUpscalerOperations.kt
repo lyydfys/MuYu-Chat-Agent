@@ -26,7 +26,7 @@ internal interface LocalImageUpscalerPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ImageUpscalerCatalogFields) -> ImageUpscalerCatalogFields)
 
     val upscalerStore: LocalImageUpscalerStore
 

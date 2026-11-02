@@ -1,10 +1,16 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,11 +27,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
@@ -34,7 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -73,6 +74,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S6：从 ImageWorkspaceScreens.kt 尾部等值移出的生图提示栏与 prompt-token 测量簇。
 // 原样逐字迁移，未做行为改动；两个跨区入口 @Composable 按协议提升为 internal。
@@ -384,6 +389,7 @@ internal fun ImagePromptBar(
         commitFieldValue(next)
     }
 
+    val haptics = rememberMcaHaptics()
     Column(modifier = modifier.fillMaxWidth()) {
         Surface(
             modifier = Modifier
@@ -391,24 +397,34 @@ internal fun ImagePromptBar(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             color = inputShellColor,
             shape = RoundedCornerShape(36.dp),
-            shadowElevation = 14.dp
+            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+            shadowElevation = 4.dp
         ) {
             Row(
                 modifier = Modifier.padding(7.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val photoInteraction = remember { MutableInteractionSource() }
                 Box(
                     modifier = Modifier
                         .size(48.dp)
+                        .mcaPressScale(photoInteraction)
                         .clip(CircleShape)
                         .background(inputIconSurfaceColor)
-                        .clickable(onClick = onOpenPhoto),
+                        .clickable(
+                            interactionSource = photoInteraction,
+                            indication = ripple(bounded = true),
+                            onClick = {
+                                haptics.tick()
+                                onOpenPhoto()
+                            }
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        Icons.Default.Image,
+                        McaIcons.Image,
                         contentDescription = "添加图片",
-                        modifier = Modifier.size(22.dp),
+                        modifier = Modifier.size(McaIconSize.M),
                         tint = McaPrimaryBlue
                     )
                 }
@@ -416,13 +432,17 @@ internal fun ImagePromptBar(
                 Surface(
                     modifier = Modifier
                         .weight(1f)
-                        .heightIn(min = 48.dp),
+                        .heightIn(min = 48.dp)
+                        .animateContentSize(animationSpec = McaMotion.sizeChangePx),
                     color = inputFieldColor,
-                    shape = CircleShape,
+                    shape = RoundedCornerShape(24.dp),
                     border = if (tokenOverflow) {
                         BorderStroke(1.dp, MaterialTheme.colorScheme.error)
                     } else {
-                        null
+                        BorderStroke(
+                            0.5.dp,
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (darkTheme) 0.40f else 0.28f)
+                        )
                     },
                 ) {
                     Row(
@@ -476,12 +496,14 @@ internal fun ImagePromptBar(
                     }
                 }
                 if (fieldValue.text.containsHanScriptForTranslationUi() && onTranslatePrompt != null) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
+                        hapticsEnabled = false,
                         onClick = {
-                            if (isGenerating) return@TextButton
+                            if (isGenerating) return@McaButton
+                            haptics.tick()
                             if (translationBusy) {
                                 translationJob?.cancel()
-                                return@TextButton
+                                return@McaButton
                             }
                             val source = fieldValue.text
                             val translate = onTranslatePrompt
@@ -523,9 +545,9 @@ internal fun ImagePromptBar(
                             Text("取消", style = MaterialTheme.typography.labelMedium)
                         } else {
                             Icon(
-                                Icons.Default.Translate,
+                                McaIcons.Translate,
                                 contentDescription = null,
-                                modifier = Modifier.size(17.dp)
+                                modifier = Modifier.size(McaIconSize.Optical.Inline)
                             )
                             Spacer(Modifier.width(2.dp))
                             Text("译成英文", style = MaterialTheme.typography.labelMedium)
@@ -533,15 +555,25 @@ internal fun ImagePromptBar(
                     }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
+                val submitInteraction = remember { MutableInteractionSource() }
                 FloatingActionButton(
                     onClick = {
                         when {
-                            isGenerating -> onStop()
-                            !translationBusy && !negativeTranslationBusy -> onSubmit()
+                            isGenerating -> {
+                                haptics.stop()
+                                onStop()
+                            }
+                            !translationBusy && !negativeTranslationBusy -> {
+                                if (prompt.isNotBlank()) haptics.confirm() else haptics.tick()
+                                onSubmit()
+                            }
                             // 原项目经穷尽枚举分派（ChatScreen.kt:11451-11454）：
                             // 只要不在生成中即走 SUBMIT -> onSubmit()，不因翻译忙标志而静默。
                             // 此处补全兜底，保持与原项目一致的行为（避免标志卡 true 时点击完全无反应）。
-                            else -> onSubmit()
+                            else -> {
+                                if (prompt.isNotBlank()) haptics.confirm() else haptics.tick()
+                                onSubmit()
+                            }
                         }
                     },
                     containerColor = when {
@@ -555,16 +587,26 @@ internal fun ImagePromptBar(
                     },
                     elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 0.dp),
                     shape = CircleShape,
-                    modifier = Modifier.size(48.dp).testTag(if (isGenerating) "image.stop" else "image.generate")
+                    interactionSource = submitInteraction,
+                    modifier = Modifier
+                        .size(48.dp)
+                        .mcaPressScale(submitInteraction)
+                        .testTag(if (isGenerating) "image.stop" else "image.generate")
                 ) {
-                    if (isGenerating) {
-                        Icon(Icons.Default.Stop, contentDescription = "停止生成", tint = Color.White)
-                    } else {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "生成图片",
-                            tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White
-                        )
+                    Crossfade(
+                        targetState = isGenerating,
+                        animationSpec = McaMotion.sizeChange,
+                        label = "imagePromptPrimaryAction"
+                    ) { generating ->
+                        if (generating) {
+                            Icon(McaIcons.Stop, contentDescription = "停止生成", tint = Color.White)
+                        } else {
+                            Icon(
+                                McaIcons.Send,
+                                contentDescription = "生成图片",
+                                tint = if (prompt.isBlank()) inputPlaceholderColor else Color.White
+                            )
+                        }
                     }
                 }
             }
@@ -605,7 +647,7 @@ internal fun ImagePromptBar(
                         maxLines = 4
                     )
                 }
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         val translated = translationPreview.orEmpty()
                         applyDiscreteFieldValue(TextFieldValue(translated, TextRange(translated.length)))
@@ -660,7 +702,7 @@ private fun ImagePromptTranslationDraft(
         }
     }
     Column(modifier) {
-        TextButton(
+        McaButton(style = McaButtonStyle.Text,
             enabled = enabled && (!translatingOtherField || busy),
             modifier = Modifier.testTag("$testTagPrefix.start"),
             onClick = {
@@ -701,7 +743,7 @@ private fun ImagePromptTranslationDraft(
                 modifier = Modifier.fillMaxWidth().testTag("$testTagPrefix.draft"),
                 minLines = 2, maxLines = 4
             )
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 enabled = enabled && !busy && draft?.isNotBlank() == true,
                 modifier = Modifier.testTag("$testTagPrefix.apply"),
                 onClick = { draft?.takeIf(String::isNotBlank)?.let(onApply) }

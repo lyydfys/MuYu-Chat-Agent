@@ -5,7 +5,6 @@ import android.util.Log
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.modelstore.ModelStoreRepository
 import com.muyuchat.feature.agent.AgentEngineLifecycle
-import com.muyuchat.mca.composition.McaAppContainer
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CoroutineScope
@@ -18,10 +17,11 @@ import kotlinx.coroutines.withContext
 // tag and one T0 with the phase stamps instead of forming a second MCAStartup timeline.
 
 internal class MainPostStartupCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<StartupReconciliationFields>,
+    private val modelIdentityStore: UiStateWriter<ModelIdentityFields>,
     private val scope: CoroutineScope,
     private val application: Application,
-    private val container: McaAppContainer,
+    private val localImageTextualInversionStore: TextualInversionStore,
     private val engine: McaInferenceService,
     private val modelStore: ModelStoreRepository,
     private val imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
@@ -91,7 +91,7 @@ internal class MainPostStartupCoordinator(
 
         scope.launch(Dispatchers.IO) {
             val inversionStartedAt = android.os.SystemClock.elapsedRealtime()
-            val loaded = loadInitialTextualInversionLibraryState(container.localImageTextualInversionStore)
+            val loaded = loadInitialTextualInversionLibraryState(localImageTextualInversionStore)
             StartupLog.stamp("textual-inversion", opStartedAt = inversionStartedAt)
             store.update { state ->
                 if (!state.localImageTextualInversionLoading) {
@@ -191,7 +191,7 @@ internal class MainPostStartupCoordinator(
         reconcileModelIdentitiesFor(
             chatSessionPersistenceMutex = chatSessionPersistenceMutex,
             modelIdentityReferenceMigration = modelIdentityReferenceMigration,
-            store = store,
+            store = modelIdentityStore,
             getDurableChatSessions = getDurableChatSessions,
             setDurableChatSessions = setDurableChatSessions
         )

@@ -2,10 +2,12 @@ package com.muyuchat.feature.modelhub
 
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.download.ModelRepositoryProvider
+import com.muyuchat.core.download.ImageEngineAccelerator
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.download.RecommendedChatRuntime
 import com.muyuchat.core.download.RecommendedModelSection
 import com.muyuchat.core.download.RecommendedModelStatus
+import com.muyuchat.core.download.downloadEligibilityFor
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.modelstore.ModelSource
@@ -199,6 +201,37 @@ class RecommendationCatalogTest {
         assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).canDownload)
         assertTrue(recommendationDownloadAccess(cyberRealistic, "MT6989", deviceIsSnapdragon = false).experimental)
         assertTrue(recommendationDownloadAccess(cyberRealistic, "", deviceIsSnapdragon = false).canDownload)
+    }
+
+    @Test
+    fun remoteMediaTekImageStaysVisibleAndDownloadableOnEveryDevice() {
+        val model = recommendations.first { it.id == "mediatek_anima_npu_np9" }
+        val mediatek = recommendationDownloadAccess(model, "MT6993")
+        val unknown = recommendationDownloadAccess(model, "")
+        val snapdragon = recommendationDownloadAccess(model, "SM8750", deviceIsSnapdragon = true)
+        val mediatekEligibility = model.downloadEligibilityFor("MT6993")
+        val unknownEligibility = model.downloadEligibilityFor("")
+        val snapdragonEligibility = model.downloadEligibilityFor("SM8750", deviceIsSnapdragon = true)
+
+        assertEquals(RecommendedModelStatus.EXPERIMENTAL, model.status)
+        assertEquals(ImageEngineAccelerator.MEDIATEK_NPU, model.plannedImageAccelerator)
+        assertEquals(null, model.imageEngineBundle)
+        assertEquals(RecommendedModelSection.NPU_IMAGE, model.section)
+        assertTrue(model.downloadable)
+        assertFalse(model.manualImportRequired)
+        assertTrue(requireNotNull(model.remoteImageBundle).variants.isNotEmpty())
+        assertTrue(mediatek.canDownload)
+        assertTrue(unknown.canDownload)
+        assertTrue(snapdragon.canDownload)
+        assertTrue(mediatek.experimental)
+        assertTrue(unknown.experimental)
+        assertTrue(snapdragon.experimental)
+        assertEquals(null, mediatekEligibility.blockedReason)
+        assertEquals(null, unknownEligibility.blockedReason)
+        assertEquals(null, snapdragonEligibility.blockedReason)
+        listOf("MT6993", "").forEach { chipset ->
+            assertTrue(catalogFor(chipset).npuImageMediaTek.any { it.id == model.id })
+        }
     }
 
     @Test
@@ -458,9 +491,11 @@ class RecommendationCatalogTest {
             "qwen25_vl_7b_qairt_w4a16"
         )
         val universalLightweight = "qwen3_06b_qairt_w4a16"
+        val universalGenieXLlama = "ling30_tiny_qnn"
         return when (chipsetCode) {
-            "SM8550", "SM8750", "SM8850" -> qairtFamily + universalLightweight
-            else -> listOf(universalLightweight) + qairtFamily
+            "SM8550", "SM8750", "SM8850" ->
+                qairtFamily + listOf(universalGenieXLlama, universalLightweight)
+            else -> listOf(universalGenieXLlama, universalLightweight) + qairtFamily
         }
     }
 
@@ -469,7 +504,7 @@ class RecommendationCatalogTest {
         assertEquals(4, catalog.mainChat.size)
         assertEquals(5, catalog.qualityChat.size)
         assertEquals(15, catalog.lightChat.size + catalog.mainChat.size + catalog.qualityChat.size)
-        assertEquals(5, catalog.npuChat.size)
+        assertEquals(6, catalog.npuChat.size)
         assertEquals(
             listOf(
                 "gemma4_e2b_litertlm_npu",
@@ -514,7 +549,7 @@ class RecommendationCatalogTest {
         // id order is therefore asserted per device via expectedNpuChatIds(...) at each call
         // site instead of once here.
 
-        assertEquals(8, catalog.cpuImage.size)
+        assertEquals(9, catalog.cpuImage.size)
         assertEquals(
             listOf(
                 "sd_turbo_512_experimental",
@@ -524,6 +559,7 @@ class RecommendationCatalogTest {
                 "z_image_turbo_q4",
                 "longcat_image_q4",
                 "qwen_image_21_q4_k_m",
+                "anima_preview_q4",
                 "qwen_image_2512_q2"
             ),
             catalog.cpuImage.map { it.id }
@@ -557,7 +593,8 @@ class RecommendationCatalogTest {
             ),
             catalog.npuImageGen5.map { it.id }
         )
-        assertEquals(11, catalog.npuImage.size)
+        assertEquals(listOf("mediatek_anima_npu_np9"), catalog.npuImageMediaTek.map { it.id })
+        assertEquals(12, catalog.npuImage.size)
     }
 
     private fun assertQwenImage21GpuCatalog(catalog: RecommendationCatalog) {

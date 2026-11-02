@@ -72,6 +72,12 @@ internal fun runLocalImageCancellation(port: LocalImageCancellationPort): Boolea
             }
             true
         }
+        LocalImageRuntime.MEDIATEK_NEURON -> {
+            // Neuron graph invocation is cooperative at graph boundaries; the pipeline
+            // observes this owner flag before opening the next graph.
+            cancellationRequested.set(true)
+            true
+        }
         else -> false
     }
 }

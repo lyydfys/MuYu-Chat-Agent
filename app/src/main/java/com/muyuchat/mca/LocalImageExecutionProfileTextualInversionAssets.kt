@@ -173,6 +173,7 @@ internal fun resolveTextualInversionConsumerAssetFiles(
                 }
             }
             LocalImageRuntime.ONNX_RUNTIME,
+            LocalImageRuntime.MEDIATEK_NEURON,
             LocalImageRuntime.CUSTOM -> error(
                 "Textual inversion is not executable on runtime ${profile.runtime}."
             )
@@ -217,5 +218,6 @@ private fun LocalImageRuntime.toTextualInversionRuntime(): TextualInversionRunti
     LocalImageRuntime.MNN_DIFFUSION -> TextualInversionRuntime.MNN_DIFFUSION
     LocalImageRuntime.STABLE_DIFFUSION_CPP -> TextualInversionRuntime.STABLE_DIFFUSION_CPP
     LocalImageRuntime.ONNX_RUNTIME,
+    LocalImageRuntime.MEDIATEK_NEURON,
     LocalImageRuntime.CUSTOM -> error("Textual inversion is not executable on runtime $this.")
 }

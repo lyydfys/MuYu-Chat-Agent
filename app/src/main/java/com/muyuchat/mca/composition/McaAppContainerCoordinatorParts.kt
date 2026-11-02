@@ -67,7 +67,7 @@ internal fun McaAppContainer.createChatAppearanceCoordinatorImpl(
     ): ChatAppearanceCoordinator =
         ChatAppearanceCoordinator(
             scope = scope,
-            uiStateStore = uiStateStore,
+            uiStateStore = uiStateStore.chatAppearanceWriter(),
             globalChatAppearanceStore = globalChatAppearanceStore,
             backgroundImageStore = backgroundImageStore,
             assistantStore = assistantStore,
@@ -105,7 +105,7 @@ internal fun McaAppContainer.createAgentTuningCoordinator(
     ): AgentTuningCoordinator =
         AgentTuningCoordinator(
             application = application,
-            store = store,
+            store = store.runtimeProfileWriter(),
             scope = scope,
             engine = engine,
             tuningOwner = tuningOwner,
@@ -158,7 +158,7 @@ internal fun McaAppContainer.createModelScopeHubCoordinator(
     ): ModelScopeHubCoordinator =
         ModelScopeHubCoordinator(
             scope = scope,
-            store = store,
+            store = store.modelHubWriter(),
             client = client,
             application = application,
             currentDeviceProfile = currentDeviceProfile,
@@ -210,10 +210,12 @@ internal fun McaAppContainer.createAssistantProfileCoordinator(
         captureContentImportOwner: () -> com.muyuchat.mca.ContentImportOwner,
         stageContentImportPreview: suspend (com.muyuchat.mca.ContentImportPreview) -> Unit,
         readAttachmentText: (android.net.Uri, Int) -> Pair<String, Boolean>,
+        resolveWorldBookFallbackName: (android.net.Uri) -> String,
         currentModelGenerationProfileKey: () -> String?
     ): AssistantProfileCoordinator =
         AssistantProfileCoordinator(
-            store = store,
+            store = store.assistantProfileWriter(),
+            knowledgeStore = store.knowledgeLibraryWriter(),
             scope = scope,
             application = application,
             assistantStore = assistantStore,
@@ -260,6 +262,7 @@ internal fun McaAppContainer.createAssistantProfileCoordinator(
             captureContentImportOwner = captureContentImportOwner,
             stageContentImportPreview = stageContentImportPreview,
             readAttachmentText = readAttachmentText,
+            resolveWorldBookFallbackName = resolveWorldBookFallbackName,
             currentModelGenerationProfileKey = currentModelGenerationProfileKey
         )
 
@@ -294,7 +297,9 @@ internal fun McaAppContainer.createChatModelCoordinator(
             persistChatSessions = persistChatSessionsWithBinding
         )
         return ChatModelCoordinator(
-            store = store,
+            store = store.runtimeProfileWriter(),
+            modelSelectionStore = store.chatModelSelectionWriter(),
+            modelCatalogStore = store.modelCatalogWriter(),
             scope = scope,
             application = application,
             engine = engine,
@@ -348,10 +353,11 @@ internal fun McaAppContainer.createMainPostStartupCoordinator(
         skipInitialModelDiscovery: Boolean
     ): MainPostStartupCoordinator =
         MainPostStartupCoordinator(
-            store = store,
+            store = store.startupReconciliationWriter(),
+            modelIdentityStore = store.modelIdentityWriter(),
             scope = scope,
             application = application,
-            container = this,
+            localImageTextualInversionStore = localImageTextualInversionStore,
             engine = engine,
             modelStore = modelStore,
             imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
@@ -377,7 +383,7 @@ internal fun McaAppContainer.createContentImportPreviewCoordinator(
         showStatus: (String?) -> Unit
     ): ContentImportPreviewCoordinator =
         ContentImportPreviewCoordinator(
-            store = store,
+            store = store.contentImportWriter(),
             scope = scope,
             contentImportPreviewStore = contentImportPreviewStore,
             assistantProfileCoordinator = assistantProfileCoordinator,
@@ -402,8 +408,18 @@ internal fun McaAppContainer.createChatSessionManagementCoordinator(
         ChatSessionManagementCoordinator(
             application = application,
             scope = scope,
-            store = store,
-            container = this,
+            store = store.conversationSessionWriter(),
+            selectChatSessionPort = createSelectChatSessionPort(
+                store = store.conversationSelectionWriter(),
+                rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
+                hasActiveAssistantImageExecution = { com.muyuchat.mca.hasActiveAssistantImageExecutionIn(store.current, it) },
+                invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
+                cancelActiveWebSearch = cancelActiveWebSearch,
+                bumpContentImportSelectionRevision = bumpContentImportSelectionRevision,
+                loadModelGenerationParams = loadModelGenerationParams,
+                markLocalConversationContextInvalid = markLocalConversationContextInvalid,
+                continueAssistantImageTurn = continueAssistantImageTurn
+            ),
             rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
             hasActiveAssistantImageExecutionIn = hasActiveAssistantImageExecutionIn,
             showStatus = showStatus,
@@ -411,9 +427,7 @@ internal fun McaAppContainer.createChatSessionManagementCoordinator(
             invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
             cancelActiveWebSearch = cancelActiveWebSearch,
             bumpContentImportSelectionRevision = bumpContentImportSelectionRevision,
-            loadModelGenerationParams = loadModelGenerationParams,
             markLocalConversationContextInvalid = markLocalConversationContextInvalid,
-            continueAssistantImageTurn = continueAssistantImageTurn,
             persistChatSessions = persistChatSessions
         )
 
@@ -434,8 +448,10 @@ internal fun McaAppContainer.createChatInputAndAttachmentCoordinator(
         ChatInputAndAttachmentCoordinator(
             application = application,
             scope = scope,
-            store = store,
-            container = this,
+            store = store.chatAttachmentWriter(),
+            hasPendingChatImagePreparation = {
+                runtimeAdmission.pendingImageTranslation != null || runtimeAdmission.pendingChatImageAction != null
+            },
             showStatus = showStatus,
             fail = fail,
             invalidatePendingChatImagePreparation = invalidatePendingChatImagePreparation,
@@ -459,21 +475,14 @@ internal fun McaAppContainer.createChatImageWorkflowCoordinatorImpl(
         imageLibraryStartupReconciliation: ImageLibraryStartupReconciliation,
         chatImageRetryPort: ChatImageRetryPort,
         showStatus: (String?) -> Unit,
-        tryAcquireObservedImageGenerationLease: (String) -> LocalImageGenerationCoordinator.Lease?,
-        releaseObservedImageGenerationLease: (LocalImageGenerationCoordinator.Lease) -> Boolean,
         offlinePromptTranslationService: () -> OfflinePromptTranslationService,
         runtimeProfileStore: ModelRuntimeProfileStore,
         engine: McaInferenceService,
-        selectCloudImageModel: (String) -> Unit,
-        registerLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Unit,
-        unregisterLocalApiImageGenerationOwnership: (LocalApiImageGenerationOwnership) -> Boolean,
-        cancelOwnedLocalApiImageWorker: (LocalApiImageGenerationOwnership) -> Boolean
+        selectCloudImageModel: (String) -> Unit
     ): ChatImageWorkflowCoordinator =
-        ChatImageWorkflowCoordinator(
-            application = application,
+        assembleChatImageWorkflowCoordinator(
             scope = scope,
             store = store,
-            container = this,
             imageAssetWriteMutex = imageAssetWriteMutex,
             imageLibraryMutationMutex = imageLibraryMutationMutex,
             imageLibraryBackup = imageLibraryBackup,
@@ -482,15 +491,10 @@ internal fun McaAppContainer.createChatImageWorkflowCoordinatorImpl(
             imageLibraryStartupReconciliation = imageLibraryStartupReconciliation,
             chatImageRetryPort = chatImageRetryPort,
             showStatus = showStatus,
-            tryAcquireObservedImageGenerationLease = tryAcquireObservedImageGenerationLease,
-            releaseObservedImageGenerationLease = releaseObservedImageGenerationLease,
             offlinePromptTranslationService = offlinePromptTranslationService,
             runtimeProfileStore = runtimeProfileStore,
             engine = engine,
-            selectCloudImageModel = selectCloudImageModel,
-            registerLocalApiImageGenerationOwnership = registerLocalApiImageGenerationOwnership,
-            unregisterLocalApiImageGenerationOwnership = unregisterLocalApiImageGenerationOwnership,
-            cancelOwnedLocalApiImageWorker = cancelOwnedLocalApiImageWorker
+            selectCloudImageModel = selectCloudImageModel
         )
 
 internal fun McaAppContainer.createChatWorkflowCoordinatorImpl(
@@ -502,7 +506,7 @@ internal fun McaAppContainer.createChatWorkflowCoordinatorImpl(
         persistConversationMutation: (List<ChatSessionRecord>, ConversationMutationRollbackState, Boolean) -> kotlinx.coroutines.Job?
     ): ChatWorkflowCoordinator =
         ChatWorkflowCoordinator(
-            store = store,
+            store = store.conversationWorkflowWriter(),
             rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
             showStatus = showStatus,
             isChatImageRequestActive = isChatImageRequestActive,

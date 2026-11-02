@@ -16,6 +16,10 @@ void load_baseline_cpu_backend_if_needed(
         const std::string &native_lib_dir,
         std::string &last_error);
 
+void load_mca_ggml_backends(
+        const std::string &native_lib_dir,
+        std::string &diagnostic);
+
 bool load_android_opencl_runtime_if_available_locked(
         void *&android_opencl_handle,
         std::string &backend_load_diagnostic);

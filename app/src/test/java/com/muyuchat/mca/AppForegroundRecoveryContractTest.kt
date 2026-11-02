@@ -186,12 +186,15 @@ class AppForegroundRecoveryContractTest {
     @Test
     fun regenerationIsProtectedBeforeAsynchronousPersistence() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
-        val body = functionBody(viewModel, "fun regenerateLastResponse()")
+        // D02 moves the whole transaction, so assert the owner and actual entry wiring.
+        assertTrue(viewModel.contains("private fun regenerateLastResponseFor(target: ChatMessageIdentity?) = regenerateConversationResponseFor("))
+        val replay = sourceFile("app/src/main/java/com/muyuchat/mca/ConversationReplayOperations.kt")
+        val body = functionBody(replay, "fun regenerateConversationResponseFor(")
         val acquire = body.indexOf("val preparationLease = McaGenerationForegroundService.acquire(")
-        val persist = body.indexOf("val persistenceJob = persistConversationMutation(")
+        val persist = body.indexOf("val persistenceJob = persistMutation(")
         assertTrue(acquire >= 0 && persist > acquire)
         assertTrue(body.contains("persistenceJob.invokeOnCompletion"))
-        assertTrue(body.contains("McaGenerationForegroundService.release(getApplication<Application>(), preparationLease)"))
+        assertTrue(body.contains("McaGenerationForegroundService.release(application, preparationLease)"))
     }
 
     @Test
@@ -247,14 +250,28 @@ class AppForegroundRecoveryContractTest {
     }
 
     @Test
-    fun viewModelReleasesGlobalApiProvidersOnlyThroughItsOwnerToken() {
+    fun processRootReleasesGlobalApiProvidersOnlyThroughItsOwnerToken() {
         val viewModel = sourceFile("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
         val runtime = sourceFile("api/local/src/main/java/com/muyuchat/api/local/LocalApiRuntime.kt")
+        val root = sourceFile("app/src/main/java/com/muyuchat/mca/composition/McaProcessRuntimeRoot.kt")
         val cleared = functionBody(viewModel, "override fun onCleared()")
         val release = functionBody(runtime, "fun releaseOwner(token: Any)")
 
         assertTrue(viewModel.contains("LocalApiRuntime.claimOwner(localApiRuntimeOwner)"))
-        assertTrue(cleared.contains("LocalApiRuntime.releaseOwner(localApiRuntimeOwner)"))
+        // ADR-0008: the page only retires its listener requests. The process root owns the
+        // bindings and is the only path that may clear them.
+        assertFalse(
+            "page teardown must not clear process-scoped API bindings",
+            cleared.contains("LocalApiRuntime.releaseOwner(localApiRuntimeOwner)")
+        )
+        assertTrue(
+            "the process root must release the container-owned API runtime",
+            root.contains("container.localApiRuntimeOwner.release()")
+        )
+        assertTrue(
+            "the root stops the foreground service before releasing the owner",
+            root.indexOf("local-api-service") in 0 until root.indexOf("local-api-owner")
+        )
         assertFalse(cleared.contains("LocalApiRuntime.engine = null"))
         assertTrue(release.contains("streamChatWithContextProvider = null"))
         assertTrue(release.contains("loadedModelJsonProvider = { \"{}\" }"))
@@ -262,8 +279,7 @@ class AppForegroundRecoveryContractTest {
         assertTrue(release.contains("controlPlane = null"))
         assertTrue(cleared.contains("stopForegroundService = false"))
         assertTrue(cleared.contains("forceServerStop = false"))
-        assertTrue(cleared.indexOf("LocalApiRuntime.releaseOwner(localApiRuntimeOwner)") <
-            cleared.indexOf("retireLocalApiListener("))
+        assertTrue(cleared.contains("retireLocalApiListener("))
     }
 
     @Test

@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.text.AnnotatedString
@@ -35,20 +36,29 @@ internal fun inlineMarkdownText(value: String): AnnotatedString {
 }
 
 // P9/S5: private→internal（纯解析器/类型/只读常量；跨文件被 ChatChromeScreens 复合区引用）
-internal sealed class MarkdownBlock {
-    data class Paragraph(val text: String) : MarkdownBlock()
-    data class Heading(val text: String, val level: Int) : MarkdownBlock()
-    data class BulletList(val items: List<String>) : MarkdownBlock()
-    data class NumberedList(val items: List<OrderedMarkdownItem>) : MarkdownBlock()
-    data class Quote(val text: String) : MarkdownBlock()
+@Immutable
+internal sealed class MarkdownBlock(val blockKindKey: Int) {
+    @Immutable
+    data class Paragraph(val text: String) : MarkdownBlock(1)
+    @Immutable
+    data class Heading(val text: String, val level: Int) : MarkdownBlock(2)
+    @Immutable
+    data class BulletList(val items: List<String>) : MarkdownBlock(3)
+    @Immutable
+    data class NumberedList(val items: List<OrderedMarkdownItem>) : MarkdownBlock(4)
+    @Immutable
+    data class Quote(val text: String) : MarkdownBlock(5)
+    @Immutable
     data class Code(
         val language: String?,
         val code: String,
         val fileName: String? = null,
         val copyCode: String = code
-    ) : MarkdownBlock()
-    data class Table(val rows: List<List<String>>) : MarkdownBlock()
-    data object Divider : MarkdownBlock()
+    ) : MarkdownBlock(6)
+    @Immutable
+    data class Table(val rows: List<List<String>>) : MarkdownBlock(7)
+    @Immutable
+    data object Divider : MarkdownBlock(8)
 }
 
 // P9/S5: private→internal（纯解析器/类型/只读常量；跨文件被 ChatChromeScreens 复合区引用）
@@ -120,7 +130,7 @@ private fun parsePlainMarkdownBlocks(content: String): List<MarkdownBlock> {
             .map { it.toTableCells() }
             .filter { it.isNotEmpty() }
         if (rows.isNotEmpty()) {
-            blocks += MarkdownBlock.Table(rows)
+            blocks += MarkdownBlock.Table(padTableRows(rows))
         }
         tableLines.clear()
     }
@@ -221,24 +231,134 @@ private fun String.isHorizontalRule(): Boolean {
     return trimmed.length >= 3 && trimmed.all { it == '-' || it == '_' || it == '*' || it.isWhitespace() }
 }
 
+// R02: one scanner owns table tokenisation so "is this a table line", "is this the separator row"
+// and "split into cells" can never disagree. It keeps the outer boundary pipes separate from real
+// empty cells, keeps an escaped `\|` inside its cell as a literal pipe, and ignores `|` inside
+// inline code spans (including spans opened with more than one backtick).
+private class TableRowScan(
+    val cells: List<String>,
+    val pipeCount: Int,
+    val startsWithBoundary: Boolean,
+    val endsWithBoundary: Boolean
+)
+
+private fun String.scanTableRow(): TableRowScan {
+    val value = trim()
+    var start = 0
+    var end = value.length
+    val startsWithBoundary = value.startsWith("|")
+    if (startsWithBoundary) start = 1
+    val endsWithBoundary = end > start && value[end - 1] == '|' && !value.isEscapedAt(end - 1)
+    if (endsWithBoundary) end -= 1
+
+    val cells = ArrayList<String>(4)
+    val cell = StringBuilder()
+    var codeSpanFence = 0
+    var pipeCount = 0
+    var index = start
+    while (index < end) {
+        val character = value[index]
+        when {
+            // Backslash escaping: only `\|` matters for cell boundaries (it renders as `|`). The
+            // backslashes themselves are kept verbatim; an odd tail escapes the pipe, an even run
+            // leaves the pipe as a real delimiter.
+            character == '\\' -> {
+                var run = 1
+                while (index + run < end && value[index + run] == '\\') run += 1
+                val pipeAt = index + run
+                if (pipeAt < end && value[pipeAt] == '|') {
+                    if (run % 2 == 1) {
+                        repeat(run - 1) { cell.append('\\') }
+                        cell.append('|')
+                        index = pipeAt + 1
+                    } else {
+                        repeat(run) { cell.append('\\') }
+                        index = pipeAt
+                    }
+                } else {
+                    repeat(run) { cell.append('\\') }
+                    index += run
+                }
+            }
+
+            // Inline code span: pipes inside it are content, not column boundaries.
+            character == '`' -> {
+                var run = 1
+                while (index + run < end && value[index + run] == '`') run += 1
+                if (codeSpanFence == 0) {
+                    codeSpanFence = run
+                } else if (run == codeSpanFence) {
+                    codeSpanFence = 0
+                }
+                repeat(run) { cell.append('`') }
+                index += run
+            }
+
+            character == '|' && codeSpanFence == 0 -> {
+                pipeCount += 1
+                cells += cell.toString().trim()
+                cell.setLength(0)
+                index += 1
+            }
+
+            else -> {
+                cell.append(character)
+                index += 1
+            }
+        }
+    }
+    // The trailing cell is always appended, even when empty: an empty real cell must stay in place
+    // so later columns do not shift left.
+    cells += cell.toString().trim()
+    return TableRowScan(
+        cells = cells,
+        pipeCount = pipeCount + (if (startsWithBoundary) 1 else 0) + (if (endsWithBoundary) 1 else 0),
+        startsWithBoundary = startsWithBoundary,
+        endsWithBoundary = endsWithBoundary
+    )
+}
+
+private fun String.isEscapedAt(position: Int): Boolean {
+    var backslashes = 0
+    var index = position - 1
+    while (index >= 0 && this[index] == '\\') {
+        backslashes += 1
+        index -= 1
+    }
+    return backslashes % 2 == 1
+}
+
 private fun String.isTableLine(): Boolean {
     val trimmed = trim()
-    if (!trimmed.contains("|")) return false
-    if (trimmed.count { it == '|' } < 2) return false
-    return trimmed.startsWith("|") || trimmed.endsWith("|")
+    if (!trimmed.contains('|')) return false
+    val scan = trimmed.scanTableRow()
+    if (scan.pipeCount < 2) return false
+    return scan.startsWithBoundary || scan.endsWithBoundary
 }
+
+private val TABLE_SEPARATOR_CELL = Regex(""":?-+:?""")
 
 private fun String.isTableSeparatorLine(): Boolean {
-    val compact = trim().trim('|').replace(" ", "")
-    return compact.isNotBlank() && compact.all { it == '-' || it == ':' || it == '|' }
+    // R02: separator recognition uses the same cells as the data rows; a row is only a separator
+    // when every cell is a dash-based alignment marker.
+    val cells = trim().scanTableRow().cells
+    return cells.isNotEmpty() && cells.all { cell ->
+        cell.isNotEmpty() && TABLE_SEPARATOR_CELL.matches(cell)
+    }
 }
 
-private fun String.toTableCells(): List<String> =
-    trim()
-        .trim('|')
-        .split('|')
-        .map { it.trim() }
-        .filter { it.isNotBlank() }
+private fun String.toTableCells(): List<String> = trim().scanTableRow().cells
+
+/**
+ * R02: ragged rows are padded to the widest row instead of being truncated. The padded cells are
+ * empty, so the renderer shows a placeholder in that column and no cell is silently dropped.
+ */
+private fun padTableRows(rows: List<List<String>>): List<List<String>> {
+    val columnCount = rows.maxOf { it.size }
+    return rows.map { row ->
+        if (row.size == columnCount) row else row + List(columnCount - row.size) { "" }
+    }
+}
 
 private fun String.isLikelyCodeLine(continuingCodeBlock: Boolean): Boolean {
     val trimmed = trim()

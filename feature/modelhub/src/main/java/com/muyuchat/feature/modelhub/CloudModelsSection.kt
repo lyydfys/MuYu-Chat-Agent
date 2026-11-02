@@ -2,8 +2,11 @@
 
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,28 +22,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,6 +43,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconSize
+import kotlinx.coroutines.launch
 
 @Composable
 internal fun CloudModelsSection(
@@ -117,6 +112,7 @@ internal fun CloudModelEditorPage(
     onSupportsVisionChange: (Boolean) -> Unit,
     onSupportsToolsChange: (Boolean) -> Unit,
     onResponsesReasoningChange: (Boolean) -> Unit = {},
+    onStreamingChange: (Boolean) -> Unit = {},
     onImageModelChange: (String) -> Unit,
     onImageSizeChange: (String) -> Unit,
     onImageEndpointPathChange: (String) -> Unit,
@@ -124,6 +120,9 @@ internal fun CloudModelEditorPage(
     onSaveChat: () -> Unit,
     onSaveImage: () -> Unit,
     onTest: () -> Unit,
+    onFetchModels: suspend () -> Result<List<String>> = {
+        Result.failure(UnsupportedOperationException("获取模型列表未接入"))
+    },
     modifier: Modifier = Modifier
 ) {
     val isImage = kind == "IMAGE"
@@ -132,6 +131,28 @@ internal fun CloudModelEditorPage(
         "图像生成引擎独立保存，用于图片页。"
     } else {
         "云端推理引擎用于普通聊天页。"
+    }
+    val fetchScope = rememberCoroutineScope()
+    var fetchingModels by rememberSaveable { mutableStateOf(false) }
+    var fetchModelsError by rememberSaveable { mutableStateOf<String?>(null) }
+    var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
+    var modelsDialogOpen by rememberSaveable { mutableStateOf(false) }
+
+    fun fetchModels() {
+        if (fetchingModels) return
+        fetchingModels = true
+        fetchModelsError = null
+        fetchScope.launch {
+            onFetchModels()
+                .onSuccess { models ->
+                    fetchedModels = models
+                    modelsDialogOpen = true
+                }
+                .onFailure { error ->
+                    fetchModelsError = error.message ?: "请求失败"
+                }
+            fetchingModels = false
+        }
     }
 
     Column(
@@ -148,8 +169,12 @@ internal fun CloudModelEditorPage(
         ) {
             // 2.0x 大字号下给标题列限宽，长副标题省略而不是越界裁切
             Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回云端模型")
+                McaIconButton(
+                    contentDescription = "返回云端模型",
+                    onClick = onBack,
+                    glyphSize = McaIconSize.L,
+                ) {
+                    Icon(McaIcons.Back, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -187,7 +212,7 @@ internal fun CloudModelEditorPage(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Switch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled)
+                        McaSwitch(checked = cloud.enabled, onCheckedChange = onEnabledChange, enabled = enabled, contentDescription = "启用云端模型")
                     }
                     OutlinedTextField(
                         value = cloud.displayName,
@@ -216,6 +241,38 @@ internal fun CloudModelEditorPage(
                         }
                     )
                     if (!isImage) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            McaButton(
+                                style = McaButtonStyle.Outlined,
+                                onClick = ::fetchModels,
+                                enabled = enabled && !fetchingModels,
+                                shape = RoundedCornerShape(999.dp)
+                            ) {
+                                if (fetchingModels) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(if (fetchingModels) "获取中" else "获取模型列表")
+                            }
+                            Text(
+                                "用当前 Base URL 和 API Key 拉取可用模型。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        fetchModelsError?.let { error ->
+                            Text(
+                                "获取模型列表失败：$error",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    if (!isImage) {
                         if (cloud.apiFormat == "OPENAI_RESPONSES") {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Column(modifier = Modifier.weight(1f)) {
@@ -226,9 +283,10 @@ internal fun CloudModelEditorPage(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                McaSwitch(
                                     checked = cloud.supportsTools,
                                     onCheckedChange = onSupportsToolsChange,
+                                    contentDescription = "支持工具调用",
                                     enabled = enabled
                                 )
                             }
@@ -238,11 +296,27 @@ internal fun CloudModelEditorPage(
                                     Text("仅对支持 reasoning 的模型开启。开启后请求推理摘要，并停用温度与 Top P 参数。",
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                Switch(checked = cloud.responsesReasoningEnabled,
-                                    onCheckedChange = onResponsesReasoningChange, enabled = enabled)
+                                McaSwitch(checked = cloud.responsesReasoningEnabled,
+                                    onCheckedChange = onResponsesReasoningChange, enabled = enabled, contentDescription = "推理模型")
                             }
                         }
-                        Surface(
+Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text("流式输出", fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        "关闭后每次请求只返回一整段结果，用于 SSE 流不会正常结束的网关；普通网关请保持开启。",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                McaSwitch(
+                                    checked = cloud.streaming,
+                                    onCheckedChange = onStreamingChange,
+                                    contentDescription = "流式输出",
+                                    enabled = enabled
+                                )
+                            }
+                                                    Surface(
                             modifier = Modifier.fillMaxWidth(),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.34f),
                             shape = RoundedCornerShape(12.dp),
@@ -261,9 +335,10 @@ internal fun CloudModelEditorPage(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
-                                Switch(
+                                McaSwitch(
                                     checked = cloud.supportsVision,
                                     onCheckedChange = onSupportsVisionChange,
+                                    contentDescription = "支持图片输入",
                                     enabled = enabled
                                 )
                             }
@@ -283,7 +358,7 @@ internal fun CloudModelEditorPage(
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         if (isImage) {
                             items(cloud.availableImageFormats, key = { it.first }) { format ->
-                                FilterChip(
+                                McaChip(
                                     selected = cloud.imageApiFormat == format.first,
                                     onClick = { onImageFormatChange(format.first) },
                                     label = { Text(format.second) },
@@ -292,7 +367,7 @@ internal fun CloudModelEditorPage(
                             }
                         } else {
                             items(cloud.availableFormats, key = { it.first }) { format ->
-                                FilterChip(
+                                McaChip(
                                     selected = cloud.apiFormat == format.first,
                                     onClick = { onFormatChange(format.first) },
                                     label = { Text(format.second) },
@@ -398,14 +473,14 @@ internal fun CloudModelEditorPage(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (isImage) {
-                    OutlinedButton(
+                    McaButton(style = McaButtonStyle.Outlined,
                         onClick = onBack,
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp),
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         Text("取消")
                     }
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = onSaveImage,
                         enabled = enabled && cloud.imageConfigured,
                         modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
@@ -414,7 +489,7 @@ internal fun CloudModelEditorPage(
                         Text("保存并设为当前", maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 } else {
-                    OutlinedButton(
+                    McaButton(style = McaButtonStyle.Outlined,
                         onClick = onTest,
                         enabled = enabled && cloud.configured,
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp),
@@ -422,7 +497,7 @@ internal fun CloudModelEditorPage(
                     ) {
                         Text("测试")
                     }
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = onSaveChat,
                         enabled = enabled && cloud.configured,
                         modifier = Modifier.weight(1.45f).heightIn(min = 48.dp),
@@ -432,6 +507,35 @@ internal fun CloudModelEditorPage(
                     }
                 }
             }
+        }
+        if (!isImage && modelsDialogOpen && fetchedModels.isNotEmpty()) {
+            McaDialog(
+                onDismissRequest = { modelsDialogOpen = false },
+                title = { Text("选择推理模型", fontWeight = FontWeight.Bold) },
+                text = {
+                    LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                        items(fetchedModels) { modelId ->
+                            Text(
+                                modelId,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = if (modelId == cloud.chatModel) FontWeight.Bold else FontWeight.Normal,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        onChatModelChange(modelId)
+                                        modelsDialogOpen = false
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 4.dp)
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    McaButton(style = McaButtonStyle.Text, onClick = { modelsDialogOpen = false }) {
+                        Text("取消")
+                    }
+                }
+            )
         }
     }
 }
@@ -469,7 +573,7 @@ private fun CloudModelGroupCard(
                 )
             }
         }
-        OutlinedButton(
+        McaButton(style = McaButtonStyle.Outlined,
             onClick = onAdd,
             enabled = enabled,
             modifier = Modifier.fillMaxWidth(),
@@ -544,7 +648,7 @@ private fun CloudModelRow(
                 Text(meta, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text(model.baseUrl, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = { onPrimaryAction(model.id) },
                         enabled = enabled && !model.selected,
                         modifier = Modifier.weight(1f),
@@ -552,9 +656,9 @@ private fun CloudModelRow(
                     ) {
                         if (!largeText) {
                             Icon(
-                                imageVector = if (model.kind == "IMAGE") Icons.Rounded.Image else Icons.Rounded.PlayArrow,
+                                imageVector = if (model.kind == "IMAGE") McaIcons.Image else McaIcons.PlayArrow,
                                 contentDescription = null,
-                                modifier = Modifier.size(18.dp)
+                                modifier = Modifier.size(McaIconSize.S)
                             )
                             Spacer(Modifier.width(6.dp))
                         }
@@ -564,25 +668,31 @@ private fun CloudModelRow(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    OutlinedButton(
+                    McaButton(style = McaButtonStyle.Outlined,
                         onClick = { onEdit(model.id) },
                         enabled = enabled,
                         modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(999.dp)
                     ) {
                         if (!largeText) {
-                            Icon(Icons.Rounded.Edit, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(McaIcons.Edit, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                             Spacer(Modifier.width(6.dp))
                         }
                         Text("编辑", maxLines = if (largeText) 2 else 1, overflow = TextOverflow.Ellipsis)
                     }
                     // 与本地模型卡删除按钮统一：48dp 触达 + 18dp muted 字形
-                    IconButton(onClick = { confirmDelete = true }, enabled = enabled, modifier = Modifier.size(48.dp)) {
+                    McaIconButton(
+                        contentDescription = cloudModelDeleteActionLabel(model),
+                        onClick = { confirmDelete = true },
+                        enabled = enabled,
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.S,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    ) {
                         Icon(
-                            Icons.Rounded.Delete,
-                            contentDescription = cloudModelDeleteActionLabel(model),
-                            modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            McaIcons.Delete,
+                            contentDescription = null,
+                            modifier = Modifier.size(McaIconSize.S)
                         )
                     }
                 }
@@ -590,14 +700,14 @@ private fun CloudModelRow(
         }
     }
     if (confirmDelete) {
-        AlertDialog(
+        McaDialog(
             onDismissRequest = { confirmDelete = false },
             title = { Text("删除云端模型", fontWeight = FontWeight.Bold) },
             text = {
                 Text("确定删除「${model.modelName}」吗？这只会移除 MCA 中保存的接入配置，不会影响云端服务商账号。")
             },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         confirmDelete = false
                         onDelete(model.id)
@@ -607,7 +717,7 @@ private fun CloudModelRow(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmDelete = false }) {
+                McaButton(style = McaButtonStyle.Text, onClick = { confirmDelete = false }) {
                     Text("取消")
                 }
             }

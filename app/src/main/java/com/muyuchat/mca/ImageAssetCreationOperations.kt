@@ -22,7 +22,7 @@ internal interface ImageAssetCreationPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ImageAssetCreationFields) -> ImageAssetCreationFields)
 
     val context: Application
 
@@ -185,6 +185,7 @@ records: List<LocalImageLoraRecord>
                 ?.displayName
             port.localImageModelStore.saveSelectedModelId(model.id)
             port.localImageModelStore.saveSelectedBackend(ImageBackend.LOCAL)
+            val hasActiveJob = port.activeImageGenerationJobId() != null
             port.updateUiState {
                 it.copy(
                     qnnImageVerificationCurrentByModelId = it.qnnImageVerificationCurrentByModelId +
@@ -193,7 +194,7 @@ records: List<LocalImageLoraRecord>
                     selectedImageBackend = ImageBackend.LOCAL,
                     statusMessage = buildString {
                         append("图片页已切换到本地生图：${model.displayName}")
-                        if (port.activeImageGenerationJobId() != null) {
+                        if (hasActiveJob) {
                             append("；当前任务仍固定使用")
                             append(runningModelName?.let { " $it" }.orEmpty())
                             append("，本次切换从下一任务生效")
@@ -291,7 +292,7 @@ internal fun canReadGenerationHistoryInputFor(application: Application, referenc
 }
 
 internal fun rejectImageModelSwitchWhileGenerationIsActiveFor(
-    store: UiStateStore,
+    store: UiStatusWriter,
     admission: RuntimeAdmissionState
 ): Boolean {
     val activeJobId = admission.activeImageGenerationJobId ?: return false
@@ -299,14 +300,10 @@ internal fun rejectImageModelSwitchWhileGenerationIsActiveFor(
         .firstOrNull { job -> job.id == activeJobId }
         ?.modelName
         ?.takeIf(String::isNotBlank)
-    store.update { state ->
-        state.copy(
-            statusMessage = buildString {
+    store.showStatus(buildString {
                 append("当前图片任务已锁定")
                 activeModelName?.let { append("使用 $it") }
                 append("；完成或取消后再切换模型。")
-            }
-        )
-    }
+            })
     return true
 }

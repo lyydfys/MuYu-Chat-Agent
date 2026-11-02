@@ -3,6 +3,7 @@ package com.muyuchat.core.download
 enum class RecommendedChatRuntime(val label: String) {
     MNN("MNN 高速引擎"),
     GGUF("GGUF 兼容引擎"),
+    GENIEX_LLAMA_CPP("GenieX llama.cpp / 骁龙 HTP"),
     GENIEX_QAIRT("GenieX QAIRT / 骁龙 NPU"),
     LITERT_LM("LiteRT-LM 引擎")
 }
@@ -112,7 +113,8 @@ enum class ImageEngineModelFamily {
     FLUX,
     QWEN_IMAGE,
     LONGCAT_IMAGE,
-    SANA
+    SANA,
+    ANIMA
 }
 
 enum class ImageEngineModelVariant {
@@ -129,7 +131,8 @@ enum class ImageEngineModelVariant {
     QWEN_IMAGE_21,
     LONGCAT_IMAGE,
     CONTROLNET_CANNY,
-    SANA_EDIT
+    SANA_EDIT,
+    ANIMA_PREVIEW
 }
 
 /**

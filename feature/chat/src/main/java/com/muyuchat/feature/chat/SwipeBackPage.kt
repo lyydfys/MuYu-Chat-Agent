@@ -2,7 +2,6 @@ package com.muyuchat.feature.chat
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -19,10 +18,20 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
+import com.muyuchat.core.designsystem.McaPageMotion
+import com.muyuchat.core.designsystem.SmoothPageMotionState
 import com.muyuchat.core.designsystem.SystemBackMotionHandler
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.launch
+
+// Preserve the shell's established curves while sharing the gesture/settle command owner.
+internal val MainShellPageMotion = McaPageMotion(
+    enterSlide = tween(durationMillis = 260),
+    enterFade = tween(durationMillis = 180),
+    dismissSlide = spring(dampingRatio = 0.92f, stiffness = 620f)
+)
+internal val MainShellCancelSlide = spring<androidx.compose.ui.unit.IntOffset>(
+    dampingRatio = 0.95f,
+    stiffness = 700f
+)
 
 /**
  * A page that follows the system predictive-back gesture and can also be dismissed by its own
@@ -35,11 +44,10 @@ import kotlinx.coroutines.launch
  *   instead of restarting another slide on top of it.
  * - The value is read only inside `graphicsLayer`, so dragging invalidates the layer, never the
  *   composition.
- * - Predictive-back progress arrives once per frame. It is funnelled through a **conflated channel**
- *   into one consumer that snaps the shared offset; it does not allocate one coroutine per callback.
- * - A single settle job (latest command wins) owns the cancel/dismiss animations. Gesture progress
- *   cancels that job immediately and takes over from wherever the page currently is.
- * - Dismissal is idempotent: repeated back presses cannot run the exit twice.
+ * - Entrance, predictive-back progress, cancel and dismiss share [SmoothPageMotionState]'s one
+ *   conflated mailbox; a sample never allocates its own coroutine.
+ * - Dismissal commits synchronously: late progress/cancel cannot reverse a committed exit, and
+ *   start/completion callbacks each run at most once.
  * - Both settle animations use springs, so the page keeps its weight; with the system animation
  *   scale at zero they complete immediately (standard `Animatable` behaviour).
  */
@@ -66,120 +74,49 @@ fun SwipeBackPage(
     ) {
         BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
             val density = LocalDensity.current
-            val widthPx = with(density) { maxWidth.toPx() }
+            val widthPx = with(density) { maxWidth.roundToPx() }
             // The page is composed when it becomes visible, so it starts one width off screen. The
             // remembered value is stable for this page's composition; a configuration change
             // recreates the page (and restarts this entrance), as before.
-            val offsetX = remember { Animatable(widthPx) }
+            val pageMotion = remember { SmoothPageMotionState(widthPx) }
+            val offsetX = pageMotion.offsetX
             // Collectors are keyed on the stable offset only: a window resize must not cancel a
             // running entrance or dismissal. They still read the current width for their maths.
             val latestWidthPx = rememberUpdatedState(widthPx)
-            val gestureProgress = remember { Channel<Float>(Channel.CONFLATED) }
-            val settleTargets = remember { Channel<SwipeBackTarget>(Channel.CONFLATED) }
-            val gate = remember { SwipeBackGate() }
-
-            // Predictive-back drag: conflated samples, snapped into the shared offset. Taking over
-            // cancels any in-flight settle and continues from the current position.
-            LaunchedEffect(offsetX) {
-                for (progress in gestureProgress) {
-                    gate.settleJob?.cancel()
-                    gate.settleJob = null
-                    gate.dismissing = false
-                    if (!gate.gestureActive) {
-                        gate.gestureActive = true
-                        gate.gestureBase = offsetX.value.coerceIn(0f, latestWidthPx.value)
-                    }
-                    val fraction = progress.coerceIn(0f, 1f)
-                    // A gesture that starts during the entrance maps the remaining travel instead
-                    // of jumping back to a fully open page.
-                    offsetX.snapTo(
-                        gate.gestureBase +
-                            (latestWidthPx.value - gate.gestureBase) * fraction
-                    )
-                }
-            }
-
-            // Single settle-job owner. Callbacks above only post targets; the latest target wins and
-            // a cancelled animation never reaches its completion callback.
-            LaunchedEffect(offsetX) {
-                for (target in settleTargets) {
-                    when (target) {
-                        SwipeBackTarget.Enter -> {
-                            // A gesture that already took over owns the position; a stale entrance
-                            // target must not pull the page back.
-                            if (gate.gestureActive) continue
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(0f, tween(durationMillis = 260))
-                            }
-                        }
-
-                        SwipeBackTarget.Cancel -> {
-                            gate.gestureActive = false
-                            gate.dismissing = false
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(
-                                    0f,
-                                    spring(dampingRatio = 0.95f, stiffness = 700f)
-                                )
-                            }
-                        }
-
-                        SwipeBackTarget.Dismiss -> {
-                            if (gate.dismissing) continue
-                            gate.dismissing = true
-                            gate.gestureActive = false
-                            onDismissStart()
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(
-                                    latestWidthPx.value,
-                                    spring(dampingRatio = 0.92f, stiffness = 620f)
-                                )
-                                onDismiss()
-                            }
-                        }
-                    }
-                }
+            val latestOnDismissStart = rememberUpdatedState(onDismissStart)
+            val latestOnDismiss = rememberUpdatedState(onDismiss)
+            LaunchedEffect(pageMotion) {
+                pageMotion.run(
+                    widthPx = { latestWidthPx.value },
+                    motion = { MainShellPageMotion },
+                    cancelSlide = { MainShellCancelSlide },
+                    onDismissStart = { latestOnDismissStart.value() },
+                    onDismiss = { latestOnDismiss.value() }
+                )
             }
 
             // Hidden-first visibility means the content is composed at the exact moment the page
             // starts entering, so this sends exactly one entrance target per page composition.
             LaunchedEffect(visible) {
-                if (visible) settleTargets.trySend(SwipeBackTarget.Enter)
-            }
-
-            fun closeWithDrawerMotion() {
-                settleTargets.trySend(SwipeBackTarget.Dismiss)
+                if (visible) pageMotion.enter()
             }
 
             SystemBackMotionHandler(
                 enabled = visible && !WindowInsets.isImeVisible,
-                onProgress = { progress -> gestureProgress.trySend(progress) },
-                onCancel = { settleTargets.trySend(SwipeBackTarget.Cancel) },
+                onProgress = pageMotion::progress,
+                onCancel = pageMotion::cancel,
                 // Deliberately no minimum-offset kick: the exit always continues from the current
                 // offset, so a back press during the entrance never jumps.
-                onBack = { settleTargets.trySend(SwipeBackTarget.Dismiss) }
+                onBack = pageMotion::dismiss
             )
 
             val pageModifier = Modifier
                 .fillMaxSize()
-                .graphicsLayer { translationX = offsetX.value }
+                .graphicsLayer { translationX = offsetX.value.x.toFloat() }
 
-            content(pageModifier, ::closeWithDrawerMotion)
+            content(pageModifier, pageMotion::dismiss)
         }
     }
 }
 
-private enum class SwipeBackTarget { Enter, Cancel, Dismiss }
-
-/** Plain holder: gesture bookkeeping must not invalidate composition. */
-private class SwipeBackGate {
-    var settleJob: Job? = null
-    var dismissing = false
-    var gestureActive = false
-    var gestureBase = 0f
-}
-
-fun drawerPageEnter() = fadeIn(animationSpec = tween(durationMillis = 180))
+fun drawerPageEnter() = fadeIn(animationSpec = MainShellPageMotion.enterFade)

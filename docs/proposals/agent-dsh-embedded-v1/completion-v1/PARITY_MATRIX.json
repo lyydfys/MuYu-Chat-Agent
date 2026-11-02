@@ -1,0 +1,87 @@
+{
+  "schema": "mca.dsh.parity-matrix.v1",
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-20T14:30:15+08:00",
+  "task": "C00",
+  "stage": "SEED_ONLY",
+  "purpose": "C14 行级 DSH 功能对标矩阵的种子。C00 不预填任何 row；row identity 必须来自 CAPABILITY_MANIFEST.json，不得在 C00 阶段凭阅读印象造行。",
+  "sourceRevisions": {
+    "head": "68b6eef1e67870b02bfef6afda2e625d36663da9",
+    "branch": "codex/enterprise-refactor",
+    "headCommitTime": "2026-10-20T12:25:10+08:00",
+    "headCommitTitle": "docs(audit): round-29 completion gaps and device captures",
+    "headFinal": null,
+    "headTreeContainsDshModules": false,
+    "headTreeDshFileCount": 0,
+    "submodules": [
+      {
+        "path": "third_party/llama.cpp",
+        "revision": "4ceb1719101f32637b841206c172f3f058ffc182",
+        "internalPorcelainChanges": 20
+      },
+      {
+        "path": "third_party/stable-diffusion.cpp",
+        "revision": "16b3846acfdf2c9499a3ac0c3d5d2914ebe859a0",
+        "internalPorcelainChanges": 18
+      },
+      {
+        "path": "third_party/tokenizers-cpp",
+        "revision": "acbdc5a27ae01ba74cda756f94da698d40f11dfe",
+        "internalPorcelainChanges": 5
+      }
+    ],
+    "payload": {
+      "path": "core/dsh-runtime/src/main/assets/dsh/payload.zip",
+      "size": 160464248,
+      "sha256": "975146516216ced02299676689c1731c7f390962389dbef56821cd59a3bf69ab",
+      "lockPath": "scripts/dsh/payload-lock.json",
+      "apkSha256": "c324272bff00e8cce06e0baa2ebb9b88e524a5d246e06f8cb55d39df7c66dafa",
+      "apkSize": 162006797,
+      "kernelVersion": "0.2.1-rc.2",
+      "kernelRevision": "20261018072502",
+      "payloadVersion": "dsh-0.2.1-rc.2+android-ref-c324272bff00",
+      "payloadFileCount": 31021,
+      "payloadZipEntries": 36541,
+      "payloadDirEntries": 5520,
+      "payloadNativeAddons": 0,
+      "officialRevision": "687f282e8625c6b8d11ff58211a90524be2e4317",
+      "officialPackageVersion": "0.2.1-rc.2",
+      "officialProfile": "web",
+      "defaultAgentPreset": "standard"
+    },
+    "worktree": {
+      "snapshotAt": "2026-10-20T14:29:15+08:00",
+      "porcelainEntries": 95,
+      "modifiedEntries": 44,
+      "untrackedTopLevelEntries": 51,
+      "porcelainEntriesUall": 714,
+      "untrackedFiles": 670,
+      "trackedDiffFiles": 44,
+      "trackedDiffInsertions": 2494,
+      "trackedDiffDeletions": 411,
+      "note": "采集期间其他 C 任务仍在写工作树（C02c 的 DshGatewayConfigSeeder.kt 14:23:43 / 测试 14:26:01）；任何复现必须重新绑定采集时刻与 seeder 快照 hash。"
+    }
+  },
+  "rowIdentity": {
+    "source": "docs/proposals/agent-dsh-embedded-v1/CAPABILITY_MANIFEST.json",
+    "schema": "mca.dsh.capability.v1",
+    "schemaVersion": 1,
+    "generatedAt": "2026-10-19T19:38:31+08:00",
+    "rowCount": 422,
+    "idField": "id",
+    "idExamples": [
+      "host.tool-plugin-manager",
+      "host.plugin-manager",
+      "host.session"
+    ],
+    "fillOwner": "C14",
+    "rules": [
+      "C14 新增的每一行必须带 capabilityManifestId，且该 id 必须能在 CAPABILITY_MANIFEST.json 的 rows[].id 中精确命中；不得自造 id。",
+      "row 的 officialRows/officialRevision/officialProfile 必须从 manifest 行或其 source 字段派生，不复制整份 manifest。",
+      "status 只用 PASS/FAIL/NOT_RUN/BLOCKED/NOT_APPLICABLE，且必须绑定本次 run 的 revision/APK/配置；C00 种子不带任何 PASS。",
+      "无 MCA 生产调用点不等于功能缺失，记 NOT_RUN 并在 notes 说明；只有源码/设备证据支持时才可 FAIL。",
+      "禁止复制或覆盖 CAPABILITY_MANIFEST.json；C14 只读引用，需要修订 manifest 时另开任务。"
+    ]
+  },
+  "rows": []
+}

@@ -52,23 +52,38 @@ internal fun MacrobenchmarkScope.waitForChatSurface(
  */
 internal fun MacrobenchmarkScope.requireChatBackendFixture() {
     val device = device
-    val headerPresent = device.wait(Until.hasObject(By.desc("选择模型")), BenchmarkTarget.UI_TIMEOUT_MS)
+    // The chat surface is identified by the composer, which keeps its accessibility name.
+    val composerPresent = device.wait(
+        Until.hasObject(By.desc("消息输入框")),
+        BenchmarkTarget.UI_TIMEOUT_MS
+    )
     Assume.assumeTrue(
-        "Streaming fixture missing: the chat model header is not visible. " +
+        "Streaming fixture missing: the chat composer is not visible. " +
             "Install ${packageName} and open the chat screen first.",
-        headerPresent
+        composerPresent
     )
+
+    // Readiness is read from the production model-capsule subtitle instead of a duplicated
+    // contentDescription: `已就绪` marks a loaded local model, `云端 API` a selected cloud model.
+    // Everything in `unavailableMarkers` means the run would drive a model-less screen.
+    val readyMarkers = listOf("已就绪", "云端 API")
+    val ready = readyMarkers.any { marker ->
+        device.wait(Until.hasObject(By.textContains(marker)), BenmarkReadyTimeoutMs)
+    }
     val unavailableMarkers = listOf(
-        "待加载", "选择模型", "加载中", "重新加载中", "恢复参数中", "停止中", "需要重载", "加载失败"
+        "待加载", "选择模型", "正在读取模型权重", "重新加载中", "恢复参数中", "停止中", "需要重载", "加载失败"
     )
-    val unavailable = unavailableMarkers.any { marker -> device.hasObject(By.textContains(marker)) }
+    val unavailable = unavailableMarkers.filter { marker -> device.hasObject(By.textContains(marker)) }
     Assume.assumeTrue(
-        "Streaming fixture missing: no ready chat backend is visible in the header. " +
+        "Streaming fixture missing: no ready chat backend is visible in the header " +
+            "(ready=${readyMarkers.joinToString("/")}, blocked=${unavailable.joinToString(",")}). " +
             "Install ${packageName}, load a local chat model (or configure a cloud chat model) " +
             "once, then re-run. A skipped run is NOT_RUN, not a performance result.",
-        !unavailable
+        ready && unavailable.isEmpty()
     )
 }
+
+private const val BenmarkReadyTimeoutMs = 3_000L
 
 /** Prefer the explicit new-chat action; a restored session is an acceptable fallback. */
 internal fun MacrobenchmarkScope.startFreshChatIfAvailable() {

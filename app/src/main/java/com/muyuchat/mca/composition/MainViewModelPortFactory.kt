@@ -33,6 +33,8 @@ internal object MainViewModelPortFactory {
         benchmarkRunner: BenchmarkRunner,
         buildRecommendationAction: (UserPreference) -> AgentRecommendation,
         generateLocalApiImageAction: suspend (String, String) -> String,
+        generateLocalApiVideoAction: suspend (String, String) -> String,
+        stopLocalApiVideoAction: suspend (String) -> Boolean,
         cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
         chatContextComposer: ChatContextComposer,
         showStatus: (String?) -> Unit,
@@ -74,6 +76,8 @@ internal object MainViewModelPortFactory {
                 benchmarkRunner = benchmarkRunner,
                 buildRecommendationAction = buildRecommendationAction,
                 generateLocalApiImageAction = generateLocalApiImageAction,
+                generateLocalApiVideoAction = generateLocalApiVideoAction,
+                stopLocalApiVideoAction = stopLocalApiVideoAction,
             )
 
         val chatLocalApiProviderPort: ChatLocalApiProviderPort =

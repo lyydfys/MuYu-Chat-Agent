@@ -8,7 +8,76 @@ import kotlin.concurrent.thread
 
 internal const val WORKER_LOG_TAG = "McaLocalChatWorker"
 
+/** Main-process stop dispatch tag, paired with [WORKER_LOG_TAG] for device stop-latency timing. */
+internal const val LOCAL_CHAT_LOG_TAG = "McaLocalChat"
+
 internal const val NATIVE_CANCEL_GRACE_TIMEOUT_MS = 1_500L
+
+/**
+ * Records a stop request against the exact native operation that was active when it arrived.
+ *
+ * Emits one bounded log line with request id, stage, operation token and generation so device
+ * verification can match the line to the main-process dispatch log and to the gateway call id.
+ */
+internal fun LocalChatWorkerService.recordStopRequested(source: String): LocalChatStopLatencyTrace.Ticket? {
+        val ticket = stopLatencyTrace.request(
+            stage = activeNativeStage,
+            operationToken = activeNativeOperationToken,
+            generation = generationSequence.get(),
+            requestKey = activeRequestKey
+        )
+        if (ticket == null) {
+            Log.i(
+                WORKER_LOG_TAG,
+                "stop requested source=$source with no active native operation; " +
+                    "the runner stop is still dispatched"
+            )
+            return null
+        }
+        Log.i(
+            WORKER_LOG_TAG,
+            "stop requested source=$source request=${ticket.requestKey ?: "-"} " +
+                "stage=${ticket.stage} op=${ticket.operationToken} generation=${ticket.generation} " +
+                "requestedAtMs=${ticket.requestedAtMs}"
+        )
+        return ticket
+    }
+
+/** Emits the bounded request-to-observation latency for the exact stopped native operation. */
+internal fun LocalChatWorkerService.recordStopObserved(stage: String, operationToken: Long) {
+        val observation = stopLatencyTrace.observe(operationToken) ?: return
+        Log.i(
+            WORKER_LOG_TAG,
+            "stop observed request=${observation.ticket.requestKey ?: "-"} " +
+                "stage=$stage op=$operationToken " +
+                "stopRequestedToObservedMs=${observation.elapsedMs}"
+        )
+    }
+
+/** Emits the worker-idle boundary: no native operation and no running generation for this stop. */
+internal fun LocalChatWorkerService.recordStopIdle(operationToken: Long) {
+        if (activeRunner?.isGenerationRunning() == true) return
+        val idle = stopLatencyTrace.idle(operationToken, generationSequence.get()) ?: return
+        Log.i(
+            WORKER_LOG_TAG,
+            "worker idle request=${idle.observation.ticket.requestKey ?: "-"} " +
+                "stage=${idle.observation.ticket.stage} op=${idle.observation.ticket.operationToken} " +
+                "stopObservedToIdleMs=${idle.stopObservedToIdleMs} " +
+                "stopRequestedToIdleMs=${idle.stopRequestedToIdleMs}"
+        )
+    }
+
+/**
+ * Closes the idle boundary of a pending stop when the terminal decode chunk arrives.
+ *
+ * LiteRT finishes asynchronously after the Binder call that observed the stop, so its idle proof
+ * can only be emitted by the next terminal chunk. The ticket's own token/generation are used, never
+ * the caller's current operation token.
+ */
+internal fun LocalChatWorkerService.recordStopIdleForPendingStop() {
+        val token = stopLatencyTrace.pendingToken() ?: return
+        recordStopIdle(token)
+    }
 
 internal fun <T> LocalChatWorkerService.guarded(
         stage: String,
@@ -93,10 +162,14 @@ internal fun <T> LocalChatWorkerService.guardedNativeCall(
                 runnerStillActive = activeRunner?.isGenerationRunning() == true) }
             watchdogs.remove(token)?.let(watchdogHandler::removeCallbacks)
             cancellationWatchdogs.remove(token)?.let(watchdogHandler::removeCallbacks)
+            // Stop-latency evidence is emitted at the exact native return boundary, before the
+            // token is restored, so a device log can time request -> observed -> idle.
+            recordStopObserved(stage, token)
             if (activeNativeStage == stage && activeNativeOperationToken == token) {
                 activeNativeStage = previousStage
                 activeNativeOperationToken = previousToken
             }
+            recordStopIdleForPendingStop()
         }
     }
 

@@ -27,7 +27,7 @@ internal interface LocalImageAdapterPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (LocalImageAdapterFields) -> LocalImageAdapterFields)
 
     val loraStore: LocalImageLoraStore
 

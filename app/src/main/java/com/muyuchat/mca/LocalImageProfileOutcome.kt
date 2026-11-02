@@ -10,6 +10,14 @@ import org.json.JSONObject
  */
 
 internal fun LocalImageModelRecord.resolveExecutionProfileOutcomeForUi(): LocalImageUiProfileOutcome {
+    if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        // The Neuron pipeline consumes the typed v3 contract directly. Do not
+        // synthesize an unrelated generic stable-diffusion profile for UI fields.
+        return LocalImageUiProfileOutcome(
+            resolution = null,
+            readinessError = localImageStructuralReadinessMessage()
+        )
+    }
     val root = installedImageBundleRootForUi()
     return try {
         LocalImageUiProfileOutcome(

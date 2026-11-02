@@ -30,7 +30,7 @@ internal interface WebSearchConfigPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (WebSearchFields) -> WebSearchFields)
 
     fun saveConfig(config: WebSearchConfig)
 
@@ -219,9 +219,8 @@ internal fun runWebSearchPreflight(
                     )
                 }
             }
-            port.updateUiState { state ->
-                val elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
-                result.fold(
+            val elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+            val (detail, diagnostics, status) = result.fold(
                     onSuccess = { report ->
                         val warningChecks = report.checks.filter { it.startsWith("需检查") }
                         val diagnostics = port.appendDiagnostic(
@@ -243,11 +242,8 @@ internal fun runWebSearchPreflight(
                                 closedLoopChecks = report.checks
                             )
                         )
-                        state.copy(
-                            webSearchStatusMessage = report.message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = if (report.ok) "联网网络预检通过" else "联网网络预检需检查"
-                        )
+                        Triple(report.message, diagnostics,
+                            if (report.ok) "联网网络预检通过" else "联网网络预检需检查")
                     },
                     onFailure = { error ->
                         val message = "网络预检失败：${error.message ?: "未知错误"}"
@@ -270,12 +266,14 @@ internal fun runWebSearchPreflight(
                                 closedLoopChecks = listOf(message)
                             )
                         )
-                        state.copy(
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = "联网网络预检失败"
-                        )
+                        Triple(message, diagnostics, "联网网络预检失败")
                     }
+                )
+            port.updateUiState { state ->
+                state.copy(
+                    webSearchStatusMessage = detail,
+                    webSearchDiagnostics = diagnostics,
+                    statusMessage = status
                 )
             }
         }
@@ -313,8 +311,7 @@ query: String, config: WebSearchConfig): Job? {
         ) {
             val started = android.os.SystemClock.elapsedRealtime()
             val result = runCatchingCancellable { port.provider.search(plan, config) }
-            port.updateUiState { state ->
-                result.fold(
+            val (detail, diagnostics, status) = result.fold(
                     onSuccess = { searchResult ->
                         val success = searchResult.documents.isNotEmpty()
                         val message = if (success) {
@@ -329,11 +326,8 @@ query: String, config: WebSearchConfig): Job? {
                                 message = message
                             )
                         )
-                        state.copy(
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = if (success) "联网检索测试成功" else "联网检索无结果"
-                        )
+                        Triple(message, diagnostics,
+                            if (success) "联网检索测试成功" else "联网检索无结果")
                     },
                     onFailure = { error ->
                         val message = "测试失败：${error.message ?: "未知错误"}"
@@ -344,12 +338,14 @@ query: String, config: WebSearchConfig): Job? {
                                 message = message
                             )
                         )
-                        state.copy(
-                            webSearchStatusMessage = message,
-                            webSearchDiagnostics = diagnostics,
-                            statusMessage = "联网检索测试失败"
-                        )
+                        Triple(message, diagnostics, "联网检索测试失败")
                     }
+                )
+            port.updateUiState { state ->
+                state.copy(
+                    webSearchStatusMessage = detail,
+                    webSearchDiagnostics = diagnostics,
+                    statusMessage = status
                 )
             }
         }

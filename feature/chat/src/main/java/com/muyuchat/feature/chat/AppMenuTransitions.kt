@@ -15,20 +15,15 @@ import android.os.BatteryManager
 import android.os.Environment
 import android.os.SystemClock
 import android.provider.MediaStore
-import android.widget.Toast
 import androidx.activity.BackEventCompat
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.ExitTransition
-import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -52,11 +47,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -70,7 +62,6 @@ import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -87,39 +78,34 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.PhotoCamera
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Translate
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DatePickerDialog
@@ -128,23 +114,18 @@ import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material3.rememberDateRangePickerState
@@ -157,7 +138,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -172,7 +152,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
@@ -187,7 +166,6 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -217,6 +195,7 @@ import androidx.compose.ui.text.input.OffsetMapping
 import androidx.compose.ui.text.input.TransformedText
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatMessage
@@ -241,8 +220,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -259,140 +236,46 @@ import java.time.format.DateTimeFormatter
 import java.util.Calendar
 import org.json.JSONArray
 import org.json.JSONObject
-import com.muyuchat.core.designsystem.SystemBackMotionHandler
+import com.muyuchat.core.designsystem.McaPageMotion
+import com.muyuchat.core.designsystem.SmoothRightToLeftPage as SharedSmoothRightToLeftPage
 import com.muyuchat.core.engine.isAsciiTriggerWordCharacter
 
+/**
+ * Chat's page wrapper now shares the design-system page instead of carrying a second motion
+ * owner. The local curves differ from [McaPageMotion.Default] -- the menu pages keep their
+ * established tweens -- but entrance, predictive-back takeover and the dismissal terminal gate
+ * are the same code path as every other full-screen page.
+ */
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
 internal fun SmoothRightToLeftPage(
     visible: Boolean,
     onDismiss: () -> Unit,
     content: @Composable (Modifier, () -> Unit) -> Unit
 ) {
-    // Start from the hidden state so the enter transition also runs when a caller composes the
-    // page only at the moment it opens (`request?.let { SmoothRightToLeftPage(visible = true) }`).
-    // Passing the raw flag to AnimatedVisibility leaves currentState == targetState == true on that
-    // first composition, which silently skips the entry animation and hard-cuts the page in.
-    val pageVisibility = remember { MutableTransitionState(initialState = false) }
-    pageVisibility.targetState = visible
-    AnimatedVisibility(
-        visibleState = pageVisibility,
-        enter = appMenuPageEnter(),
-        exit = ExitTransition.None
-    ) {
-        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
-            val density = LocalDensity.current
-            val widthPx = with(density) { maxWidth.toPx() }
-            // Single position source for the entrance, predictive-back drag, cancel and dismissal.
-            // Read only inside graphicsLayer. The page starts one width off screen and animates in
-            // through the same value a gesture later takes over.
-            val offsetX = remember { Animatable(widthPx) }
-            // Collectors are keyed on the stable offset only so a window resize cannot cancel a
-            // running entrance/dismissal; they still read the current width for their maths.
-            val latestWidthPx = rememberUpdatedState(widthPx)
-            val gestureProgress = remember { Channel<Float>(Channel.CONFLATED) }
-            val settleTargets = remember { Channel<AppMenuPageTarget>(Channel.CONFLATED) }
-            val gate = remember { AppMenuPageGate() }
-            // Let the IME own the first Back press. Some Android builds dispatch that event
-            // through the page callback while a text field is acquiring focus.
-            val imeVisible = WindowInsets.isImeVisible
-
-            // Predictive-back drag: one consumer, conflated samples, no coroutine per callback.
-            // Taking over cancels the settle job and continues from the current offset.
-            LaunchedEffect(offsetX) {
-                for (progress in gestureProgress) {
-                    gate.settleJob?.cancel()
-                    gate.settleJob = null
-                    gate.dismissing = false
-                    if (!gate.gestureActive) {
-                        gate.gestureActive = true
-                        gate.gestureBase = offsetX.value.coerceIn(0f, latestWidthPx.value)
-                    }
-                    val fraction = progress.coerceIn(0f, 1f)
-                    offsetX.snapTo(
-                        gate.gestureBase +
-                            (latestWidthPx.value - gate.gestureBase) * fraction
-                    )
-                }
-            }
-
-            // One settle-job owner: callbacks only post targets, the latest target wins, and a
-            // cancelled animation never reaches its dismissal callback.
-            LaunchedEffect(offsetX) {
-                for (target in settleTargets) {
-                    when (target) {
-                        AppMenuPageTarget.Enter -> {
-                            // A gesture that already took over owns the position; a stale entrance
-                            // target must not pull the page back.
-                            if (gate.gestureActive) continue
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(0f, tween(durationMillis = 240))
-                            }
-                        }
-
-                        AppMenuPageTarget.Cancel -> {
-                            gate.gestureActive = false
-                            gate.dismissing = false
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(0f, tween(durationMillis = 160))
-                            }
-                        }
-
-                        AppMenuPageTarget.Dismiss -> {
-                            if (gate.dismissing) continue
-                            gate.dismissing = true
-                            gate.gestureActive = false
-                            gate.settleJob?.cancel()
-                            gate.settleJob = launch {
-                                offsetX.animateTo(latestWidthPx.value, tween(durationMillis = 180))
-                                onDismiss()
-                            }
-                        }
-                    }
-                }
-            }
-
-            LaunchedEffect(visible) {
-                if (visible) settleTargets.trySend(AppMenuPageTarget.Enter)
-            }
-
-            fun closeWithDrawerMotion() {
-                settleTargets.trySend(AppMenuPageTarget.Dismiss)
-            }
-
-            SystemBackMotionHandler(
-                enabled = visible && !imeVisible,
-                onProgress = { progress -> gestureProgress.trySend(progress) },
-                onCancel = { settleTargets.trySend(AppMenuPageTarget.Cancel) },
-                // No minimum-offset kick: the exit continues from the current offset so an
-                // immediate back press during the entrance cannot jump.
-                onBack = { settleTargets.trySend(AppMenuPageTarget.Dismiss) }
-            )
-
-            val pageModifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer { translationX = offsetX.value }
-
-            content(pageModifier, ::closeWithDrawerMotion)
-        }
-    }
+    SharedSmoothRightToLeftPage(
+        visible = visible,
+        onDismiss = onDismiss,
+        motion = ChatAppMenuPageMotion,
+        cancelSlide = ChatAppMenuCancelSlide,
+        content = content
+    )
 }
 
-private enum class AppMenuPageTarget { Enter, Cancel, Dismiss }
+/**
+ * The chat page curves, unchanged from the wrapper this replaced: 240 ms entrance, 160 ms
+ * gesture-cancel recovery, 180 ms dismissal and the 140 ms fade. They stay tweens rather than
+ * [McaPageMotion.Default]'s springs because the menu pages' hand-feel is part of the frozen
+ * visual contract.
+ */
+internal val ChatAppMenuPageMotion: McaPageMotion = McaPageMotion(
+    enterSlide = tween(durationMillis = 240),
+    enterFade = tween(durationMillis = 140),
+    dismissSlide = tween(durationMillis = 180)
+)
 
-/** Plain holder: per-frame gesture bookkeeping must not invalidate composition. */
-private class AppMenuPageGate {
-    var settleJob: Job? = null
-    var dismissing = false
-    var gestureActive = false
-    var gestureBase = 0f
-}
-
-// Only the fade stays on AnimatedVisibility: horizontal position is owned by offsetX so the
-// entrance, gesture takeover and dismissal cannot stack two different translations.
-private fun appMenuPageEnter() = fadeIn(animationSpec = tween(durationMillis = 140))
+/** Predictive-back cancellation recovery curve for the chat pages; see [ChatAppMenuPageMotion]. */
+internal val ChatAppMenuCancelSlide: FiniteAnimationSpec<IntOffset> =
+    tween(durationMillis = 160)
 
 /**
  * Chat-scoped spring language shared by the composer, message list and page chrome.

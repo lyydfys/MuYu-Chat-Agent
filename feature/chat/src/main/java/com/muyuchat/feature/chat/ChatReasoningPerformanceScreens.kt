@@ -1,8 +1,20 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.os.SystemClock
+import android.graphics.LinearGradient
+import android.graphics.Matrix
+import android.graphics.Shader
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -17,14 +29,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -34,7 +42,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -51,9 +64,56 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.PromptMessageRetention
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
+
+@Composable
+private fun rememberReasoningShimmer(
+    active: Boolean,
+    baseColor: Color,
+    highlightColor: Color,
+): ReasoningShimmer? {
+    if (!active) return null
+    val transition = rememberInfiniteTransition(label = "reasoning-shimmer")
+    val shimmerX = transition.animateFloat(
+        initialValue = -140f,
+        targetValue = 420f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1650, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "reasoning-shimmer-x"
+    )
+    return remember(baseColor, highlightColor, shimmerX) {
+        val shader = LinearGradient(
+            -110f, 0f, 110f, 0f,
+            intArrayOf(
+                baseColor.copy(alpha = 0.72f).toArgb(),
+                highlightColor.toArgb(),
+                baseColor.copy(alpha = 0.72f).toArgb()
+            ),
+            null,
+            Shader.TileMode.CLAMP
+        )
+        val matrix = Matrix()
+        ReasoningShimmer(
+            brush = ShaderBrush(shader),
+            // Preserve the original gradient and text metrics. Only the shader's translation
+            // changes during drawing: no per-frame Brush/style allocation or recomposition,
+            // and no extra offscreen layer is needed to mask the text.
+            modifier = Modifier.drawWithContent {
+                matrix.setTranslate(shimmerX.value, 0f)
+                shader.setLocalMatrix(matrix)
+                drawContent()
+            }
+        )
+    }
+}
+
+private class ReasoningShimmer(val brush: Brush, val modifier: Modifier)
 
 // P9/S15：从 ChatChromeScreens.kt 等值移出的推理面板与生成性能簇。
 // 原样逐字迁移，未做行为改动；4 个跨区入口按协议提升 internal。
@@ -72,6 +132,7 @@ internal fun ReasoningPanel(
     val cleaned = remember(boundedContent) { cleanReasoningForDisplay(boundedContent) }
     if (cleaned.isBlank()) return
 
+    val haptics = rememberMcaHaptics()
     var expanded by rememberSaveable { mutableStateOf(true) }
     // One chevron vector, rotated in the layer phase: the previous Up/Down icon swap was a hard
     // cut on every toggle and neither icon needed its own compose pass.
@@ -89,6 +150,11 @@ internal fun ReasoningPanel(
         "已思考"
     }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val shimmer = rememberReasoningShimmer(
+        active = awaitingFinalAnswer,
+        baseColor = muted,
+        highlightColor = MaterialTheme.colorScheme.onSurface
+    )
     val displayText = if (expanded) cleaned else reasoningPreview(cleaned)
     val wrappedDisplayText = remember(displayText) { wrapForDisplay(displayText) }
 
@@ -106,23 +172,31 @@ internal fun ReasoningPanel(
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
-                .clickable { expanded = !expanded }
+                .clickable {
+                    haptics.tick()
+                    expanded = !expanded
+                }
                 .padding(vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = title,
-                color = muted,
-                style = MaterialTheme.typography.bodySmall,
+                modifier = shimmer?.modifier ?: Modifier,
+                color = if (shimmer == null) muted else Color.Unspecified,
+                style = if (shimmer != null) {
+                    MaterialTheme.typography.bodySmall.copy(brush = shimmer.brush)
+                } else {
+                    MaterialTheme.typography.bodySmall
+                },
                 fontWeight = FontWeight.Medium
             )
             Spacer(modifier = Modifier.width(4.dp))
             Icon(
-                imageVector = Icons.Default.KeyboardArrowDown,
+                imageVector = McaIcons.KeyboardArrowDown,
                 contentDescription = if (expanded) "收起思考" else "展开思考",
                 tint = muted,
                 modifier = Modifier
-                    .size(18.dp)
+                    .size(McaIconSize.S)
                     // Layer-phase read: rotating the chevron does not recompose while animating.
                     .graphicsLayer { rotationZ = arrowRotation.value }
             )
@@ -152,7 +226,7 @@ internal fun ReasoningPanel(
                     softWrap = true
                 )
                 if (expanded && boundedContent.length < content.length) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             visibleCharacters = (visibleCharacters + MESSAGE_RENDER_PAGE_CHARS)
                                 .coerceAtMost(content.length)
@@ -214,6 +288,11 @@ internal fun PendingReasoningPanel(
         "\u5df2\u5199\u5165 ${"%.1f".format(writtenMb)}/${"%.1f".format(totalMb)} MB"
     }
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val shimmer = rememberReasoningShimmer(
+        active = true,
+        baseColor = muted,
+        highlightColor = MaterialTheme.colorScheme.onSurface
+    )
 
     Column(
         modifier = modifier
@@ -226,8 +305,13 @@ internal fun PendingReasoningPanel(
         ) {
             Text(
                 text = displayTitle,
-                style = MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp),
-                color = muted,
+                modifier = shimmer?.modifier ?: Modifier,
+                style = if (shimmer != null) {
+                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp, brush = shimmer.brush)
+                } else {
+                    MaterialTheme.typography.titleSmall.copy(fontSize = 15.sp)
+                },
+                color = if (shimmer == null) muted else Color.Unspecified,
                 fontWeight = FontWeight.Medium
             )
             // No chevron while waiting: this panel has nothing to expand and the glyph would
@@ -315,7 +399,7 @@ internal fun PromptContextUsageLine(usage: PromptContextUsage) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
-            imageVector = Icons.Default.Info,
+            imageVector = McaIcons.Info,
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.72f),
             modifier = Modifier.size(14.dp)

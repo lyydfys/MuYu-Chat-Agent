@@ -1,5 +1,6 @@
 package com.muyuchat.mca.presentation
 
+import com.muyuchat.mca.*
 import com.muyuchat.api.local.ImageGenerationApiContract
 import com.muyuchat.api.local.ImageGenerationProviderException
 import com.muyuchat.core.engine.EngineLifecycleLease
@@ -375,28 +376,7 @@ internal suspend fun generateLocalApiImageOperations(
                             "responseOutputEvidence",
                             localImageApiResponseOutputEvidence(orderedOutputs)
                         )
-                        val nativeEffective = execution.optJSONObject("nativeEffective")
-                            ?: error("The local image result is missing nativeEffective execution evidence.")
-                        require(
-                            execution.optBoolean("nativeExecution", false) &&
-                                !execution.optBoolean("fallback", true)
-                        ) {
-                            "The local image result did not prove direct native execution without fallback."
-                        }
-                        require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
-                            "The local image result is missing a positive native generation sequence."
-                        }
-                        require(nativeEffective.getString("runtime") == model.runtime.name) {
-                            "The local image result runtime does not match the selected model runtime."
-                        }
-                        if (model.runtime == LocalImageRuntime.QNN_HTP) {
-                            require(
-                                execution.optBoolean("npuActive", false) &&
-                                    execution.optBoolean("qnnGraphExecution", false)
-                            ) {
-                                "The local image result did not prove native QNN graph execution."
-                            }
-                        }
+                        requireNativeImageExecutionEvidence(execution, model.runtime)
                         JSONObject()
                             .put("created", System.currentTimeMillis() / 1000L)
                             .put("request_id", requestId)

@@ -1,5 +1,7 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
 import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -15,20 +17,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.FileDownload
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,19 +71,19 @@ fun LogsApiScreen(
         item { Text("日志/诊断", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold) }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = onRefreshLogs, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null)
+                McaButton(style = McaButtonStyle.Primary, onClick = onRefreshLogs, modifier = Modifier.weight(1f)) {
+                    Icon(McaIcons.Refresh, contentDescription = null)
                     Text("刷新", modifier = Modifier.padding(start = 6.dp))
                 }
-                Button(onClick = onRefreshDiagnostics, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.Description, contentDescription = null)
+                McaButton(style = McaButtonStyle.Primary, onClick = onRefreshDiagnostics, modifier = Modifier.weight(1f)) {
+                    Icon(McaIcons.Description, contentDescription = null)
                     Text("生成诊断", modifier = Modifier.padding(start = 6.dp))
                 }
             }
         }
         item {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = {
                         scope.launch {
                             clipboard.setClipEntry(
@@ -101,15 +94,15 @@ fun LogsApiScreen(
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                    Icon(McaIcons.ContentCopy, contentDescription = null)
                     Text("复制", modifier = Modifier.padding(start = 6.dp))
                 }
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = onExportDiagnostics,
                     enabled = state.diagnosticReport.isNotBlank(),
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Rounded.FileDownload, contentDescription = null)
+                    Icon(McaIcons.FileDownload, contentDescription = null)
                     Text("导出", modifier = Modifier.padding(start = 6.dp))
                 }
             }
@@ -311,9 +304,11 @@ private fun PersistentPrefixCacheCard(
                 ) {
                     Text("持久化前缀缓存", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                     Spacer(Modifier.width(12.dp))
-                    Switch(
+                    McaSwitch(
                         checked = enabled,
-                        onCheckedChange = if (busy) null else onEnabledChanged
+                        onCheckedChange = if (busy) null else onEnabledChanged,
+                        enabled = !busy,
+                        contentDescription = "持久化前缀缓存"
                     )
                 }
                 Text(
@@ -331,15 +326,13 @@ private fun PersistentPrefixCacheCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onRequestClear,
+                loading = busy,
+                loadingIndicatorColor = MaterialTheme.colorScheme.primary,
                 enabled = entryCount > 0 && !busy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (busy) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.size(6.dp))
-                }
                 Text(if (confirmClear) "确认清空前缀缓存" else "清空前缀缓存")
             }
         }
@@ -372,38 +365,32 @@ private fun PrivacyCleanupCard(
             Text("清理能力", fontWeight = FontWeight.Bold)
             Text("清理只影响 MCA 本机数据；模型文件和云端 API 配置不会被删除。")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = onRequestClearChats,
+                    loading = chatHistoryBusy,
+                    loadingIndicatorColor = MaterialTheme.colorScheme.primary,
                     enabled = chatSessionCount > 0 && !anyBusy,
                     modifier = Modifier.weight(1f)
                 ) {
-                    if (chatHistoryBusy) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.size(6.dp))
-                    }
                     Text(if (confirmClearChats) "确认清空聊天" else "清空聊天")
                 }
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = onRequestClearImages,
+                    loading = imageLibraryBusy,
+                    loadingIndicatorColor = MaterialTheme.colorScheme.primary,
                     enabled = imageAssetCount > 0 && !anyBusy,
                     modifier = Modifier.weight(1f)
                 ) {
-                    if (imageLibraryBusy) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(modifier = Modifier.size(6.dp))
-                    }
                     Text(if (confirmClearImages) "确认清空图片" else "清空图片")
                 }
             }
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onRequestClearFiles,
+                loading = fileLibraryBusy,
+                loadingIndicatorColor = MaterialTheme.colorScheme.primary,
                 enabled = fileAssetCount > 0 && !anyBusy,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (fileLibraryBusy) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(modifier = Modifier.size(6.dp))
-                }
                 Text(if (confirmClearFiles) "确认清空文件库" else "清空文件库")
             }
             Text(
@@ -505,7 +492,7 @@ private fun LogsEmptyState() {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Icon(
-                Icons.Rounded.Description,
+                McaIcons.Description,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
                 modifier = Modifier.size(32.dp)

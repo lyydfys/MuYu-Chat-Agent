@@ -15,7 +15,7 @@ import kotlinx.coroutines.launch
  */
 internal class AppLifecycleCoordinator(
     private val application: Application,
-    private val uiStateStore: UiStateStore,
+    private val uiStateStore: UiStateWriter<LocalApiSettingsFields>,
     private val scope: CoroutineScope,
     private val engine: McaInferenceService,
     private val chatRuns: ChatRunOwnership,
@@ -70,7 +70,7 @@ internal class AppLifecycleCoordinator(
         // A file removed or replaced while backgrounded must restore the download action.
         viewModelScope.launch { offlinePromptTranslationAndChatImageCoordinator.verifiedOfflineTranslationBundle() }
         chatRuns.foreground()
-        // R3/S22: 前后台写入经 UiStateStore。
+        // R3/S22: 前后台写入经 UiStateWriter<LocalApiSettingsFields>。
         uiStateStore.update { state ->
             if (state.statusMessage != BACKGROUND_TASK_STATUS) {
                 state

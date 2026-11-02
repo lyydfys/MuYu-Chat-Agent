@@ -1,7 +1,9 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
 import android.content.ClipData
-import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,10 +11,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,8 +23,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaFeedbackPopup
+import com.muyuchat.core.designsystem.rememberMcaFeedbackState
 import kotlinx.coroutines.launch
 
 internal enum class GuidanceAction(val label: String) {
@@ -77,15 +79,13 @@ internal fun GuidanceNotice(
     modifier: Modifier = Modifier
 ) {
     val clipboard = LocalClipboard.current
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val notice = userNotice(message) ?: return
     var showDetails by rememberSaveable(message) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(notice.problem, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.titleSmall)
         Text(notice.nextStep, style = MaterialTheme.typography.bodySmall)
         Row {
-            TextButton(onClick = {
+            McaButton(style = McaButtonStyle.Text,onClick = {
                 when (notice.action) {
                     GuidanceAction.MODELS -> onModels()
                     GuidanceAction.EDIT -> onEdit()
@@ -93,13 +93,16 @@ internal fun GuidanceNotice(
                 }
             }) { Text(notice.action.label) }
             if (notice.action != GuidanceAction.DETAILS) {
-                TextButton(onClick = { showDetails = true }) { Text("详情") }
+                McaButton(style = McaButtonStyle.Text,onClick = { showDetails = true }) { Text("详情") }
             }
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("关闭") }
         }
     }
     if (showDetails) {
-        AlertDialog(
+        // This owner lives with the modal; root Activity feedback is behind its window.
+        val detailsFeedback = rememberMcaFeedbackState()
+        val scope = rememberCoroutineScope()
+        McaDialog(
             onDismissRequest = { showDetails = false },
             title = { Text("错误详情") },
             text = {
@@ -109,17 +112,18 @@ internal fun GuidanceNotice(
             },
             confirmButton = {
                 Row {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             scope.launch {
                                 clipboard.setClipEntry(
                                     ClipEntry(ClipData.newPlainText("MCA", message))
                                 )
-                                Toast.makeText(context, "已复制详情", Toast.LENGTH_SHORT).show()
+                                detailsFeedback.post("已复制详情")
                             }
                         }
                     ) { Text("复制详情") }
-                    TextButton(onClick = { showDetails = false }) { Text("返回") }
+                    McaButton(style = McaButtonStyle.Text,onClick = { showDetails = false }) { Text("返回") }
+                    McaFeedbackPopup(detailsFeedback)
                 }
             }
         )
@@ -129,14 +133,14 @@ internal fun GuidanceNotice(
 @Composable
 internal fun QuickStartDialog(onDismiss: () -> Unit, onChooseModel: () -> Unit) {
     var images by rememberSaveable { mutableStateOf(false) }
-    AlertDialog(
+    McaDialog(
         onDismissRequest = onDismiss,
         title = { Text("快速开始") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row {
-                    androidx.compose.material3.FilterChip(selected = !images, onClick = { images = false }, label = { Text("聊天") })
-                    androidx.compose.material3.FilterChip(selected = images, onClick = { images = true }, label = { Text("生图") })
+                    McaChip(selected = !images, onClick = { images = false }, label = { Text("聊天") })
+                    McaChip(selected = images, onClick = { images = true }, label = { Text("生图") })
                 }
                 Text(if (images) "1. 在推荐页下载生图模型，或导入完整模型包。\n\n2. 在图片页选择模型，保留模型默认参数。\n\n3. 输入图片描述并生成，结果保存到图片库。"
                     else "1. 在推荐页下载聊天模型，或导入已有模型。\n\n2. 从此入口下载推荐模型会自动加载；实验模型或已有模型可在本地页手动加载。\n\n3. 等待加载完成，返回聊天发送问题。")
@@ -144,7 +148,7 @@ internal fun QuickStartDialog(onDismiss: () -> Unit, onChooseModel: () -> Unit) 
                     else "已有云端服务账号时，也可在模型管理的云端页配置连接。下载、加载和生成是不同阶段。")
             }
         },
-        confirmButton = { TextButton(onClick = onChooseModel) { Text("打开推荐页") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+        confirmButton = { McaButton(style = McaButtonStyle.Text,onClick = onChooseModel) { Text("打开推荐页") } },
+        dismissButton = { McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("关闭") } }
     )
 }

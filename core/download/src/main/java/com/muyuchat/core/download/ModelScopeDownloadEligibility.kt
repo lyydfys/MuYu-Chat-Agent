@@ -31,6 +31,8 @@ enum class RecommendedModelStatus(val label: String) {
     EXPERIMENTAL("实验"),
     /** Execution integration is incomplete; configured component packages may still be downloaded for testing. */
     PENDING_INTEGRATION("待接入"),
+    /** The model package is not published as a compatible MCA bundle yet. */
+    IN_DEVELOPMENT("待开发"),
     /** Tested below the recommendation bar; it must not become a managed default. */
     NOT_RECOMMENDED("实验")
 }
@@ -84,38 +86,81 @@ data class ModelScopeRecommendedModel(
     val provider: ModelRepositoryProvider = ModelRepositoryProvider.MODELSCOPE,
     val downloadable: Boolean = true,
     val downloadBlockReason: String? = null,
+    /** The card leads to the local bundle importer instead of a managed download. */
+    val manualImportRequired: Boolean = false,
     val chatRuntime: RecommendedChatRuntime = RecommendedChatRuntime.GGUF,
     val computeBackend: RecommendedComputeBackend = RecommendedComputeBackend.CPU,
     val mnnModelBundle: MnnModelBundleSpec? = null,
     val localImageEngineTier: LocalImageEngineTier? = null,
     val imageEngineBundle: ImageEngineBundleSpec? = null,
+    /** A pinned v4 bundle ZIP published outside the app; the app downloads it after the license gate. */
+    val remoteImageBundle: ImageEngineRemoteBundleSpec? = null,
+    /** Typed route for an image package that is visible while its executable bundle is still in development. */
+    val plannedImageAccelerator: ImageEngineAccelerator? = null,
     val visionModelBundle: VisionModelBundleSpec? = null
 ) {
     init {
         if (kind == ModelScopeRecommendedKind.IMAGE) {
-            val bundle = requireNotNull(imageEngineBundle) {
-                "Image recommendations require an executable image bundle."
+            val bundle = imageEngineBundle
+            val remote = remoteImageBundle
+            if (bundle == null && remote == null) {
+                require(
+                    plannedImageAccelerator != null && !downloadable &&
+                        (status == RecommendedModelStatus.IN_DEVELOPMENT || manualImportRequired)
+                ) {
+                    "Image recommendations without a bundle must be explicitly marked in development " +
+                        "or manual-import and unavailable."
+                }
+            } else if (remote != null) {
+                require(bundle == null) {
+                    "Image recommendations cannot declare a managed component bundle and a remote ZIP together."
+                }
+                require(downloadable) {
+                    "Remote image bundles must be downloadable."
+                }
+                require(!manualImportRequired) {
+                    "Remote image bundles cannot also require manual import."
+                }
+                require(plannedImageAccelerator != null) {
+                    "Remote image bundles must declare their accelerator."
+                }
+                require(remote.recommendationId == id) {
+                    "Image recommendation and remote bundle identities must match."
+                }
+            } else {
+                require(!manualImportRequired) {
+                    "Managed image bundles cannot also require manual import."
+                }
+                require(plannedImageAccelerator == null) {
+                    "Executable image recommendations cannot also declare a planned accelerator."
+                }
+                require(bundle!!.recommendationId == id) {
+                    "Image recommendation and bundle identities must match."
+                }
+                require(bundle.executionProfile != null ||
+                    bundle.runtime == ImageEngineBundleRuntime.MEDIATEK_NEURON
+                ) {
+                    "Image recommendations require an execution profile or a runtime-specific typed contract."
+                }
+                val expected = recommendedFileName.trim().replace('\\', '/').substringAfterLast('/')
+                val diffusionComponents = bundle.requiredComponents.filter {
+                    it.role == ImageEngineBundleComponentRole.DIFFUSION
+                }
+                val primaryMatches = diffusionComponents.filter { component ->
+                    sequenceOf(component.fileName, component.relativePath)
+                        .map { it.trim().replace('\\', '/').substringAfterLast('/') }
+                        .any { it.equals(expected, ignoreCase = true) }
+                }
+                require(primaryMatches.size == 1) {
+                    "Image recommendation $id must bind its recommended file to exactly one diffusion main component."
+                }
+                require(diffusionComponents.firstOrNull() == primaryMatches.single()) {
+                    "Image recommendation $id must place its declared diffusion main component first."
+                }
             }
-            require(bundle.recommendationId == id) {
-                "Image recommendation and bundle identities must match."
-            }
-            require(bundle.executionProfile != null) {
-                "Image recommendations require a catalog execution profile."
-            }
-            val expected = recommendedFileName.trim().replace('\\', '/').substringAfterLast('/')
-            val diffusionComponents = bundle.requiredComponents.filter {
-                it.role == ImageEngineBundleComponentRole.DIFFUSION
-            }
-            val primaryMatches = diffusionComponents.filter { component ->
-                sequenceOf(component.fileName, component.relativePath)
-                    .map { it.trim().replace('\\', '/').substringAfterLast('/') }
-                    .any { it.equals(expected, ignoreCase = true) }
-            }
-            require(primaryMatches.size == 1) {
-                "Image recommendation $id must bind its recommended file to exactly one diffusion main component."
-            }
-            require(diffusionComponents.firstOrNull() == primaryMatches.single()) {
-                "Image recommendation $id must place its declared diffusion main component first."
+        } else {
+            require(plannedImageAccelerator == null) {
+                "Only image recommendations may declare a planned image accelerator."
             }
         }
     }
@@ -123,7 +168,10 @@ data class ModelScopeRecommendedModel(
     val section: RecommendedModelSection
         get() = when {
             kind == ModelScopeRecommendedKind.IMAGE &&
-                imageEngineBundle?.accelerator == ImageEngineAccelerator.QNN_HTP -> RecommendedModelSection.NPU_IMAGE
+                (imageEngineBundle?.accelerator ?: plannedImageAccelerator) in setOf(
+                    ImageEngineAccelerator.QNN_HTP,
+                    ImageEngineAccelerator.MEDIATEK_NPU
+                ) -> RecommendedModelSection.NPU_IMAGE
             kind == ModelScopeRecommendedKind.IMAGE &&
                 imageEngineBundle?.accelerator == ImageEngineAccelerator.OPENCL_GPU -> RecommendedModelSection.GPU_IMAGE
             kind == ModelScopeRecommendedKind.IMAGE -> RecommendedModelSection.CPU_IMAGE

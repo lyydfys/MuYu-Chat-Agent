@@ -28,10 +28,11 @@ internal data class RecommendationCatalog(
     val gpuImage: List<ModelScopeRecommendedModel>,
     val npuImageSd15: List<ModelScopeRecommendedModel>,
     val npuImageSdxl: List<ModelScopeRecommendedModel>,
-    val npuImageGen5: List<ModelScopeRecommendedModel>
+    val npuImageGen5: List<ModelScopeRecommendedModel>,
+    val npuImageMediaTek: List<ModelScopeRecommendedModel> = emptyList()
 ) {
     val npuImage: List<ModelScopeRecommendedModel>
-        get() = npuImageSd15 + npuImageSdxl + npuImageGen5
+        get() = npuImageSd15 + npuImageSdxl + npuImageGen5 + npuImageMediaTek
 
     val litertCpu: List<ModelScopeRecommendedModel>
         get() = allChat.filter { it.chatRuntime == RecommendedChatRuntime.LITERT_LM && it.computeBackend == RecommendedComputeBackend.CPU }
@@ -67,6 +68,7 @@ internal fun buildRecommendationCatalog(
     // Device discovery ranks packages and marks an unmatched package as an
     // experiment; it never removes a user-visible model from the catalog.
     val npuImage = modelsIn(RecommendedModelSection.NPU_IMAGE)
+    val mediatekNpuImage = npuImage.filter(::isMediaTekNpuImageRecommendation)
     val npuChatModels = modelsIn(RecommendedModelSection.NPU_CHAT)
     return RecommendationCatalog(
         lightChat = cpuChat.filter { it.group == ModelScopeRecommendedGroup.LIGHT_CHAT },
@@ -79,11 +81,18 @@ internal fun buildRecommendationCatalog(
         },
         cpuImage = modelsIn(RecommendedModelSection.CPU_IMAGE),
         gpuImage = modelsIn(RecommendedModelSection.GPU_IMAGE),
-        npuImageSd15 = npuImage.filterNot { it.id in SDXL_QNN_MODEL_IDS || it.id in GEN5_QNN_MODEL_IDS },
+        npuImageSd15 = npuImage.filterNot {
+            it.id in SDXL_QNN_MODEL_IDS || it.id in GEN5_QNN_MODEL_IDS || isMediaTekNpuImageRecommendation(it)
+        },
         npuImageSdxl = npuImage.filter { it.id in SDXL_QNN_MODEL_IDS },
-        npuImageGen5 = npuImage.filter { it.id in GEN5_QNN_MODEL_IDS }
+        npuImageGen5 = npuImage.filter { it.id in GEN5_QNN_MODEL_IDS },
+        npuImageMediaTek = mediatekNpuImage
     )
 }
+
+private fun isMediaTekNpuImageRecommendation(model: ModelScopeRecommendedModel): Boolean =
+    model.plannedImageAccelerator == com.muyuchat.core.download.ImageEngineAccelerator.MEDIATEK_NPU ||
+        model.imageEngineBundle?.runtime == com.muyuchat.core.download.ImageEngineBundleRuntime.MEDIATEK_NEURON
 
 private val SDXL_QNN_MODEL_IDS = setOf(
     "sdxl_base_qnn228",
@@ -201,6 +210,14 @@ internal fun recommendationQnnCompatibilityLine(
     model: ModelScopeRecommendedModel,
     deviceChipsetCode: String
 ): String? {
+    if (model.chatRuntime == RecommendedChatRuntime.GENIEX_LLAMA_CPP) {
+        val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(deviceChipsetCode)
+        return if (deviceArch != null && deviceArch >= 79) {
+            null
+        } else {
+            "GenieX HTP 建议 HTP V79+（骁龙 8 Elite 级）。未匹配设备仍可下载；QNN 加载失败时请使用 CPU/GGUF。"
+        }
+    }
     val profile = model.imageEngineBundle?.requiredRuntimeProfile ?: return null
     val deviceArch = DeviceAccelerationAnalyzer.expectedQnnHtpArchVersionForChipsetCode(deviceChipsetCode)
         ?: return null
@@ -217,7 +234,11 @@ internal fun recommendationQnnCompatibilityLine(
 internal fun recommendationHardwareLine(
     model: ModelScopeRecommendedModel,
     fitLabel: String
-): String = "建议内存：${model.minRamGb} GB 及以上 · $fitLabel"
+): String = if (model.status == RecommendedModelStatus.IN_DEVELOPMENT) {
+    "适配状态：待开发"
+} else {
+    "建议内存：${model.minRamGb} GB 及以上 · $fitLabel"
+}
 
 /** Download access is independent of internal engineering acceptance. */
 internal fun recommendationDownloadCtaLabel(
@@ -283,6 +304,8 @@ internal fun recommendedLocalChatModel(
 
 private fun ModelManifest.runtimeMatchesRecommendation(model: ModelScopeRecommendedModel): Boolean = when {
     model.mnnModelBundle != null -> runtime == com.muyuchat.core.modelstore.ChatModelRuntime.MNN
+    model.chatRuntime == RecommendedChatRuntime.GENIEX_LLAMA_CPP ->
+        runtime == com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_LLAMA_CPP
     model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT ->
         runtime == com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_QAIRT
     model.chatRuntime == RecommendedChatRuntime.LITERT_LM ->

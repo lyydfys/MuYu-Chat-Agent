@@ -104,6 +104,40 @@ internal object KnowledgeLibraryOperations {
     }
 
     /**
+     * Enables or disables a world book without touching its entries.
+     *
+     * A disabled book stays listed and re-importable; the resolver simply skips it, so the user can
+     * turn a lorebook on and off per conversation instead of deleting it. Returns null for an
+     * unknown id, like [deleteWorldBook]; a same-state toggle publishes only a status line.
+     */
+    fun setWorldBookEnabled(
+        port: KnowledgeLibraryPort,
+        snapshot: KnowledgeLibrarySnapshot,
+        worldBookId: String,
+        enabled: Boolean
+    ): KnowledgeLibraryChange? {
+        val book = snapshot.worldBooks.firstOrNull { it.id == worldBookId } ?: return null
+        if (book.enabled == enabled) {
+            return KnowledgeLibraryChange(
+                statusMessage = "世界书「${book.name}」已是${if (enabled) "启用" else "停用"}状态"
+            )
+        }
+        return runCatching {
+            port.upsertWorldBook(book.copy(enabled = enabled, updatedAt = System.currentTimeMillis()))
+        }.fold(
+            onSuccess = { updated ->
+                KnowledgeLibraryChange(
+                    worldBooks = updated,
+                    statusMessage = if (enabled) "已启用世界书：${book.name}" else "已停用世界书：${book.name}"
+                )
+            },
+            onFailure = { error ->
+                KnowledgeLibraryChange(statusMessage = "世界书状态更新失败：${error.message ?: "请重试"}")
+            }
+        )
+    }
+
+    /**
      * Creates a knowledge base.
      *
      * A failure publishes only a status line -- no list, no count -- matching the original, which
@@ -163,6 +197,8 @@ internal data class WorldBookImportRequest(
     val scope: WorldBookScope,
     val owner: ContentImportOwner,
     val commitId: String?,
+    /** File-derived name used when the exported JSON carries no name/title of its own. */
+    val fallbackName: String? = null,
     /** `owner.sessionId != null`: a CHAT-scoped import needs an active conversation. */
     val hasActiveSession: Boolean,
     /** Whether the assistant or session the book belongs to still exists. */
@@ -215,14 +251,15 @@ internal suspend fun KnowledgeLibraryPort.importWorldBook(request: WorldBookImpo
             rawJson = request.rawJson,
             scope = request.scope,
             assistantId = request.owner.assistantId.takeIf { request.scope == WorldBookScope.ASSISTANT },
-            chatSessionId = request.owner.sessionId.takeIf { request.scope == WorldBookScope.CHAT }
+            chatSessionId = request.owner.sessionId.takeIf { request.scope == WorldBookScope.CHAT },
+            fallbackName = request.fallbackName ?: "Imported World Book"
         )
     }
     val imported = result.book
         ?: return WorldBookImportOutcome.Rejected("世界书导入失败：${result.error ?: "格式不正确"}")
     if (request.commitId == null) {
         return WorldBookImportOutcome.NeedsPreview(
-            worldBookPreview(request.rawJson, result, request.owner, request.scope)
+            worldBookPreview(request.rawJson, result, request.owner, request.scope, request.fallbackName)
         )
     }
     val frozenBook = imported.copy(id = request.commitId, enabled = request.ownerStillExists)

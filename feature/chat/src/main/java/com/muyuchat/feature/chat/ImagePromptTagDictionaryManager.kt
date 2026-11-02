@@ -1,5 +1,9 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaSwitch
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import android.os.SystemClock
 import android.content.Context
 import android.net.Uri
@@ -19,24 +23,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Redo
-import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.AlertDialog
+
+
+
+
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -82,7 +80,8 @@ internal fun ImagePromptTagDictionaryManagerDialog(
     onClear: (ImagePromptTagDictionaryKind) -> Unit,
     onEnabledChange: (Boolean) -> Unit
 ) {
-    AlertDialog(
+    val haptics = rememberMcaHaptics()
+    McaDialog(
         onDismissRequest = onDismiss,
         title = { Text("标签联想词典") },
         text = {
@@ -101,7 +100,10 @@ internal fun ImagePromptTagDictionaryManagerDialog(
                             value = session.enabled,
                             enabled = !session.busy,
                             role = Role.Switch,
-                            onValueChange = onEnabledChange
+                            onValueChange = { enabled ->
+                                haptics.toggle(enabled)
+                                onEnabledChange(enabled)
+                            }
                         ),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -113,7 +115,7 @@ internal fun ImagePromptTagDictionaryManagerDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Switch(
+                    McaSwitch(
                         checked = session.enabled,
                         onCheckedChange = null,
                         enabled = !session.busy
@@ -155,7 +157,7 @@ internal fun ImagePromptTagDictionaryManagerDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onDismiss,
                 modifier = Modifier.heightIn(min = MIN_TOUCH_TARGET_DP)
             ) { Text("完成") }
@@ -180,17 +182,18 @@ private fun DictionaryStateSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onImport,
                 enabled = !busy,
                 modifier = Modifier.heightIn(min = MIN_TOUCH_TARGET_DP)
             ) { Text(if (configured) "替换 CSV" else "导入 CSV") }
             if (configured) {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = onClear,
                     enabled = !busy,
+                    contentColor = MaterialTheme.colorScheme.error,
                     modifier = Modifier.heightIn(min = MIN_TOUCH_TARGET_DP)
-                ) { Text("清除", color = MaterialTheme.colorScheme.error) }
+                ) { Text("清除") }
             }
         }
     }

@@ -3,6 +3,7 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import android.media.projection.MediaProjectionManager
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -28,16 +29,26 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.muyuchat.core.benchmark.BenchmarkResult
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaFeedbackLayer
 import com.muyuchat.core.designsystem.McaTheme
 import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.dsh.contract.console.DshScreenCaptureConsentCodes
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
 import com.muyuchat.feature.agent.*
+import com.muyuchat.feature.agent.workspace.AgentWorkspaceRoute
 import com.muyuchat.feature.chat.*
+import com.muyuchat.feature.dsh.workspace.DshWorkspaceRoute
+import com.muyuchat.feature.video.workspace.VideoWorkspaceRoute
 import com.muyuchat.feature.modelhub.*
 import com.muyuchat.feature.settings.*
 import com.muyuchat.mca.presentation.*
+import com.muyuchat.mca.video.model.Wan22Ti2v5bProfiles
+import com.muyuchat.mca.video.settings.VideoDraftFileStore
+import com.muyuchat.mca.video.settings.VideoEnginePreferenceStore
+import com.muyuchat.mca.presentation.startup.TtfdProbe
+import com.muyuchat.mca.presentation.startup.TtfdProbeHost
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -64,6 +75,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        TtfdProbe.install(window.decorView)
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         onBackPressedDispatcher.addCallback(
             this,
@@ -123,10 +135,40 @@ class MainActivity : ComponentActivity() {
             pendingChatExportSessionId = null
             if (uri != null && sId != null) startup.whenReady { it.exportChatSession(sId, uri) }
         }
+        // D15 virtual screen: the system `MediaProjection` consent dialog. The launcher stays
+        // registered for the Activity lifetime so Android can deliver a result after recreation;
+        // the result itself is applied by the app consent owner, never by this Activity.
+        val screenCaptureLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            startup.whenReady { model -> model.onDshScreenCaptureResult(result.resultCode, result.data) }
+        }
+        // Prepares the capture foreground service, then launches the one system dialog. The id is
+        // claimed exactly once by the ViewModel, so recomposition or recreation cannot open two
+        // dialogs for the same request.
+        val launchDshScreenCapture: (Long) -> Unit = { requestId ->
+            if (viewModel.beginDshScreenCaptureConsent(requestId)) {
+                val consentIntent = runCatching {
+                    getSystemService(MediaProjectionManager::class.java)?.createScreenCaptureIntent()
+                }.getOrNull()
+                if (consentIntent == null) {
+                    viewModel.rejectDshScreenCaptureConsent(
+                        requestId,
+                        DshScreenCaptureConsentCodes.MEDIA_PROJECTION_UNAVAILABLE
+                    )
+                } else if (runCatching { screenCaptureLauncher.launch(consentIntent) }.isFailure) {
+                    viewModel.rejectDshScreenCaptureConsent(
+                        requestId,
+                        DshScreenCaptureConsentCodes.CONSENT_DIALOG_UNAVAILABLE
+                    )
+                }
+            }
+        }
 
         setContent {
+            // One TTFD observation point; renders nothing and never changes the startup flow.
+            TtfdProbeHost()
             val startupState by startup.state.collectAsStateWithLifecycle()
             McaTheme {
+                McaFeedbackLayer {
                 // V03: splash -> app handoff. Both surfaces live under the one McaTheme node, so the
                 // system-bar owner stays single while the startup surface crossfades out and the app
                 // crossfades in; neither branch is composed twice and the app's content lambda is the
@@ -141,6 +183,12 @@ class MainActivity : ComponentActivity() {
                         AppStartupScreen(startupState, onRetry = { startup.start() }, onSkipScan = { startup.skipModelDiscovery() })
                     } else {
                         val state by readyModel.uiState.collectAsStateWithLifecycle()
+                        // Observes the app-owned consent request and asks this Activity to launch
+                        // the system dialog. It renders nothing and owns no capture state.
+                        DshScreenCaptureConsentHost(
+                            consent = readyModel.dshScreenCaptureConsent,
+                            onLaunchConsent = launchDshScreenCapture
+                        )
                         McaApp(
                             state = state,
                             onTab = viewModel::selectTab,
@@ -161,6 +209,10 @@ class MainActivity : ComponentActivity() {
                             viewModel = viewModel
                         )
                     }
+                }
+                // D16: the one host for DSH capability consent. It renders nothing until a
+                // privileged/consent-gated request arrives and never pulls itself to front.
+                com.muyuchat.mca.composition.DshCapabilityConsentDialog()
                 }
             }
         }
@@ -213,6 +265,13 @@ private fun McaApp(
     )
 
     var appMenuOpen by rememberSaveable { mutableStateOf(false) }
+    // Experimental video-engine switch: persisted app-wide, default OFF. The page only forwards
+    // the value into the submit command; execution ownership stays with the process video owner.
+    val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
+    val videoEnginePreference = remember(appContext) { VideoEnginePreferenceStore(appContext) }
+    val videoDraftStore = remember(appContext) {
+        VideoDraftFileStore(File(appContext.filesDir, "video/draft.txt"))
+    }
     var internalBrowserUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var startModelsInRecommended by rememberSaveable { mutableStateOf(false) }
     var startSettingsInWebSearch by rememberSaveable { mutableStateOf(false) }
@@ -363,6 +422,91 @@ private fun McaApp(
                 )
             }
 
+            // Independent Agent workspace (architecture 13.1). The chat page stays composed below
+            // every tab; this overlay only observes the Agent owner and never writes chat state.
+            CrossfadeTabPage(
+                visible = state.tab == AppTab.AGENT_WORKSPACE,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.AGENT_WORKSPACE.name,
+                label = "tab-agent-workspace",
+                onDismissStart = { if (appMenuOpen) appMenuOpen = true },
+                onDismiss = { onTab(AppTab.CHAT) }
+            ) { pageModifier, closePage ->
+                AgentWorkspaceRoute(
+                    queries = viewModel.agentWorkspacePorts.runtime.queries,
+                    commands = viewModel.agentWorkspacePorts.runtime,
+                    modelCatalog = viewModel.agentWorkspacePorts.modelCatalog,
+                    onBack = closePage,
+                    onLoadLocalModel = viewModel::selectChatModel,
+                    modifier = pageModifier,
+                    packageActions = viewModel.agentWorkspacePorts.packageActions,
+                    skillAdmin = viewModel.agentWorkspacePorts.skillAdmin,
+                    mcpAdmin = viewModel.agentWorkspacePorts.mcpAdmin,
+                    toolPackageAdmin = viewModel.agentWorkspacePorts.toolPackageAdmin,
+                    memoryAdmin = viewModel.agentWorkspacePorts.memoryAdmin,
+                    workflowAdmin = viewModel.agentWorkspacePorts.workflowAdmin,
+                    workflowLaunch = viewModel.agentWorkspacePorts.workflowAdmin,
+                    workflowSchedule = viewModel.agentWorkspacePorts.workflowSchedule,
+                    documentLauncher = rememberAgentDocumentLauncher()
+                )
+            }
+
+            // Independent official DSH mode. The page hosts the official DSH Web UI in its own
+            // WebView container; MCA owns only host start/stop/failure and Android interactions.
+            // It never renders Kotlin Agent state and never starts a second runtime per entry.
+            CrossfadeTabPage(
+                visible = state.tab == AppTab.DSH_WORKSPACE,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.DSH_WORKSPACE.name,
+                label = "tab-dsh-workspace",
+                onDismissStart = { if (appMenuOpen) appMenuOpen = true },
+                onDismiss = { onTab(AppTab.CHAT) }
+            ) { pageModifier, closePage ->
+                DshWorkspaceRoute(
+                    client = viewModel.dshRuntimeClient,
+                    firstFrameReporter = viewModel.dshFirstFrameReporter,
+                    consolePort = viewModel.dshConsolePort,
+                    maintenanceConsolePort = viewModel.dshMaintenanceConsolePort,
+                    externalBrowserPort = viewModel.dshExternalBrowserPort,
+                    accountAuthUrlMatcher = viewModel.dshAccountAuthUrlMatcher,
+                    accountLogin = viewModel.dshAccountLoginPort,
+                    modelSwitch = viewModel.dshModelSwitch,
+                    modifier = pageModifier,
+                    onExit = closePage
+                )
+            }
+
+            // Native video workflow workspace (proposal mca-native-video-workflow-v1). The page
+            // is pure Compose UI; execution belongs to the process-level video owner injected here
+            // through the contract port (V1-02a). The :local_video worker adapter is wired;
+            // real device/native execution remains pending validation — no fake runtime or progress.
+            // Leaving never cancels a video run; re-entering reuses the same owner.
+            CrossfadeTabPage(
+                visible = state.tab == AppTab.VIDEO_WORKSPACE,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.VIDEO_WORKSPACE.name,
+                label = "tab-video-workspace",
+                onDismissStart = { if (appMenuOpen) appMenuOpen = true },
+                onDismiss = { onTab(AppTab.CHAT) }
+            ) { pageModifier, closePage ->
+                VideoWorkspaceRoute(
+                    port = viewModel.videoWorkflowPort,
+                    importPort = viewModel.videoImportPort,
+                    remoteProbePort = viewModel.videoRemoteProbePort,
+                    modelAssetPort = viewModel.videoModelAssetPort,
+                    enginePreference = videoEnginePreference,
+                    turboLoraPathProvider = {
+                        File(
+                            appContext.filesDir,
+                            "video_models/${Wan22Ti2v5bProfiles.MODEL_ID}/loras/turbo.safetensors",
+                        ).takeIf { it.isFile }?.absolutePath
+                    },
+                    draftStore = videoDraftStore,
+                    onExit = closePage,
+                    modifier = pageModifier,
+                )
+            }
+
             CrossfadeTabPage(
                 visible = state.tab == AppTab.MODELS,
                 stateHolder = tabStateHolder,
@@ -419,6 +563,7 @@ private fun McaApp(
                             displayName = state.cloudApiConfig.displayName, baseUrl = state.cloudApiConfig.baseUrl, apiKey = state.cloudApiConfig.apiKey,
                             chatModel = state.cloudApiConfig.chatModel, supportsVision = state.cloudApiConfig.supportsVision,
                             supportsTools = state.cloudApiConfig.supportsTools, responsesReasoningEnabled = state.cloudApiConfig.responsesReasoningEnabled,
+                            streaming = state.cloudApiConfig.streaming,
                             imageApiFormat = state.cloudApiConfig.imageApiFormat.name, availableImageFormats = cloudImageApiFormats().map { it.name to it.label },
                             imageModel = state.cloudApiConfig.imageModel, imageSize = state.cloudApiConfig.imageSize,
                             imageEndpointPath = state.cloudApiConfig.imageEndpointPath, imageModelPresets = imageModelPresetsFor(state.cloudApiConfig.imageApiFormat),
@@ -454,6 +599,13 @@ private fun McaApp(
                     onSearchHubModels = viewModel::searchHubModels, onFetchHubModelFiles = viewModel::fetchHubModelFiles,
                     onShowRecommendedFiles = viewModel::fetchRecommendedFiles,
                     onDownloadRecommended = { model -> viewModel.downloadRecommended(model, useAfterDownload = startModelsInRecommended) },
+                    onDownloadRecommendedVariant = { model, variantId ->
+                        viewModel.downloadRecommended(
+                            model,
+                            useAfterDownload = startModelsInRecommended,
+                            imageBundleVariantId = variantId
+                        )
+                    },
                     onOpenModelPage = viewModel::openModelScopePage, onOpenLocalModel = viewModel::selectLocalImageModel,
                     onVerifyLocalModel = viewModel::verifyLocalImageModel, onDownload = viewModel::download,
                     onLoad = viewModel::loadModel, onUnload = viewModel::unloadModel, onVerify = viewModel::verifyModel,
@@ -466,10 +618,12 @@ private fun McaApp(
                     onCloudBaseUrlChange = viewModel::updateCloudBaseUrl, onCloudApiKeyChange = viewModel::updateCloudApiKey,
                     onCloudChatModelChange = viewModel::updateCloudChatModel, onCloudSupportsVisionChange = viewModel::updateCloudSupportsVision,
                     onCloudSupportsToolsChange = viewModel::updateCloudSupportsTools, onCloudResponsesReasoningChange = viewModel::updateCloudResponsesReasoning,
+                    onCloudStreamingChange = viewModel::updateCloudStreaming,
                     onCloudImageFormatChange = viewModel::updateCloudImageApiFormat, onCloudImageModelChange = viewModel::updateCloudImageModel,
                     onCloudImageSizeChange = viewModel::updateCloudImageSize, onCloudImageEndpointPathChange = viewModel::updateCloudImageEndpointPath,
                     onCloudDisplayNameChange = viewModel::updateCloudDisplayName, onSaveCloudChatModel = viewModel::saveCloudChatModel,
                     onSaveCloudImageModel = viewModel::saveCloudImageModel, onTestCloudApi = viewModel::testCloudApiConfig,
+                    onFetchCloudModels = { viewModel.fetchCloudModelOptions() },
                     onSelectCloudChat = { modelId -> viewModel.selectChatModel(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + modelId) },
                     onSelectCloudImage = viewModel::selectCloudImageModel, onDeleteCloudModel = viewModel::deleteCloudModel,
                     onRefreshLocal = viewModel::refreshLocalModels, onPauseDownloads = viewModel::pauseManagedDownloads,

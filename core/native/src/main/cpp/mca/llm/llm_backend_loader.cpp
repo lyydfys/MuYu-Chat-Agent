@@ -70,6 +70,29 @@ void load_baseline_cpu_backend_if_needed(
     }
 }
 
+void load_mca_ggml_backends(
+        const std::string &native_lib_dir,
+        std::string &diagnostic) {
+    if (native_lib_dir.empty()) return;
+    DIR *handle = opendir(native_lib_dir.c_str());
+    if (handle == nullptr) {
+        diagnostic += "MCA backend directory unreadable: " + native_lib_dir + ". ";
+        return;
+    }
+    while (dirent *entry = readdir(handle)) {
+        const std::string name = entry->d_name;
+        if (name.rfind("libmca_ggml-cpu", 0) != 0) continue;
+        if (name.size() < 3 || name.rfind(".so") != name.size() - 3) continue;
+        const std::string path = join_path(native_lib_dir, name);
+        if (ggml_backend_load(path.c_str()) != nullptr) {
+            diagnostic += "Loaded MCA backend: " + path + ". ";
+        } else {
+            diagnostic += "MCA backend failed: " + path + ". ";
+        }
+    }
+    closedir(handle);
+}
+
 bool load_android_opencl_runtime_if_available_locked(
         void *&android_opencl_handle,
         std::string &backend_load_diagnostic) {

@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -21,7 +23,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,7 +53,7 @@ internal fun ModelImportProgressCard(
             } else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         if (task.active || task.resumable) {
-            TextButton(onClick = { if (task.active) onPause(task.id) else onResume(task.id) }) {
+            McaButton(style = McaButtonStyle.Text, onClick = { if (task.active) onPause(task.id) else onResume(task.id) }) {
                 Text(if (task.active) "暂停导入" else "继续 / 重试导入")
             }
             Text("已完成组件经校验后可复用；未完成或源信息不明的组件重新复制。若源文件权限失效，请重新选择。", style = MaterialTheme.typography.bodySmall)
@@ -180,7 +181,7 @@ internal fun totalRamGb(bytes: Long): Double = bytes / 1024.0 / 1024.0 / 1024.0
 internal fun ModelStoragePath(path: String) {
     if (path.isBlank()) return
     var expanded by rememberSaveable(path) { mutableStateOf(false) }
-    TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "收起保存位置" else "查看保存位置") }
+    McaButton(style = McaButtonStyle.Text, onClick = { expanded = !expanded }) { Text(if (expanded) "收起保存位置" else "查看保存位置") }
     AnimatedVisibility(
         visible = expanded,
         enter = fadeIn(animationSpec = McaMotion.fade()) +

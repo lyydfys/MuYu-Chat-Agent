@@ -1,4 +1,6 @@
-// Compatibility symbols for the GenieX 0.3.12 llama.cpp plugin.
+// Compatibility symbols retained for the GenieX 0.3.12 rollback AAR.
+// GenieX 0.10.0 uses its own canonical llama/ggml DSO set and does not link
+// these symbols from MCA's prefixed libmca_llama-common.
 
 #include "chat.h"
 #include "sampling.h"

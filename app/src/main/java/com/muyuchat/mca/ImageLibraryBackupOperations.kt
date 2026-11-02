@@ -42,7 +42,7 @@ internal fun deleteIncompleteImageLibraryBackup(
     }.getOrDefault(false)
 
 internal fun startImageLibraryBackupJobFor(
-    store: UiStateStore,
+    store: UiStateWriter<ImageLibraryBackupFields>,
     scope: CoroutineScope,
     lifecycleLock: Any,
     sequence: AtomicLong,
@@ -79,7 +79,7 @@ internal fun startImageLibraryBackupJobFor(
     }
 
 internal fun exportImageLibraryBackupFor(
-    store: UiStateStore,
+    store: UiStateWriter<ImageLibraryBackupFields>,
     scope: CoroutineScope,
     application: Application,
     imageLibraryBackup: ImageLibraryBackup,
@@ -203,7 +203,7 @@ internal fun exportImageLibraryBackupFor(
 }
 
 internal fun importImageLibraryBackupFor(
-    store: UiStateStore,
+    store: UiStateWriter<ImageLibraryBackupFields>,
     scope: CoroutineScope,
     application: Application,
     imageLibraryBackup: ImageLibraryBackup,
@@ -341,7 +341,7 @@ internal class ImageLibraryBackupCoordinator(
     private val lifecycleLock: Any = Any()
 ) {
     fun exportBackup(
-        store: UiStateStore,
+        store: UiStateWriter<ImageLibraryBackupFields>,
         scope: CoroutineScope,
         application: Application,
         imageLibraryBackup: ImageLibraryBackup,
@@ -369,7 +369,7 @@ internal class ImageLibraryBackupCoordinator(
     )
 
     fun importBackup(
-        store: UiStateStore,
+        store: UiStateWriter<ImageLibraryBackupFields>,
         scope: CoroutineScope,
         application: Application,
         imageLibraryBackup: ImageLibraryBackup,

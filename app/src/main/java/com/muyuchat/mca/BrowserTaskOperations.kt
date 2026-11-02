@@ -7,7 +7,7 @@ import com.muyuchat.feature.chat.BrowserTaskStateMachine
 import kotlinx.coroutines.CompletableDeferred
 
 internal fun startBrowserTaskFor(
-    store: UiStateStore,
+    store: UiStateWriter<BrowserTaskFields>,
     request: BrowserTaskLaunch
 ) {
     val state = store.current
@@ -21,7 +21,7 @@ internal fun startBrowserTaskFor(
 }
 
 internal fun onBrowserTaskEventFor(
-    store: UiStateStore,
+    store: UiStateWriter<BrowserTaskFields>,
     getActiveWebSearchTaskId: () -> String?,
     cancelActiveWebSearch: () -> Unit,
     event: BrowserTaskEvent

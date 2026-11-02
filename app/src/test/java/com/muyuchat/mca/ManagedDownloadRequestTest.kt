@@ -44,4 +44,14 @@ class ManagedDownloadRequestTest {
             assertNotEquals(request.catalogFingerprint, managedCatalogFingerprint(model.copy(revision = "changed")))
         }
     }
+
+    @Test fun remoteImageBundleVariantSurvivesSerializationAndSeparatesJobs() {
+        val model = ModelScopeClient().recommendedModels().first { it.remoteImageBundle != null }
+        val fixed = ManagedDownloadRequest.recommended(model, "fixed")
+        val dynamic = ManagedDownloadRequest.recommended(model, "dynamic")
+
+        assertEquals(fixed, ManagedDownloadRequest.fromJson(fixed.toJson()))
+        assertEquals(dynamic, ManagedDownloadRequest.fromJson(dynamic.toJson()))
+        assertNotEquals(fixed.identity, dynamic.identity)
+    }
 }

@@ -19,7 +19,7 @@ import kotlinx.coroutines.sync.withLock
  */
 internal class ImageLibraryStartupReconciliation(
     scope: CoroutineScope,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<AssetReconciliationFields>,
     private val chatSessionStore: ChatSessionStore,
     private val recoveryPort: ChatImageCommitRecoveryPort,
     private val persistenceState: ChatSessionPersistenceState,

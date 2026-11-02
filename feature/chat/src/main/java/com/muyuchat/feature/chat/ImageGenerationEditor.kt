@@ -1,6 +1,10 @@
-﻿@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
@@ -16,20 +20,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.ZoomIn
-import androidx.compose.material.icons.filled.ZoomOut
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -57,6 +52,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.muyuchat.core.designsystem.McaIconSize
 
 internal sealed interface GenerationImageEditorRequest {
     val sourceUri: String
@@ -253,24 +249,28 @@ private fun CropEditor(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = { crop = defaultCrop },
                     enabled = dirty && !saving,
                     modifier = Modifier.heightIn(min = 48.dp)
                 ) { Text("重置") }
-                IconButton(
+                McaIconButton(
+                    contentDescription = "缩小裁剪框，放大保留内容",
                     onClick = { crop = smallerCrop },
                     enabled = smallerCrop != crop && !saving,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.Default.ZoomIn, contentDescription = "缩小裁剪框，放大保留内容")
+                    Icon(McaIcons.ZoomIn, contentDescription = null)
                 }
-                IconButton(
+                McaIconButton(
+                    contentDescription = "放大裁剪框，缩小保留内容",
                     onClick = { crop = largerCrop },
                     enabled = largerCrop != crop && !saving,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.Default.ZoomOut, contentDescription = "放大裁剪框，缩小保留内容")
+                    Icon(McaIcons.ZoomOut, contentDescription = null)
                 }
             }
             Row(
@@ -283,29 +283,37 @@ private fun CropEditor(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                IconButton(
+                McaIconButton(
+                    contentDescription = "向左移动裁剪框",
                     onClick = { moveCrop(-1, 0) },
                     enabled = !saving,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "向左移动裁剪框")
+                    Icon(McaIcons.Previous, contentDescription = null)
                 }
-                IconButton(
+                McaIconButton(
+                    contentDescription = "向上移动裁剪框",
                     onClick = { moveCrop(0, -1) },
                     enabled = !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.Default.KeyboardArrowUp, contentDescription = "向上移动裁剪框") }
-                IconButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.KeyboardArrowUp, contentDescription = null) }
+                McaIconButton(
+                    contentDescription = "向下移动裁剪框",
                     onClick = { moveCrop(0, 1) },
                     enabled = !saving,
-                    modifier = Modifier.size(48.dp)
-                ) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "向下移动裁剪框") }
-                IconButton(
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
+                ) { Icon(McaIcons.KeyboardArrowDown, contentDescription = null) }
+                McaIconButton(
+                    contentDescription = "向右移动裁剪框",
                     onClick = { moveCrop(1, 0) },
                     enabled = !saving,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "向右移动裁剪框")
+                    Icon(McaIcons.Forward, contentDescription = null)
                 }
             }
         },

@@ -32,6 +32,7 @@ private fun String.toImageDimensions(family: LocalImageModelFamily): Pair<Int, I
         LocalImageModelFamily.WAN -> 832 to 480
         LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
+        LocalImageModelFamily.ANIMA,
         LocalImageModelFamily.CUSTOM -> 512 to 512
     }
 }
@@ -47,7 +48,8 @@ internal fun Pair<Int, Int>.fastLocalDimensions(family: LocalImageModelFamily): 
         LocalImageModelFamily.FLUX,
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.SD21,
-        LocalImageModelFamily.SD15 -> 512
+        LocalImageModelFamily.SD15,
+        LocalImageModelFamily.ANIMA -> 512
         LocalImageModelFamily.SDXL,
         LocalImageModelFamily.WAN,
         LocalImageModelFamily.CUSTOM -> 384
@@ -461,6 +463,7 @@ internal fun defaultStepsFor(family: LocalImageModelFamily): Int =
         LocalImageModelFamily.SD21 -> 8
         LocalImageModelFamily.SD15 -> 8
         LocalImageModelFamily.WAN -> 6
+        LocalImageModelFamily.ANIMA -> 8
         LocalImageModelFamily.CUSTOM -> 6
     }
 
@@ -472,6 +475,7 @@ internal fun defaultCfgFor(family: LocalImageModelFamily): Double =
         LocalImageModelFamily.QWEN_IMAGE -> 2.5
         LocalImageModelFamily.SANA -> 4.5
         LocalImageModelFamily.LONGCAT_IMAGE -> 5.0
+        LocalImageModelFamily.ANIMA -> 6.0
         LocalImageModelFamily.GLM_IMAGE,
         LocalImageModelFamily.DREAMLITE,
         LocalImageModelFamily.SDXL,
@@ -497,6 +501,28 @@ internal fun requireQwenImage21GgufExecutionEvidence(result: JSONObject) {
     }
 }
 
+internal fun requireAnimaSdcppExecutionEvidence(result: JSONObject) {
+    val native = result.optJSONObject("nativeEffective")
+        ?: error("Anima did not report native execution metadata.")
+    require(native.optString("actualModelFamily") == "ANIMA") {
+        "Anima requires the detected Anima architecture, got " +
+            "${native.optString("actualModelVersion").ifBlank { "no model version" }}."
+    }
+    require(native.optString("actualModelVariant") == "ANIMA_PREVIEW") {
+        "Anima requires its detected preview variant."
+    }
+    require(
+        native.optInt("actualLatentChannels", -1) == 16 &&
+            native.optInt("actualLatentDownsample", -1) == 8
+    ) {
+        "Anima requires the detected 16-channel / 8x latent topology."
+    }
+    require(result.optString("runtimeBackend") == "cpu") {
+        "stable-diffusion.cpp Anima reported runtimeBackend=" +
+            "${result.optString("runtimeBackend")}, expected cpu."
+    }
+}
+
 internal fun defaultStableDiffusionFlowShiftFor(profile: ImageExecutionProfile): Double {
     if (profile.scheduler.predictionType != ImagePredictionType.FLOW) return -1.0
     if (profile.variant == ImageModelVariant.QWEN_IMAGE_21) return -1.0
@@ -513,6 +539,7 @@ internal fun defaultStableDiffusionFlowShiftFor(profile: ImageExecutionProfile):
         LocalImageModelFamily.SDXL,
         LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15,
+        LocalImageModelFamily.ANIMA,
         LocalImageModelFamily.CUSTOM -> -1.0
     }
 }
@@ -531,5 +558,6 @@ internal fun defaultImageSizeFor(fileName: String): String =
         LocalImageModelFamily.SD21,
         LocalImageModelFamily.SD15 -> if ("384" in fileName) "384x384" else "512x512"
         LocalImageModelFamily.WAN,
+        LocalImageModelFamily.ANIMA,
         LocalImageModelFamily.CUSTOM -> "512x512"
     }

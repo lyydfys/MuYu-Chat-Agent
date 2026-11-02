@@ -1,12 +1,13 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,17 +36,17 @@ fun ModelImportDialog(
                     Text("仅导入 MNN 聊天组件（不启用视觉、音频）")
                 }
                 Text("默认完整导入。纯聊天模式需要完整的聊天权重和分词器，不会补齐缺失文件。")
-                TextButton(onClick = {
+                McaButton(style = McaButtonStyle.Text,onClick = {
                     onDismissRequest()
                     onImportDirectory(modelImportTextOnly)
                 }) { Text("选择模型目录") }
-                TextButton(onClick = {
+                McaButton(style = McaButtonStyle.Text,onClick = {
                     onDismissRequest()
                     onImportFiles(modelImportTextOnly)
                 }) { Text("选择文件 / ZIP") }
             }
         },
-        confirmButton = { TextButton(onClick = onDismissRequest) { Text("取消") } }
+        confirmButton = { McaButton(style = McaButtonStyle.Text,onClick = onDismissRequest) { Text("取消") } }
     )
 }
 
@@ -63,10 +64,10 @@ fun AppUpdatePromptDialog(
             Text("MCA $versionName 已在官方 GitHub Release 发布。下载后会校验 SHA-256、包名和版本号，再交由系统安装。")
         },
         confirmButton = {
-            TextButton(onClick = onConfirm) { Text("查看更新") }
+            McaButton(style = McaButtonStyle.Text,onClick = onConfirm) { Text("查看更新") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("稍后") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("稍后") }
         }
     )
 }

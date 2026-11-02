@@ -1,4 +1,8 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -19,19 +23,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +45,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S12：从 ChatChromeScreens.kt 等值移出的文件库页面簇。
 // 原样逐字迁移，未做行为改动；无新增提升（FileLibraryPage 原即 internal）。
@@ -97,8 +98,13 @@ internal fun FileLibraryPage(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                IconButton(onClick = onBack) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭文件库")
+                McaIconButton(
+                    onClick = onBack,
+                    contentDescription = "关闭文件库",
+                    glyphSize = McaIconSize.L,
+                    tint = LocalContentColor.current
+                ) {
+                    Icon(McaIcons.Close, contentDescription = null, modifier = Modifier.size(McaIconSize.L))
                 }
             }
             OutlinedTextField(
@@ -120,7 +126,7 @@ internal fun FileLibraryPage(
                 modifier = Modifier.horizontalScroll(rememberScrollState())
             ) {
                 FileLibraryFilter.entries.forEach { item ->
-                    FilterChip(
+                    McaChip(
                         selected = filter == item,
                         onClick = { filter = item },
                         label = { Text(item.label) }
@@ -194,9 +200,9 @@ private fun FileLibraryRow(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            Icons.Default.Folder,
+                            McaIcons.Folder,
                             contentDescription = null,
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(McaIconSize.M),
                             tint = McaPrimaryBlue
                         )
                     }
@@ -227,10 +233,10 @@ private fun FileLibraryRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End
             ) {
-                TextButton(onClick = onDelete) {
+                McaButton(style = McaButtonStyle.Text,onClick = onDelete) {
                     Text("删除")
                 }
-                Button(onClick = onInsert) {
+                McaButton(style = McaButtonStyle.Primary,onClick = onInsert) {
                     Text("插入当前聊天")
                 }
             }

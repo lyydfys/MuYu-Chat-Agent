@@ -9,7 +9,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 internal class ContentImportPreviewCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ContentImportFields>,
     private val scope: CoroutineScope,
     private val contentImportPreviewStore: ContentImportPreviewStore,
     private val assistantProfileCoordinator: AssistantProfileCoordinator,
@@ -73,7 +73,7 @@ internal class ContentImportPreviewCoordinator(
                             assistantProfileCoordinator.finishCharacterCardImport(originalSource, preview.owner, preview.id)
                         }
                         "world_book" -> assistantProfileCoordinator.importWorldBookOwned(
-                            preview.rawSource, requireNotNull(preview.scope), preview.owner, preview.id
+                            preview.rawSource, requireNotNull(preview.scope), preview.owner, preview.id, preview.fallbackName
                         )
                         "knowledge_document" -> confirmKnowledgeDocumentImport(preview)
                         else -> error("未知的导入预览类型")

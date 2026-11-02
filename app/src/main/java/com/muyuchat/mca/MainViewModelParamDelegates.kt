@@ -1,6 +1,7 @@
 package com.muyuchat.mca
 
 import android.app.Application
+import com.muyuchat.mca.composition.settingsParameterWriter
 import com.muyuchat.core.engine.GenerationParams
 
 fun MainViewModel.updateParams(params: GenerationParams) {
@@ -17,7 +18,7 @@ fun MainViewModel.updateParams(params: GenerationParams) {
     val updatedAssistants = updatedAssistantsWithParams(state.assistants, state.selectedAssistantId, scopedParams)
     val hasLoadedModel = uiStateStore.current.loadedModelId != null
     val reloadRequired = hasLoadedModel && profileDiffersFrom(scopedParams, runtimeAssembly.activeExecutionProfile())
-    uiStateStore.update { state ->
+    uiStateStore.settingsParameterWriter().update { state ->
         state.copy(
             params = scopedParams,
             assistants = updatedAssistants,

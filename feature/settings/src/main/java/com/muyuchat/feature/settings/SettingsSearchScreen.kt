@@ -1,5 +1,7 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,18 +16,12 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Save
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -228,7 +224,7 @@ fun SearchSettingsScreen(
                         ) {
                             Text("启用联网检索", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             Spacer(Modifier.width(12.dp))
-                            Switch(checked = enabled, onCheckedChange = { enabled = it })
+                            McaSwitch(checked = enabled, onCheckedChange = { enabled = it }, contentDescription = "启用联网检索")
                         }
                         Text(
                             "开启后可读取用户提供的网页链接；关键词搜索还需要配置搜索服务。",
@@ -238,7 +234,7 @@ fun SearchSettingsScreen(
                     }
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         providerItems.forEach { item ->
-                            FilterChip(
+                            McaChip(
                                 selected = provider == item.first,
                                 onClick = { provider = item.first },
                                 label = { Text(item.second) }
@@ -255,7 +251,7 @@ fun SearchSettingsScreen(
                             Text("触发方式", fontWeight = FontWeight.Bold)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 triggerModes.forEach { item ->
-                                    FilterChip(
+                                    McaChip(
                                         selected = triggerMode == item.first,
                                         onClick = { triggerMode = item.first },
                                         label = { Text(item.second) }
@@ -272,7 +268,7 @@ fun SearchSettingsScreen(
                             Text("研究模式", fontWeight = FontWeight.Bold)
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 researchModes.forEach { item ->
-                                    FilterChip(
+                                    McaChip(
                                         selected = researchMode == item.first,
                                         onClick = { researchMode = item.first },
                                         label = { Text(item.second) }
@@ -379,7 +375,7 @@ fun SearchSettingsScreen(
                         ) {
                             Text("抓取网页正文", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                             Spacer(Modifier.width(12.dp))
-                            Switch(checked = fetchPageContent, onCheckedChange = { fetchPageContent = it })
+                            McaSwitch(checked = fetchPageContent, onCheckedChange = { fetchPageContent = it }, contentDescription = "抓取网页正文")
                         }
                         Text(
                             "会额外读取前几个公开网页正文，提高回答质量，但速度会慢一点；本机、局域网、链路本地和保留地址会被安全拦截。",
@@ -388,13 +384,13 @@ fun SearchSettingsScreen(
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             modifier = Modifier.weight(1f),
                             onClick = {
                                 onSave(currentDraft())
                             }
                         ) {
-                            Icon(Icons.Rounded.Save, contentDescription = null)
+                            Icon(McaIcons.Save, contentDescription = null)
                             Text("保存")
                         }
                     }
@@ -428,7 +424,7 @@ fun SearchSettingsScreen(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Button(
+                    McaButton(style = McaButtonStyle.Primary,
                         onClick = { onPreflight(currentDraft()) },
                         enabled = !state.operationBusy,
                         modifier = Modifier.fillMaxWidth()
@@ -436,14 +432,14 @@ fun SearchSettingsScreen(
                         Text("网络预检")
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = { onTest(testQuery, currentDraft()) },
                             enabled = !state.operationBusy,
                             modifier = Modifier.weight(1f)
                         ) {
                             Text("测试当前填写")
                         }
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = { onTestTurn(testQuery, currentDraft(), false) },
                             enabled = !state.operationBusy,
                             modifier = Modifier.weight(1f)
@@ -457,7 +453,7 @@ fun SearchSettingsScreen(
                         expanded = testExpanded,
                         onExpandedChange = { testExpanded = it }
                     ) {
-                        Button(
+                        McaButton(style = McaButtonStyle.Primary,
                             onClick = {
                                 testQuery = WEB_SEARCH_RESEARCH_CHECK_QUERY
                                 onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, currentDraft().copy(researchMode = "DEEP"), false)
@@ -468,7 +464,7 @@ fun SearchSettingsScreen(
                             Text("研究闭环自检")
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                            Button(
+                            McaButton(style = McaButtonStyle.Primary,
                                 onClick = {
                                     applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
                                     onTestTurn(WEB_SEARCH_PUBLIC_CHECK_QUERY, publicCheckDraft(deepResearch = false), true)
@@ -478,7 +474,7 @@ fun SearchSettingsScreen(
                             ) {
                                 Text("协议自检")
                             }
-                            Button(
+                            McaButton(style = McaButtonStyle.Primary,
                                 onClick = {
                                     applyPublicCheckDraft(WEB_SEARCH_RESEARCH_CHECK_QUERY, deepResearch = true)
                                     onTestTurn(WEB_SEARCH_RESEARCH_CHECK_QUERY, publicCheckDraft(deepResearch = true), true)
@@ -489,7 +485,7 @@ fun SearchSettingsScreen(
                                 Text("研究协议自检")
                             }
                         }
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 applyPublicCheckDraft(WEB_SEARCH_PUBLIC_CHECK_QUERY, deepResearch = false)
@@ -502,7 +498,7 @@ fun SearchSettingsScreen(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = onClearDiagnostics,
                             enabled = state.diagnostics.isNotEmpty() && !state.operationBusy,
                             modifier = Modifier.fillMaxWidth()

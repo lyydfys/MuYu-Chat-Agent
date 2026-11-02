@@ -24,7 +24,7 @@ internal interface CloudModelConfigPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (CloudModelConfigFields) -> CloudModelConfigFields): CloudModelConfigFields
 
     val cloudApiStore: CloudApiStore
 
@@ -147,6 +147,13 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
         }
     }
 
+    internal fun applyCloudStreaming(
+    port: CloudModelConfigPort,value: Boolean) {
+        port.updateUiState { state ->
+            state.copy(cloudApiConfig = state.cloudApiConfig.copy(streaming = value))
+        }
+    }
+
     internal fun applyCloudImageModel(
     port: CloudModelConfigPort,value: String) {
         port.updateUiState { state ->
@@ -205,6 +212,7 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
             supportsVision = config.supportsVision,
             supportsTools = config.supportsTools,
             responsesReasoningEnabled = config.responsesReasoningEnabled,
+            streaming = config.streaming,
             imageSize = config.imageSize,
             updatedAt = System.currentTimeMillis()
         ) ?: port.uiState().cloudModels.matchingCloudModel(
@@ -219,6 +227,7 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
             supportsVision = config.supportsVision,
             supportsTools = config.supportsTools,
             responsesReasoningEnabled = config.responsesReasoningEnabled,
+            streaming = config.streaming,
             updatedAt = System.currentTimeMillis()
         ) ?: CloudModelRecord(
             kind = CloudModelKind.CHAT,
@@ -231,6 +240,7 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
             supportsVision = config.supportsVision,
             supportsTools = config.supportsTools,
             responsesReasoningEnabled = config.responsesReasoningEnabled,
+            streaming = config.streaming,
             imageSize = config.imageSize
         )
         val models = port.uiState().cloudModels.upsertCloudModel(record)
@@ -245,9 +255,8 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
             defaults = port.uiState().params
         )
         port.persistGenerationParams(modelParams)
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        port.updateUiState { state ->
-            sessionsToPersist = state.chatSessions.bindSession(
+        val committed = port.updateUiState { state ->
+            val sessionsToPersist = state.chatSessions.bindSession(
                 sessionId = state.activeChatSessionId,
                 assistantId = state.selectedAssistantId,
                 modelMode = ChatBackend.CLOUD.bindingValue(),
@@ -264,7 +273,7 @@ internal fun CloudApiConfig.normalized(): CloudApiConfig =
                 statusMessage = "已保存并加载云端推理模型：${record.displayName}"
             )
         }
-        port.persistChatSessions(sessionsToPersist)
+        port.persistChatSessions(committed.chatSessions)
     }
 
     internal fun saveCloudImageModelConfig(
@@ -373,6 +382,17 @@ internal fun applyCloudApiEnabled(
         state.copy(cloudApiConfig = state.cloudApiConfig.copy(enabled = enabled))
     }
 }
+
+/**
+ * Fetches the provider's available model ids for the editor's "获取模型列表" action.
+ *
+ * Unlike the self-test this publishes nothing: the caller owns the in-progress flag and renders
+ * the returned list or error locally, so a fetch never disturbs the form's status line.
+ */
+internal suspend fun fetchCloudModelOptionsFor(
+    port: CloudModelConfigPort
+): Result<List<String>> =
+    port.cloudChatProvider.listModels(port.uiState().cloudApiConfig.normalized())
 
 internal fun applyCloudApiFormat(
     port: CloudModelConfigPort,
@@ -548,7 +568,7 @@ internal fun updateReasoningModeFor(
     state: MainUiState,
     application: Application,
     modelGenerationProfileStore: ModelGenerationProfileStore,
-    uiStateStore: UiStateStore,
+    uiStateStore: UiStateWriter<CloudModelConfigFields>,
     showStatus: (String) -> Unit,
     mode: ReasoningMode
 ) {

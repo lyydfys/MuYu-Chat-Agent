@@ -14,6 +14,7 @@ internal data class McaInferenceStreamPrefillOutcome(
 )
 
 internal suspend fun McaInferenceService.beginNativeWithPrefillProgressLoop(
+    generationStopToken: GenerationStopToken,
     paramsJson: String,
     activeRequest: ChatRequest,
     preparedParameters: CompletionPreflight.Ready?,
@@ -111,6 +112,9 @@ internal suspend fun McaInferenceService.beginNativeWithPrefillProgressLoop(
                                 downstreamPrefillEmissionFailed = true
                                 throw error
                             }
+                            // The exact request is about to enter native prefill. This is the only
+                            // point that turns a "safe direct release" into "native proof required".
+                            markRequestNativeDispatchStarted(generationStopToken)
                             val nativeBegin = async(io) {
                                 if (persistentPrefix == null) {
                                     runner.beginCompletion(messagesJson, runtimeParamsJson)

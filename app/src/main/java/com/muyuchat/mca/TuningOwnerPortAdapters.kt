@@ -90,16 +90,12 @@ internal class CandidateCanaryResultPortAdapter(
 }
 
 internal class TuningCanaryPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateReadPort,
     private val deviceProfileReader: DeviceProfileReader,
     private val inferenceEngine: McaInferenceService,
     private val resultPort: CandidateCanaryResultPort
 ) : TuningCanaryPort {
     override fun uiState(): MainUiState = store.current
-
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
 
     override fun currentDeviceProfile(): DeviceProfile = deviceProfileReader.read()
 

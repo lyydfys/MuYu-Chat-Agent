@@ -33,7 +33,7 @@ import com.muyuchat.mca.KnowledgeBaseRecord
 
 internal fun McaAppContainer.createChatTerminalSettlementPortImpl(store: UiStateStore): ChatTerminalSettlementPort =
         ChatTerminalSettlementPortAdapter(
-            store = store,
+            store = store.conversationSettlementWriter(),
             chatRunsRef = chatRuns,
             diagnosticStoreRef = webSearchDiagnosticStore,
             accumulatorRef = chatStreamAccumulator
@@ -46,7 +46,8 @@ internal fun McaAppContainer.createChatSessionPersistencePort(
         engine: McaInferenceService
     ): ChatSessionPersistencePort =
         ChatSessionPersistencePortAdapter(
-            store = store,
+            store = store.conversationPersistenceWriter(),
+            knowledgeStore = store.knowledgeLibraryWriter(),
             scopeRef = scope,
             engineRef = engine,
             chatRunsRef = chatRuns,
@@ -62,7 +63,7 @@ internal fun McaAppContainer.createChatImageRequestPort(
         store: UiStateStore,
         persistencePort: ChatSessionPersistencePort
     ): ChatImageRequestPort =
-        ChatImageRequestPortAdapter(store = store, persistencePort = persistencePort)
+        ChatImageRequestPortAdapter(store = store.chatImageRequestWriter(), persistencePort = persistencePort)
 
 internal fun McaAppContainer.createChatImageCommitRecoveryPortImpl(
         journalProvider: () -> ChatImageCommitJournal,
@@ -78,7 +79,7 @@ internal fun McaAppContainer.createImageLibraryStartupReconciliationImpl(
     ): ImageLibraryStartupReconciliation =
         ImageLibraryStartupReconciliation(
             scope = scope,
-            store = store,
+            store = store.assetReconciliationWriter(),
             chatSessionStore = chatSessionStore,
             recoveryPort = recoveryPort,
             persistenceState = chatSessionPersistenceState,
@@ -97,7 +98,7 @@ internal fun McaAppContainer.createSendChatImageRequestPort(
         imageGenerationOwner: ImageGenerationOwner
     ): SendChatImageRequestPort =
         SendChatImageRequestPortAdapter(
-            store = store,
+            store = store.sendChatImageWriter(),
             admission = runtimeAdmission,
             persistencePort = persistencePort,
             requestPort = requestPort,
@@ -112,7 +113,8 @@ internal fun McaAppContainer.createChatImageRetryPort(
         journalProvider: () -> ChatImageCommitJournal
     ): ChatImageRetryPort =
         ChatImageRetryPortAdapter(
-            store = store,
+            store = store.cloudModelConfigWriter(),
+            promptDraftStore = store.chatPromptDraftWriter(),
             admission = runtimeAdmission,
             cloudApiStoreRef = cloudApiStore,
             localImageModelStoreRef = localImageModelStore,
@@ -130,7 +132,7 @@ internal fun McaAppContainer.createChatLocalApiProviderPort(
         ChatLocalApiProviderPortAdapter(
             engine = engine,
             chatRuns = chatRuns,
-            store = store,
+            store = store.generationLifecycleWriter(),
             cancelActiveLocalApiImageGenerationAction = cancelActiveLocalApiImageGenerationAction,
             localApiPayloadPortProvider = localApiPayloadPortProvider,
             chatExecutionFacade = chatExecutionFacadeFor(engine),
@@ -148,7 +150,7 @@ internal fun McaAppContainer.createChatStopGenerationPort(
         persistConversationMutationRef: (List<ChatSessionRecord>, ConversationMutationRollbackState) -> Unit,
     ): ChatStopGenerationPort =
         ChatStopGenerationPortAdapter(
-            store = store,
+            store = store.generationStopWriter(),
             engine = engine,
             chatRuns = chatRuns,
             stopScopeRef = stopScopeRef,

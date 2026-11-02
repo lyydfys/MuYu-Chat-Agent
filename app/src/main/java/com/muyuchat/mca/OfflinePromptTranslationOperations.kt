@@ -29,7 +29,7 @@ internal suspend fun cacheVerifiedOfflineTranslationBundleFor(
 }
 
 internal suspend fun verifiedOfflineTranslationBundleFor(
-    store: UiStateStore,
+    store: UiStateWriter<OfflineTranslationFields>,
     admission: RuntimeAdmissionState,
     downloader: OfflinePromptTranslationBundleDownloader
 ): VerifiedOfflinePromptTranslationBundle? = withContext(Dispatchers.IO) {
@@ -69,7 +69,7 @@ internal suspend fun verifiedOfflineTranslationBundleFor(
 }
 
 internal fun importOfflinePromptTranslationBundleFor(
-    store: UiStateStore,
+    store: UiStateWriter<OfflineTranslationFields>,
     admission: RuntimeAdmissionState,
     scope: CoroutineScope,
     installer: OfflinePromptTranslationBundleInstaller,
@@ -104,7 +104,7 @@ internal fun cancelOfflinePromptTranslationInstallFor(admission: RuntimeAdmissio
 }
 
 internal fun downloadOfflinePromptTranslationBundleFor(
-    store: UiStateStore,
+    store: UiStateWriter<OfflineTranslationFields>,
     admission: RuntimeAdmissionState,
     scope: CoroutineScope,
     downloader: OfflinePromptTranslationBundleDownloader

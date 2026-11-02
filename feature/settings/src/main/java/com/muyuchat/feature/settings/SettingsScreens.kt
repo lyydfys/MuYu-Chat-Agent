@@ -1,5 +1,11 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -10,17 +16,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -32,7 +36,9 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.telemetry.RuntimeMetrics
+import com.muyuchat.core.designsystem.McaIconSize
 
+@Immutable
 data class SettingsUiState(
     val params: GenerationParams = GenerationParams(),
     val stats: RuntimeStats = RuntimeStats(),
@@ -60,6 +66,7 @@ data class SettingsUiState(
     val webSearch: WebSearchSettingsUiState = WebSearchSettingsUiState()
 )
 
+@Immutable
 data class SettingsCleanupBusyUiState(
     val chatHistory: Boolean = false,
     val imageLibrary: Boolean = false,
@@ -70,6 +77,7 @@ data class SettingsCleanupBusyUiState(
         get() = chatHistory || imageLibrary || fileLibrary || persistentPrefixCache
 }
 
+@Immutable
 data class AppUpdateSettingsUiState(
     val autoCheckEnabled: Boolean = true,
     val status: String = "IDLE",
@@ -86,6 +94,7 @@ data class AppUpdateSettingsUiState(
     val message: String? = null
 )
 
+@Immutable
 data class WebSearchSettingsUiState(
     val enabled: Boolean = false,
     val provider: String = "SEARXNG",
@@ -107,6 +116,7 @@ data class WebSearchSettingsUiState(
     val diagnostics: List<WebSearchDiagnosticUiItem> = emptyList()
 )
 
+@Immutable
 data class WebSearchBackupProviderUiState(
     val enabled: Boolean = false,
     val provider: String = "SEARXNG",
@@ -116,6 +126,7 @@ data class WebSearchBackupProviderUiState(
     val configured: Boolean = false
 )
 
+@Immutable
 data class WebSearchDiagnosticUiItem(
     val createdAtText: String,
     val providerLabel: String,
@@ -217,6 +228,7 @@ fun SettingsHubScreen(
     onAutoCheckChanged: (Boolean) -> Unit = {},
     onOpenWebPage: (String) -> Unit = {}
 ) {
+    val haptics = rememberMcaHaptics()
     val startSection = if (startInWebSearch) SettingsSection.SEARCH else SettingsSection.RUNTIME
     var section by rememberSaveable(startInWebSearch) { mutableStateOf(startSection) }
     Column(
@@ -243,10 +255,10 @@ fun SettingsHubScreen(
                     McaIconButton(
                         contentDescription = "返回聊天",
                         onClick = onBack,
-                        glyphSize = 24.dp,
+                        glyphSize = McaIconSize.L,
                         tint = LocalContentColor.current
                     ) {
-                        Icon(Icons.Rounded.Close, contentDescription = null)
+                        Icon(McaIcons.Close, contentDescription = null)
                     }
                     Column {
                         Text("系统设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -254,7 +266,7 @@ fun SettingsHubScreen(
                     }
                 }
                 Spacer(Modifier.width(8.dp))
-                Icon(Icons.Rounded.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Icon(McaIcons.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             }
             // Wrap instead of scrolling: with four sections a phone-width row could clip the last
             // tab, and a horizontal scroll made it look truncated at 2.0x font scale.
@@ -263,63 +275,77 @@ fun SettingsHubScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SettingsSection.entries.forEach { item ->
-                    FilterChip(
+                    McaChip(
                         selected = section == item,
-                        onClick = { section = item },
+                        onClick = {
+                            if (section != item) haptics.tick()
+                            section = item
+                        },
+                        // This selection owner ticks only when the selected section changes.
+                        hapticsEnabled = false,
                         label = { Text(item.title) }
                     )
                 }
             }
         }
-        when (section) {
-            SettingsSection.RUNTIME -> RuntimeScreen(
-                state = state,
-                offlineTranslationStatus = offlineTranslationStatus,
-                offlineTranslationInstalled = offlineTranslationInstalled,
-                offlineTranslationInstalling = offlineTranslationInstalling,
-                offlineTranslationDownloading = offlineTranslationDownloading,
-                offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
-                onImportOfflineTranslation = onImportOfflineTranslation,
-                onCancelOfflineTranslationImport = onCancelOfflineTranslationImport,
-                onDownloadOfflineTranslation = onDownloadOfflineTranslation,
-                onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
-                onCheckUpdate = onCheckUpdate,
-                onDownloadUpdate = onDownloadUpdate,
-                onInstallUpdate = onInstallUpdate,
-                onOpenRelease = onOpenRelease,
-                onAutoCheckChanged = onAutoCheckChanged,
-                modifier = Modifier.weight(1f)
-            )
-            SettingsSection.LOGS -> LogsApiScreen(
-                state = state,
-                onRefreshLogs = onRefreshLogs,
-                onRefreshDiagnostics = onRefreshDiagnostics,
-                onExportDiagnostics = onExportDiagnostics,
-                modifier = Modifier.weight(1f)
-            )
-            SettingsSection.PRIVACY -> PrivacyDataScreen(
-                state = state,
-                onClearChatHistory = onClearChatHistory,
-                onClearImageLibrary = onClearImageLibrary,
-                onClearFileLibrary = onClearFileLibrary,
-                onPersistentPrefixCacheEnabledChanged = onPersistentPrefixCacheEnabledChanged,
-                onClearPersistentPrefixCache = onClearPersistentPrefixCache,
-                modifier = Modifier.weight(1f)
-            )
-            SettingsSection.SEARCH -> SearchSettingsScreen(
-                state = state.webSearch,
-                onSave = onSaveWebSearchSettings,
-                onPreflight = onPreflightWebSearch,
-                onTest = onTestWebSearch,
-                onTestTurn = onTestWebSearchTurn,
-                onClearDiagnostics = onClearWebSearchDiagnostics,
-                onOpenWebPage = onOpenWebPage,
-                modifier = Modifier.weight(1f)
-            )
-            SettingsSection.EXPERIMENTS -> ExperimentsScreen(
-                state = state,
-                modifier = Modifier.weight(1f)
-            )
+        AnimatedContent(
+            targetState = section,
+            transitionSpec = {
+                fadeIn(McaMotion.fade(150)) togetherWith fadeOut(McaMotion.fade(100))
+            },
+            label = "settingsSectionContent",
+            modifier = Modifier.weight(1f)
+        ) { targetSection ->
+            when (targetSection) {
+                SettingsSection.RUNTIME -> RuntimeScreen(
+                    state = state,
+                    offlineTranslationStatus = offlineTranslationStatus,
+                    offlineTranslationInstalled = offlineTranslationInstalled,
+                    offlineTranslationInstalling = offlineTranslationInstalling,
+                    offlineTranslationDownloading = offlineTranslationDownloading,
+                    offlineTranslationDownloadProgress = offlineTranslationDownloadProgress,
+                    onImportOfflineTranslation = onImportOfflineTranslation,
+                    onCancelOfflineTranslationImport = onCancelOfflineTranslationImport,
+                    onDownloadOfflineTranslation = onDownloadOfflineTranslation,
+                    onCancelOfflineTranslationDownload = onCancelOfflineTranslationDownload,
+                    onCheckUpdate = onCheckUpdate,
+                    onDownloadUpdate = onDownloadUpdate,
+                    onInstallUpdate = onInstallUpdate,
+                    onOpenRelease = onOpenRelease,
+                    onAutoCheckChanged = onAutoCheckChanged,
+                    modifier = Modifier.fillMaxSize()
+                )
+                SettingsSection.LOGS -> LogsApiScreen(
+                    state = state,
+                    onRefreshLogs = onRefreshLogs,
+                    onRefreshDiagnostics = onRefreshDiagnostics,
+                    onExportDiagnostics = onExportDiagnostics,
+                    modifier = Modifier.fillMaxSize()
+                )
+                SettingsSection.PRIVACY -> PrivacyDataScreen(
+                    state = state,
+                    onClearChatHistory = onClearChatHistory,
+                    onClearImageLibrary = onClearImageLibrary,
+                    onClearFileLibrary = onClearFileLibrary,
+                    onPersistentPrefixCacheEnabledChanged = onPersistentPrefixCacheEnabledChanged,
+                    onClearPersistentPrefixCache = onClearPersistentPrefixCache,
+                    modifier = Modifier.fillMaxSize()
+                )
+                SettingsSection.SEARCH -> SearchSettingsScreen(
+                    state = state.webSearch,
+                    onSave = onSaveWebSearchSettings,
+                    onPreflight = onPreflightWebSearch,
+                    onTest = onTestWebSearch,
+                    onTestTurn = onTestWebSearchTurn,
+                    onClearDiagnostics = onClearWebSearchDiagnostics,
+                    onOpenWebPage = onOpenWebPage,
+                    modifier = Modifier.fillMaxSize()
+                )
+                SettingsSection.EXPERIMENTS -> ExperimentsScreen(
+                    state = state,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
     }
 }

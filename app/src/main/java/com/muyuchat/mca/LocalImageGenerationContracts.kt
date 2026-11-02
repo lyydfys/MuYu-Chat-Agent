@@ -37,6 +37,14 @@ internal interface LocalImageGenerationPort {
         options: LocalImageGenerationOptions,
         onProgress: (LocalImageProgress) -> Unit
     ): LocalImageResult
+
+    fun generateMediaTekAnima(
+        model: LocalImageModelRecord,
+        prompt: String,
+        options: LocalImageGenerationOptions,
+        isCancellationRequested: () -> Boolean,
+        onProgress: (LocalImageProgress) -> Unit
+    ): LocalImageResult
 }
 
 internal enum class SplitSdxlRequestTerminalState {

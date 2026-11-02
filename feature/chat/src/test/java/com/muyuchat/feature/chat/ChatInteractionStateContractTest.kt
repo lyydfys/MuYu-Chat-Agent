@@ -43,7 +43,8 @@ class ChatInteractionStateContractTest {
         assertTrue(
             "the enabled row must use the vector chevron",
             source.contains(
-                "if(enabled){Icon(imageVector=Icons.AutoMirrored.Rounded.KeyboardArrowRight," +
+                // The semantic entry point owns the same auto-mirrored rounded chevron.
+                "if(enabled){Icon(imageVector=McaIcons.Forward," +
                     "contentDescription=null,"
             )
         )

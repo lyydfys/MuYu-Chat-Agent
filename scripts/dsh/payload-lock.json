@@ -1,0 +1,93 @@
+{
+    "generatedAtUtc":  "2026-10-19T12:09:16.2574989Z",
+    "apkUrl":  "https://github.com/woaiys3/deepseek-harness-android-app/releases/download/v1.20.1/DeepSeekHarness.apk",
+    "apkSize":  162006797,
+    "apkSha256":  "c324272bff00e8cce06e0baa2ebb9b88e524a5d246e06f8cb55d39df7c66dafa",
+    "payloadSize":  160464248,
+    "payloadSha256":  "975146516216ced02299676689c1731c7f390962389dbef56821cd59a3bf69ab",
+    "kernelVersion":  "0.2.1-rc.2",
+    "kernelRevision":  "20261018072502",
+    "executables":  [
+                        {
+                            "size":  49715528,
+                            "sha256":  "a0d21a1589312919114b24a5cc520c30ab7f26f9985b3f0c643c153172ebd1e6",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshnode.so",
+                            "payloadEntry":  "runtime/bin/node",
+                            "role":  "node"
+                        },
+                        {
+                            "size":  4868920,
+                            "sha256":  "5adfd20e4c350aecd718bbef048a57a3fbabe0402c9c39a25eb40a28f1b19543",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshrg.so",
+                            "payloadEntry":  "runtime/bin/rg",
+                            "role":  "ripgrep"
+                        },
+                        {
+                            "size":  308272,
+                            "sha256":  "e9cd08920d448bb6aa448c87c5b84dc62e55b5ed654664684d79348a1b06de61",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshcurl.so",
+                            "payloadEntry":  "runtime/bin/curl",
+                            "role":  "curl"
+                        },
+                        {
+                            "size":  3562128,
+                            "sha256":  "aba46d67c0c5752c27129d97136055bd8d7f3b3c4378edbf5c7c5a6f8dead5db",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshgit.so",
+                            "payloadEntry":  "bin/git",
+                            "role":  "git"
+                        },
+                        {
+                            "size":  2010824,
+                            "sha256":  "909e5616f9cb422bc6a90517e34ac40c2a8ec0475949908a3596b006dd96db61",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshgitremotehttp.so",
+                            "payloadEntry":  "git/libexec/git-core/git-remote-http",
+                            "role":  "git-remote-http"
+                        },
+                        {
+                            "size":  2010824,
+                            "sha256":  "909e5616f9cb422bc6a90517e34ac40c2a8ec0475949908a3596b006dd96db61",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshgitremotehttps.so",
+                            "payloadEntry":  "git/libexec/git-core/git-remote-https",
+                            "role":  "git-remote-https"
+                        },
+                        {
+                            "size":  4448,
+                            "sha256":  "4f8d78ede7fc26e96e99342dd83ce42d32c9b4d0806bc9a99ff7151396269b25",
+                            "jniLibsPath":  "jniLibs/arm64-v8a/libdshpython.so",
+                            "payloadEntry":  "python/bin/python3.14",
+                            "role":  "python3.14"
+                        }
+                    ],
+    "criticalFiles":  [
+                          {
+                              "path":  "dshroot/lib/node_modules/@deepseek-ai/dsh/lib/bin.js",
+                              "sha256":  "80112efe368efb1a39720c7ada0af00442e5131fb2744edaaff8a3e8bb499e6f",
+                              "size":  11772
+                          },
+                          {
+                              "path":  "dshroot/lib/node_modules/@deepseek-ai/dsh/package.json",
+                              "sha256":  "e825e2b30656691258c014401adf3fec00e06e956534524b0fc102e407cad310",
+                              "size":  8226
+                          },
+                          {
+                              "path":  "dshhome/profiles/web/package.json",
+                              "sha256":  "b07f71cba5c341f6bd6ebf1316573588817e3a15629a86f11d34d4a01a82c94b",
+                              "size":  236
+                          },
+                          {
+                              "path":  "runtime/lib/libz.so.1",
+                              "sha256":  "c47748ed4b6ca6a2ecd664bab04795f3493956ab1f5cddc4ba0efa737ef3b711",
+                              "size":  72880
+                          },
+                          {
+                              "path":  "runtime/lib/libc++_shared.so",
+                              "sha256":  "e09c2f45cf4cf8ae574f94b6c2650d99ead0d332d5396f6613f062a2d2d73540",
+                              "size":  1374336
+                          },
+                          {
+                              "path":  "runtime/lib/libsqlite3.so",
+                              "sha256":  "2305d0c8f90757fef4be25314f69a7ad412a970a1ca4fba7ba85bbbf4a37708a",
+                              "size":  1211232
+                          }
+                      ]
+}

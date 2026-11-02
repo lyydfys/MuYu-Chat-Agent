@@ -1,0 +1,30 @@
+diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
+index 125f554..f17b872 100644
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -1044,7 +1044,8 @@ bool StableDiffusionGGML::build_vae_runners() {
+     }
+     return register_runner_params(ModelComponent::VAE, first_stage_model, SDBackendModule::VAE) &&
+            register_runner_params(ModelComponent::PreviewVAE, preview_vae, SDBackendModule::VAE) &&
+-           register_runner_params(ModelComponent::AudioVAE, audio_vae_model, SDBackendModule::VAE);
++           register_runner_params(ModelComponent::AudioVAE, audio_vae_model,
++                                  sd_version_is_minimax_h3(version) ? SDBackendModule::TE : SDBackendModule::VAE);  // dit/070
+ }
+ 
+ bool StableDiffusionGGML::build_control_net_runner() {
+diff --git a/src/pipeline/model_builders.cpp b/src/pipeline/model_builders.cpp
+index 143c980..6f3d40e 100644
+--- a/src/pipeline/model_builders.cpp
++++ b/src/pipeline/model_builders.cpp
+@@ -545,7 +545,10 @@ namespace sd::model_builders {
+ 
+         if (options.use_audio_vae) {
+             if (sd_version_is_minimax_h3(version)) {
+-                result.audio = std::make_shared<MiniMaxH3::AudioVAERunner>(ctx.backends.runtime_backend(SDBackendModule::VAE),
++                // nightmare (dit/070): MiniMax-H3's audio decoder runs where the TEXT ENCODER runs (the CPU on the phone),
++                // not on the video VAE's NPU: its rows are a clip's samples (160k at 32 kHz x 5 s) and the HTP aborted
++                // in it (VTCM-TOO-SMALL, then dspqueue_read 0x2e with dit/069). It is 0.25 GB, decoded once a clip.
++                result.audio = std::make_shared<MiniMaxH3::AudioVAERunner>(ctx.backends.runtime_backend(SDBackendModule::TE),
+                                                                            tensor_storage_map,
+                                                                            "",
+                                                                            weight_manager);

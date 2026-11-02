@@ -259,10 +259,54 @@ android {
             applicationIdSuffix = ".benchmark"
             isDebuggable = false
         }
+        // Local-model debugging target. It matches release library variants (and therefore reuses
+        // their native artifacts) while skipping R8/resource shrinking and staying installable
+        // beside the production package under its own applicationId. Resource shrinking must be
+        // disabled explicitly because initWith(release) copies shrinkResources=true and AGP rejects
+        // resource shrinking without code shrinking. The release signing key is used only when it
+        // is actually configured; otherwise this variant stays unsigned instead of failing
+        // configuration.
+        create("diagnostic") {
+            initWith(getByName("release"))
+            isDebuggable = true
+            isMinifyEnabled = false
+            isShrinkResources = false
+            // Same applicationId as release so this debuggable, fast-build variant can update the
+            // already-installed signed app in place (MIUI blocks new-package installs). It must
+            // never be published; release output still comes from assembleRelease.
+            versionNameSuffix = "-diag"
+            matchingFallbacks += listOf("release")
+            if (releaseSigningEnabled) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+        // Test-only installable variant. Some devices already carry a differently-signed
+        // com.muyuchat.mca, and replacing it would erase user data. `-PmcaDeviceTestVariant=true`
+        // adds a debuggable, debug-signed APK with a distinct applicationId so Room migration and
+        // Compose instrumentation tests can run without touching the existing install. It is not
+        // created in normal builds and does not change any production variant.
+        if (providers.gradleProperty("mcaDeviceTestVariant").orNull == "true") {
+            create("deviceTest") {
+                initWith(getByName("debug"))
+                signingConfig = signingConfigs.getByName("debug")
+                matchingFallbacks += listOf("debug")
+                applicationIdSuffix = ".devicetest"
+                versionNameSuffix = "-devicetest"
+                isDebuggable = true
+                isMinifyEnabled = false
+            }
+        }
+        // Instrumentation is only generated for Android's single test build type. Redirect it to
+        // the isolated deviceTest variant so migration/UI tests can run next to an existing install
+        // without uninstalling (and wiping) the differently-signed production app.
+        if (providers.gradleProperty("mcaDeviceTestVariant").orNull == "true") {
+            testBuildType = "deviceTest"
+        }
     }
 
     buildFeatures {
         aidl = true
+        buildConfig = true
         compose = true
     }
 
@@ -270,7 +314,23 @@ android {
         getByName("main") {
             assets.srcDir(generatedLiteRtQualcommAssets)
             assets.srcDir(generatedQwenImage21Assets)
+            // The official-DSH payload assets and jniLibs live in :core:dsh-runtime itself
+            // (core/dsh-runtime/src/main/{assets,jniLibs}), staged by scripts/dsh/stage.ps1.
+            // Keeping them module-local makes the payload part of the runtime AAR and avoids a
+            // second app-level sourceSet that could silently diverge from the verified manifest.
         }
+        // Room's MigrationTestHelper reads the exported schema from the instrumentation APK's
+        // assets. The JSON under app/schemas is generated at compile time; packaging it into the
+        // test assets is what lets the real 27 -> 28 migration be validated on a device.
+        getByName("androidTest") {
+            assets.srcDir(file("schemas"))
+        }
+
+        // The test-only deviceTest build type is initialized from debug, but Gradle does not
+        // inherit the debug build type's source set. DSH's device staging instrumentation test
+        // references a class that only exists in src/debug; include that source set so the
+        // isolated deviceTest variant can compile androidTest without affecting production.
+        findByName("deviceTest")?.java?.srcDir("src/debug/java")
     }
 
     packaging {
@@ -294,6 +354,12 @@ android {
                     "**/libmtmd*.so",
                     "**/libkleidiai.so",
                     "**/libomp.so",
+                    // The packaged DSH Node payload deliberately ships on-device executables under
+                    // lib*.so names so PackageManager extracts them into the non-writable
+                    // nativeLibraryDir (targetSdk 36 forbids exec from the writable app home).
+                    // Stripping them as if they were ordinary app libraries is not meaningful and
+                    // can corrupt their entry points, so keep every DSH payload library as-is.
+                    "**/libdsh*.so",
                     "**/libandroidx.graphics.path.so"
                 )
             }
@@ -334,6 +400,7 @@ val composeCompilerReportsEnabled = providers.gradleProperty("mca.composeCompile
     .map { value -> !value.trim().equals("false", ignoreCase = true) }
     .orElse(true)
 composeCompiler {
+    stabilityConfigurationFiles.add(rootProject.layout.projectDirectory.file("config/compose/stability.conf"))
     if (composeCompilerReportsEnabled.get()) {
         reportsDestination = layout.buildDirectory.dir("compose-compiler/reports")
         metricsDestination = layout.buildDirectory.dir("compose-compiler/metrics")
@@ -436,22 +503,55 @@ androidComponents {
     }
 }
 
+// Test-only: Room 2.8.4's migration-testing schema bundles were compiled against the
+// serialization 1.8 ABI, while Room's runtime dependency graph pins 1.7.3. The deviceTest
+// variant (never shipped) aligns both sides so MigrationTestHelper can load a schema.
+configurations.configureEach {
+    if (name.contains("devicetest", ignoreCase = true)) {
+        resolutionStrategy.force(
+            "org.jetbrains.kotlinx:kotlinx-serialization-core:1.8.1",
+            "org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1"
+        )
+    }
+}
+
 dependencies {
     implementation(project(":core:designsystem"))
     // The engine library exposes GenieX-backed runners but cannot embed a
     // local AAR in its own AAR. Package the vendored, hash-verified artifact
     // directly in the final application instead.
-    implementation(files(rootProject.file("vendor/geniex/geniex-android-0.3.12-mca1.aar")))
+    implementation(files(rootProject.file("vendor/geniex/geniex-android-0.10.0-mca1.aar")))
     if (mcaQnnRuntimeOverrideGenieX) {
         implementation(project(":core:native"))
     }
     implementation(project(":core:engine"))
+    implementation(project(":core:agent-contract"))
+    implementation(project(":core:agent-runtime"))
+    // Independent official-DSH mode (proposal agent-dsh-embedded-v1). The app composition root
+    // wires the runtime owner, the loopback model gateway and the workspace container; no DSH
+    // feature may depend on the Kotlin Agent feature internals.
+    implementation(project(":core:dsh-contract"))
+    implementation(project(":core:dsh-runtime"))
+    implementation(project(":core:dsh-platform"))
+    implementation(project(":core:dsh-android-actions"))
+    implementation(project(":core:dsh-a11y"))
+    implementation(project(":core:dsh-vscreen"))
+    implementation(project(":core:dsh-browser"))
+    implementation(project(":core:dsh-maintenance"))
+    implementation(project(":api:dsh-gateway"))
+    implementation(project(":feature:dsh-workspace"))
+    // Native video workflow (proposal mca-native-video-workflow-v1). The composition root wires
+    // the process-level video owner and the workspace feature; the shared contract types are the
+    // only new compile-surface the app gains here.
+    implementation(project(":core:video-contract"))
+    implementation(project(":feature:video-workspace"))
     if (!mcaQnnRuntimeOverrideGenieX) {
         implementation(project(":core:native"))
     }
     implementation(project(":core:sd-native"))
     implementation(project(":core:modelstore"))
     implementation(project(":core:download"))
+    implementation(project(":core:mediatek-native"))
     implementation(project(":core:telemetry"))
     implementation(project(":core:deviceprofile"))
     implementation(project(":core:advisor"))
@@ -460,6 +560,7 @@ dependencies {
     implementation(project(":api:local"))
     implementation(project(":feature:chat"))
     implementation(project(":feature:agent"))
+    implementation(project(":feature:agent-workspace"))
     implementation(project(":feature:modelhub"))
     implementation(project(":feature:settings"))
 
@@ -478,6 +579,15 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     implementation(libs.okhttp)
+    // WorkManager exposes ListenableFuture in worker APIs; AndroidX resolves
+    // listenablefuture to an empty conflict artifact unless Guava is present.
+    implementation(libs.guava.android)
+    // N10/R2: real JavaScript execution for executable tool packages. Rhino is pure JVM (no
+    // native ABI); the sandbox boundary is host-side and is NOT an isolatedProcess/UID sandbox.
+    implementation(libs.rhino)
+    // MCP Streamable HTTP wire messages are untrusted JSON; parse them with the same strict
+    // streaming-core policy family as the Agent control protocol (no databind/reflection).
+    implementation(libs.jackson.core)
     implementation("com.google.re2j:re2j:1.8")
     ksp(libs.androidx.room.compiler)
 
@@ -490,8 +600,12 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.json)
     testImplementation("org.xerial:sqlite-jdbc:3.41.2.2")
+    androidTestImplementation(libs.androidx.room.testing)
+    // Room 2.8.4 migration-testing serializers were generated against serialization 1.7.x.
+    androidTestImplementation(libs.kotlinx.serialization.json)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation(libs.androidx.test.runner)

@@ -8,7 +8,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal fun importAssistantCardFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     scope: CoroutineScope,
     showStatus: (String) -> Unit,
     captureContentImportOwner: () -> ContentImportOwner,
@@ -29,7 +29,7 @@ internal fun importAssistantCardFor(
 }
 
 internal fun importAssistantCardFileFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     scope: CoroutineScope,
     application: Application,
     showStatus: (String) -> Unit,

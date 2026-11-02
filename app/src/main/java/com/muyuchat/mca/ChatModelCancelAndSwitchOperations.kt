@@ -13,7 +13,7 @@ import kotlinx.coroutines.launch
 
 internal fun cancelImageGenerationForJobFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<ImageJobCancellationFields>,
     admission: RuntimeAdmissionState,
     workerClient: LocalImageWorkerClient,
     activeWorkerRequestId: String?,
@@ -96,7 +96,7 @@ internal fun cancelImageGenerationForJobFor(
     }
 
 internal fun cancelChatImageGenerationFor(
-    store: UiStateStore,
+    store: UiStatusWriter,
     findRequest: (String) -> Pair<String, ChatGeneratedImageRequest>?,
     rejectRequest: (String) -> Unit,
     cancelGenerationForJob: (String?) -> Unit,
@@ -119,7 +119,7 @@ internal fun cancelChatImageGenerationFor(
     }
 
 internal fun selectChatModelFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     loadModel: (ModelManifest) -> Unit,
     selectCloudModel: (String?) -> Unit,
     choiceId: String
@@ -136,7 +136,7 @@ internal fun selectChatModelFor(
     }
 
 internal fun selectCloudChatModelFor(
-    store: UiStateStore,
+    store: UiStateWriter<ChatModelSelectionFields>,
     cloudApiStore: CloudApiStore,
     engine: McaInferenceService,
     scope: CoroutineScope,
@@ -166,24 +166,23 @@ internal fun selectCloudChatModelFor(
         scope.launch(Dispatchers.IO) {
             engine.stopGeneration()
         }
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        store.update {
-            sessionsToPersist = it.chatSessions.bindSession(
-                sessionId = it.activeChatSessionId,
-                assistantId = it.selectedAssistantId,
+        val sessionsToPersist = store.updateWithResult { fields ->
+            val sessions = fields.chatSessions.bindSession(
+                sessionId = fields.activeChatSessionId,
+                assistantId = fields.selectedAssistantId,
                 modelMode = ChatBackend.CLOUD.bindingValue(),
                 modelId = model.id
             )
-            it.copy(
+            fields.copy(
                 cloudApiConfig = config,
                 selectedCloudChatModelId = model.id,
                 selectedChatBackend = ChatBackend.CLOUD,
                 params = modelParams,
-                chatSessions = sessionsToPersist,
+                chatSessions = sessions,
                 busy = false,
                 statusMessage = "已切换到云端模型：${config.safeDisplayName()}",
-                tab = AppTab.CHAT
-            )
+                tab = tabAfterLateModelLoad(fields.tab)
+            ) to sessions
         }
         persistChatSessions(sessionsToPersist)
     }

@@ -22,7 +22,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
 
 internal suspend fun summarizeCharacterMemoryFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantMemoryFields>,
     chatSessionStore: ChatSessionStore,
     cloudChatProvider: OpenAiCompatibleChatProvider,
     engine: McaInferenceService,
@@ -128,7 +128,7 @@ internal suspend fun summarizeCharacterMemoryFor(
 }
 
 internal fun upsertAssistantMemoryFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantMemoryFields>,
     scope: CoroutineScope,
     chatSessionStore: ChatSessionStore,
     showStatus: (String) -> Unit,
@@ -195,7 +195,7 @@ internal fun launchAssistantMemoryPersistence(
 }
 
 internal fun deleteAssistantMemoryFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantMemoryFields>,
     scope: CoroutineScope,
     chatSessionStore: ChatSessionStore,
     showStatus: (String) -> Unit,
@@ -225,7 +225,7 @@ internal fun deleteAssistantMemoryFor(
 }
 
 internal fun recordCompletedCharacterMemoryTurnFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     scope: CoroutineScope,
     chatSessionStore: ChatSessionStore,
     scheduleCharacterMemorySummary: (String, ChatBackend, GenerationParams, CloudApiConfig?, String?) -> Unit,

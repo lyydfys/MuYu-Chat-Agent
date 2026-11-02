@@ -1,5 +1,7 @@
 package com.muyuchat.mca.composition
 
+import com.muyuchat.mca.RuntimeProfileFields
+import com.muyuchat.mca.UiStateWriter
 import com.muyuchat.mca.LocalApiRuntimeOwner
 import com.muyuchat.mca.LocalImageGenerationCoordinator
 import kotlinx.coroutines.runBlocking
@@ -87,7 +89,7 @@ internal fun McaAppContainer.createRuntimeProfileTransactionPort(
         showStatusAction: (String) -> Unit
     ): RuntimeProfileTransactionPort =
         RuntimeProfileTransactionPortAdapter(
-            store = store,
+            store = store.runtimeProfileWriter(),
             runtimeProfileStore = runtimeProfileStore,
             engine = engine,
             runtimeAdmission = runtimeAdmission,
@@ -102,6 +104,8 @@ internal fun McaAppContainer.createLocalApiAuxProviderPort(
         benchmarkRunner: BenchmarkRunner,
         buildRecommendationAction: (UserPreference) -> AgentRecommendation,
         generateLocalApiImageAction: suspend (String, String) -> String,
+        generateLocalApiVideoAction: suspend (String, String) -> String,
+        stopLocalApiVideoAction: suspend (String) -> Boolean,
     ): LocalApiAuxProviderPort =
         LocalApiAuxProviderPortAdapter(
             store = store,
@@ -111,10 +115,12 @@ internal fun McaAppContainer.createLocalApiAuxProviderPort(
             buildRecommendationAction = buildRecommendationAction,
             benchmarkRunner = benchmarkRunner,
             generateLocalApiImageAction = generateLocalApiImageAction,
+            generateLocalApiVideoAction = generateLocalApiVideoAction,
+            stopLocalApiVideoAction = stopLocalApiVideoAction,
         )
 
 internal fun McaAppContainer.createLocalApiTuningControlPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<RuntimeProfileFields>,
         tuningOwner: TuningOwner,
         localApiModelMatchesRef: (String, MainUiState, ModelManifest) -> Boolean,
         localApiPerformancePreferenceRef: (String?) -> UserPreference?,
@@ -174,7 +180,7 @@ internal fun McaAppContainer.createChatGenerationExecutionPort(
     ): ChatGenerationExecutionPort =
         ChatGenerationExecutionPortAdapter(
             application = application,
-            store = store,
+            store = store.generationExecutionWriter(),
             engine = engine,
             chatRuns = chatRuns,
             chatSessionStore = chatSessionStore,
@@ -225,7 +231,7 @@ internal fun McaAppContainer.createChatImagePromptBridgePort(
         negativePromptSupportedRef: (MainUiState) -> Boolean,
     ): ChatImagePromptBridgePort =
         ChatImagePromptBridgePortAdapter(
-            store = store,
+            store = store.chatPromptDraftWriter(),
             chatContextComposer = chatContextComposer,
             cloudChatProvider = cloudChatProvider,
             engine = engine,
@@ -262,7 +268,7 @@ internal fun McaAppContainer.createLocalApiImageGenerationPortImpl(
         executionWithQnnVerificationEvidenceRef: (LocalImageModelRecord, LocalImageResult, LocalImageGenerationOptions, String, String, QnnImageEvidenceEntryPoint) -> String,
     ): LocalApiImageGenerationPort =
         LocalApiImageGenerationPortAdapter(
-            store = store,
+            store = store.localApiImageWriter(),
             localImageLoraLifecycleLockRef = localImageLoraLifecycleLock,
             localImageTextualInversionLifecycleLockRef = localImageTextualInversionLifecycleLock,
             getActiveLocalApiImageModelIdRef = getActiveLocalApiImageModelIdRef,

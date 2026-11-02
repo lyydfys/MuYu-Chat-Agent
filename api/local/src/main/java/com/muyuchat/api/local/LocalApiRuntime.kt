@@ -53,6 +53,8 @@ object LocalApiRuntime {
         agentRecommendationJsonProvider = { "{}" }
         benchmarkJsonProvider = { "{}" }
         imageGenerationProvider = null
+        videoGenerationProvider = null
+        videoStopProvider = null
         controlPlane = null
         // Drop the published set in the same critical section as the field clears, so a call that
         // arrives after release cannot keep using the retired owner's callbacks.
@@ -127,9 +129,32 @@ object LocalApiRuntime {
     @Volatile
     var imageGenerationProvider: (suspend (requestId: String, body: String) -> String)? = null
 
+    /**
+     * App-owned bridge to the single process video owner (`/v1/video`). Returns the finished
+     * result JSON; failures are reported as [VideoGenerationProviderException] and never as a
+     * fabricated success.
+     */
+    @Volatile
+    var videoGenerationProvider: (suspend (requestId: String, body: String) -> String)? = null
+
+    /** Stops the video run bound to one Local API request id (client disconnect / scoped stop). */
+    @Volatile
+    var videoStopProvider: (suspend (requestId: String) -> Boolean)? = null
+
     suspend fun generateImage(requestId: String, body: String): String? {
         val bindings = currentBindings()
         return bindings.imageGenerationProvider?.invoke(requestId, body)
+    }
+
+    suspend fun generateVideo(requestId: String, body: String): String? {
+        val bindings = currentBindings()
+        return bindings.videoGenerationProvider?.invoke(requestId, body)
+    }
+
+    suspend fun stopVideo(requestId: String): Boolean {
+        if (requestId.isBlank()) return false
+        val stop = currentBindings().videoStopProvider
+        return stop?.invoke(requestId) ?: false
     }
 
     /**
@@ -164,6 +189,8 @@ object LocalApiRuntime {
         val agentRecommendationJsonProvider: (String) -> String,
         val benchmarkJsonProvider: suspend (String) -> String,
         val imageGenerationProvider: (suspend (requestId: String, body: String) -> String)?,
+        val videoGenerationProvider: (suspend (requestId: String, body: String) -> String)?,
+        val videoStopProvider: (suspend (requestId: String) -> Boolean)?,
         val controlPlane: LocalApiControlPlane?
     )
 
@@ -187,6 +214,8 @@ object LocalApiRuntime {
         agentRecommendationJsonProvider = agentRecommendationJsonProvider,
         benchmarkJsonProvider = benchmarkJsonProvider,
         imageGenerationProvider = imageGenerationProvider,
+        videoGenerationProvider = videoGenerationProvider,
+        videoStopProvider = videoStopProvider,
         controlPlane = controlPlane
     )
 

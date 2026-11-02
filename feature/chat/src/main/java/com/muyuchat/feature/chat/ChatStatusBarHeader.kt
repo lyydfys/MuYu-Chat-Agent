@@ -1,5 +1,9 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -12,11 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.Menu
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -30,6 +29,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -46,7 +46,9 @@ import com.muyuchat.core.engine.ReasoningMode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.McaMotion
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ChatStatusBar(
@@ -77,6 +79,12 @@ internal fun ChatStatusBar(
     val apiBadgeVerticalPadding = if (compactForLargeText) 2.dp else 4.dp
     val cacheEvidence = cacheEvidenceLabel(state.stats).takeIf { state.hasReadyLocalModelForHeader() }
     val modelSubtitle = state.modelHeaderSubtitle()
+    val capsuleBorder = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (modelMenuExpanded) 180f else 0f,
+        animationSpec = McaMotion.press,
+        label = "modelChevronRotation"
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -88,21 +96,23 @@ internal fun ChatStatusBar(
             modifier = Modifier.size(48.dp),
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            // 4dp keeps the capsule lifted without the grey band reading as a second surface.
-            shadowElevation = 4.dp
+            border = capsuleBorder,
+            // Calibrated elevation + 0.5dp optical hairline keeps the capsule crisp in both light & dark themes.
+            shadowElevation = 2.dp
         ) {
             McaIconButton(
                 contentDescription = "打开历史",
                 onClick = onOpenHistory,
-                glyphSize = 24.dp,
+                glyphSize = McaIconSize.L,
+                onClickLabel = "打开历史",
                 // Preserve the previous IconButton content colour (the Surface's onSurface),
                 // instead of the shared component's lower-emphasis default tint.
                 tint = LocalContentColor.current,
             ) {
                 Icon(
-                    Icons.Rounded.Menu,
+                    McaIcons.Menu,
                     contentDescription = null,
-                    modifier = Modifier.size(24.dp)
+                    modifier = Modifier.size(McaIconSize.L)
                 )
             }
         }
@@ -118,7 +128,8 @@ internal fun ChatStatusBar(
                     }
                     .clickable(
                         interactionSource = modelCapsuleInteraction,
-                        indication = ripple(bounded = true)
+                        indication = ripple(bounded = true),
+                        onClickLabel = "切换模型"
                     ) {
                         focusManager.clearFocus(force = true)
                         keyboardController?.hide()
@@ -127,7 +138,8 @@ internal fun ChatStatusBar(
                     .mcaPressScale(modelCapsuleInteraction),
                 color = MaterialTheme.colorScheme.surface,
                 shape = CircleShape,
-                shadowElevation = 5.dp
+                border = capsuleBorder,
+                shadowElevation = 3.dp
             ) {
                 Row(
                     modifier = Modifier.padding(start = 10.dp, end = 12.dp, top = 7.dp, bottom = 7.dp),
@@ -174,9 +186,29 @@ internal fun ChatStatusBar(
                     // font scale it only tightens its padding; the dropdown chevron below is a
                     // decorative affordance (the whole capsule already exposes "选择模型" as a
                     // button), so it is the only element that yields space there.
+                    val apiContainerColor by animateColorAsState(
+                        targetValue = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+                        label = "apiBadgeContainerColor"
+                    )
+                    val apiContentColor by animateColorAsState(
+                        targetValue = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+                        label = "apiBadgeContentColor"
+                    )
+                    val apiBorderColor by animateColorAsState(
+                        targetValue = if (apiActive) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.28f)
+                        } else {
+                            MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+                        },
+                        animationSpec = androidx.compose.animation.core.tween(durationMillis = 160),
+                        label = "apiBadgeBorderColor"
+                    )
                     Surface(
-                        color = if (apiActive) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                        shape = CircleShape
+                        color = apiContainerColor,
+                        shape = CircleShape,
+                        border = BorderStroke(0.5.dp, apiBorderColor)
                     ) {
                         Text(
                             text = "API",
@@ -185,18 +217,19 @@ internal fun ChatStatusBar(
                                 vertical = apiBadgeVerticalPadding
                             ),
                             style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                            color = if (apiActive) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = apiContentColor,
                             fontWeight = FontWeight.Bold
                         )
                     }
                     if (!compactForLargeText) {
                         Icon(
-                            imageVector = Icons.Rounded.KeyboardArrowDown,
+                            imageVector = McaIcons.KeyboardArrowDown,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
                                 .padding(start = 4.dp)
                                 .size(15.dp)
+                                .graphicsLayer { rotationZ = chevronRotation }
                         )
                     }
                 }
@@ -227,7 +260,8 @@ internal fun ChatStatusBar(
         Surface(
             color = MaterialTheme.colorScheme.surface,
             shape = CircleShape,
-            shadowElevation = 4.dp
+            border = capsuleBorder,
+            shadowElevation = 2.dp
         ) {
             Row(
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
@@ -236,20 +270,22 @@ internal fun ChatStatusBar(
                 McaIconButton(
                     contentDescription = "新建聊天",
                     onClick = onNewConversation,
-                    glyphSize = 22.dp,
+                    glyphSize = McaIconSize.M,
+                    onClickLabel = "新建聊天",
                     // Previous IconButton content colour; keeps the header icons unchanged.
                     tint = LocalContentColor.current,
                 ) {
                     Icon(
-                        Icons.Outlined.Edit,
+                        McaIcons.Edit,
                         contentDescription = null,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier.size(McaIconSize.M)
                     )
                 }
                 McaIconButton(
                     contentDescription = "打开应用菜单",
                     onClick = onOpenAppMenu,
                     glyphSize = 28.dp,
+                    onClickLabel = "打开应用菜单",
                 ) {
                     McaLogoMark(size = 28.dp, cornerRadius = 10.dp)
                 }

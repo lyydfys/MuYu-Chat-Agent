@@ -117,7 +117,6 @@ if (-not (Test-Path -LiteralPath $env:MCA_QNN_SDK_ROOT)) { throw "Missing MCA_QN
 . (Join-Path $PSScriptRoot 'BuildProvenance.ps1')
 . (Join-Path $repo 'tools\build-guards\McaWorktreeFingerprint.ps1')
 Import-Module (Join-Path $repo 'tools\build-guards\McaBuildLock.psm1') -Force
-$provenance = Get-McaSourceProvenance -ProjectRoot $repo
 $versionText = Get-Content -LiteralPath (Join-Path $repo 'app\build.gradle.kts') -Raw
 $versionName = [regex]::Match($versionText, 'versionName\s*=\s*"([^"]+)"').Groups[1].Value
 $versionCode = [regex]::Match($versionText, 'versionCode\s*=\s*(\d+)').Groups[1].Value
@@ -133,12 +132,21 @@ $record = [ordered]@{
     completedAtUtc = $null
     app = [ordered]@{ versionName = $versionName; versionCode = [int]$versionCode; packageName = 'com.muyuchat.mca' }
     source = [ordered]@{
-        head = $provenance.head
-        worktreeSha256 = $provenance.worktreeSha256
-        trackedDiffSha256 = $provenance.trackedDiffSha256
-        fileCount = @($provenance.manifest).Count
-        submodules = @($provenance.submodules)
-        localPolicyGuards = @($provenance.localPolicyGuards)
+        # Filled only inside the build lock. `head`/`worktreeSha256` stay null when this record
+        # reviews an existing binary without a trusted prior build record: an unbound record must
+        # not look like a source binding to the frame-evidence reader.
+        schema = 'mca.build-source-provenance.v1'
+        head = $null
+        worktreeSha256 = $null
+        trackedDiffSha256 = $null
+        manifestSha256 = $null
+        fileCount = $null
+        submodules = @()
+        localPolicyGuards = @()
+        bindingStatus = $null
+        bindingOrigin = $null
+        comparison = $null
+        priorBinding = $null
     }
     toolchain = [ordered]@{
         javaHome = $env:JAVA_HOME
@@ -160,16 +168,43 @@ $record = [ordered]@{
     failure = $null
 }
 
+# A compact, comparable projection of one full Get-McaSourceProvenance capture.
+function Copy-McaSourceSummary($Provenance) {
+    return [ordered]@{
+        head = [string]$Provenance.head
+        worktreeSha256 = [string]$Provenance.worktreeSha256
+        trackedDiffSha256 = [string]$Provenance.trackedDiffSha256
+        manifestSha256 = [string]$Provenance.manifestSha256
+        fileCount = @($Provenance.manifest).Count
+        submodules = @($Provenance.submodules)
+        localPolicyGuards = @($Provenance.localPolicyGuards)
+    }
+}
+
 $lock = $null
 try {
+    # --- single controlled build boundary ----------------------------------------------------
+    # The lock is taken BEFORE any input is captured, so a queued build can never compare inputs
+    # it read while another participant was still changing the tree. `gradlew --stop` is a shared
+    # action too: it runs inside the lock and is logged instead of killing another build's daemon.
+    $lock = Enter-McaBuildLock -Kind build -RetrySeconds 3600 -RetryIntervalSeconds 5 -CommandLine 'scripts/release.ps1 signed arm64 R8 build'
+    $auditDir = Join-Path $outDir ("audit-" + $runId)
+    New-Item -ItemType Directory -Force -Path $auditDir | Out-Null
+
     if (-not $SkipBuild) {
-        & (Join-Path $repo 'gradlew.bat') --stop 2>&1 | Out-Null
+        $stopLog = Join-Path $outDir ("gradle-stop-" + $runId + ".log")
+        & (Join-Path $repo 'gradlew.bat') --stop *> $stopLog
+        $record.build.daemonStopExit = $LASTEXITCODE
+        $record.build.daemonStopLog = $stopLog.Substring($repo.Length).TrimStart('\', '/').Replace('\', '/')
         $free = Wait-MemoryFloor
         $record.build.freePhysicalMbBefore = $free
-        $lock = Enter-McaBuildLock -Kind build -RetrySeconds 3600 -RetryIntervalSeconds 5 -CommandLine 'scripts/release.ps1 signed arm64 R8 build'
+        # --- inputs BEFORE any build/packaging work ----------------------------------------
+        $provenanceBefore = Get-McaSourceProvenance -ProjectRoot $repo
+        $record.source.before = Copy-McaSourceSummary $provenanceBefore
+        $record.source.before.capturedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         Clear-OutputDir (Join-Path $repo 'app\build\outputs\apk\release')
         Clear-OutputDir (Join-Path $repo 'app\build\intermediates\packaged_manifests\release')
-        $args = @(
+        $gradleArgs = @(
             ':app:assembleRelease',
             '-Pmca.abis=arm64-v8a',
             '-Pmca.keepNativeSymbols=false',
@@ -179,13 +214,66 @@ try {
             '--no-daemon', '--no-parallel', '--console=plain',
             '-Dorg.gradle.jvmargs=-Xmx5120m -Dfile.encoding=UTF-8'
         )
-        $record.build.gradleArgs = $args
-        & (Join-Path $repo 'gradlew.bat') @args 2> $errPath 1> $logPath
+        $record.build.gradleArgs = $gradleArgs
+        & (Join-Path $repo 'gradlew.bat') @gradleArgs 2> $errPath 1> $logPath
         $rc = $LASTEXITCODE
         $record.build.gradleExit = $rc
         if ($rc -ne 0) { throw "Gradle release build failed (exit $rc). See $logPath / $errPath" }
+
+        # --- inputs AFTER the build, compared with the SAME full algorithm ------------------
+        $provenanceAfter = Get-McaSourceProvenance -ProjectRoot $repo
+        $record.source.after = Copy-McaSourceSummary $provenanceAfter
+        $record.source.after.capturedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        $comparison = Compare-McaSourceProvenance -Before $provenanceBefore -After $provenanceAfter
+        $record.source.comparison = $comparison
+        if (-not $comparison.equal) {
+            throw ("Source inputs changed during the release build; this binary cannot be attributed to one source state. {0} Changed: {1}" -f
+                (($comparison.reasons) -join '; '), (($comparison.changedPaths | Select-Object -First 20) -join '; '))
+        }
+        $before = $record.source.before
+        $record.source.head = $before.head
+        $record.source.worktreeSha256 = $before.worktreeSha256
+        $record.source.trackedDiffSha256 = $before.trackedDiffSha256
+        $record.source.manifestSha256 = $before.manifestSha256
+        $record.source.fileCount = $before.fileCount
+        $record.source.submodules = $before.submodules
+        $record.source.localPolicyGuards = $before.localPolicyGuards
+        $record.source.bindingStatus = 'bound'
+        $record.source.bindingOrigin = 'built-in-this-run'
     } else {
+        # -SkipBuild reviews the binary that already exists. It can only inherit a source binding
+        # from a PASSING record for exactly this APK hash; otherwise the source stays unverified.
         if (-not (Test-Path -LiteralPath $apkPath)) { throw "Release APK does not exist: $apkPath" }
+        $existingApkSha = Sha $apkPath
+        $binding = Select-McaTrustedSourceBinding -RecordRoot $recordRoot -ApkSha256 $existingApkSha
+        $record.review = [ordered]@{
+            mode = 'skip-build'
+            existingApkPath = $apkPath.Substring($repo.Length).TrimStart('\', '/').Replace('\', '/')
+            existingApkSha256 = $existingApkSha
+            optimized = [bool]$Optimize
+            reason = 'Existing binary review: no build ran in this run.'
+        }
+        if ($binding.status -eq 'bound' -and -not $Optimize) {
+            $record.source.head = [string]$binding.source.head
+            $record.source.worktreeSha256 = [string]$binding.source.worktreeSha256
+            $record.source.trackedDiffSha256 = [string]$binding.source.trackedDiffSha256
+            $record.source.manifestSha256 = [string]$binding.source.manifestSha256
+            $record.source.fileCount = $binding.source.fileCount
+            $record.source.submodules = @($binding.source.submodules)
+            $record.source.localPolicyGuards = @($binding.source.localPolicyGuards)
+            $record.source.bindingStatus = 'bound'
+            $record.source.bindingOrigin = 'preserved-prior-record'
+            $record.source.priorBinding = $binding
+        } else {
+            $record.source.bindingStatus = 'unverified'
+            $record.source.bindingOrigin = 'none'
+            if ($Optimize) {
+                $record.source.unverifiedReason = 'The artifact is optimized/re-signed after the reviewed binary; a prior build record cannot describe the copied bytes.'
+            } else {
+                $record.source.unverifiedReason = [string]$binding.reason
+            }
+            $record.source.priorBinding = $binding
+        }
     }
 
     if (-not (Test-Path -LiteralPath $apkPath)) { throw "Release APK was not produced: $apkPath" }
@@ -245,21 +333,28 @@ try {
 
     $env:PYTHONDONTWRITEBYTECODE = '1'
     $pageTool = Join-Path $repo 'tools\release\verify_16kb_pagesize.py'
-    & python -B $pageTool --apk $artifactApk *> (Join-Path $outDir 'page-size-audit.log')
+    # Audit outputs go to this run's own artifacts directory. Writing them back into tools/ would
+    # change tracked source inputs and make the post-build comparison reject a legitimate build
+    # (or, worse, teach everyone to ignore tools/).
+    $pageReport = Join-Path $auditDir '16kb_page_size_report.json'
+    & python -B $pageTool --apk $artifactApk --output $pageReport *> (Join-Path $auditDir 'page-size-audit.log')
     $pageExit = $LASTEXITCODE
-    $pageReport = Join-Path $repo 'tools\release\16kb_page_size_report.json'
+    if (-not (Test-Path -LiteralPath $pageReport)) { throw "16 KB page-size audit produced no report: $pageReport" }
     $record.artifacts.pageSizeReport = [ordered]@{ path = $pageReport.Substring($repo.Length).TrimStart('\','/').Replace('\','/'); sha256 = Sha $pageReport; bytes = (Get-Item $pageReport).Length; exit = $pageExit }
     if ($pageExit -ne 0) { throw '16 KB page-size audit failed.' }
 
     $sbomTool = Join-Path $repo 'tools\sbom\generate_sbom.py'
     if (Test-Path -LiteralPath $sbomTool) {
-        & python -B $sbomTool --apk $artifactApk *> (Join-Path $outDir 'sbom-generate.log')
+        $sbomPath = Join-Path $auditDir 'mca-sbom.spdx.json'
+        & python -B $sbomTool --apk $artifactApk --output $sbomPath *> (Join-Path $auditDir 'sbom-generate.log')
         $sbomExit = $LASTEXITCODE
-        $sbomPath = Join-Path $repo 'tools\sbom\mca-sbom.spdx.json'
         if (Test-Path -LiteralPath $sbomPath) {
             $record.artifacts.sbom = [ordered]@{ path = $sbomPath.Substring($repo.Length).TrimStart('\','/').Replace('\','/'); sha256 = Sha $sbomPath; bytes = (Get-Item $sbomPath).Length; exit = $sbomExit }
         }
         if ($sbomExit -ne 0) { throw 'SBOM generation failed.' }
+        if (-not (Test-Path -LiteralPath $sbomPath)) { throw "SBOM generation produced no document: $sbomPath" }
+        $sourceDocument = Join-Path $repo 'tools\sbom\mca-sbom.spdx.json'
+        $record.artifacts.sbomRepositoryCopyUntouched = (Test-Path -LiteralPath $sourceDocument)
     }
 
     if ($ReproCheck) {
@@ -268,27 +363,45 @@ try {
         Copy-Item -LiteralPath $artifactApk -Destination $firstCopy -Force
         Clear-OutputDir (Join-Path $repo 'app\build\outputs\apk\release')
         Clear-OutputDir (Join-Path $repo 'app\build\intermediates\packaged_manifests\release')
-        $args2 = @($record.build.gradleArgs) + @('--rerun-tasks')
-        & (Join-Path $repo 'gradlew.bat') @args2 2> $errPath 1> $logPath
+        $gradleArgs2 = @($record.build.gradleArgs) + @('--rerun-tasks')
+        & (Join-Path $repo 'gradlew.bat') @gradleArgs2 2> $errPath 1> $logPath
         if ($LASTEXITCODE -ne 0) { throw 'Reproducibility rebuild failed.' }
         $second = Sha $apkPath
         $record.verification.reproducible = [ordered]@{ build1Sha256 = $first; build2Sha256 = $second; equal = ($first -eq $second) }
         if ($first -ne $second) { throw "Release rebuild is not byte-reproducible: $first != $second" }
+        $provenanceAfterRepro = Get-McaSourceProvenance -ProjectRoot $repo
+        $reproComparison = Compare-McaSourceProvenance -Before $provenanceBefore -After $provenanceAfterRepro
+        $record.verification.reproducible.sourceComparison = $reproComparison
+        if (-not $reproComparison.equal) {
+            throw ("Source inputs changed during the reproducibility rebuild. {0}" -f (($reproComparison.reasons) -join '; '))
+        }
     }
 
-    $record.status = 'passed'
+    if ($record.source.bindingStatus -eq 'bound') {
+        $record.status = 'passed'
+    } else {
+        $record.status = 'verified_unbound'
+    }
     $record.completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
     $record.finalFingerprint = (Get-McaWorktreeFingerprint -RepoRoot $repo).fingerprint
     Write-Lf $recordPath (Json-Lf $record)
     Copy-Item -LiteralPath $recordPath -Destination (Join-Path $outDir "$artifactBase.release-record.json") -Force
-    Write-Host "RELEASE PASS: $artifactApk"
+    if ($record.status -eq 'passed') {
+        Write-Host "RELEASE PASS: $artifactApk"
+    } else {
+        Write-Host ("RELEASE VERIFIED (SOURCE UNVERIFIED): " + $artifactApk)
+        Write-Host ("  reason: " + [string]$record.source.unverifiedReason)
+        Write-Host '  This record cannot be used as frame-evidence source binding (status is not passed).'
+    }
     Write-Host "SHA256=$apkSha BYTES=$apkBytes"
     Write-Host "RECORD=$recordPath"
+    Write-Host ("AUDIT=" + $auditDir)
 } catch {
     $record.status = 'failed'
+    $record.source.bindingStatus = 'failed'
     $record.failure = $_.Exception.Message
     $record.completedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
-    Write-Lf $recordPath (Json-Lf $record)
+    try { Write-Lf $recordPath (Json-Lf $record) } catch { Write-Warning "Could not write failed release record: $($_.Exception.Message)" }
     Write-Error $_
     exit 1
 } finally {

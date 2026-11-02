@@ -18,6 +18,10 @@ internal fun McaInferenceService.streamChatImpl(
         request: ChatRequest,
         executionContext: LocalChatExecutionContext = LocalChatExecutionContext()
     ): Flow<GenerateEvent> = flow {
+        // The execution record outlives the request-scoped stop token: a cleared token is not a
+        // quiescence proof, and a proof must remain queryable after the collector has returned.
+        val executionRecord = beginRequestExecutionRecord(executionContext.requestId)
+        try {
         var pendingRollbackContext: PendingRollbackContext? = null
         var pendingTransactionCommitted = false
         var pendingTransactionDeferred = false
@@ -237,6 +241,7 @@ internal fun McaInferenceService.streamChatImpl(
             }
             emitTokenizePhase()
             val beginOutcome = beginNativeWithPrefillProgressLoop(
+                generationStopToken = generationStopToken,
                 paramsJson = preparedParameters?.nativeParamsJson ?: activeRequest.params.toJson(),
                 activeRequest = activeRequest,
                 preparedParameters = preparedParameters,
@@ -315,6 +320,7 @@ internal fun McaInferenceService.streamChatImpl(
                             preparedParameters = retryPreflight
                             emitTokenizePhase()
                             val retryBeginOutcome = beginNativeWithPrefillProgressLoop(
+                                generationStopToken = generationStopToken,
                                 paramsJson = retryPreflight.nativeParamsJson,
                                 activeRequest = activeRequest,
                                 preparedParameters = preparedParameters,
@@ -441,5 +447,8 @@ internal fun McaInferenceService.streamChatImpl(
             } finally {
                 parameterCoordinator.finishRequest(executionContext.requestId)
             }
+        }
+        } finally {
+            finishRequestExecutionRecord(executionRecord, "engine stream returned")
         }
     }

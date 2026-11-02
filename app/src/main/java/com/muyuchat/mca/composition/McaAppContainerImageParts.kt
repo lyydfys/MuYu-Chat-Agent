@@ -1,5 +1,13 @@
 package com.muyuchat.mca.composition
 
+import com.muyuchat.mca.UiStateReadPort
+import com.muyuchat.mca.ImageUpscalerCatalogFields
+import com.muyuchat.mca.ImageTranslationFields
+import com.muyuchat.mca.ImageAssetDeletionFields
+import com.muyuchat.mca.ImageUpscaleFields
+import com.muyuchat.mca.ImageAssetCreationFields
+import com.muyuchat.mca.UiStateWriter
+import com.muyuchat.mca.OfflineTranslationFields
 import android.app.Application
 import com.muyuchat.mca.ChatImageRequestPort
 import com.muyuchat.mca.ImageAssetCreationPort
@@ -38,7 +46,7 @@ import com.muyuchat.mca.UiStateStore
 import kotlinx.coroutines.CoroutineScope
 
 internal fun McaAppContainer.createImageAssetCreationPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageAssetCreationFields>,
         application: Application,
         imageGenerationOwner: ImageGenerationOwner
     ): ImageAssetCreationPort =
@@ -53,10 +61,11 @@ internal fun McaAppContainer.createImageAssetCreationPortImpl(
         )
 
 internal fun McaAppContainer.createImageUpscalePortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageUpscaleFields>,
         application: Application,
         assetCreationPort: ImageAssetCreationPort,
-        startupReconciliation: ImageLibraryStartupReconciliation
+        startupReconciliation: ImageLibraryStartupReconciliation,
+        setDeferGenerationImageGrantRelease: (Boolean) -> Unit
     ): ImageUpscalePort =
         ImageUpscalePortAdapter(
             store = store,
@@ -70,7 +79,8 @@ internal fun McaAppContainer.createImageUpscalePortImpl(
             chatSessionStoreRef = chatSessionStore,
             upscalerStoreRef = localImageUpscalerStore,
             assetDirectory = imageAssetDirectory,
-            mutationMutex = imageLibraryMutationMutex
+            mutationMutex = imageLibraryMutationMutex,
+            setDeferGenerationImageGrantRelease = setDeferGenerationImageGrantRelease
         )
 
     /** R3/C3-S16：图片库提交/删除端口工厂。 */
@@ -79,7 +89,7 @@ internal fun McaAppContainer.createImageLibraryCommitPort(
         requestPort: ChatImageRequestPort
     ): ImageLibraryCommitPort =
         ImageLibraryCommitPortAdapter(
-            store = store,
+            store = store.imageLibraryCommitWriter(),
             persistenceState = chatSessionPersistenceState,
             chatSessionStoreRef = chatSessionStore,
             journalProvider = { chatImageCommitJournal },
@@ -89,7 +99,7 @@ internal fun McaAppContainer.createImageLibraryCommitPort(
         )
 
 internal fun McaAppContainer.createImageAssetDeletionPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageAssetDeletionFields>,
         scope: CoroutineScope,
         imageUpscaleOwner: ImageUpscaleOwner,
         startupReconciliation: ImageLibraryStartupReconciliation
@@ -106,11 +116,13 @@ internal fun McaAppContainer.createImageAssetDeletionPortImpl(
         )
 
 internal fun McaAppContainer.createImagePromptTranslationPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageTranslationFields>,
+        offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPort =
         ImagePromptTranslationPortAdapter(
             store = store,
+            offlineTranslationStore = offlineTranslationStore,
             admission = runtimeAdmission,
             downloader = offlineTranslationDownloader,
             serviceProvider = serviceProvider
@@ -122,7 +134,7 @@ internal fun McaAppContainer.createCreateLocalGeneratedImageAssetPort(
         application: Application
     ): CreateLocalGeneratedImageAssetPort =
         CreateLocalGeneratedImageAssetPortAdapter(
-            store = store,
+            store = store.imageModelSelectionWriter(),
             admission = runtimeAdmission,
             gateway = LocalGeneratedImageWorkerGatewayAdapter(localImageWorkerClient),
             localImageModelStoreRef = localImageModelStore,
@@ -143,7 +155,8 @@ internal fun McaAppContainer.createImageGenerationOwnerImpl(
         completeAssistantImageToolTurnForJob: (String) -> Unit
     ): ImageGenerationOwner = ImageGenerationOwner(
         host = ImageGenerationHostAdapter(
-            store = store,
+            store = store.imageGenerationWriter(),
+            runtimeStore = store.runtimeProfileWriter(),
             scopeRef = scope,
             applicationRef = application,
             runtimeAdmission = runtimeAdmission,
@@ -169,7 +182,7 @@ internal fun McaAppContainer.createImageGenerationOwnerImpl(
     )
 
 internal fun McaAppContainer.createLocalImageUpscalerPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageUpscalerCatalogFields>,
         imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
     ): LocalImageUpscalerPort =
         LocalImageUpscalerPortAdapter(
@@ -180,18 +193,20 @@ internal fun McaAppContainer.createLocalImageUpscalerPortImpl(
         )
 
 internal fun McaAppContainer.createImagePromptTranslationPreviewPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ImageTranslationFields>,
+        offlineTranslationStore: UiStateWriter<OfflineTranslationFields>,
         serviceProvider: () -> OfflinePromptTranslationService
     ): ImagePromptTranslationPreviewPort =
         ImagePromptTranslationPreviewPortAdapter(
             store = store,
+            offlineTranslationStore = offlineTranslationStore,
             admission = runtimeAdmission,
             downloader = offlineTranslationDownloader,
             serviceProvider = serviceProvider
         )
 
 internal fun McaAppContainer.createAssistantImageToolTurnPortImpl(
-        store: UiStateStore,
+        store: UiStateReadPort,
         chatImageNegativePromptSupported: (MainUiState) -> Boolean,
         prepareAssistantImagePrompt: suspend (
             prompt: String,

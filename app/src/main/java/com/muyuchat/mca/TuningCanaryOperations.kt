@@ -50,8 +50,6 @@ internal interface TuningCanaryPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
-
     fun currentDeviceProfile(): DeviceProfile
 
     val candidateCanaryResultPort: CandidateCanaryResultPort

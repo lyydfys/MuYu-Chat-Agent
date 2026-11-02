@@ -1,31 +1,32 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -38,10 +39,13 @@ internal fun AssistantCurrentCard(
     onExport: () -> Unit
 ) {
     val assistantTag = assistant?.tag.orEmpty()
+    val editInteraction = remember { MutableInteractionSource() }
+    val exportInteraction = remember { MutableInteractionSource() }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = RoundedCornerShape(24.dp)
+        shape = RoundedCornerShape(24.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.50f))
     ) {
         Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("当前助手", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -85,8 +89,23 @@ internal fun AssistantCurrentCard(
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 // With no assistant available the current-card actions have nothing to act on;
                 // disable them instead of leaving dead taps that look enabled.
-                TextButton(onClick = onEdit, enabled = assistant != null) { Text("编辑") }
-                TextButton(onClick = onExport, enabled = assistant != null) { Text("导出") }
+                val hasAssistant = assistant != null
+                AssistantPillButton(
+                    onClick = {
+                        onEdit()
+                    },
+                    enabled = hasAssistant,
+                    modifier = Modifier,
+                    interactionSource = editInteraction
+                ) { Text("编辑") }
+                AssistantPillButton(
+                    onClick = {
+                        onExport()
+                    },
+                    enabled = hasAssistant,
+                    modifier = Modifier,
+                    interactionSource = exportInteraction
+                ) { Text("导出") }
             }
         }
     }
@@ -100,6 +119,9 @@ internal fun AssistantListCard(
     onDelete: () -> Unit
 ) {
     val darkTheme = isSystemInDarkTheme()
+    val selectInteraction = remember { MutableInteractionSource() }
+    val editInteraction = remember { MutableInteractionSource() }
+    val deleteInteraction = remember { MutableInteractionSource() }
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = if (assistant.selected) {
@@ -108,7 +130,11 @@ internal fun AssistantListCard(
             if (darkTheme) MaterialTheme.colorScheme.surface else Color(0xFFF8F9FA)
         },
         shape = RoundedCornerShape(20.dp),
-        border = if (assistant.selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.72f)) else null
+        border = if (assistant.selected) {
+            BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.72f))
+        } else {
+            BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f))
+        }
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -131,7 +157,7 @@ internal fun AssistantListCard(
                     )
                 }
                 if (assistant.selected) {
-                    Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Icon(McaIcons.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                 }
             }
             // 2.0x font: three actions can exceed the card width; FlowRow wraps them while the
@@ -140,10 +166,30 @@ internal fun AssistantListCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                TextButton(onClick = onSelect, enabled = !assistant.selected) { Text(if (assistant.selected) "使用中" else "切换") }
-                TextButton(onClick = onEdit) { Text("编辑") }
+                AssistantPillButton(
+                    onClick = {
+                        onSelect()
+                    },
+                    enabled = !assistant.selected,
+                    modifier = Modifier,
+                    interactionSource = selectInteraction
+                ) { Text(if (assistant.selected) "使用中" else "切换") }
+                AssistantPillButton(
+                    onClick = {
+                        onEdit()
+                    },
+                    modifier = Modifier,
+                    interactionSource = editInteraction
+                ) { Text("编辑") }
                 val deletable = assistant.id != "default"
-                TextButton(onClick = onDelete, enabled = deletable) {
+                AssistantPillButton(
+                    onClick = {
+                        onDelete()
+                    },
+                    enabled = deletable,
+                    modifier = Modifier,
+                    interactionSource = deleteInteraction
+                ) {
                     // Disabled delete inherits the Material3 disabled content colour instead of
                     // the normal neutral colour, so it no longer reads as an available action.
                     Text(
@@ -154,4 +200,35 @@ internal fun AssistantListCard(
             }
         }
     }
+}
+
+/**
+ * Secondary action rendered as a tactile micro-capsule (tonal fill + 0.5dp hairline) instead of a
+ * bare floating text button. Behaviour, semantics and the press scale supplied by callers are the
+ * same TextButton ones; only the surface craftsmanship changes.
+ */
+@Composable
+private fun AssistantPillButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    interactionSource: MutableInteractionSource? = null,
+    content: @Composable RowScope.() -> Unit
+) {
+    McaButton(style = McaButtonStyle.Text,
+        onClick = onClick,
+        modifier = modifier,
+        enabled = enabled,
+        interactionSource = interactionSource,
+        shape = RoundedCornerShape(12.dp),
+        colors = ButtonDefaults.textButtonColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.22f)
+        ),
+        border = BorderStroke(
+            0.5.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(alpha = if (enabled) 0.45f else 0.22f)
+        ),
+        content = content
+    )
 }

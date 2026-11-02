@@ -1,0 +1,23 @@
+--- a/src/model/vae/wan_vae.hpp
++++ b/src/model/vae/wan_vae.hpp
+@@ -1484,6 +1484,11 @@
+                 auto feat_cache        = get_cache_tensor_by_name("feat_idx:" + std::to_string(feat_idx));
+                 ae._feat_map[feat_idx] = feat_cache;
+             }
++            // Caches carried over from the previous tile already live in the runner's persistent
++            // cache buffer. Expanding them here made the allocator reserve the previous tile's
++            // cached activations again and made capture() copy them a second time, which was what
++            // tripled the second tile's workspace at 480p.
++            std::vector<ggml_tensor*> prior_cache = ae._feat_map;
+ 
+             ggml_tensor* z = make_input(z_tensor);
+ 
+@@ -1493,7 +1498,7 @@
+ 
+             for (size_t feat_idx = 0; feat_idx < ae._feat_map.size(); feat_idx++) {
+                 ggml_tensor* feat_cache = ae._feat_map[feat_idx];
+-                if (feat_cache != nullptr) {
++                if (feat_cache != nullptr && feat_cache != prior_cache[feat_idx]) {
+                     cache("feat_idx:" + std::to_string(feat_idx), feat_cache);
+                     ggml_build_forward_expand(gf, feat_cache);
+                 }

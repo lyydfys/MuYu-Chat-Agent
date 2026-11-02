@@ -1,4 +1,9 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -11,19 +16,15 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoLibrary
+
+
+
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +35,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -44,14 +44,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Replay
+
+
+
+
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +61,7 @@ import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import com.muyuchat.core.designsystem.McaIconSize
 
 internal class ImageInputOptionsPanelDeleteState(
     private val readPendingLoraDeleteId: () -> String?,
@@ -132,7 +129,7 @@ internal fun ImageInputAdapterOptionsPanel(
                     onMeasureTokens = onMeasureTokens,
                     modifier = Modifier.fillMaxWidth()
                 )
-                FilterChip(
+                McaChip(
                     selected = disableModelNegativePrompt,
                     onClick = { onDisableModelNegativePromptChange(!disableModelNegativePrompt) },
                     label = { Text("关闭模型默认负面词") }
@@ -155,17 +152,17 @@ internal fun ImageInputAdapterOptionsPanel(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    TextButton(onClick = onImportLora, enabled = !loraImporting) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    McaButton(style = McaButtonStyle.Text,onClick = onImportLora, enabled = !loraImporting) {
+                        Icon(McaIcons.Add, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (loraImporting) "导入中…" else "导入")
                     }
                     if (executionModel?.isQwenImage21Gguf == true) {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = onDownloadOfficialViggleLora,
                             enabled = !loraImporting
                         ) {
-                            Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(McaIcons.Download, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                             Spacer(modifier = Modifier.width(4.dp))
                             Text("下载 Viggle v0.2.1")
                         }
@@ -201,7 +198,7 @@ internal fun ImageInputAdapterOptionsPanel(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                FilterChip(
+                                McaChip(
                                     selected = selection != null,
                                     onClick = { onToggleLora(adapter.id) },
                                     enabled = selection != null || !loraSelectionLimitReached,
@@ -240,22 +237,20 @@ internal fun ImageInputAdapterOptionsPanel(
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                 }
-                                IconButton(
+                                McaIconButton(
+                                    contentDescription = if (adapter.inUse) {
+                                        "当前任务使用中，无法删除 ${adapter.name}"
+                                    } else {
+                                        "删除 ${adapter.name}"
+                                    },
                                     onClick = { pendingLoraDeleteId = adapter.id },
-                                    enabled = !adapter.inUse && !loraImporting
+                                    enabled = !adapter.inUse && !loraImporting,
+                                    glyphSize = McaIconSize.L,
+                                    tint = MaterialTheme.colorScheme.error,
                                 ) {
                                     Icon(
-                                        Icons.Default.Delete,
-                                        contentDescription = if (adapter.inUse) {
-                                            "当前任务使用中，无法删除 ${adapter.name}"
-                                        } else {
-                                            "删除 ${adapter.name}"
-                                        },
-                                        tint = if (adapter.inUse) {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        } else {
-                                            MaterialTheme.colorScheme.error
-                                        }
+                                        McaIcons.Delete,
+                                        contentDescription = null,
                                     )
                                 }
                             }
@@ -304,11 +299,11 @@ internal fun ImageInputAdapterOptionsPanel(
                             style = MaterialTheme.typography.bodySmall
                         )
                     }
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = onImportTextualInversion,
                         enabled = !textualInversionImporting
                     ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(McaIcons.Add, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(if (textualInversionImporting) "导入中" else "导入")
                     }
@@ -342,7 +337,7 @@ internal fun ImageInputAdapterOptionsPanel(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            FilterChip(
+                            McaChip(
                                 selected = selected,
                                 onClick = { onToggleTextualInversion(artifact.id) },
                                 enabled = selected ||
@@ -373,22 +368,20 @@ internal fun ImageInputAdapterOptionsPanel(
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
-                            IconButton(
+                            McaIconButton(
+                                contentDescription = if (artifact.inUse) {
+                                    "当前任务使用中，无法删除 ${artifact.name}"
+                                } else {
+                                    "删除 ${artifact.name}"
+                                },
                                 onClick = { pendingTextualInversionDeleteId = artifact.id },
-                                enabled = !artifact.inUse && !textualInversionImporting
+                                enabled = !artifact.inUse && !textualInversionImporting,
+                                glyphSize = McaIconSize.L,
+                                tint = MaterialTheme.colorScheme.error,
                             ) {
                                 Icon(
-                                    Icons.Default.Delete,
-                                    contentDescription = if (artifact.inUse) {
-                                        "当前任务使用中，无法删除 ${artifact.name}"
-                                    } else {
-                                        "删除 ${artifact.name}"
-                                    },
-                                    tint = if (artifact.inUse) {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    } else {
-                                        MaterialTheme.colorScheme.error
-                                    }
+                                    McaIcons.Delete,
+                                    contentDescription = null,
                                 )
                             }
                         }
@@ -421,7 +414,7 @@ internal fun ImageInputLivePreviewBatchPanel(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FilterChip(
+                    McaChip(
                         selected = livePreviewEnabled,
                         onClick = { onLivePreviewEnabledChange(!livePreviewEnabled) },
                         enabled = !ultraFixEnabled,
@@ -436,7 +429,7 @@ internal fun ImageInputLivePreviewBatchPanel(
                         Text("预览间隔（步）", style = MaterialTheme.typography.labelMedium)
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items((1..10).toList()) { interval ->
-                                FilterChip(
+                                McaChip(
                                     selected = interval == livePreviewInterval.coerceIn(1, 10),
                                     onClick = { onLivePreviewIntervalChange(interval) },
                                     label = { Text(interval.toString()) }
@@ -472,7 +465,7 @@ internal fun ImageInputLivePreviewBatchPanel(
                     // Batch is a product-level sequential coordinator feature for QNN/MNN, so
                     // expose every valid count instead of skipping 3/5/6/7.
                     items((1..maxBatchCount.coerceAtLeast(1)).toList()) { count ->
-                            FilterChip(
+                            McaChip(
                                 selected = count == batchCount,
                                 onClick = { onBatchCountChange(count) },
                                 enabled = !ultraFixEnabled,
@@ -526,7 +519,7 @@ internal fun ImageInputDeleteDialogsPanel(
                     title = { Text("删除 LoRA") },
                     text = { Text("确定删除“${adapter.name}”吗？文件会从本机移除，此操作无法撤销。") },
                     confirmButton = {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 pendingLoraDeleteId = null
                                 onDeleteLora(adapter.id)
@@ -534,7 +527,7 @@ internal fun ImageInputDeleteDialogsPanel(
                         ) { Text("删除", color = MaterialTheme.colorScheme.error) }
                     },
                     dismissButton = {
-                        TextButton(onClick = { pendingLoraDeleteId = null }) { Text("取消") }
+                        McaButton(style = McaButtonStyle.Text,onClick = { pendingLoraDeleteId = null }) { Text("取消") }
                     }
                 )
             }
@@ -547,7 +540,7 @@ internal fun ImageInputDeleteDialogsPanel(
                     title = { Text("删除 Textual Inversion") },
                     text = { Text("确定删除“${artifact.name}”吗？文件会从本机移除，此操作无法撤销。") },
                     confirmButton = {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 pendingTextualInversionDeleteId = null
                                 onDeleteTextualInversion(artifact.id)
@@ -555,7 +548,7 @@ internal fun ImageInputDeleteDialogsPanel(
                         ) { Text("删除", color = MaterialTheme.colorScheme.error) }
                     },
                     dismissButton = {
-                        TextButton(onClick = { pendingTextualInversionDeleteId = null }) {
+                        McaButton(style = McaButtonStyle.Text,onClick = { pendingTextualInversionDeleteId = null }) {
                             Text("取消")
                         }
                     }

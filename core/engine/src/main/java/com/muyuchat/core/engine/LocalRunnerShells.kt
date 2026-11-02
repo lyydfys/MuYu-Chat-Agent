@@ -15,23 +15,53 @@ import org.json.JSONObject
 private const val MNN_CHAT_DEFAULT_SESSION_ID = "mnn-chat-default"
 internal class LlamaCppChatRunner(
     private val bridge: NativeLlamaBridge = NativeLlamaBridge()
-) : LocalChatRunner {
+) : LocalChatRunner, NativeQuiescenceProbe {
     @Volatile private var submittedGenerationJson: String? = null
     @Volatile private var nativeReleasePending = false
     @Volatile private var nativeReleaseFailure: String? = null
+    /**
+     * Real native call accounting. A non-zero count means a JNI generation/stop call has not
+     * returned yet, which is itself ACTIVE evidence and avoids a stats query behind that call.
+     */
+    private val nativeCallsInFlight = java.util.concurrent.atomic.AtomicInteger(0)
+    /**
+     * Mirror of the native `generationActive` flag, updated only from real native call returns:
+     * set on a successful begin, cleared only when a chunk call returns null (the native terminal
+     * acknowledgement). A cancelled stream that never got that null keeps this true, which is the
+     * deliberate fence.
+     */
+    @Volatile private var generationActive = false
     override val runtime: LocalChatRuntime = LocalChatRuntime.LLAMA_CPP
     override val isAvailable: Boolean
         get() = NativeLlamaBridge.isAvailable
     override val loadError: Throwable?
         get() = NativeLlamaBridge.loadError
 
+    private inline fun <T> nativeCall(block: () -> T): T {
+        nativeCallsInFlight.incrementAndGet()
+        try {
+            return block()
+        } finally {
+            nativeCallsInFlight.decrementAndGet()
+        }
+    }
+
+    override fun nativeGenerationActivity(): NativeGenerationActivity = when {
+        nativeReleasePending -> NativeGenerationActivity.ACTIVE
+        nativeCallsInFlight.get() > 0 -> NativeGenerationActivity.ACTIVE
+        generationActive -> NativeGenerationActivity.ACTIVE
+        else -> NativeGenerationActivity.IDLE
+    }
+
     override fun initBackends(nativeLibDir: String) = bridge.initBackends(nativeLibDir)
     override fun loadModel(modelPath: String, paramsJson: String): Int {
         submittedGenerationJson = null
+        generationActive = false
         return bridge.loadModel(modelPath, paramsJson)
     }
     override fun unloadModel() {
         submittedGenerationJson = null
+        generationActive = false
         try {
             bridge.unloadModel()
             nativeReleasePending = false
@@ -52,9 +82,10 @@ internal class LlamaCppChatRunner(
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int {
         submittedGenerationJson = null
         GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
-        return bridge.beginCompletion(messagesJson, paramsJson).also { rc ->
-            if (rc == 0) submittedGenerationJson = paramsJson
-        }
+        val rc = nativeCall { bridge.beginCompletion(messagesJson, paramsJson) }
+        generationActive = rc == 0
+        if (rc == 0) submittedGenerationJson = paramsJson
+        return rc
     }
     override fun beginCompletionWithPrefixCache(
         messagesJson: String,
@@ -64,14 +95,19 @@ internal class LlamaCppChatRunner(
         if (prefixCache == null) return beginCompletion(messagesJson, paramsJson)
         submittedGenerationJson = null
         GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
-        return bridge.beginCompletionWithPrefixCache(
-            messagesJson = messagesJson,
-            paramsJson = paramsJson,
-            restoreStatePath = prefixCache.restoreStatePath,
-            writeStatePath = prefixCache.writeStatePath,
-            fixedSystemPrompt = prefixCache.fixedSystemPrompt,
-            fullSessionState = prefixCache.fullSessionState
-        ).also { rc -> if (rc == 0) submittedGenerationJson = paramsJson }
+        val rc = nativeCall {
+            bridge.beginCompletionWithPrefixCache(
+                messagesJson = messagesJson,
+                paramsJson = paramsJson,
+                restoreStatePath = prefixCache.restoreStatePath,
+                writeStatePath = prefixCache.writeStatePath,
+                fixedSystemPrompt = prefixCache.fixedSystemPrompt,
+                fullSessionState = prefixCache.fullSessionState
+            )
+        }
+        generationActive = rc == 0
+        if (rc == 0) submittedGenerationJson = paramsJson
+        return rc
     }
     override fun prefillProgress(): TokenProgress? = runCatching {
         val root = JSONObject(bridge.getPrefillProgressJson())
@@ -93,10 +129,25 @@ internal class LlamaCppChatRunner(
         if (stage == PersistStage.IDLE || total <= 0L) return@runCatching null
         PersistProgress(stage = stage, writtenBytes = written.coerceAtLeast(0L), totalBytes = total)
     }.getOrNull()
-    override fun generateNextChunk(): String? = bridge.generateNextChunk()
+    override fun generateNextChunk(): String? = nativeCall {
+        val chunk = bridge.generateNextChunk()
+        // Null is the native terminal acknowledgement of this generation; a non-null chunk keeps
+        // the generation active until the exact terminal call.
+        generationActive = chunk != null
+        chunk
+    }
     override fun invalidateConversationContext() = bridge.invalidateTextContext()
-    override fun requestStop() = bridge.requestStop()
-    override fun requestStopIfActive(): Boolean = bridge.requestStopIfActive()
+    override fun requestStop() = nativeCall {
+        bridge.requestStop()
+        // The llama.cpp stop path finishes the generation before returning; a timed-out stop call
+        // stays counted above, so it is never mistaken for quiescence.
+        generationActive = false
+    }
+    override fun requestStopIfActive(): Boolean = nativeCall {
+        val stopped = bridge.requestStopIfActive()
+        if (stopped) generationActive = false
+        stopped
+    }
     override fun getRuntimeStatsJson(): String {
         val stats = JSONObject(bridge.getRuntimeStatsJson())
         submittedGenerationJson?.let { request ->
@@ -109,9 +160,9 @@ internal class LlamaCppChatRunner(
 
 /**
  * Keeps the explicit GenieX llama.cpp CPU choice on the stable MCA llama.cpp
- * bridge.  GenieX 0.3.12's llama plugin is linked against an older ggml/llama
- * ABI than the current MCA llama.cpp libraries; loading that plugin for a CPU
- * request can therefore crash in decode even though model creation succeeds.
+ * bridge. GenieX's llama plugin is kept on its own canonical llama/ggml DSO
+ * set while MCA's embedded runner uses the prefixed mca_* set; the explicit
+ * CPU request stays on the embedded bridge rather than crossing that boundary.
  *
  * This is deliberately a narrow transport choice: only an explicit CPU
  * compute-unit request takes this path.  Hybrid/GPU/NPU requests continue to
@@ -119,7 +170,7 @@ internal class LlamaCppChatRunner(
  */
 internal class GenieXLlamaCppChatRunner(
     appContext: Context? = null
-) : LocalChatRunner {
+) : LocalChatRunner, NativeQuiescenceProbe {
     override val runtime: LocalChatRuntime = LocalChatRuntime.GENIEX_LLAMA_CPP
 
     private val genieX = GenieXChatRunner(
@@ -277,6 +328,16 @@ internal class GenieXLlamaCppChatRunner(
     override fun isNativeReleaseConfirmed(): Boolean =
         !nativeReleasePending && (activeDelegate?.isNativeReleaseConfirmed() ?: true)
 
+    /**
+     * Delegates to the exact delegate that owns the native call. An unconfirmed release keeps the
+     * fence: the previous native owner may still be alive even though no delegate is installed.
+     */
+    override fun nativeGenerationActivity(): NativeGenerationActivity = when {
+        nativeReleasePending -> NativeGenerationActivity.ACTIVE
+        else -> activeDelegate?.nativeGenerationActivityOrUnknown()
+            ?: NativeGenerationActivity.IDLE
+    }
+
     override fun nativeReleaseMessage(): String? = nativeReleaseFailure
 
     override fun isSessionKnownLost(): Boolean =
@@ -391,9 +452,37 @@ internal fun genieXLlamaCppCpuFallbackRequested(paramsJson: String): Boolean {
 
 internal class MnnCpuChatRunner(
     private val bridge: NativeMnnBridge = NativeMnnBridge()
-) : LocalChatRunner {
+) : LocalChatRunner, NativeQuiescenceProbe {
     @Volatile private var submittedGenerationJson: String? = null
     override val runtime: LocalChatRuntime = LocalChatRuntime.MNN_CPU
+
+    /** Non-zero while a JNI generation/stop call has not returned. */
+    private val nativeCallsInFlight = java.util.concurrent.atomic.AtomicInteger(0)
+    /**
+     * Mirror of the MNN `generationActive` flag. MNN clears it before returning the terminal null
+     * chunk, so a cancelled stream without that null stays fenced. `requestStop()` only publishes a
+     * signal, so it deliberately does not clear this flag here.
+     */
+    @Volatile private var generationActive = false
+
+    private inline fun <T> nativeCall(block: () -> T): T {
+        nativeCallsInFlight.incrementAndGet()
+        try {
+            return block()
+        } finally {
+            nativeCallsInFlight.decrementAndGet()
+        }
+    }
+
+    override fun nativeGenerationActivity(): NativeGenerationActivity = when {
+        !isAvailable -> NativeGenerationActivity.IDLE
+        pendingReleaseEngine?.isNativeReleaseConfirmed == false -> NativeGenerationActivity.ACTIVE
+        nativeCallsInFlight.get() > 0 -> NativeGenerationActivity.ACTIVE
+        generationActive -> NativeGenerationActivity.ACTIVE
+        // The visual producer is a real native owner too (non-blocking atomic read in the bridge).
+        isGenerationRunning() -> NativeGenerationActivity.ACTIVE
+        else -> NativeGenerationActivity.IDLE
+    }
 
     /**
      * E05: the MNN chat lifecycle runs through the real Runtime Port. This runner stays the single
@@ -435,6 +524,7 @@ internal class MnnCpuChatRunner(
 
     override fun loadModel(modelPath: String, paramsJson: String): Int {
         submittedGenerationJson = null
+        generationActive = false
         if (!isAvailable) return UNAVAILABLE_RC
         // A previous engine object is retired and released as bookkeeping only: the native loadModel
         // below stays the only native call of a load, exactly as it was before this port existed,
@@ -455,6 +545,7 @@ internal class MnnCpuChatRunner(
 
     override fun unloadModel() {
         submittedGenerationJson = null
+        generationActive = false
         if (!isAvailable) return
         val engine = portEngine
         if (engine != null) {
@@ -474,34 +565,48 @@ internal class MnnCpuChatRunner(
         GenerationParams.fromJson(paramsJson).requireFiniteSamplerValues()
         if (!isAvailable) return UNAVAILABLE_RC
         val session = portSession
-        val handle = session?.beginRequest(messagesJson, paramsJson)
-        val rc = if (handle != null) {
-            handle.beginRc
-        } else {
-            // No live session (a load that failed, or a session retired without a reload yet):
-            // keep the pre-port native exchange so executor return codes stay identical.
-            bridge.beginCompletion(messagesJson, paramsJson)
+        val rc = nativeCall {
+            val handle = session?.beginRequest(messagesJson, paramsJson)
+            if (handle != null) {
+                handle.beginRc
+            } else {
+                // No live session (a load that failed, or a session retired without a reload yet):
+                // keep the pre-port native exchange so executor return codes stay identical.
+                bridge.beginCompletion(messagesJson, paramsJson)
+            }
         }
+        generationActive = rc == 0
         if (rc == 0) submittedGenerationJson = paramsJson
         return rc
     }
 
     override fun generateNextChunk(): String? {
         if (!isAvailable) return null
-        val handle = portSession?.currentExecution
-        return handle?.nextChunk() ?: bridge.generateNextChunk()
+        val chunk = nativeCall {
+            val handle = portSession?.currentExecution
+            handle?.nextChunk() ?: bridge.generateNextChunk()
+        }
+        // MNN clears its native generation flag before returning the terminal null chunk.
+        generationActive = chunk != null
+        return chunk
     }
 
     override fun requestStop() {
         if (!isAvailable) return
-        val session = portSession
-        if (session != null) session.requestStop() else bridge.requestStop()
+        nativeCall {
+            val session = portSession
+            if (session != null) session.requestStop() else bridge.requestStop()
+        }
     }
 
     override fun requestStopIfActive(): Boolean {
         if (!isAvailable) return false
-        val session = portSession
-        return if (session != null) session.requestStopIfActive() else bridge.requestStopIfActive()
+        val stopped = nativeCall {
+            val session = portSession
+            if (session != null) session.requestStopIfActive() else bridge.requestStopIfActive()
+        }
+        if (stopped) generationActive = false
+        return stopped
     }
 
     override fun isGenerationRunning(): Boolean {
@@ -564,6 +669,7 @@ internal class MnnCpuChatRunner(
 
     override fun shutdown() {
         if (!isAvailable) return
+        generationActive = false
         val engine = portEngine
         val pending = pendingReleaseEngine
         portSession = null

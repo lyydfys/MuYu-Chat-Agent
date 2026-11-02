@@ -1,0 +1,104 @@
+diff --git a/src/gguf.cpp b/src/gguf.cpp
+index ab3cc97..c2be005 100644
+--- a/src/gguf.cpp
++++ b/src/gguf.cpp
+@@ -610,11 +609,0 @@ struct gguf_context * gguf_init_from_file_ptr(FILE * file, struct gguf_init_para
+-            if (n_dims > GGML_MAX_DIMS) {
+-                GGML_LOG_ERROR("%s: tensor '%s' has invalid number of dimensions: %" PRIu32 " > %" PRIu32 "\n",
+-                    __func__, info.t.name, n_dims, GGML_MAX_DIMS);
+-                ok = false;
+-                break;
+-            }
+-            for (uint32_t j = 0; ok && j < GGML_MAX_DIMS; ++j) {
+-                info.t.ne[j] = 1;
+-                if (j < n_dims) {
+-                    ok = ok && gr.read(info.t.ne[j]);
+-                }
+@@ -622,4 +611,12 @@ struct gguf_context * gguf_init_from_file_ptr(FILE * file, struct gguf_init_para
+-                // check that all ne are non-negative
+-                if (info.t.ne[j] < 0) {
+-                    GGML_LOG_ERROR("%s: tensor '%s' dimension %" PRIu32 " has invalid number of elements: %" PRIi64 " < 0\n",
+-                        __func__, info.t.name, j, info.t.ne[j]);
++            bool shape_stacked = false;
++
++            if (ok && n_dims > GGML_MAX_DIMS) {
++                // Wan video stores patch_embedding.weight as 5D with a unit kernel
++                // dim (2,2,1,48,3072). model_io/gguf_reader_ext.h already stacks
++                // extra dims into the last one for detection; do the same here so
++                // the tensor can actually be loaded as [2,2,1,48*3072] (the layout
++                // CausalConv3d expects) and the following tensor infos are read.
++                uint64_t raw[GGML_MAX_DIMS + 4] = {0, 0, 0, 0, 0, 0, 0, 0};
++                if (n_dims > GGML_MAX_DIMS + 4) {
++                    GGML_LOG_ERROR("%s: tensor '%s' has too many dimensions: %" PRIu32 "\n",
++                        __func__, info.t.name, n_dims);
+@@ -628,0 +626,70 @@ struct gguf_context * gguf_init_from_file_ptr(FILE * file, struct gguf_init_para
++                for (uint32_t j = 0; ok && j < n_dims; ++j) {
++                    ok = ok && gr.read(raw[j]);
++                }
++                if (ok) {
++                    bool shape_ok = true;
++                    for (uint32_t j = 0; j < 3; ++j) {
++                        if (raw[j] > static_cast<uint64_t>(INT64_MAX)) {
++                            shape_ok = false;
++                        }
++                    }
++                    int64_t stacked = static_cast<int64_t>(raw[3]);
++                    for (uint32_t j = GGML_MAX_DIMS; j < n_dims; ++j) {
++                        if (raw[j] == 0 || raw[j] > static_cast<uint64_t>(INT64_MAX) ||
++                            stacked > INT64_MAX / static_cast<int64_t>(raw[j])) {
++                            shape_ok = false;
++                            break;
++                        }
++                        stacked *= static_cast<int64_t>(raw[j]);
++                    }
++                    if (!shape_ok) {
++                        GGML_LOG_ERROR("%s: tensor '%s' has unrepresentable stacked shape\n",
++                            __func__, info.t.name);
++                        ok = false;
++                        break;
++                    }
++                    info.t.ne[0] = static_cast<int64_t>(raw[0]);
++                    info.t.ne[1] = static_cast<int64_t>(raw[1]);
++                    info.t.ne[2] = static_cast<int64_t>(raw[2]);
++                    info.t.ne[3] = stacked;
++                    shape_stacked = true;
++                    std::string raw_str;
++                    for (uint32_t j = 0; j < n_dims; ++j) {
++                        if (j > 0) {
++                            raw_str += ", ";
++                        }
++                        raw_str += std::to_string(raw[j]);
++                    }
++                    GGML_LOG_INFO("%s: tensor '%s' stacked %uD shape (%s) -> (%" PRIi64 ", %" PRIi64 ", %" PRIi64 ", %" PRIi64 ")\n",
++                        __func__, info.t.name, n_dims, raw_str.c_str(),
++                        info.t.ne[0], info.t.ne[1], info.t.ne[2], info.t.ne[3]);
++                }
++            }
++
++            if (ok && !shape_stacked) {
++                for (uint32_t j = 0; ok && j < GGML_MAX_DIMS; ++j) {
++                    info.t.ne[j] = 1;
++                    if (j < n_dims) {
++                        ok = ok && gr.read(info.t.ne[j]);
++                    }
++
++                    // check that all ne are non-negative
++                    if (info.t.ne[j] < 0) {
++                        GGML_LOG_ERROR("%s: tensor '%s' dimension %" PRIu32 " has invalid number of elements: %" PRIi64 " < 0\n",
++                            __func__, info.t.name, j, info.t.ne[j]);
++                        ok = false;
++                        break;
++                    }
++                }
++            }
++
++            // check the stacked dims too (uint64 -> int64 conversion above can wrap)
++            if (ok && shape_stacked) {
++                for (uint32_t j = 0; j < GGML_MAX_DIMS; ++j) {
++                    if (info.t.ne[j] < 0) {
++                        GGML_LOG_ERROR("%s: tensor '%s' dimension %" PRIu32 " has invalid number of elements: %" PRIi64 " < 0\n",
++                            __func__, info.t.name, j, info.t.ne[j]);
++                        ok = false;
++                        break;
++                    }
++                }

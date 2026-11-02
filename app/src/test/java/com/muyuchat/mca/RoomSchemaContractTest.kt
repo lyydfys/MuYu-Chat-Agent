@@ -112,16 +112,21 @@ class RoomSchemaContractTest {
 
     @Test
     fun `a migration path exists from every historical version to the current one`() {
-        // The migration chain moved to the database file in the persistence-layer split; the
-        // walk below is unchanged.
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
+        // The edges come from the builder registration, which is what Room actually executes.
+        // Schema files elsewhere declare the Migration objects; reading one file for their literal
+        // ranges missed both the named-constant files and the video chain. Comments are stripped
+        // first so a `)` inside a KDoc cannot truncate an addMigrations(...) argument list.
+        val source = codeOnly(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
+        )
         val current = declaredVersion(source)
 
-        val migrations = Regex("Migration\\((\\d+),\\s*(\\d+)\\)")
-            .findAll(source)
-            .map { it.groupValues[1].toInt() to it.groupValues[2].toInt() }
-            .toList()
-        assertTrue("no Migration declarations were found", migrations.isNotEmpty())
+        val migrations = registeredMigrations(source)
+            .map { name ->
+                val (from, to) = name.removePrefix("MIGRATION_").split('_').map { it.toInt() }
+                from to to
+            }
+        assertTrue("no migration registration was found", migrations.isNotEmpty())
 
         // Walk forward from each historical version and confirm it can reach `current`.
         val unreachable = (1 until current).filter { start ->
@@ -145,19 +150,21 @@ class RoomSchemaContractTest {
 
     @Test
     fun `the migration chain retires every version below the current one`() {
-        // The migration chain moved to the database file in the persistence-layer split; the
-        // registration check below is unchanged.
-        val source = sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
+        // This file is the single builder registration point even though the 27..32 migration SQL
+        // lives in the Agent/memory/video data packages. Registration tokens are read from the real
+        // call argument lists (see registeredMigrations), and the declared set must cover both the
+        // inferred-type (`= object : Migration`) and explicitly-typed (`: Migration = ...`) forms.
+        val source = codeOnly(
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatSessionStoreRoomDatabase.kt")
+        )
         val current = declaredVersion(source)
-        val registered = Regex("addMigrations\\(([^)]*)\\)", RegexOption.DOT_MATCHES_ALL)
-            .findAll(source)
-            .flatMap { match -> Regex("MIGRATION_\\d+_\\d+").findAll(match.groupValues[1]).map { it.value } }
-            .toSet()
+        val registered = registeredMigrations(source)
 
-        val declared = Regex("private val (MIGRATION_\\d+_\\d+)\\s*=\\s*object\\s*:\\s*Migration")
-            .findAll(source)
-            .map { it.groupValues[1] }
-            .toSet()
+        val declared =
+            Regex("(?:private|internal) val (MIGRATION_\\d+_\\d+)\\s*(?::\\s*Migration)?\\s*=\\s*object\\s*:\\s*Migration")
+                .findAll(source)
+                .map { it.groupValues[1] }
+                .toSet()
 
         assertEquals(
             "every declared migration must be registered on the builder",
@@ -186,6 +193,46 @@ class RoomSchemaContractTest {
         }
     }
 
+    /**
+     * Removes comments so structural checks only see executable code. Migration arguments carry
+     * KDoc-adjacent comments with parentheses; without this, the first `)` ends the call early.
+     */
+    private fun codeOnly(text: String): String = text
+        .replace(Regex("/\\*[\\s\\S]*?\\*/"), "")
+        .replace(Regex("//[^\\n]*"), "")
+
+    /** Every `MIGRATION_<from>_<to>` token inside a real `addMigrations(...)` argument list. */
+    private fun registeredMigrations(source: String): Set<String> {
+        val names = mutableSetOf<String>()
+        var searchFrom = 0
+        while (true) {
+            val call = source.indexOf("addMigrations(", searchFrom)
+            if (call < 0) break
+            var index = call + "addMigrations".length
+            var depth = 0
+            var end = -1
+            while (index < source.length) {
+                when (source[index]) {
+                    '(' -> depth += 1
+                    ')' -> {
+                        depth -= 1
+                        if (depth == 0) {
+                            end = index
+                            break
+                        }
+                    }
+                }
+                index += 1
+            }
+            if (end < 0) break
+            Regex("MIGRATION_\\d+_\\d+")
+                .findAll(source.substring(call, end))
+                .forEach { names += it.value }
+            searchFrom = end + 1
+        }
+        return names
+    }
+
     private fun declaredVersion(source: String): Int =
         Regex("@Database\\([\\s\\S]*?version\\s*=\\s*(\\d+)").find(source)
             ?.groupValues?.get(1)?.toInt()
@@ -195,8 +242,11 @@ class RoomSchemaContractTest {
         val directory = File(projectRoot(), "app/schemas/$databaseClassName")
         val files = directory.listFiles { file -> file.extension == "json" }
         requireNotNull(files) { "no exported schema for $databaseClassName at ${directory.path}" }
-        assertEquals("$databaseClassName must export exactly one schema version", 1, files.size)
-        return files.single().nameWithoutExtension.toInt()
+        require(files.isNotEmpty()) { "$databaseClassName must export at least one schema version" }
+        // Migration history legitimately keeps every exported version (27.json, 28.json, ...).
+        // What must stay true is that the highest exported version is exactly the one declared in
+        // the @Database source; a stale export or a version bump without re-export fails here.
+        return files.maxOf { it.nameWithoutExtension.toInt() }
     }
 
     private fun schemaEntities(databaseClassName: String): List<JSONObject> {
@@ -204,7 +254,10 @@ class RoomSchemaContractTest {
         val files = requireNotNull(directory.listFiles { file -> file.extension == "json" }) {
             "no exported schema for $databaseClassName at ${directory.path}"
         }
-        val schema = JSONObject(files.single().readText())
+        val latest = requireNotNull(files.maxByOrNull { it.nameWithoutExtension.toInt() }) {
+            "no exported schema for $databaseClassName at ${directory.path}"
+        }
+        val schema = JSONObject(latest.readText())
         val entities = schema.getJSONObject("database").getJSONArray("entities")
         return (0 until entities.length()).map { entities.getJSONObject(it) }
     }

@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,22 +18,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -41,9 +39,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun HistorySectionHeader(title: String, modifier: Modifier = Modifier) {
@@ -62,7 +60,8 @@ internal fun HistoryEmptyState(text: String) {
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(18.dp),
-        tonalElevation = 1.dp
+        tonalElevation = 1.dp,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
     ) {
         Text(
             text,
@@ -86,6 +85,7 @@ internal fun HistoryRow(
     var menuExpanded by remember { mutableStateOf(false) }
     val rowInteraction = remember { MutableInteractionSource() }
     val menuInteraction = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
     Surface(
         color = if (item.selected) {
             MaterialTheme.colorScheme.surface
@@ -95,14 +95,21 @@ internal fun HistoryRow(
         shape = RoundedCornerShape(12.dp),
         tonalElevation = 0.dp,
         shadowElevation = if (item.selected) 5.dp else 0.dp,
-        border = null,
+        border = if (item.selected) {
+            BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+        } else {
+            null
+        },
         modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 36.dp)
             .clickable(
                 interactionSource = rowInteraction,
                 indication = LocalIndication.current,
-                onClick = onClick
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                }
             )
             // Press weight only; the 36dp row height, radius and content are unchanged.
             .mcaPressScale(rowInteraction)
@@ -163,16 +170,21 @@ internal fun HistoryRow(
                 )
             }
             Box {
-                IconButton(
-                    onClick = { menuExpanded = true },
-                    modifier = Modifier.size(48.dp).mcaPressScale(menuInteraction),
-                    interactionSource = menuInteraction
+                McaIconButton(
+                    contentDescription = "更多操作",
+                    onClick = {
+                        haptics.tick()
+                        menuExpanded = true
+                    },
+                    modifier = Modifier.size(48.dp),
+                    interactionSource = menuInteraction,
+                    hapticsEnabled = false
                 ) {
                     Icon(
-                        Icons.Default.MoreVert,
-                        contentDescription = "更多操作",
-                        modifier = Modifier.size(18.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        McaIcons.MoreVert,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.S),
+                        tint = if (menuExpanded) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 DropdownMenu(
@@ -181,6 +193,7 @@ internal fun HistoryRow(
                     modifier = Modifier.width(216.dp),
                     shape = RoundedCornerShape(20.dp),
                     containerColor = MaterialTheme.colorScheme.surface,
+                    border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
                     tonalElevation = 0.dp,
                     shadowElevation = 18.dp
                 ) {
@@ -192,16 +205,18 @@ internal fun HistoryRow(
                     ) {
                         HistoryMenuItem(
                             text = "重命名",
-                            icon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            icon = { Icon(McaIcons.Edit, contentDescription = null, modifier = Modifier.size(McaIconSize.M)) },
                             onClick = {
+                                haptics.tick()
                                 menuExpanded = false
                                 onRename()
                             }
                         )
                         HistoryMenuItem(
                             text = if (item.pinned) "取消置顶" else "置顶",
-                            icon = { Icon(Icons.Default.PushPin, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            icon = { Icon(McaIcons.PushPin, contentDescription = null, modifier = Modifier.size(McaIconSize.M)) },
                             onClick = {
+                                haptics.tick()
                                 menuExpanded = false
                                 onTogglePin()
                             }
@@ -209,8 +224,9 @@ internal fun HistoryRow(
                         if (item.mixedAssistantHistory) {
                             HistoryMenuItem(
                                 text = "创建角色分支",
-                                icon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                icon = { Icon(McaIcons.Add, contentDescription = null, modifier = Modifier.size(McaIconSize.M)) },
                                 onClick = {
+                                    haptics.tick()
                                     menuExpanded = false
                                     onBranch()
                                 }
@@ -224,15 +240,16 @@ internal fun HistoryRow(
                             text = "删除",
                             icon = {
                                 Icon(
-                                    Icons.Default.Delete,
+                                    McaIcons.Delete,
                                     contentDescription = null,
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(McaIconSize.M),
                                     tint = MaterialTheme.colorScheme.error
                                 )
                             },
                             contentColor = MaterialTheme.colorScheme.error,
                             iconContainerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.10f),
                             onClick = {
+                                haptics.tick()
                                 menuExpanded = false
                                 onDelete()
                             }

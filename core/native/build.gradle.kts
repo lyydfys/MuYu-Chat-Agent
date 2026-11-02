@@ -543,6 +543,68 @@ val applyMcaLlamaPatches = tasks.register("applyMcaLlamaPatches") {
     }
 }
 
+val mcaTokenizersSourceRoot = rootProject.file("third_party/tokenizers-cpp")
+val mcaTokenizersPatch = rootProject.file("third_party/patches/tokenizers-cpp-mca.patch")
+val mcaTokenizersManifest = rootProject.file("vendor/tokenizers-cpp.properties")
+val applyMcaTokenizersPatch = tasks.register("applyMcaTokenizersPatch") {
+    group = "verification"
+    description = "Applies the pinned MCA compatibility patch to tokenizers-cpp."
+    inputs.files(mcaTokenizersPatch, mcaTokenizersManifest)
+    outputs.upToDateWhen { false }
+
+    doLast {
+        if (!mcaTokenizersSourceRoot.resolve("CMakeLists.txt").isFile) {
+            throw GradleException("tokenizers-cpp checkout is missing: ${mcaTokenizersSourceRoot.absolutePath}")
+        }
+        if (!mcaTokenizersPatch.isFile || !mcaTokenizersManifest.isFile) {
+            throw GradleException("tokenizers-cpp patch or provenance manifest is missing.")
+        }
+
+        val manifest = Properties().apply { mcaTokenizersManifest.inputStream().use(::load) }
+        val expectedBase = manifest.getProperty("baseCommit")?.trim()?.lowercase()
+            ?: throw GradleException("tokenizers-cpp manifest is missing baseCommit.")
+        val expectedPatchSha = manifest.getProperty("patchSha256")?.trim()?.lowercase()
+            ?: throw GradleException("tokenizers-cpp manifest is missing patchSha256.")
+        val actualPatchSha = sha256Hex(mcaTokenizersPatch.readBytes())
+        if (actualPatchSha != expectedPatchSha) {
+            throw GradleException("tokenizers-cpp patch SHA-256 mismatch: ${mcaTokenizersPatch.absolutePath}")
+        }
+
+        val git = providers.gradleProperty("mcaGitExecutable")
+            .orElse(providers.environmentVariable("MCA_GIT_EXECUTABLE"))
+            .orElse("git")
+            .get()
+        fun gitResult(vararg arguments: String): McaCommandResult = runMcaCommand(
+            listOf(git, "-C", mcaTokenizersSourceRoot.absolutePath) + arguments
+        )
+
+        val head = String(gitResult("rev-parse", "HEAD").stdout, StandardCharsets.UTF_8)
+            .trim().lowercase()
+        if (head != expectedBase) {
+            throw GradleException("tokenizers-cpp base commit mismatch. Expected $expectedBase, got $head.")
+        }
+
+        val patchPath = mcaTokenizersPatch.absolutePath
+        val reverse = gitResult("apply", "--reverse", "--check", "--whitespace=nowarn", patchPath)
+        if (reverse.exitCode == 0) {
+            logger.lifecycle("MCA tokenizers-cpp patch already applied (SHA-256 $actualPatchSha).")
+            return@doLast
+        }
+        val forward = gitResult("apply", "--check", "--whitespace=nowarn", patchPath)
+        if (forward.exitCode != 0) {
+            throw GradleException(
+                "tokenizers-cpp patch cannot be applied to the pinned checkout:\n" +
+                    forward.stderr.trim().ifEmpty { "git apply check failed" }
+            )
+        }
+        val applied = gitResult("apply", "--whitespace=nowarn", patchPath)
+        if (applied.exitCode != 0) {
+            throw GradleException("Unable to apply tokenizers-cpp patch: ${applied.stderr.trim()}")
+        }
+        logger.lifecycle("Applied MCA tokenizers-cpp patch (SHA-256 $actualPatchSha).")
+    }
+}
+
 android {
     namespace = "com.muyuchat.core.nativebridge"
     compileSdk = libs.versions.compileSdk.get().toInt()
@@ -624,6 +686,7 @@ tasks.configureEach {
     val isReleaseProductBuild = "release" in lowerName && !mcaDebugOnlyInvocation
     if (isProductNativeBuildTask) {
         dependsOn(applyMcaLlamaPatches)
+        dependsOn(applyMcaTokenizersPatch)
         if (isReleaseProductBuild && !mcaMnnDebugRuntimeExperiment) {
             dependsOn(verifyMcaQnnSdkHeaders)
             dependsOn(verifyMcaMnnVendor)

@@ -1,5 +1,8 @@
 package com.muyuchat.core.engine
 
+import kotlin.concurrent.thread
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
@@ -19,9 +22,9 @@ internal suspend fun McaInferenceService.stopGenerationImpl() {
         }
         val runner = runCatching { runnerFor(activeRuntime) }.getOrNull() ?: return
         withContext(io) {
-            withTimeoutOrNull(STOP_REQUEST_TIMEOUT_MS) {
-                runCatching { runner.requestStop() }
-            }
+            // The fallback path is still bounded the same way: a blocking native stop must not
+            // hold a lifecycle/UI caller for the length of an in-flight prefill.
+            dispatchRunnerStopBounded(runner, STOP_REQUEST_TIMEOUT_MS)
         }
     }
 
@@ -56,25 +59,65 @@ internal suspend fun McaInferenceService.stopGenerationIfActiveImpl(
         if (!capture.first) return false
         val target = capture.second ?: return true
         return withContext(io) {
-            withTimeoutOrNull(STOP_REQUEST_TIMEOUT_MS) {
-                // Dispatch can lag behind a model reload or a replacement turn.
-                // Recheck after the dispatcher hop before signaling the runner.
-                val stillCurrent = synchronized(generationStopGate) {
-                    activeGenerationStopTarget?.token == expected &&
-                        stopRequestedToken == expected
-                }
-                if (!stillCurrent) return@withTimeoutOrNull true
-                // The engine-owned token is the active-operation proof. Do not
-                // perform a second native active-state query here: a damaged
-                // runner may serialize that query behind decode and recreate
-                // the very Binder stall this path is meant to avoid.
-                runCatching {
-                    target.runner.requestStop()
-                    true
-                }.getOrDefault(false)
-            } ?: true
+            // Dispatch can lag behind a model reload or a replacement turn.
+            // Recheck after the dispatcher hop before signaling the runner.
+            val stillCurrent = synchronized(generationStopGate) {
+                activeGenerationStopTarget?.token == expected &&
+                    stopRequestedToken == expected
+            }
+            if (!stillCurrent) return@withContext true
+            // The engine-owned token is the active-operation proof. Do not
+            // perform a second native active-state query here: a damaged
+            // runner may serialize that query behind decode and recreate
+            // the very Binder stall this path is meant to avoid. The stop
+            // itself is dispatched on its own thread and only acknowledged
+            // within the bounded window; a blocked native/Binder stop must
+            // never hold the UI, gateway or lifecycle caller.
+            dispatchRunnerStopBounded(target.runner, STOP_REQUEST_TIMEOUT_MS)
         }
     }
+
+/**
+ * Dispatches one blocking runner `requestStop()` on a disposable daemon thread and bounds only the
+ * acknowledgement wait.
+ *
+ * A native runner may serialize `requestStop()` behind the same native mutex as prefill/decode. The
+ * JNI/Binder stop flag is set before that wait (the llama.cpp wrapper stores its stop flag before
+ * taking the engine mutex), so the cancellation itself is already requested; this function must never
+ * convert that native wait into caller latency. `true` means the stop was accepted and dispatched,
+ * never that native work has stopped — quiescence is answered separately by
+ * [McaInferenceService.awaitStopSettlement].
+ *
+ * A [CancellationException] thrown by the runner is re-thrown to the caller instead of being
+ * swallowed. The dispatched thread is daemon-only and is never retained: repeated stops for the same
+ * generation token are rejected earlier by [McaInferenceService.stopGenerationIfActiveImpl], so at
+ * most one dispatch thread can exist per captured token.
+ */
+internal suspend fun dispatchRunnerStopBounded(
+    runner: LocalChatRunner,
+    timeoutMs: Long = STOP_REQUEST_TIMEOUT_MS
+): Boolean {
+    require(timeoutMs > 0L) { "stop dispatch timeout must be positive" }
+    val acknowledgement = CompletableDeferred<StopDispatchAcknowledgement>()
+    thread(isDaemon = true, name = "mca-native-stop-dispatch") {
+        val failure = try {
+            runner.requestStop()
+            null
+        } catch (cancellation: CancellationException) {
+            cancellation
+        } catch (error: Throwable) {
+            error
+        }
+        acknowledgement.complete(StopDispatchAcknowledgement(failure))
+    }
+    val acknowledgementResult = withTimeoutOrNull(timeoutMs) { acknowledgement.await() }
+        ?: return true // dispatched; the runner-owned recovery watchdog owns the bound from here
+    val failure = acknowledgementResult.failure ?: return true
+    if (failure is CancellationException) throw failure
+    return false
+}
+
+internal data class StopDispatchAcknowledgement(val failure: Throwable?)
 
 
 internal fun McaInferenceService.activateGenerationStopTargetImpl(
@@ -98,6 +141,9 @@ internal fun McaInferenceService.activateGenerationStopTargetImpl(
         generationStopEpoch += 1L
         GenerationStopToken(generationStopEpoch, requestId).also { token ->
             activeGenerationStopTarget = ActiveGenerationStopTarget(token, runner, collectorJob)
+            // Attach the exact epoch to the retained execution record. Clearing this token later
+            // must not erase the quiescence proof; the record outlives the token on purpose.
+            attachGenerationStopTokenLocked(requestId, token)
         }
     }
 
@@ -116,5 +162,8 @@ internal fun McaInferenceService.invalidateGenerationStopTargetAfterLifecycleTra
             generationStopEpoch += 1L
             activeGenerationStopTarget = null
             stopRequestedToken = null
+            // A native worker incarnation boundary: every proof taken before this point is stale
+            // and must never be used to release a lease against the replacement worker.
+            markLifecycleTransitionLocked("native lifecycle transition")
         }
     }

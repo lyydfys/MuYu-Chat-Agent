@@ -498,5 +498,116 @@ internal val RECOMMENDED_MODELS_PART_3 = listOf(
             executionProfile = recommendedImageExecutionProfile("longcat_image_q4"),
             modelFamily = "LONGCAT_IMAGE"
         )
+    ),
+    ModelScopeRecommendedModel(
+        id = "anima_preview_q4",
+        title = "Anima Preview · Q4_K_M GGUF",
+        repoId = "Bedovyy/Anima-GGUF",
+        revision = "main",
+        description = "Anima Preview 文生图的 stable-diffusion.cpp CPU 实验路径（非商业许可，仅限个人非商业本地实验）。完整包约 2.87 GB：Q4_K_M 主模型、Qwen3-0.6B 文本编码器和 Qwen-Image VAE；默认 512×512、8 步、CFG 6，Euler + Flow，16 通道 DiT。宽高可在 256–1024 内按 64 的倍数选择，仅文生图。所有兼容设备均可下载试运行，实际结果由原生加载和执行决定。主模型 GGUF 来自 Bedovyy/Anima-GGUF；VAE 与文本编码器来自 circlestone-labs/Anima。模型权重遵循 circlestone-labs Anima 的非商业许可（license: other），使用前请阅读 https://huggingface.co/circlestone-labs/Anima ；本应用不随 APK 分发权重。",
+        recommendedFileName = "anima-preview-Q4_K_M.gguf",
+        parameterScale = "Anima Preview",
+        quant = "Q4_K_M",
+        minRamGb = 8,
+        tags = listOf("本地生图", "Anima", "GGUF", "CPU 实验", "Hugging Face", "非商业许可", "16 通道 DiT"),
+        priority = 4,
+        kind = ModelScopeRecommendedKind.IMAGE,
+        status = RecommendedModelStatus.EXPERIMENTAL,
+        provider = ModelRepositoryProvider.HUGGING_FACE,
+        downloadable = true,
+        downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+        downloadBlockReason = null,
+        localImageEngineTier = LocalImageEngineTier.HEAVY_EXPERIMENTAL,
+        imageEngineBundle = ImageEngineBundleSpec(
+            id = "anima_preview_q4_bundle",
+            title = "Anima Preview Q4 引擎包",
+            recommendationId = "anima_preview_q4",
+            runtime = ImageEngineBundleRuntime.STABLE_DIFFUSION_CPP,
+            accelerator = ImageEngineAccelerator.CPU,
+            minDeviceTier = ImageEngineMinDeviceTier.ANY,
+            requiresSmokeTest = true,
+            smokeSpec = ImageEngineSmokeSpec(width = 512, height = 512, steps = 8, timeoutSeconds = 1_800),
+            components = listOf(
+                ImageEngineBundleComponentSpec(
+                    role = ImageEngineBundleComponentRole.DIFFUSION,
+                    repoId = "Bedovyy/Anima-GGUF",
+                    revision = "main",
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = "anima-preview-Q4_K_M.gguf",
+                    expectedSizeBytes = 1_421_648_000L,
+                    sha256 = "219ff28288177b526ec3197309045ab0c11ede88ed7d6f6a27d0148033a8de00"
+                ),
+                ImageEngineBundleComponentSpec(
+                    role = ImageEngineBundleComponentRole.VAE,
+                    repoId = "circlestone-labs/Anima",
+                    revision = "main",
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = "split_files/vae/qwen_image_vae.safetensors",
+                    expectedSizeBytes = 253_806_246L,
+                    sha256 = "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
+                ),
+                ImageEngineBundleComponentSpec(
+                    role = ImageEngineBundleComponentRole.TEXT_ENCODER,
+                    repoId = "circlestone-labs/Anima",
+                    revision = "main",
+                    provider = ModelRepositoryProvider.HUGGING_FACE,
+                    fileName = "split_files/text_encoders/qwen_3_06b_base.safetensors",
+                    expectedSizeBytes = 1_192_135_096L,
+                    sha256 = "cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba"
+                )
+            ),
+            executionProfile = recommendedImageExecutionProfile("anima_preview_q4"),
+            modelFamily = "ANIMA"
+        )
+    ),
+    ModelScopeRecommendedModel(
+        id = "mediatek_anima_npu_np9",
+        title = "Anima · 天玑 NPU (NPUG + DLA)",
+        repoId = "lyydfys/anima-npug-dla-mt6993-nc",
+        revision = "9abfacd6606c044a786bdf85ea74b248b6744ea8",
+        description = "同一 Anima 模型的 AOT 变体（按 SoC/DLA 与分辨率编译）：已验证 MT6993/NP9/L1024s4，512×512、6 步。下载时可选择固定包（Prompt 固定，约 1.8 GB，约 43 秒/张）或动态包（支持任意文本，约 3.3 GB，约 111 秒/张）；下载前需同意 CircleStone 非商业许可与 NVIDIA 声明。其他档位未验证；仅限非商业使用，商用模型/衍生物需单独授权。",
+        recommendedFileName = "bundles/mca-mediatek-reference-v4-fixed.zip",
+        parameterScale = "Anima",
+        quant = "NPUG + DLA · w8/w16",
+        minRamGb = 8,
+        tags = listOf("Anima", "天玑 NPU", "MediaTek", "Neuron", "DLA", "NPUG", "v4", "变体", "已验证", "非商业"),
+        priority = 1,
+        kind = ModelScopeRecommendedKind.IMAGE,
+        status = RecommendedModelStatus.EXPERIMENTAL,
+        group = ModelScopeRecommendedGroup.LOCAL_IMAGE,
+        provider = ModelRepositoryProvider.MODELSCOPE,
+        downloadable = true,
+        downloadPolicy = RecommendedModelDownloadPolicy.ALL_DEVICES,
+        downloadBlockReason = null,
+        plannedImageAccelerator = ImageEngineAccelerator.MEDIATEK_NPU,
+        manualImportRequired = false,
+        remoteImageBundle = ImageEngineRemoteBundleSpec(
+            recommendationId = "mediatek_anima_npu_np9",
+            descriptorUrl = "https://modelscope.cn/models/lyydfys/anima-npug-dla-mt6993-nc/resolve/9abfacd6606c044a786bdf85ea74b248b6744ea8/download.json",
+            descriptorBytes = 1_102L,
+            descriptorSha256 = "8bbe8b63ff538bc4a1f30d2390669a1ed8aa3d6a504a11d97cd4e5236b48e5c8",
+            license = "CircleStone-Labs-Non-Commercial-1.2",
+            licenseUrl = "https://modelscope.cn/models/lyydfys/anima-npug-dla-mt6993-nc/resolve/9abfacd6606c044a786bdf85ea74b248b6744ea8/LICENSE.md",
+            noticeUrl = "https://modelscope.cn/models/lyydfys/anima-npug-dla-mt6993-nc/resolve/9abfacd6606c044a786bdf85ea74b248b6744ea8/NOTICE.txt",
+            defaultVariantId = "dynamic",
+            variants = listOf(
+                ImageEngineRemoteBundleVariant(
+                    id = "fixed",
+                    conditioningMode = "FIXED_CONTEXT",
+                    file = "bundles/mca-mediatek-reference-v4-fixed.zip",
+                    url = "https://modelscope.cn/models/lyydfys/anima-npug-dla-mt6993-nc/resolve/54c1e5607e4b86b86f9603789f87a5a4347636ac/bundles/mca-mediatek-reference-v4-fixed.zip",
+                    sizeBytes = 1_830_262_377L,
+                    sha256 = "438440754de27f49a395bce448dc8c2fe2df944c83f90a980b438e431fdbce9f"
+                ),
+                ImageEngineRemoteBundleVariant(
+                    id = "dynamic",
+                    conditioningMode = "DYNAMIC_TEXT",
+                    file = "bundles/mca-mediatek-reference-v4-dynamic.zip",
+                    url = "https://modelscope.cn/models/lyydfys/anima-npug-dla-mt6993-nc/resolve/54c1e5607e4b86b86f9603789f87a5a4347636ac/bundles/mca-mediatek-reference-v4-dynamic.zip",
+                    sizeBytes = 3_292_929_429L,
+                    sha256 = "e4c020640fcf567ce743c364a36a67a85a4eb29d54a166025f6db132cd7070fe"
+                )
+            )
+        )
     )
 )

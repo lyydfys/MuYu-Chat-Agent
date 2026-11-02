@@ -12,8 +12,8 @@ import java.io.File
 internal class ChatInputAndAttachmentCoordinator(
     private val application: Application,
     private val scope: CoroutineScope,
-    private val store: UiStateStore,
-    private val container: com.muyuchat.mca.composition.McaAppContainer,
+    private val store: UiStateWriter<ChatAttachmentFields>,
+    private val hasPendingChatImagePreparation: () -> Boolean,
     private val showStatus: (String?) -> Unit,
     private val fail: (String) -> Unit,
     private val invalidatePendingChatImagePreparation: () -> Unit,
@@ -26,9 +26,9 @@ internal class ChatInputAndAttachmentCoordinator(
     private val chatSessionStore: ChatSessionStore
 ) {
     fun onInputChange(value: String) {
-        if (value != store.current.input &&
-            (container.runtimeAdmission.pendingImageTranslation != null || container.runtimeAdmission.pendingChatImageAction != null)
-        ) invalidatePendingChatImagePreparation()
+        if (value != store.current.input && hasPendingChatImagePreparation()) {
+            invalidatePendingChatImagePreparation()
+        }
         val bounded = value.takeUtf8Prefix(MainViewModel.MAX_DIRECT_COMPOSER_UTF8_BYTES)
         store.update {
             it.copy(

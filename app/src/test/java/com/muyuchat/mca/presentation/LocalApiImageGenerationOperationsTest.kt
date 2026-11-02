@@ -18,6 +18,9 @@ import com.muyuchat.mca.LocalImagePromptTransformationMethod
 import com.muyuchat.mca.LocalImageResult
 import com.muyuchat.mca.LocalImageRuntime
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.LocalApiImageFields
+import com.muyuchat.mca.toLocalApiImageFields
+import com.muyuchat.mca.mergeInto
 import com.muyuchat.mca.QnnImageEvidenceEntryPoint
 import com.muyuchat.mca.localImageStructuralReadinessMessage
 import java.io.ByteArrayOutputStream
@@ -717,8 +720,8 @@ class LocalApiImageGenerationOperationsTest {
         override val uiState: StateFlow<MainUiState> get() = mutableUiState
         val state: MutableStateFlow<MainUiState> get() = mutableUiState
 
-        override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-            mutableUiState.update(transform)
+        override fun updateUiState(transform: (LocalApiImageFields) -> LocalApiImageFields) {
+            mutableUiState.update { snapshot -> transform(snapshot.toLocalApiImageFields()).mergeInto(snapshot) }
         }
 
         var selectedModel: LocalImageModelRecord? = model

@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
 // The application menu pages, moved verbatim out of ChatScreen.kt.
 //
 // ChatScreen.kt held four unrelated page domains. The image workspace and the assistant auxiliary
@@ -19,6 +20,8 @@ package com.muyuchat.feature.chat
 // are warnings in Kotlin, and copying them keeps the move mechanical instead of making it a
 // judgement call about which imports each declaration still needs.
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
@@ -42,16 +45,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.NetworkWifi
-import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Settings
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -59,7 +52,6 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun McaAppMenuPage(
@@ -121,9 +114,9 @@ internal fun McaAppMenuPage(
             McaIconButton(
                 contentDescription = "关闭",
                 onClick = onClose,
-                glyphSize = 24.dp
+                glyphSize = McaIconSize.L
             ) {
-                Icon(Icons.Default.Close, contentDescription = null)
+                Icon(McaIcons.Close, contentDescription = null)
             }
             Spacer(modifier = Modifier.weight(1f))
         }
@@ -148,17 +141,17 @@ internal fun McaAppMenuPage(
             )
             AppMenuCard {
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Psychology, null) },
+                    icon = { Icon(McaIcons.Psychology, null) },
                     title = "助手与角色",
                     subtitle = state.assistants.firstOrNull { it.selected }?.let { "${it.name} · 角色卡与能力" } ?: "当前助手、角色卡、提示词与能力",
                     onClick = onOpenAssistants
                 )
-                AppMenuRow(icon = { Icon(Icons.Default.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
+                AppMenuRow(icon = { Icon(McaIcons.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
                 AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
-                AppMenuRow(icon = { Icon(Icons.Default.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
-                 AppMenuRow(icon = { Icon(Icons.Default.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与高级设置", onClick = onOpenSettings)
-                AppMenuRow(icon = { Icon(Icons.Default.Image, null) }, title = "聊天背景", subtitle = "设置全局、助手或当前会话背景图片", onClick = onOpenBackgroundSettings)
-                AppMenuRow(icon = { Icon(Icons.Default.Info, null) }, title = "快速开始", subtitle = "聊天、生图与常见问题", onClick = onOpenQuickStart)
+                AppMenuRow(icon = { Icon(McaIcons.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
+                 AppMenuRow(icon = { Icon(McaIcons.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与高级设置", onClick = onOpenSettings)
+                AppMenuRow(icon = { Icon(McaIcons.Image, null) }, title = "聊天背景", subtitle = "设置全局、助手或当前会话背景图片", onClick = onOpenBackgroundSettings)
+                AppMenuRow(icon = { Icon(McaIcons.Info, null) }, title = "快速开始", subtitle = "聊天、生图与常见问题", onClick = onOpenQuickStart)
             }
 
             Spacer(modifier = Modifier.height(18.dp))
@@ -183,19 +176,19 @@ internal fun McaAppMenuPage(
                     onClick = onOpenModels
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.NetworkWifi, null) },
+                    icon = { Icon(McaIcons.NetworkWifi, null) },
                     title = "本地 API",
                     subtitle = if (state.apiEnabled || state.restEnabled) "已启用" else "未启用",
                     onClick = onOpenApi
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Image, null) },
+                    icon = { Icon(McaIcons.Image, null) },
                     title = "图像任务",
                     subtitle = state.imageTaskSummary(),
                     onClick = onOpenImages
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Psychology, null) },
+                    icon = { Icon(McaIcons.Psychology, null) },
                     title = state.assistants.firstOrNull { it.selected }?.name ?: "默认助手",
                     subtitle = state.assistants.firstOrNull { it.selected }?.let {
                         "记忆${if (it.memoryEnabled) "开" else "关"} · 检索${if (it.webSearchEnabled) "开" else "关"}"
@@ -213,7 +206,7 @@ internal fun McaAppMenuPage(
             )
             AppMenuCard {
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Replay, null) },
+                    icon = { Icon(McaIcons.Replay, null) },
                     title = if (state.contextCompressionPending) "已安排压缩" else "下次发送时压缩",
                     subtitle = if (state.contextCompressionPending) {
                         "下一次发送时执行，保留角色设定和最近消息"
@@ -224,20 +217,20 @@ internal fun McaAppMenuPage(
                     onClick = onRequestContextCompression
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Settings, null) },
+                    icon = { Icon(McaIcons.Settings, null) },
                     title = "自动压缩阈值 · ${state.contextCompressionThresholdPercent}%",
                     subtitle = "达到模型上下文窗口的该比例后自动压缩",
                     onClick = { chooseCompressionThreshold = true }
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Folder, null) },
+                    icon = { Icon(McaIcons.Folder, null) },
                     title = "摘要历史",
                     subtitle = if (state.contextSummaryHistory.isEmpty()) "当前对话尚无摘要" else
                         "${state.contextSummaryHistory.size} 个版本 · ${if (state.canUndoContextSummary) "有生效摘要" else "已撤销"}",
                     onClick = { showSummaryHistory = true }
                 )
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Settings, null) },
+                    icon = { Icon(McaIcons.Settings, null) },
                     title = "摘要模型",
                     subtitle = state.contextSummaryModels.firstOrNull {
                         it.id == state.contextSummaryModelSelection
@@ -255,7 +248,7 @@ internal fun McaAppMenuPage(
             )
             AppMenuCard {
                 AppMenuRow(
-                    icon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                    icon = { Icon(McaIcons.Delete, null, tint = MaterialTheme.colorScheme.error) },
                     title = "清空全部",
                     subtitle = "删除本机保存的全部聊天记录",
                     contentColor = MaterialTheme.colorScheme.error,
@@ -271,7 +264,7 @@ internal fun McaAppMenuPage(
             title = { Text("清空全部历史") },
             text = { Text("确定清空所有聊天记录吗？当前模型和模型文件不会被删除。") },
             confirmButton = {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         onClearHistory()
                         confirmClear = false
@@ -281,7 +274,7 @@ internal fun McaAppMenuPage(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmClear = false }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { confirmClear = false }) {
                     Text("取消")
                 }
             }
@@ -304,7 +297,7 @@ internal fun McaAppMenuPage(
                         style = MaterialTheme.typography.bodyMedium
                     )
                     listOf(70, 80, 90).forEach { percent ->
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 onSetContextCompressionThreshold(percent)
                                 chooseCompressionThreshold = false
@@ -320,7 +313,7 @@ internal fun McaAppMenuPage(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { chooseCompressionThreshold = false }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { chooseCompressionThreshold = false }) {
                     Text("取消")
                 }
             }
@@ -371,7 +364,7 @@ internal fun McaAppMenuPage(
                 }
             },
             confirmButton = {
-                TextButton(onClick = { chooseSummaryModel = false }) { Text("关闭") }
+                McaButton(style = McaButtonStyle.Text,onClick = { chooseSummaryModel = false }) { Text("关闭") }
             }
         )
     }
@@ -463,14 +456,14 @@ internal fun McaAppMenuPage(
                 // 2.0x font: the two long actions no longer fit one dialog line; FlowRow keeps
                 // the 1.0x single row and wraps only when the type scale needs it.
                 FlowRow {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             onUndoContextSummary()
                             showSummaryHistory = false
                         },
                         enabled = state.canUndoContextSummary && !state.isGenerating && !state.conversationReadOnly
                     ) { Text("撤销") }
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             onRequestContextCompression()
                             showSummaryHistory = false
@@ -480,7 +473,7 @@ internal fun McaAppMenuPage(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showSummaryHistory = false }) { Text("关闭") }
+                McaButton(style = McaButtonStyle.Text,onClick = { showSummaryHistory = false }) { Text("关闭") }
             }
         )
     }

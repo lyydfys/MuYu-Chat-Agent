@@ -38,7 +38,9 @@ data class ContentImportPreview(
     val scope: WorldBookScope? = null,
     val sourceKind: CharacterCardSource? = null,
     val knowledgeBaseId: String? = null,
-    val source: String? = null
+    val source: String? = null,
+    /** File-derived book name for world books; re-applied when the preview commit re-parses. */
+    val fallbackName: String? = null
 )
 
 internal fun characterCardPreview(
@@ -93,7 +95,8 @@ internal fun worldBookPreview(
     rawSource: String,
     result: WorldBookImportResult,
     owner: ContentImportOwner,
-    scope: WorldBookScope
+    scope: WorldBookScope,
+    fallbackName: String? = null
 ): ContentImportPreview {
     val book = requireNotNull(result.book)
     return ContentImportPreview(
@@ -104,7 +107,7 @@ internal fun worldBookPreview(
             "keyword" to book.entries.count { !it.constant }.toString(),
             "excerpt" to book.entries.take(3).joinToString("\n\n") { it.content.take(400) }),
         warnings = result.warnings + "Advanced trigger fields and executable extensions are not applied.",
-        owner = owner, rawSource = rawSource, scope = scope
+        owner = owner, rawSource = rawSource, scope = scope, fallbackName = fallbackName
     )
 }
 
@@ -152,6 +155,7 @@ internal class ContentImportPreviewStore(context: Context) {
             .put("title", preview.title).put("sourceHash", preview.sourceHash).put("rawSource", preview.rawSource)
             .put("scope", preview.scope?.wireName).put("sourceKind", preview.sourceKind?.name)
             .put("knowledgeBaseId", preview.knowledgeBaseId).put("source", preview.source)
+            .put("fallbackName", preview.fallbackName)
             .put("owner", JSONObject().put("sessionId", preview.owner.sessionId)
                 .put("assistantId", preview.owner.assistantId).put("selectionRevision", preview.owner.selectionRevision))
             .put("fields", JSONArray().apply { preview.fields.forEach { (name, value) ->
@@ -165,7 +169,9 @@ internal class ContentImportPreviewStore(context: Context) {
     fun load(): ContentImportPreview? {
         val raw = preferences.getString("pending", null) ?: return null
         return runCatching {
-            require(raw.length <= 2_200_000) { "Import preview exceeds its size limit." }
+            // Headroom above the 8 MiB world-book import ceiling: the payload is the JSON-escaped
+            // rawSource plus preview fields, so escaping overhead has to fit too.
+            require(raw.length <= 9_500_000) { "Import preview exceeds its size limit." }
             val payload = JSONObject(raw)
             val owner = payload.getJSONObject("owner")
             val source = payload.getString("rawSource")
@@ -183,7 +189,8 @@ internal class ContentImportPreviewStore(context: Context) {
                 scope = payload.optString("scope").takeIf { it.isNotBlank() && it != "null" }?.let(WorldBookScope::fromWireName),
                 sourceKind = payload.optString("sourceKind").takeIf { it.isNotBlank() && it != "null" }?.let(CharacterCardSource::valueOf),
                 knowledgeBaseId = payload.optString("knowledgeBaseId").takeIf { it.isNotBlank() && it != "null" },
-                source = payload.optString("source").takeIf { it.isNotBlank() && it != "null" }
+                source = payload.optString("source").takeIf { it.isNotBlank() && it != "null" },
+                fallbackName = payload.optString("fallbackName").takeIf { it.isNotBlank() && it != "null" }
             )
         }.getOrNull()
     }

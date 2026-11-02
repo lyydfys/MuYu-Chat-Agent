@@ -10,7 +10,8 @@ import com.muyuchat.core.modelstore.ModelStoreRepository.Companion.MODEL_IMPORT_
         repoId: String,
         revision: String,
         license: String? = null,
-        source: ModelSource = ModelSource.MODELSCOPE
+        source: ModelSource = ModelSource.MODELSCOPE,
+        runtime: ChatModelRuntime = ChatModelRuntime.LLAMA_CPP
     ): ModelManifest {
         if (file.name.endsWith(".litertlm", ignoreCase = true) || file.hasLiteRtLmMagic()) {
             return registerDownloadedLiteRtLmModel(
@@ -20,6 +21,9 @@ import com.muyuchat.core.modelstore.ModelStoreRepository.Companion.MODEL_IMPORT_
                 license = license,
                 source = source
             )
+        }
+        require(runtime == ChatModelRuntime.LLAMA_CPP || runtime == ChatModelRuntime.GENIEX_LLAMA_CPP) {
+            "下载的 GGUF 聊天模型不支持运行时 ${runtime.label}。"
         }
         require(file.exists()) { "Downloaded file does not exist: ${file.absolutePath}" }
         require(file.extension.equals("gguf", ignoreCase = true)) { "下载完成的聊天模型不是 GGUF。" }
@@ -31,7 +35,7 @@ import com.muyuchat.core.modelstore.ModelStoreRepository.Companion.MODEL_IMPORT_
             id = UUID.randomUUID().toString(),
             displayName = file.name.removeSuffix(".gguf"),
             path = file.absolutePath,
-            runtime = ChatModelRuntime.LLAMA_CPP,
+            runtime = runtime,
             source = source,
             repoId = repoId,
             revision = revision,

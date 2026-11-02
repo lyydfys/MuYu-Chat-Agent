@@ -53,6 +53,46 @@ internal fun localImageApiResponseOutputEvidence(outputs: List<LocalImageOutput>
     }
 }
 
+/**
+ * Local API execution-evidence gate. QNN keeps its nativeEffective/partition
+ * contract; MediaTek proves its own native path (Neuron backend, runtime and
+ * output digest) instead of borrowing QNN-shaped fields. Both fail closed.
+ */
+internal fun requireNativeImageExecutionEvidence(execution: JSONObject, runtime: LocalImageRuntime) {
+    if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        require(
+            execution.optString("backend") == runtime.name && execution.optString("runtime") == runtime.name
+        ) {
+            "The local image result did not identify the MediaTek Neuron backend."
+        }
+        require(execution.optString("outputSha256").isNotBlank()) {
+            "The local image result is missing its output digest."
+        }
+        require(!execution.optBoolean("fallback", false)) {
+            "The MediaTek image result must not report a fallback."
+        }
+        return
+    }
+    val nativeEffective = execution.optJSONObject("nativeEffective")
+        ?: throw IllegalArgumentException("The local image result is missing nativeEffective execution evidence.")
+    require(
+        execution.optBoolean("nativeExecution", false) && !execution.optBoolean("fallback", true)
+    ) {
+        "The local image result did not prove direct native execution without fallback."
+    }
+    require(execution.optLong("nativeGenerationSequence", 0L) > 0L) {
+        "The local image result is missing a positive native generation sequence."
+    }
+    require(nativeEffective.getString("runtime") == runtime.name) {
+        "The local image result runtime does not match the selected model runtime."
+    }
+    if (runtime == LocalImageRuntime.QNN_HTP) {
+        require(execution.optBoolean("npuActive", false) && execution.optBoolean("qnnGraphExecution", false)) {
+            "The local image result did not prove native QNN graph execution."
+        }
+    }
+}
+
 /** Exact Local Images API to worker request mapping; no execution control is inferred here. */
 internal fun ImageGenerationApiRequest.toLocalImageApiDispatch(): LocalImageApiDispatch {
     val effectiveStrength = ultraFix?.strength ?: strength

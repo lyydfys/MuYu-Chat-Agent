@@ -127,7 +127,7 @@ internal suspend fun importImageAsset(
 }
 
 internal fun attachFileFor(
-    store: UiStateStore,
+    store: UiStateWriter<ChatAttachmentFields>,
     scope: CoroutineScope,
     contentResolver: ContentResolver,
     imageAssetWriteMutex: Mutex,
@@ -182,11 +182,10 @@ internal fun attachFileFor(
         }
         result.onSuccess { imported ->
             fun publishImportedAttachment(): List<FileAssetRecord>? {
-                var filesToPersist: List<FileAssetRecord>? = null
-                store.update { state ->
+                return store.updateWithResult { state ->
                     val importedAttachment = imported.imageAsset?.toChatAttachment()
                     val alreadyAttached = importedAttachment != null &&
-                        prepareChatInput(state).imageAttachments.any { existing ->
+                        prepareChatInput(state.snapshot).imageAttachments.any { existing ->
                             listOf(existing, importedAttachment)
                                 .deduplicateVisionAttachments()
                                 .size == 1
@@ -213,7 +212,6 @@ internal fun attachFileFor(
                         (listOf(file) + state.files.filterNot { it.id == file.id })
                             .sortedFilesForLibrary()
                     }
-                    if (updatedFiles != null) filesToPersist = updatedFiles
                     state.copy(
                         input = state.input + attachment,
                         images = updatedImages ?: state.images,
@@ -225,9 +223,8 @@ internal fun attachFileFor(
                         } else {
                             "已添加文件：${imported.name}"
                         }
-                    )
+                    ) to updatedFiles
                 }
-                return filesToPersist
             }
 
             val filesToPersist = imported.imageAsset?.let { image ->
@@ -253,22 +250,20 @@ internal fun attachFileFor(
 }
 
 internal fun deleteFileAssetFor(
-    store: UiStateStore,
+    store: UiStateWriter<ChatAttachmentFields>,
     persistFiles: (List<FileAssetRecord>) -> Unit,
     fileId: String
 ) {
-    var removed: FileAssetRecord? = null
-    var filesToPersist: List<FileAssetRecord> = emptyList()
-    store.update { state ->
-        removed = state.files.firstOrNull { it.id == fileId }
-        filesToPersist = state.files.filterNot { it.id == fileId }
-        state.copy(files = filesToPersist, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
+    val committed = store.updateAndGet { state ->
+        val removed = state.files.firstOrNull { it.id == fileId }
+        val files = state.files.filterNot { it.id == fileId }
+        state.copy(files = files, statusMessage = "已从文件库移除：${removed?.name ?: "文件"}")
     }
-    persistFiles(filesToPersist)
+    persistFiles(committed.files)
 }
 
 internal fun clearFileLibraryFor(
-    store: UiStateStore,
+    store: UiStateWriter<ChatAttachmentFields>,
     scope: CoroutineScope,
     showStatus: (String) -> Unit,
     persistFiles: suspend (List<FileAssetRecord>) -> Result<Unit>

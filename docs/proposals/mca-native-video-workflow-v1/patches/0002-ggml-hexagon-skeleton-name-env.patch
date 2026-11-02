@@ -1,0 +1,18 @@
+# Source: ggml/src/ggml-hexagon/ggml-hexagon.cpp (HappyYzy ggml f8758628)
+# Change: make the HTP skeleton library basename configurable through MCA_HTP_SKEL_NAME (default libggml-htp, unchanged behaviour when unset).
+# Why:    MCA ships the same skeleton under several names (libggml-htp-v79.so / libggml-htp-mca-v79.so per device build); the hard-coded file:///libggml-htp-v0.so cannot load those without renaming files on device.
+diff --git a/ggml/src/ggml-hexagon/ggml-hexagon.cpp b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+index f48c98c..cff57fa 100644
+--- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+@@ -3788,7 +3788,9 @@ void ggml_hexagon_session::allocate(const ggml_hexagon_device_config & config) n
+     char session_uri[256];
+     {
+         char htp_uri[256];
+-        snprintf(htp_uri, sizeof(htp_uri), "file:///libggml-htp-v%u.so?htp_iface_skel_handle_invoke&_modver=1.0", opt_arch);
++        const char * skel_base_env = getenv("MCA_HTP_SKEL_NAME");
++        const char * skel_base = (skel_base_env != nullptr && skel_base_env[0] != '\0') ? skel_base_env : "libggml-htp";
++        snprintf(htp_uri, sizeof(htp_uri), "file:///%s-v%u.so?htp_iface_skel_handle_invoke&_modver=1.0", skel_base, opt_arch);
+ 
+         struct remote_rpc_get_uri u = {};
+         u.session_id      = this->session_id;

@@ -1,0 +1,238 @@
+# Source: src/model/diffusion/wan.hpp and src/core/ggml_runner.cpp
+# Change: debug-only, env-gated (MCA_WAN_TENSOR_PROBE / MCA_WAN_TENSOR_STATS) per-stage tensor
+#         capture: patch embedding, time embedding e0, block 0 modulation inputs, q/k/v, rope
+#         attention output, self/cross/FFN outputs, every block output, head and final latent.
+#         ggml_runner prints compact sum/sumsq/absmax stats for each captured tensor.
+# Why:    P3 needed a CPU-vs-HTP comparison point-by-point. With this probe the first diverging
+#         stage was isolated to block 0 modulate_mul/modulate_add (wan.e, wan.e0, es0/es1 and
+#         LayerNorm output were bit-identical; norm1 after modulation differed). Not compiled
+#         into production behaviour unless the env vars are set.
+--- a/src/model/diffusion/wan.hpp
++++ b/src/model/diffusion/wan.hpp
+@@ -2,8 +2,10 @@
+ #define __SD_MODEL_DIFFUSION_WAN_HPP__
+ 
+ #include <cinttypes>
++#include <cstdlib>
+ #include <map>
+ #include <memory>
++#include <string>
+ #include <utility>
+ #include "core/ggml_extend_backend.h"
+ #include "core/ggml_tensor_utils.h"
+@@ -18,6 +20,27 @@
+ 
+     constexpr int WAN_GRAPH_SIZE = 10240;
+ 
++    // Debug-only (MCA_WAN_TENSOR_PROBE): capture per-block hidden states so the same
++    // graph can be run on CPU and HTP and compared stage by stage.
++    inline bool wan_tensor_probe_enabled() {
++        static const bool enabled = std::getenv("MCA_WAN_TENSOR_PROBE") != nullptr;
++        return enabled;
++    }
++
++    inline int& wan_probe_block_index() {
++        static int index = -1;
++        return index;
++    }
++
++    inline std::string& wan_probe_tag() {
++        static std::string tag;
++        return tag;
++    }
++
++    inline bool wan_probe_block0() {
++        return wan_tensor_probe_enabled() && wan_probe_block_index() == 0;
++    }
++
+     struct WanConfig {
+         std::string model_type                 = "t2v";
+         std::tuple<int, int, int> patch_size   = {1, 2, 2};
+@@ -138,13 +161,26 @@
+             k      = norm_k->forward(ctx, k);
+             auto v = v_proj->forward(ctx, x);  // [N, n_token, n_head*d_head]
+ 
++            const bool probe = wan_probe_block0();
++            if (probe) {
++                ctx->capture_tensor(wan_probe_tag() + ".q", q);
++                ctx->capture_tensor(wan_probe_tag() + ".k", k);
++                ctx->capture_tensor(wan_probe_tag() + ".v", v);
++            }
++
+             q = ggml_reshape_4d(ctx->ggml_ctx, q, head_dim, num_heads, n_token, N);  // [N, n_token, n_head, d_head]
+             k = ggml_reshape_4d(ctx->ggml_ctx, k, head_dim, num_heads, n_token, N);  // [N, n_token, n_head, d_head]
+             v = ggml_reshape_4d(ctx->ggml_ctx, v, head_dim, num_heads, n_token, N);  // [N, n_token, n_head, d_head]
+ 
+             x = Rope::attention(ctx, q, k, v, pe, mask);  // [N, n_token, dim]
++            if (probe) {
++                ctx->capture_tensor(wan_probe_tag() + ".attn", x);
++            }
+ 
+             x = o_proj->forward(ctx, x);  // [N, n_token, dim]
++            if (probe) {
++                ctx->capture_tensor(wan_probe_tag() + ".o", x);
++            }
+             return x;
+         }
+     };
+@@ -356,16 +392,34 @@
+ 
+             // self-attention
+             auto y = norm1->forward(ctx, x);
++            const bool probe = wan_probe_block0();
++            if (probe) {
++                ctx->capture_tensor("b0.norm1_raw", y);
++                ctx->capture_tensor("b0.es0", es[0]);
++                ctx->capture_tensor("b0.es1", es[1]);
++            }
+             y      = ggml_add(ctx->ggml_ctx, y, modulate_mul(ctx->ggml_ctx, y, es[1]));
+             y      = modulate_add(ctx->ggml_ctx, y, es[0]);
++            if (probe) {
++                ctx->capture_tensor("b0.norm1", y);
++                wan_probe_tag() = "b0.self";
++            }
+             y      = self_attn->forward(ctx, y, pe);
++            if (probe) {
++                ctx->capture_tensor("b0.self_out", y);
++            }
+ 
+             x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[2]));
++            if (probe) {
++                ctx->capture_tensor("b0.res1", x);
++            }
+ 
+             // cross-attention
+-            x = ggml_add(ctx->ggml_ctx,
+-                         x,
+-                         cross_attn->forward(ctx, norm3->forward(ctx, x), context, context_img_len));
++            auto cross_out = cross_attn->forward(ctx, norm3->forward(ctx, x), context, context_img_len);
++            if (probe) {
++                ctx->capture_tensor("b0.cross_out", cross_out);
++            }
++            x = ggml_add(ctx->ggml_ctx, x, cross_out);
+ 
+             // ffn
+             y = norm2->forward(ctx, x);
+@@ -375,8 +429,14 @@
+             y = ffn_0->forward(ctx, y);
+             y = ggml_ext_gelu(ctx->ggml_ctx, y, true);
+             y = ffn_2->forward(ctx, y);
++            if (probe) {
++                ctx->capture_tensor("b0.ffn2", y);
++            }
+ 
+             x = ggml_add(ctx->ggml_ctx, x, modulate_mul(ctx->ggml_ctx, y, es[5]));
++            if (probe) {
++                ctx->capture_tensor("b0.block_out", x);
++            }
+ 
+             return x;
+         }
+@@ -675,11 +735,17 @@
+             e      = time_embedding_0->forward(ctx, e);
+             e      = ggml_silu_inplace(ctx->ggml_ctx, e);
+             e      = time_embedding_2->forward(ctx, e);  // [N, dim] or [N, T, dim]
++            if (wan_tensor_probe_enabled()) {
++                ctx->capture_tensor("wan.e", e);
++            }
+ 
+             // time_projection
+             auto e0 = ggml_silu(ctx->ggml_ctx, e);
+             e0      = time_projection_1->forward(ctx, e0);
+             e0      = ggml_reshape_4d(ctx->ggml_ctx, e0, e0->ne[0] / 6, 6, e0->ne[1], e0->ne[2]);  //  [N, 6, dim] or [N, T, 6, dim]
++            if (wan_tensor_probe_enabled()) {
++                ctx->capture_tensor("wan.e0", e0);
++            }
+ 
+             context = text_embedding_0->forward(ctx, context);
+             context = ggml_ext_gelu(ctx->ggml_ctx, context);
+@@ -705,6 +771,9 @@
+                 c = ggml_ext_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, c, 1, 0, 2, 3));  // [N, t_len*h_len*w_len, dim]
+             }
+             sd::ggml_graph_cut::mark_graph_cut(x, "wan.prelude", "x");
++            if (wan_tensor_probe_enabled()) {
++                ctx->capture_tensor("wan.emb", x);
++            }
+             // sd::ggml_graph_cut::mark_graph_cut(e, "wan.prelude", "e");
+             // sd::ggml_graph_cut::mark_graph_cut(e0, "wan.prelude", "e0");
+             // sd::ggml_graph_cut::mark_graph_cut(context, "wan.prelude", "context");
+@@ -717,6 +786,7 @@
+             for (int i = 0; i < config.num_layers; i++) {
+                 auto block = std::dynamic_pointer_cast<WanAttentionBlock>(blocks["blocks." + std::to_string(i)]);
+ 
++                wan_probe_block_index() = i;
+                 x = block->forward(ctx, x, e0, pe, context, context_img_len);
+ 
+                 auto iter = config.vace_layers_mapping.find(i);
+@@ -732,12 +802,18 @@
+                     x           = ggml_add(ctx->ggml_ctx, x, c_skip);
+                 }
+                 sd::ggml_graph_cut::mark_graph_cut(x, "wan.blocks." + std::to_string(i), "x");
++                if (wan_tensor_probe_enabled()) {
++                    ctx->capture_tensor("wan.blk." + std::to_string(i), x);
++                }
+                 if (c != nullptr) {
+                     sd::ggml_graph_cut::mark_graph_cut(c, "wan.blocks." + std::to_string(i), "c");
+                 }
+             }
+ 
+             x = head->forward(ctx, x, e);  // [N, t_len*h_len*w_len, pt*ph*pw*out_dim]
++            if (wan_tensor_probe_enabled()) {
++                ctx->capture_tensor("wan.head", x);
++            }
+ 
+             return x;
+         }
+@@ -789,6 +865,10 @@
+             out = ggml_ext_slice(ctx->ggml_ctx, out, 1, 0, H);  // [N*C, T, H, W + pad_w]
+             out = ggml_ext_slice(ctx->ggml_ctx, out, 0, 0, W);  // [N*C, T, H, W]
+ 
++            if (wan_tensor_probe_enabled()) {
++                ctx->capture_tensor("wan.out", out);
++            }
++
+             return out;
+         }
+     };
+--- a/src/core/ggml_runner.cpp
++++ b/src/core/ggml_runner.cpp
+@@ -1,4 +1,6 @@
+ #include <algorithm>
++#include <cmath>
++#include <cstdlib>
+ #include <map>
+ #include <utility>
+ 
+@@ -782,7 +784,31 @@
+                 continue;
+             }
+             auto debug_tensor = make_sd_tensor_from_ggml<float>(tensor);
+-            print_sd_tensor(debug_tensor, false, entry.second.c_str());
++            if (std::getenv("MCA_WAN_TENSOR_STATS") != nullptr && !debug_tensor.empty()) {
++                double sum          = 0.0;
++                double sumsq        = 0.0;
++                float amax          = 0.f;
++                int64_t imax        = 0;
++                const float* values = debug_tensor.data();
++                for (int64_t i = 0; i < debug_tensor.numel(); ++i) {
++                    const float v = values[i];
++                    sum += v;
++                    sumsq += static_cast<double>(v) * v;
++                    if (std::fabs(v) > amax) {
++                        amax = std::fabs(v);
++                        imax = i;
++                    }
++                }
++                LOG_INFO("%s stats numel=%lld sum=%.7g sumsq=%.7g absmax=%.7g at %lld",
++                         entry.second.c_str(),
++                         static_cast<long long>(debug_tensor.numel()),
++                         sum,
++                         sumsq,
++                         static_cast<double>(amax),
++                         static_cast<long long>(imax));
++            } else {
++                print_sd_tensor(debug_tensor, false, entry.second.c_str());
++            }
+         }
+     }
+ 

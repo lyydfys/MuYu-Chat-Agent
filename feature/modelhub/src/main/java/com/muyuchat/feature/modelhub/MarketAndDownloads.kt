@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.designsystem.*
+
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -31,24 +33,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.ExpandMore
-import androidx.compose.material.icons.rounded.Search
-import androidx.compose.material.icons.rounded.UploadFile
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -72,6 +62,7 @@ import com.muyuchat.core.download.isLiteRtLmModelCandidate
 import com.muyuchat.core.download.isVisionModelCandidate
 import com.muyuchat.core.download.kindLabel
 import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun MarketSection(
@@ -95,8 +86,13 @@ internal fun MarketSection(
                     singleLine = true,
                     label = { Text("搜索模型") }
                 )
-                IconButton(onClick = { onSearchHubModels(true) }, enabled = !state.isBusy) {
-                    Icon(Icons.Rounded.Search, contentDescription = "搜索")
+                McaIconButton(
+                    contentDescription = "搜索",
+                    onClick = { onSearchHubModels(true) },
+                    enabled = !state.isBusy,
+                    glyphSize = McaIconSize.L,
+                ) {
+                    Icon(McaIcons.Search, contentDescription = null)
                 }
             }
         }
@@ -121,7 +117,7 @@ internal fun MarketSection(
                 }
             }
             item {
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = { onSearchHubModels(false) },
                     enabled = !state.isBusy && state.hubModels.size < state.hubTotalCount,
                     modifier = Modifier.fillMaxWidth(),
@@ -160,8 +156,8 @@ internal fun RemoteFilesSection(
             }
         }
         item {
-            Button(onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
-                Icon(Icons.Rounded.UploadFile, contentDescription = null, modifier = Modifier.size(18.dp))
+            McaButton(style = McaButtonStyle.Primary, onClick = onImportClick, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(999.dp)) {
+                Icon(McaIcons.UploadFile, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                 Spacer(Modifier.width(6.dp))
                 Text("导入本地推理引擎")
             }
@@ -178,8 +174,13 @@ internal fun RemoteFilesSection(
                     singleLine = true,
                     label = { Text("模型 ID 或链接") }
                 )
-                IconButton(onClick = onFetchRemoteFiles, enabled = !state.isBusy) {
-                    Icon(Icons.Rounded.Search, contentDescription = "查找远程推理文件")
+                McaIconButton(
+                    contentDescription = "查找远程推理文件",
+                    onClick = onFetchRemoteFiles,
+                    enabled = !state.isBusy,
+                    glyphSize = McaIconSize.L,
+                ) {
+                    Icon(McaIcons.Search, contentDescription = null)
                 }
             }
         }
@@ -194,8 +195,12 @@ internal fun RemoteFilesSection(
                     placeholder = { Text("文件名、路径、类型或来源") },
                     trailingIcon = {
                         if (fileFilter.isNotEmpty()) {
-                            IconButton(onClick = { fileFilter = "" }) {
-                                Icon(Icons.Rounded.Close, contentDescription = "清除筛选")
+                            McaIconButton(
+                                contentDescription = "清除筛选",
+                                onClick = { fileFilter = "" },
+                                glyphSize = McaIconSize.L,
+                            ) {
+                                Icon(McaIcons.Close, contentDescription = null)
                             }
                         }
                     }
@@ -289,7 +294,7 @@ internal fun DownloadProgressPanel(
                 )
                 Text(percentText, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
                 if (state.downloadStatus == DownloadStatus.RUNNING || state.downloadStatus == DownloadStatus.QUEUED) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = onPauseDownloads,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                         // W9 accessibility: keep the dense look while guaranteeing a >= 44dp target.
@@ -297,21 +302,23 @@ internal fun DownloadProgressPanel(
                     ) { Text("暂停", style = MaterialTheme.typography.labelMedium) }
                 }
                 if (state.downloadStatus == DownloadStatus.PAUSED || state.downloadStatus == DownloadStatus.FAILED) {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = onResumeDownloads,
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                         modifier = Modifier.heightIn(min = 44.dp)
                     ) { Text(if (state.downloadStatus == DownloadStatus.FAILED) "重试" else "继续",
                         style = MaterialTheme.typography.labelMedium) }
                 }
-                IconButton(
+                McaIconButton(
+                    contentDescription = "查看下载详情",
                     onClick = onShowDetails,
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.S,
                 ) {
                     Icon(
-                        imageVector = Icons.Rounded.ExpandMore,
-                        contentDescription = "查看下载详情",
-                        modifier = Modifier.size(18.dp)
+                        imageVector = McaIcons.ExpandMore,
+                        contentDescription = null,
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }
@@ -393,7 +400,7 @@ internal fun DownloadDetailsDialog(
     } else {
         state.downloadStatus.downloadStatusLabel()
     }
-    AlertDialog(
+    McaDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
@@ -447,24 +454,24 @@ internal fun DownloadDetailsDialog(
         },
         confirmButton = {
             if (state.downloadStatus == DownloadStatus.FAILED || state.downloadStatus == DownloadStatus.PAUSED) {
-                TextButton(onClick = onResumeDownloads) {
+                McaButton(style = McaButtonStyle.Text, onClick = onResumeDownloads) {
                     Text(if (state.downloadStatus == DownloadStatus.FAILED) "重试" else "继续")
                 }
             } else if (state.downloadStatus == DownloadStatus.DONE && !state.isBusy) {
-                TextButton(onClick = onOpenLocalModels) { Text("查看本地模型") }
+                McaButton(style = McaButtonStyle.Text, onClick = onOpenLocalModels) { Text("查看本地模型") }
             }
         },
         dismissButton = {
-            TextButton(onClick = {
+            McaButton(style = McaButtonStyle.Text, onClick = {
                 val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 clipboard.setPrimaryClip(ClipData.newPlainText("模型下载诊断", downloadDiagnostics(state)))
             }) {
                 // 行内图标统一 18dp，16dp 是全模块孤例
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(18.dp))
+                Icon(McaIcons.ContentCopy, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                 Spacer(Modifier.width(4.dp))
                 Text("复制诊断")
             }
-            TextButton(onClick = onDismiss) { Text("关闭") }
+            McaButton(style = McaButtonStyle.Text, onClick = onDismiss) { Text("关闭") }
         }
     )
 }
@@ -545,10 +552,10 @@ private fun HubModelCard(
             Text("该模型可能需要登录或访问授权。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onShowFiles, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+            McaButton(style = McaButtonStyle.Primary, onClick = onShowFiles, enabled = enabled, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
                 Text("读取文件")
             }
-            OutlinedButton(onClick = onOpenPage, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
+            McaButton(style = McaButtonStyle.Outlined, onClick = onOpenPage, modifier = Modifier.weight(1f), shape = RoundedCornerShape(999.dp)) {
                 Text("打开页面")
             }
         }
@@ -594,8 +601,8 @@ private fun RemoteFileCard(file: RemoteModelFile, enabled: Boolean, onDownload: 
         } else if (isLiteRtLm) {
             Text("这是独立 LiteRT-LM 容器，不是 GGUF；下载后会按 LiteRT-LM 运行时注册。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Button(onClick = onDownload, enabled = enabled && isDownloadableModel, shape = RoundedCornerShape(999.dp)) {
-            Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+        McaButton(style = McaButtonStyle.Primary, onClick = onDownload, enabled = enabled && isDownloadableModel, shape = RoundedCornerShape(999.dp)) {
+            Icon(McaIcons.Download, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
             Spacer(Modifier.width(6.dp))
             Text(
                 when {

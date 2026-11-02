@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import java.io.File
 import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * T2B22-T5（b 工位）拆片：image_models 扫描/发现与 catalog 持久化入口（discoverInstalledImageBundles /
@@ -40,21 +41,34 @@ internal fun LocalImageModelStore.discoverInstalledImageBundles(persisted: List<
                 // Only a manifest that is a DIRECT child may authorize this directory's
                 // identity; a descendant bundle's manifest belongs to that descendant.
                 val hasDirectManifest = bundleRoot.directImageManifestFile() != null
-                val manifest = if (hasDirectManifest) {
-                    runCatching {
-                        when (val inspection = inspectLocalImageBundleManifestFromRoot(bundleRoot)) {
-                            is LocalImageBundleManifestInspection.Ready -> inspection.manifest
-                            else -> null
-                        }
-                    }.getOrNull()
+                val inspection = if (hasDirectManifest) {
+                    runCatching { inspectLocalImageBundleManifestFromRoot(bundleRoot) }
+                        .getOrNull() ?: LocalImageBundleManifestInspection.Undeclared
+                } else {
+                    LocalImageBundleManifestInspection.Undeclared
+                }
+                val manifest = (inspection as? LocalImageBundleManifestInspection.Ready)?.manifest
+                val rawManifest = if (hasDirectManifest) {
+                    runCatching { JSONObject(bundleRoot.directImageManifestFile()!!.readText(Charsets.UTF_8)) }
+                        .getOrNull()
                 } else {
                     null
                 }
+                // Keep a malformed declared MediaTek package visible as an incompatible
+                // model so readiness can report the concrete contract/file error. Never
+                // fall through to the generic GGUF/CPU Anima route.
+                val declaredMediaTek = rawManifest?.optString("runtime")
+                    ?.equals(LocalImageRuntime.MEDIATEK_NEURON.name, ignoreCase = true) == true
                 // A declared diffusion primary remains authoritative when missing. Falling
                 // back to the VAE/encoder in that directory creates a second broken model.
                 // Persisted rows keep the missing-file diagnosis; a complete retained copy
                 // can take over during normalization without inheriting the old native proof.
-                val declaredPrimary = manifest?.declaredPrimaryPath
+                val declaredPrimaryPath = manifest?.declaredPrimaryPath
+                    ?: if (declaredMediaTek) {
+                        rawManifest?.optJSONArray("components")?.firstComponentPath("DIFFUSION")
+                            ?: rawManifest?.optString("primary")?.takeIf(String::isNotBlank)
+                    } else null
+                val declaredPrimary = declaredPrimaryPath
                     ?.let(bundleRoot::safeDescendantOrNull) ?: manifest?.primaryFile
                 if (declaredPrimary != null && (!declaredPrimary.isFile || declaredPrimary.length() <= 0L)) {
                     return@runCatching null
@@ -94,8 +108,11 @@ internal fun LocalImageModelStore.discoverInstalledImageBundles(persisted: List<
                         primaryCanonical.path.startsWith(otherPath + File.separator)
                 }
                 if (!hasDirectManifest && ownedByDescendantBundle) return@runCatching null
-                val runtime = manifest?.runtime ?: inferLocalImageRuntimeForBundle(bundleRoot, primary, discovery = true)
+                val runtime = manifest?.runtime
+                    ?: if (declaredMediaTek) LocalImageRuntime.MEDIATEK_NEURON
+                    else inferLocalImageRuntimeForBundle(bundleRoot, primary, discovery = true)
                 if (runtime != LocalImageRuntime.QNN_HTP && runtime != LocalImageRuntime.MNN_DIFFUSION &&
+                    runtime != LocalImageRuntime.MEDIATEK_NEURON &&
                     runtime != LocalImageRuntime.STABLE_DIFFUSION_CPP
                 ) return@runCatching null
                 LocalImageModelRecord(
@@ -136,6 +153,13 @@ internal fun localImageBundleHasPositiveImageEvidence(bundleRoot: File, primary:
     ) {
         return true
     }
+    val declaresMediaTekImage = root.directImageManifestFile()?.let { file ->
+        runCatching {
+            JSONObject(file.readText(Charsets.UTF_8)).optString("runtime")
+                .equals(LocalImageRuntime.MEDIATEK_NEURON.name, ignoreCase = true)
+        }.getOrDefault(false)
+    } == true
+    if (declaresMediaTekImage && primary.extension.lowercase() in READINESS_MODEL_EXTENSIONS) return true
     if (primary.name.isPrimaryImageModelName()) return true
     val familyHint = LocalImageModelFamily.infer(root.name)
     if (familyHint != LocalImageModelFamily.CUSTOM &&

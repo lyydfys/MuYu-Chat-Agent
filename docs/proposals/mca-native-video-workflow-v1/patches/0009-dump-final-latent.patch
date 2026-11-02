@@ -1,0 +1,67 @@
+# Source: src/pipeline/video.cpp
+# Change: add a compile-time-gated (MCA_DUMP_FINAL_LATENT) final-latent dump: writes the init latent and the post-sampling latent as self-describing f32 files (magic+ndim+numel+shape+data) to the path in MCA_DUMP_LATENT. Not compiled into production builds.
+# Why:    P3 needs a CPU-vs-HTP element-wise latent diff; the public ABI only exposes decoded frames, so the dump must live inside the engine before decode_video_outputs.
+--- a/src/pipeline/video.cpp
++++ b/src/pipeline/video.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <cstdio>
+ #include <cstdlib>
+ #include <optional>
+ 
+@@ -18,6 +19,34 @@
+ 
+ namespace sd::pipeline {
+ 
++#if defined(MCA_DUMP_FINAL_LATENT)
++    // Debug-only: writes a self-describing f32 tensor (magic + ndim + numel + shape + payload)
++    // so a host-side tool can diff CPU and HTP latents of the same run parameters.
++    static void dump_latent_tensor(const sd::Tensor<float>& tensor, const char* path) {
++        if (path == nullptr || path[0] == '\0' || tensor.empty()) {
++            return;
++        }
++        FILE* fp = fopen(path, "wb");
++        if (fp == nullptr) {
++            LOG_WARN("cannot open latent dump '%s'", path);
++            return;
++        }
++        const char magic[8] = {'M', 'C', 'A', 'L', 'A', 'T', '0', '1'};
++        const int64_t ndim  = tensor.dim();
++        const int64_t numel = tensor.numel();
++        fwrite(magic, 1, sizeof(magic), fp);
++        fwrite(&ndim, sizeof(ndim), 1, fp);
++        fwrite(&numel, sizeof(numel), 1, fp);
++        fwrite(tensor.shape().data(), sizeof(int64_t), static_cast<size_t>(ndim), fp);
++        fwrite(tensor.data(), sizeof(float), static_cast<size_t>(numel), fp);
++        fclose(fp);
++        LOG_INFO("dumped latent '%s' ndim=%d numel=%lld",
++                 path,
++                 static_cast<int>(ndim),
++                 static_cast<long long>(numel));
++    }
++#endif
++
+     static sd_audio_t* waveform_to_sd_audio(const StableDiffusionGGML* sd,
+                                             const sd::Tensor<float>& waveform) {
+         if (sd == nullptr || waveform.empty()) {
+@@ -1957,6 +1986,18 @@
+         int64_t latent_end = ggml_time_ms();
+         LOG_INFO("generating latent video completed, taking %.2fs", (latent_end - latent_start) * 1.0f / 1000);
+ 
++#if defined(MCA_DUMP_FINAL_LATENT)
++        {
++            const char* dump_path = getenv("MCA_DUMP_LATENT");
++            if (dump_path != nullptr && dump_path[0] != '\0') {
++                char init_path[1024];
++                snprintf(init_path, sizeof(init_path), "%s.init", dump_path);
++                dump_latent_tensor(x_t, init_path);
++                dump_latent_tensor(final_latent, dump_path);
++            }
++        }
++#endif
++
+         sd_audio_t* generated_audio = nullptr;
+         if ((sd_version_is_ltxav(sd->version) || sd_version_is_minimax_h3(sd->version)) &&
+             latents.audio_length > 0 &&

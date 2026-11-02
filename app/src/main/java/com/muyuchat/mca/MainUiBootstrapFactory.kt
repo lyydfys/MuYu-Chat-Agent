@@ -9,7 +9,6 @@ import com.muyuchat.core.deviceprofile.DeviceProfileReader
 import com.muyuchat.core.download.ModelScopeClient
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.LocalChatRuntime
-import com.muyuchat.mca.composition.McaAppContainer
 
 internal data class MainUiBootstrapResult(
     val initialDeviceProfile: DeviceProfile,
@@ -21,7 +20,10 @@ internal data class MainUiBootstrapResult(
 internal object MainUiBootstrapFactory {
     fun create(
         application: Application,
-        container: McaAppContainer,
+        globalChatAppearanceStore: GlobalChatAppearanceStore,
+        localImageUpscalerStore: LocalImageUpscalerStore,
+        webSearchStore: WebSearchStore,
+        webSearchDiagnosticStore: WebSearchDiagnosticStore,
         isRuntimeAvailable: (LocalChatRuntime) -> Boolean,
         modelScopeClient: ModelScopeClient,
         agentLogger: AgentDecisionLogger,
@@ -51,7 +53,7 @@ internal object MainUiBootstrapFactory {
         val initialAssistantMemories = initialAssistants.flatMap { assistant ->
             chatSessionStore.loadMemories(assistant.id)
         }
-        val initialGlobalChatAppearance = container.globalChatAppearanceStore.load()
+        val initialGlobalChatAppearance = globalChatAppearanceStore.load()
         val initialWorldBooks = worldBookStore.load()
         val initialKnowledgeBases = knowledgeBaseStore.loadBases()
         val initialStartupSession = initialChatSessions
@@ -76,7 +78,7 @@ internal object MainUiBootstrapFactory {
         val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
         val initialLocalImageModels = if (skipInitialModelDiscovery) emptyList() else localImageModelStore.loadModels(discover = false)
         val initialLocalImageLoras = localImageLoraStore.load()
-        val initialLocalImageUpscalers = container.localImageUpscalerStore.load()
+        val initialLocalImageUpscalers = localImageUpscalerStore.load()
         val initialSelectedLocalImageUpscalerId = imageUpscalerPreferences
             .getString(IMAGE_UPSCALER_SELECTED_ID, null)
             ?.takeIf { id -> initialLocalImageUpscalers.any { it.id == id } }
@@ -107,8 +109,8 @@ internal object MainUiBootstrapFactory {
             .firstOrNull { it.id == initialSelectedCloudChatModelId && it.kind == CloudModelKind.CHAT }
             ?.toChatConfig()
             ?: cloudApiStore.load()
-        val initialWebSearchConfig = container.webSearchStore.load()
-        val initialWebSearchDiagnostics = container.webSearchDiagnosticStore.load()
+        val initialWebSearchConfig = webSearchStore.load()
+        val initialWebSearchDiagnostics = webSearchDiagnosticStore.load()
         val initialSelectedBackend = initialStartupSession
             ?.modelMode
             ?.toChatBackendOrNull()

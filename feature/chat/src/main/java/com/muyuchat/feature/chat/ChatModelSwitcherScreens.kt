@@ -1,11 +1,13 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
-import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,9 +16,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -30,16 +29,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.muyuchat.core.designsystem.McaMotion
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S14：从 ChatChromeScreens.kt 等值移出的模型切换/推理模式簇。
 // 原样逐字迁移，未做行为改动；双向跨区入口按协议提升 internal（随迁 2 项 + 保留区 2 项）。
@@ -61,12 +63,18 @@ internal fun ModelSwitcherDropdown(
     onOpenModels: () -> Unit
 ) {
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
     var reasoningExpanded by rememberSaveable { mutableStateOf(false) }
     var generationParamsDialogVisible by rememberSaveable { mutableStateOf(false) }
     var sourceExpanded by rememberSaveable { mutableStateOf<InferenceSource?>(null) }
     val localModels = models.filterNot { it.cloud }
     val cloudModels = models.filter { it.cloud }
     val activeReasoningMode = if (selectedModelIsCloud) ReasoningMode.STANDARD else reasoningMode
+    val reasoningChevronRotation by animateFloatAsState(
+        targetValue = if (reasoningExpanded) -90f else 0f,
+        animationSpec = McaMotion.press,
+        label = "reasoningChevronRotation"
+    )
     LaunchedEffect(selectedModelIsCloud) {
         if (selectedModelIsCloud) reasoningExpanded = false
     }
@@ -76,7 +84,8 @@ internal fun ModelSwitcherDropdown(
         shape = RoundedCornerShape(30.dp),
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
-        shadowElevation = 18.dp,
+        shadowElevation = 10.dp,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.60f)),
         modifier = Modifier
             .widthIn(min = 238.dp, max = 320.dp)
             .clip(RoundedCornerShape(30.dp))
@@ -146,7 +155,7 @@ internal fun ModelSwitcherDropdown(
                         sourceExpanded = null
                         if (selectedModelIsCloud) {
                             reasoningExpanded = false
-                            Toast.makeText(context, CLOUD_REASONING_LOCKED_TIP, Toast.LENGTH_SHORT).show()
+                            notify(CLOUD_REASONING_LOCKED_TIP)
                             onCloudReasoningModeLocked()
                         } else {
                             reasoningExpanded = !reasoningExpanded
@@ -169,19 +178,19 @@ internal fun ModelSwitcherDropdown(
                         )
                         if (!selectedModelIsCloud) {
                             Icon(
-                                imageVector = Icons.Default.KeyboardArrowDown,
+                                imageVector = McaIcons.KeyboardArrowDown,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
-                                    .rotate(if (reasoningExpanded) -90f else 0f)
-                                    .size(18.dp)
+                                    .graphicsLayer { rotationZ = reasoningChevronRotation }
+                                    .size(McaIconSize.S)
                             )
                         }
                     }
                 }
                 CapsuleMenuRow(
                     leading = {
-                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
+                        Icon(McaIcons.Settings, contentDescription = null, modifier = Modifier.size(McaIconSize.Optical.Menu), tint = MaterialTheme.colorScheme.onSurface)
                     },
                     onClick = {
                         sourceExpanded = null
@@ -205,7 +214,7 @@ internal fun ModelSwitcherDropdown(
                 }
                 CapsuleMenuRow(
                     leading = {
-                        Icon(Icons.Default.Settings, contentDescription = null, modifier = Modifier.size(21.dp), tint = MaterialTheme.colorScheme.onSurface)
+                        Icon(McaIcons.Settings, contentDescription = null, modifier = Modifier.size(McaIconSize.Optical.Menu), tint = MaterialTheme.colorScheme.onSurface)
                     },
                     onClick = onOpenModels
                 ) {

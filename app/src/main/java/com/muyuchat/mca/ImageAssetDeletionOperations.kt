@@ -21,7 +21,7 @@ import kotlinx.coroutines.sync.withLock
 internal interface ImageAssetDeletionPort {
     // R3/S25: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
     val uiState: StateFlow<MainUiState>
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ImageAssetDeletionFields) -> ImageAssetDeletionFields)
     val scope: CoroutineScope
     val imageLibraryMutationMutex: Mutex
     val imageUpscaleOwner: ImageUpscaleOwner

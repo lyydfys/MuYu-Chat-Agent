@@ -134,7 +134,9 @@ internal class ImagesWorkspaceOverlayBindings(
     generationImageEditorRequestVar: ImagesWorkspaceBoundVar<GenerationImageEditorRequest?>,
 ) {
 
-    val enqueueImagePrompt: (String) -> Unit = { prompt -> imagesWorkspaceEnqueueImagePrompt(this, prompt) }
+    val enqueueImagePrompt: (String, (String) -> Unit) -> Unit = { prompt, notify ->
+        imagesWorkspaceEnqueueImagePrompt(this, prompt, notify)
+    }
 
     var imagePrompt by imagePromptVar
     var imageValidationError by imageValidationErrorVar

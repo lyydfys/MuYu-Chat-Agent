@@ -44,7 +44,7 @@ internal fun AssistantRecord.toGenerationParams(defaults: GenerationParams): Gen
     assistantGenerationParamsFromJson(paramsJson, defaults, systemPrompt)
 
 internal fun saveAssistantProfileFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantProfileFields>,
     assistantStore: AssistantStore,
     application: Application,
     rejectWhileConversationMutationInProgress: () -> Boolean,
@@ -195,7 +195,7 @@ internal fun saveAssistantProfileFor(
 }
 
 internal fun deleteAssistantFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantProfileFields>,
     assistantStore: AssistantStore,
     modelGenerationProfileStore: ModelGenerationProfileStore,
     chatSessionStore: ChatSessionStore,
@@ -285,7 +285,7 @@ internal fun deleteAssistantFor(
 }
 
 internal suspend fun finishCharacterCardImportFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantProfileFields>,
     assistantStore: AssistantStore,
     worldBookStore: WorldBookStore,
     chatSessionStore: ChatSessionStore,

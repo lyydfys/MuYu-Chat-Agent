@@ -46,18 +46,24 @@ class ConversationMutationAtomicityContractTest {
 
     @Test
     fun regenerationStartsOnlyFromTheCommittedMutationCallback() {
-        val body = functionBody(mainViewModelSource(), "regenerateLastResponse")
-        assertTrue(body.contains("val generationReservation = reserveUiGenerationStart() ?: return"))
+        // D02: the transaction now belongs to the replay owner; pin the VM's real wiring too.
+        val entry = functionBody(mainViewModelSource(), "regenerateLastResponse")
+        assertTrue(entry.contains("regenerateConversationResponseFor("))
+        assertTrue(entry.contains("reserveGeneration = ::reserveUiGenerationStart"))
+        assertTrue(entry.contains("persistConversationMutation(sessions, rollback, onCommitted = onCommitted, onCommitFailed = onCommitFailed)"))
+        val body = functionBodyOf(movedOperationSource("regenerateLastResponse"), "fun regenerateConversationResponseFor(")
+        assertTrue(body.contains("val reservation = reserveGeneration() ?: return"))
         assertTrue(
             body.contains(
-                "onCommitted = { startGeneration(kept.dropLast(1), generationReservation) }"
+                "{ startGeneration(kept.dropLast(1), reservation) }"
             )
         )
         assertTrue(
             body.contains(
-                "onCommitFailed = { chatRuns.cancelPending(generationReservation) }"
+                "{ cancelPendingReservation(reservation) }"
             )
         )
+        assertInOrder(body, "val reservation = reserveGeneration()", "store.updateWithResult", "val persistenceJob = persistMutation(", "{ startGeneration(kept.dropLast(1), reservation) }")
         assertFalse(body.contains("persistChatSessions("))
     }
 
@@ -95,6 +101,7 @@ class ConversationMutationAtomicityContractTest {
      */
     private fun movedOperationSource(functionName: String): String {
         val relative = when (functionName) {
+            "regenerateLastResponse" -> "src/main/java/com/muyuchat/mca/ConversationReplayOperations.kt"
             "selectChatSession" -> "src/main/java/com/muyuchat/mca/SelectChatSessionOperations.kt"
             "stopGeneration" -> "src/main/java/com/muyuchat/mca/ChatStopGenerationOperations.kt"
             "deleteLastConversationTurn", "sendMessage" -> "src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt"
@@ -114,8 +121,16 @@ class ConversationMutationAtomicityContractTest {
         }
     }
 
-    private fun functionBody(source: String, functionName: String): String =
-        functionBodyOf(source, "fun $functionName(")
+    private fun functionBody(source: String, functionName: String): String {
+        if (functionName == "regenerateLastResponse") {
+            // The entry is an expression delegate followed by its explicitly wired replay call.
+            val start = source.indexOf("fun regenerateLastResponse()")
+            val end = source.indexOf("fun deleteMessageAt(", start)
+            assertTrue("Missing real replay entry wiring", start >= 0 && end > start)
+            return source.substring(start, end)
+        }
+        return functionBodyOf(source, "fun $functionName(")
+    }
 
     private fun functionBodyOf(source: String, declaration: String): String {
         val declarationIndex = source.indexOf(declaration)

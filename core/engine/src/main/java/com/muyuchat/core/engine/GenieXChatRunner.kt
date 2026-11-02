@@ -13,6 +13,7 @@ import com.geniex.sdk.bean.VlmCreateInput
 import com.muyuchat.core.modelstore.QairtBundleReadiness
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 
@@ -24,7 +25,7 @@ internal class GenieXChatRunner(
     internal val defaultBackendDevices: String,
     private val appContext: Context? = null,
     private val clock: RuntimeMonotonicClock = SystemRuntimeMonotonicClock
-) : LocalChatRunner {
+) : LocalChatRunner, NativeQuiescenceProbe {
     override val isAvailable: Boolean
         get() = appContext != null && classesPresent && sdkInitError == null
     override val loadError: Throwable?
@@ -68,6 +69,8 @@ internal class GenieXChatRunner(
     @Volatile internal var lastPromptEndsInsideReasoning = false
     private val lifecycleLock = Any()
     internal val stopRequested = AtomicBoolean(false)
+    /** Non-zero while a begin/stop SDK call has not returned to the caller thread. */
+    private val nativeCallsInFlight = AtomicInteger(0)
     @Volatile internal var queue = StreamingChunkQueue()
     internal var params: GenerationParams = GenerationParams()
     internal var loadParams: LoadParams = LoadParams()
@@ -227,10 +230,7 @@ internal class GenieXChatRunner(
                     nSeqMax = 0,
                     nGpuLayers = 0,
                     chat_template_path = "",
-                    chat_template_content = "",
-                    max_tokens = 0,
-                    enable_thinking = false,
-                    verbose = false
+                    chat_template_content = ""
                 )
             } else {
                 val threads = loadParams.nThreads.coerceAtLeast(1)
@@ -243,10 +243,7 @@ internal class GenieXChatRunner(
                     nSeqMax = 1,
                     nGpuLayers = gpuLayers,
                     chat_template_path = "",
-                    chat_template_content = "",
-                    max_tokens = 0,
-                    enable_thinking = false,
-                    verbose = false
+                    chat_template_content = ""
                 )
             }
             val runtimeId = managed.runtimeId.ifBlank { requestedRuntimeId }
@@ -261,7 +258,6 @@ internal class GenieXChatRunner(
             val engineClassName: String
             if (managed.modelType == ModelType.VLM) {
                 createInput = VlmCreateInput(
-                    model_name = managed.modelName,
                     model_path = managed.modelPath,
                     mmproj_path = managed.mmprojPath.orEmpty(),
                     config = config,
@@ -272,7 +268,6 @@ internal class GenieXChatRunner(
                 engineClassName = "com.geniex.sdk.jni.Vlm"
             } else {
                 createInput = LlmCreateInput(
-                    model_name = managed.modelName,
                     model_path = managed.modelPath,
                     tokenizer_path = managed.tokenizerPath,
                     config = config,
@@ -479,7 +474,12 @@ internal class GenieXChatRunner(
     override fun sessionRecoveryMessage(): String? = nativeReleaseFailure
 
     override fun beginCompletion(messagesJson: String, paramsJson: String): Int = synchronized(lifecycleLock) {
-        beginCompletionLocked(messagesJson, paramsJson)
+        nativeCallsInFlight.incrementAndGet()
+        try {
+            beginCompletionLocked(messagesJson, paramsJson)
+        } finally {
+            nativeCallsInFlight.decrementAndGet()
+        }
     }
 
     override fun generateNextChunk(): String? {
@@ -489,9 +489,25 @@ internal class GenieXChatRunner(
     override fun requestStop() {
         stopRequested.set(true)
         queue.cancel()
-        synchronized(lifecycleLock) {
-            requestStopLocked()
+        nativeCallsInFlight.incrementAndGet()
+        try {
+            synchronized(lifecycleLock) {
+                requestStopLocked()
+            }
+        } finally {
+            nativeCallsInFlight.decrementAndGet()
         }
+    }
+
+    /**
+     * GenieX generation runs on its own native thread. [generateThread] is alive exactly while the
+     * native `generate` call has not returned; an unconfirmed native release is a deliberate fence.
+     */
+    override fun nativeGenerationActivity(): NativeGenerationActivity = when {
+        nativeReleasePending -> NativeGenerationActivity.ACTIVE
+        nativeCallsInFlight.get() > 0 -> NativeGenerationActivity.ACTIVE
+        generateThread?.isAlive == true -> NativeGenerationActivity.ACTIVE
+        else -> NativeGenerationActivity.IDLE
     }
 
     override fun prefillProgress(): TokenProgress? {

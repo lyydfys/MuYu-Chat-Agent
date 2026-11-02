@@ -10,7 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 internal fun setAssistantImageToolAutoApprovalFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationStatusFields>,
     scope: CoroutineScope,
     chatImageToolAuthorizationStore: ChatImageToolAuthorizationStore,
     chatImageToolPermissionUiState: () -> ChatImageToolPermissionUiState,
@@ -51,9 +51,9 @@ internal fun setAssistantImageToolAutoApprovalFor(
         store.update { current ->
             val currentChatIdentity = chatImageToolChatModelIdentity(
                 current.selectedCloudChatModelId,
-                current.selectedChatCloudConfig()?.normalized()
+                current.snapshot.selectedChatCloudConfig()?.normalized()
             )
-            val currentImageIdentity = current.chatImageModelBinding()?.authorizationIdentity()
+            val currentImageIdentity = current.snapshot.chatImageModelBinding()?.authorizationIdentity()
             if (current.activeChatSessionId != sessionId ||
                 currentChatIdentity != chatModelIdentity ||
                 currentImageIdentity != imageModelIdentity
@@ -77,7 +77,7 @@ internal fun setAssistantImageToolAutoApprovalFor(
 }
 
 internal suspend fun prepareAssistantImagePromptFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     cloudChatProvider: OpenAiCompatibleChatProvider,
     chatContextComposer: ChatContextComposer,
     prompt: String,
@@ -219,7 +219,7 @@ internal suspend fun prepareAssistantImageNegativePromptFor(
 }
 
 internal fun setPendingAssistantToolFailureFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationMessageFields>,
     persistChatSessions: (List<ChatSessionRecord>) -> Unit,
     message: String
 ) {
@@ -253,7 +253,7 @@ internal fun setPendingAssistantToolFailureFor(
 }
 
 internal fun attachAssistantImageRequestToTimelineFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationMessageFields>,
     persistChatSessions: (List<ChatSessionRecord>) -> Unit,
     chatSessionId: String,
     request: ChatGeneratedImageRequest

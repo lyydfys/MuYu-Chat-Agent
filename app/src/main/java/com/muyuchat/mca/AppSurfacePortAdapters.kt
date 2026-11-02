@@ -11,7 +11,7 @@ import com.muyuchat.core.modelstore.ModelStoreRepository
  * R3-S35：聊天生图审批端口具名适配器（A 族第 4 端口）。
  */
 internal class ChatImageRequestApprovalPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ChatImageApprovalFields>,
     private val admission: RuntimeAdmissionState,
     private val imageGenerationOwnerProvider: () -> ImageGenerationOwner,
     private val chatImageRequestPortProvider: () -> ChatImageRequestPort,
@@ -23,7 +23,7 @@ internal class ChatImageRequestApprovalPortAdapter(
 ) : ChatImageRequestApprovalPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ChatImageApprovalFields) -> ChatImageApprovalFields) {
         store.update(transform)
     }
 
@@ -101,7 +101,7 @@ internal class ChatImageRequestApprovalPortAdapter(
  */
 internal class ManagedRuntimeReadinessPortAdapter(
     override val context: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ModelCatalogFields>,
     private val modelStore: ModelStoreRepository,
     private val localImageModelStore: LocalImageModelStore,
     private val refreshGate: ManagedRuntimeReadinessRefreshGate,
@@ -112,9 +112,8 @@ internal class ManagedRuntimeReadinessPortAdapter(
 ) : ManagedRuntimeReadinessPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override fun updateUiState(transform: (ModelCatalogFields) -> ModelCatalogFields): ModelCatalogFields =
+        store.updateAndGet(transform)
 
     override fun listLocalModels(): List<ModelManifest> = modelStore.listModels()
 
@@ -156,11 +155,11 @@ internal class ManagedRuntimeReadinessPortAdapter(
  */
 internal class AppUpdatePortAdapter(
     override val context: Application,
-    private val storeProvider: () -> UiStateStore
+    private val storeProvider: () -> UiStateWriter<AppUpdateFields>
 ) : AppUpdatePort {
     override fun uiState(): MainUiState = storeProvider().current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (AppUpdateFields) -> AppUpdateFields) {
         storeProvider().update(transform)
     }
 }
@@ -170,7 +169,7 @@ internal class AppUpdatePortAdapter(
  */
 internal class CloudModelConfigPortAdapter(
     private val application: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<CloudModelConfigFields>,
     override val cloudApiStore: CloudApiStore,
     override val cloudChatProvider: OpenAiCompatibleChatProvider,
     override val localImageModelStore: LocalImageModelStore,
@@ -179,9 +178,8 @@ internal class CloudModelConfigPortAdapter(
 ) : CloudModelConfigPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override fun updateUiState(transform: (CloudModelConfigFields) -> CloudModelConfigFields): CloudModelConfigFields =
+        store.updateAndGet(transform)
 
     override fun loadModelGenerationParams(
         backend: ChatBackend,
@@ -218,7 +216,7 @@ internal class CloudModelConfigPortAdapter(
  */
 internal class SelectChatSessionPortAdapter(
     private val application: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ConversationSelectionFields>,
     private val knowledgeBaseStore: KnowledgeBaseStore,
     private val assistantStore: AssistantStore,
     private val cloudApiStore: CloudApiStore,
@@ -234,7 +232,7 @@ internal class SelectChatSessionPortAdapter(
 ) : SelectChatSessionPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ConversationSelectionFields) -> ConversationSelectionFields) {
         store.update(transform)
     }
 

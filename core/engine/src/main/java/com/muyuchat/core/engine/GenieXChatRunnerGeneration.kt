@@ -67,6 +67,7 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
                     Long::class.javaPrimitiveType,
                     Array<VlmChatMessage>::class.java,
                     String::class.java,
+                    Boolean::class.javaPrimitiveType,
                     Boolean::class.javaPrimitiveType
                 )
                 val out = method.invoke(
@@ -74,7 +75,8 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
                     nativeHandle,
                     messages,
                     null,
-                    templateEnableThinking
+                    templateEnableThinking,
+                    true
                 )
                 formattedTemplateText(requireNotNull(out) { "GenieX VLM returned no chat template output." })
             }.getOrElse { error ->
@@ -107,6 +109,7 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
                     Array<ChatMessage>::class.java,
                     String::class.java,
                     Boolean::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
                     Boolean::class.javaPrimitiveType
                 )
                 val out = method.invoke(
@@ -115,6 +118,7 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
                     messages,
                     null,
                     templateEnableThinking,
+                    true,
                     true
                 )
                 val rendered = requireNonBlankGenieXTemplate(
@@ -149,13 +153,26 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
             name = "mca-${runtime.backendId}-generate"
         ) {
             runCatching {
-                val generate = current.javaClass.getDeclaredMethod(
-                    "generate",
-                    Long::class.javaPrimitiveType,
-                    String::class.java,
-                    GenerationConfig::class.java,
-                    LLMTokenCallback::class.java
-                )
+                val generate = if (activeModelType == ModelType.VLM) {
+                    current.javaClass.getDeclaredMethod(
+                        "generate",
+                        Long::class.javaPrimitiveType,
+                        String::class.java,
+                        GenerationConfig::class.java,
+                        LLMTokenCallback::class.java
+                    )
+                } else {
+                    current.javaClass.getDeclaredMethod(
+                        "generate",
+                        Long::class.javaPrimitiveType,
+                        String::class.java,
+                        IntArray::class.java,
+                        FloatArray::class.java,
+                        Int::class.javaPrimitiveType,
+                        GenerationConfig::class.java,
+                        LLMTokenCallback::class.java
+                    )
+                }
 
                 // One GenieX native generation attempt. The first few tokens are
                 // buffered (instead of streamed immediately) so a degenerate
@@ -228,7 +245,20 @@ internal fun GenieXChatRunner.beginCompletionLocked(messagesJson: String, params
                         paramsJson, config, templateEnableThinking, runtime,
                         attempt = if (isRescueAttempt) 2 else 1
                     ).toString()
-                    val returned = generate.invoke(current, nativeHandle, prompt, config, callback)
+                    val returned = if (activeModelType == ModelType.VLM) {
+                        generate.invoke(current, nativeHandle, prompt, config, callback)
+                    } else {
+                        generate.invoke(
+                            current,
+                            nativeHandle,
+                            prompt,
+                            null,
+                            null,
+                            0,
+                            config,
+                            callback
+                        )
+                    }
                     if (!sawCallbackChunk) {
                         extractGenieXResultText(returned)?.let { raw ->
                             ingestVisibleChunk(stripGenieXPromptEcho(raw, prompt))
@@ -408,7 +438,7 @@ internal fun GenieXChatRunner.genieXStatsJson(): String {
         .put("backendDevices", activeBackendDevices)
         .put(
             "chatRoleMode",
-            if (activeModelType == ModelType.LLM) "native_roles_geniex_0_3_12_mca1" else "native_roles"
+            if (activeModelType == ModelType.LLM) "native_roles_geniex_0_10_0_mca1" else "native_roles"
         )
         .put("nativeProfile", nativeProfileJson)
         .put("parameterApplication", JSONObject(parameterApplicationJson))

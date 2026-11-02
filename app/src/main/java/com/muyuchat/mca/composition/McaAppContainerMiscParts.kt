@@ -1,5 +1,10 @@
 package com.muyuchat.mca.composition
 
+import com.muyuchat.mca.LocalImageAdapterFields
+import com.muyuchat.mca.UiStateReadPort
+import com.muyuchat.mca.ChatImageApprovalFields
+import com.muyuchat.mca.ConversationSelectionFields
+import com.muyuchat.mca.UiStateWriter
 import com.muyuchat.mca.ChatImageRequestPort
 import com.muyuchat.mca.ChatImageRequestApprovalPort
 import com.muyuchat.mca.ChatImageRequestApprovalPortAdapter
@@ -36,7 +41,7 @@ import kotlinx.coroutines.CoroutineScope
 
 internal fun McaAppContainer.createTuningOwnerImpl(store: UiStateStore, scope: CoroutineScope, engine: McaInferenceService): TuningOwner =
         TuningOwner(
-            store = store,
+            store = store.runtimeProfileWriter(),
             scope = scope,
             engine = engine,
             runtimeProfileStore = runtimeProfileStore,
@@ -49,7 +54,7 @@ internal fun McaAppContainer.createTuningOwnerImpl(store: UiStateStore, scope: C
             admission = runtimeAdmission
         )
 
-internal fun McaAppContainer.createLocalImageAdapterPortImpl(store: UiStateStore): LocalImageAdapterPort =
+internal fun McaAppContainer.createLocalImageAdapterPortImpl(store: UiStateWriter<LocalImageAdapterFields>): LocalImageAdapterPort =
         LocalImageAdapterPortAdapter(
             store = store,
             loraStoreRef = localImageLoraStore,
@@ -60,7 +65,7 @@ internal fun McaAppContainer.createLocalImageAdapterPortImpl(store: UiStateStore
 
 internal fun McaAppContainer.createWebSearchConfigPort(store: UiStateStore): WebSearchConfigPort =
         WebSearchConfigPortAdapter(
-            store = store,
+            store = store.webSearchWriter(),
             appContext = application,
             webSearchStoreRef = webSearchStore,
             diagnosticStoreRef = webSearchDiagnosticStore,
@@ -80,13 +85,13 @@ internal fun McaAppContainer.createWebSearchWorkflowCoordinatorImpl(
 
 internal fun McaAppContainer.createVisionAttachmentPortImpl(store: UiStateStore, engine: McaInferenceService): VisionAttachmentPort =
         VisionAttachmentPortAdapter(
-            store = store,
+            store = store.visionAttachmentWriter(),
             appContext = application,
             engineRef = engine,
             admissionRef = runtimeAdmission
         )
 
-internal fun McaAppContainer.createLocalApiPayloadPortImpl(store: UiStateStore, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
+internal fun McaAppContainer.createLocalApiPayloadPortImpl(store: UiStateReadPort, engine: McaInferenceService, tuningOwner: TuningOwner): LocalApiPayloadPort =
         LocalApiPayloadPortAdapter(
             store = store,
             engineRef = engine,
@@ -103,7 +108,7 @@ internal fun McaAppContainer.createImagePromptTokenMeasurementHostImpl(store: Ui
         )
 
 internal fun McaAppContainer.createChatImageRequestApprovalPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ChatImageApprovalFields>,
         imageGenerationOwnerProvider: () -> ImageGenerationOwner,
         chatImageRequestPortProvider: () -> ChatImageRequestPort,
         buildChatImageRetrySnapshot: (ChatGeneratedImageRequest, String) -> ImageGenerationJobSpec?,
@@ -126,7 +131,7 @@ internal fun McaAppContainer.createManagedRuntimeReadinessPort(
     ): ManagedRuntimeReadinessPort =
         ManagedRuntimeReadinessPortAdapter(
             context = application,
-            store = store,
+            store = store.modelCatalogWriter(),
             modelStore = modelStore,
             localImageModelStore = localImageModelStore,
             refreshGate = readinessRefreshGate,
@@ -139,7 +144,7 @@ internal fun McaAppContainer.createManagedRuntimeReadinessPort(
 internal fun McaAppContainer.createAppUpdatePortImpl(storeProvider: () -> UiStateStore): AppUpdatePort =
         AppUpdatePortAdapter(
             context = application,
-            storeProvider = storeProvider
+            storeProvider = { storeProvider().appUpdateWriter() }
         )
 
     /** R3-S38：云模型配置端口工厂（B 族第 3 端口）。 */
@@ -150,7 +155,7 @@ internal fun McaAppContainer.createCloudModelConfigPort(
     ): CloudModelConfigPort =
         CloudModelConfigPortAdapter(
             application = application,
-            store = store,
+            store = store.cloudModelConfigWriter(),
             cloudApiStore = cloudApiStore,
             cloudChatProvider = cloudChatProvider,
             localImageModelStore = localImageModelStore,
@@ -159,7 +164,7 @@ internal fun McaAppContainer.createCloudModelConfigPort(
         )
 
 internal fun McaAppContainer.createSelectChatSessionPortImpl(
-        store: UiStateStore,
+        store: UiStateWriter<ConversationSelectionFields>,
         rejectWhileConversationMutationInProgress: () -> Boolean,
         hasActiveAssistantImageExecution: (String?) -> Boolean,
         invalidatePendingChatImagePreparation: () -> Unit,

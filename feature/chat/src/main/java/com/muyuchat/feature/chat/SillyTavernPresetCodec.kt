@@ -93,7 +93,9 @@ object RoleplayStylePresets {
  * the selected model's native chat template.
  */
 object SillyTavernPresetCodec {
-    private const val MAX_JSON_BYTES = 1_048_576
+    // Real Tavern presets (long prompt lists, embedded reference material) routinely pass 1 MiB;
+    // the per-prompt and merged-prompt char caps below remain the actual safety net.
+    private const val MAX_JSON_BYTES = 8_388_608
     private val promptFields = listOf(
         "prompts",
         "prompt_order",
@@ -107,7 +109,7 @@ object SillyTavernPresetCodec {
 
     fun parse(rawJson: String, fallbackName: String = "Tavern 预设"): SillyTavernGenerationPreset {
         require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_JSON_BYTES) {
-            "预设文件超过 1 MiB。"
+            "预设文件超过 8 MiB。"
         }
         val root = JSONObject(rawJson)
         val source = root.optJSONObject("settings")
@@ -342,7 +344,7 @@ object SillyTavernPresetCodec {
     }
 }
 
-fun readSillyTavernPresetJson(input: InputStream, maxBytes: Int = 1_048_576): String {
+fun readSillyTavernPresetJson(input: InputStream, maxBytes: Int = 8_388_608): String {
     require(maxBytes > 0)
     val output = ByteArrayOutputStream()
     val buffer = ByteArray(8192)
@@ -350,7 +352,7 @@ fun readSillyTavernPresetJson(input: InputStream, maxBytes: Int = 1_048_576): St
     while (true) {
         val read = input.read(buffer)
         if (read < 0) break
-        require(read <= maxBytes - total) { "酒馆预设文件超过 1 MiB。" }
+        require(read <= maxBytes - total) { "酒馆预设文件超过 8 MiB。" }
         output.write(buffer, 0, read)
         total += read
     }

@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,7 +16,6 @@ import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
@@ -147,7 +148,7 @@ internal fun ContextAssemblyTraceDialog(trace: ContextTraceDetail, onDismiss: ()
                 contextTraceSection("知识库 · 已跳过", trace.skippedKnowledge, isKnowledge = true)
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } }
+        confirmButton = { McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("关闭") } }
     )
 }
 

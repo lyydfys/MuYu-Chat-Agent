@@ -1,12 +1,12 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -32,8 +32,8 @@ internal fun ImageWorkspaceEmptyState(
     ) {
         ImageGalleryTitleBar(onBack = onBack)
         Text("还没有可用的生图模型", style = MaterialTheme.typography.titleMedium)
-        Button(onClick = onOpenModels) { Text("选择推荐模型") }
-        OutlinedButton(onClick = onImportModel) { Text("导入已有模型") }
+        McaButton(style = McaButtonStyle.Primary,onClick = onOpenModels) { Text("选择推荐模型") }
+        McaButton(style = McaButtonStyle.Outlined,onClick = onImportModel) { Text("导入已有模型") }
         ImageTranslationDownloadRow(
             status = offlineTranslationStatus,
             installed = offlineTranslationInstalled,

@@ -25,7 +25,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal class LocalApiServerCoordinator(
     private val application: Application,
     private val scope: CoroutineScope,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<LocalApiSettingsFields>,
     private val localApiRuntimeOwner: LocalApiRuntimeOwner,
     private val apiKey: String,
     private val cancelActiveLocalApiImageGeneration: (String) -> Boolean,

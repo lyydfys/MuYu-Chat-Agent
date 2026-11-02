@@ -1,0 +1,532 @@
+{
+  "GenerationLifecycleFields": [
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats",
+    "engineLifecycle",
+    "stats",
+    "statusMessage"
+  ],
+  "GenerationExecutionFields": [
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats",
+    "engineLifecycle",
+    "stats",
+    "statusMessage",
+    "messages",
+    "chatSessions",
+    "promptContextUsage",
+    "logs",
+    "params",
+    "contextCompressionPending",
+    "webSearchTurnMode",
+    "webSearchResearchModeOverride",
+    "webSearchOneShotEnabled",
+    "webSearchDiagnostics",
+    "webSearchStatusMessage",
+    "browserTask"
+  ],
+  "ChatPromptDraftFields": [
+    "input",
+    "pendingChatImageActionDraft",
+    "pendingChatImageTranslationDraft",
+    "statusMessage"
+  ],
+  "GenerationStopFields": [
+    "browserTask",
+    "messages",
+    "chatSessions",
+    "isGenerating",
+    "engineLifecycle",
+    "statusMessage",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats"
+  ],
+  "AssistantProfileFields": [
+    "assistants",
+    "selectedAssistantId",
+    "params",
+    "chatSessions",
+    "assistantMemories",
+    "worldBooks",
+    "reloadRequired",
+    "pendingProfile",
+    "tuningJobState",
+    "tuningPhase",
+    "statusMessage"
+  ],
+  "AssistantMemoryFields": [
+    "assistantMemories",
+    "statusMessage"
+  ],
+  "KnowledgeLibraryFields": [
+    "worldBooks",
+    "knowledgeBases",
+    "knowledgeDocumentCounts",
+    "knowledgeBaseImportingIds",
+    "selectedKnowledgeBaseIds",
+    "statusMessage"
+  ],
+  "ChatAppearanceFields": [
+    "chatBackgroundImporting",
+    "statusMessage",
+    "globalChatAppearance",
+    "assistants",
+    "chatSessions"
+  ],
+  "ContentImportFields": [
+    "contentImportPreview",
+    "contentImportCommitting"
+  ],
+  "CacheSettingsFields": [
+    "persistentPrefixCacheEnabled",
+    "persistentPrefixCacheEntryCount",
+    "persistentPrefixCacheBytes",
+    "statusMessage"
+  ],
+  "AppUpdateFields": [
+    "appUpdate"
+  ],
+  "WebSearchFields": [
+    "webSearchConfig",
+    "webSearchTurnMode",
+    "webSearchResearchModeOverride",
+    "webSearchOneShotEnabled",
+    "webSearchStatusMessage",
+    "webSearchDiagnostics",
+    "settingsOperations",
+    "statusMessage"
+  ],
+  "BrowserTaskFields": [
+    "browserTask"
+  ],
+  "SettingsParameterFields": [
+    "params",
+    "assistants",
+    "reloadRequired",
+    "statusMessage"
+  ],
+  "RuntimeProfileFields": [
+    "models",
+    "loadedModelId",
+    "loadedModelName",
+    "selectedChatBackend",
+    "chatSessions",
+    "busy",
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats",
+    "modelLoadStage",
+    "params",
+    "stats",
+    "autoTuningInProgress",
+    "rollbackParams",
+    "profileId",
+    "revision",
+    "profileRecordState",
+    "verification",
+    "engineLifecycle",
+    "tuningJobState",
+    "reloadRequired",
+    "pendingProfile",
+    "rollbackProfile",
+    "tuningEtaSeconds",
+    "tuningPhase",
+    "tuningCandidateProgress",
+    "nativeStatsJson",
+    "logs",
+    "statusMessage",
+    "deviceProfile",
+    "agentRecommendation",
+    "agentLogs",
+    "preference",
+    "benchmark",
+    "benchmarkHistory",
+    "lastAutoTuningSummary",
+    "localStabilitySmokeSummary",
+    "diagnosticReport",
+    "recommendedRemoteModels",
+    "qairtVerifiedLocalModelIds",
+    "qairtVerifiedRecommendationIds",
+    "tab"
+  ],
+  "ChatModelSelectionFields": [
+    "cloudApiConfig",
+    "selectedCloudChatModelId",
+    "selectedChatBackend",
+    "params",
+    "chatSessions",
+    "busy",
+    "statusMessage",
+    "tab"
+  ],
+  "ImageJobCancellationFields": [
+    "imageJobs",
+    "statusMessage"
+  ],
+  "ModelCatalogFields": [
+    "models",
+    "localImageModels",
+    "qnnImageVerificationCurrentByModelId",
+    "selectedLocalImageModelId",
+    "selectedImageBackend",
+    "qairtVerifiedLocalModelIds",
+    "qairtVerifiedRecommendationIds",
+    "busy",
+    "engineLifecycle",
+    "statusMessage",
+    "downloadFileName",
+    "downloadTaskId",
+    "downloadedBytes",
+    "downloadTotalBytes",
+    "downloadSpeedBytesPerSecond",
+    "downloadRemainingSeconds",
+    "downloadStatus",
+    "downloadPhase",
+    "downloadFailureSource",
+    "downloadIntegrityStatus",
+    "downloadIntegrityMessage",
+    "downloadExecutionStatus",
+    "downloadExecutionMessage",
+    "importTasks"
+  ],
+  "ModelIdentityFields": [
+    "models",
+    "loadedModelId",
+    "chatSessions",
+    "assistants"
+  ],
+  "ModelHubFields": [
+    "busy",
+    "hubModels",
+    "hubPage",
+    "hubTotalCount",
+    "remoteFiles",
+    "repoInput",
+    "statusMessage"
+  ],
+  "LocalApiSettingsFields": [
+    "apiEnabled",
+    "restEnabled",
+    "localApiAddress",
+    "openApiAddress",
+    "engineLifecycle",
+    "statusMessage"
+  ],
+  "StartupReconciliationFields": [
+    "engineLifecycle",
+    "localImageTextualInversionLoading",
+    "localImageTextualInversionMessage",
+    "localImageTextualInversions",
+    "nativeStatsJson",
+    "offlineTranslationInstalled",
+    "offlineTranslationStatus",
+    "persistentPrefixCacheBytes",
+    "persistentPrefixCacheEntryCount",
+    "stats",
+    "statusMessage"
+  ],
+  "ConversationSessionFields": [
+    "messages",
+    "input",
+    "activeChatSessionId",
+    "selectedAssistantId",
+    "chatSessions",
+    "browserTask",
+    "contextCompressionPending",
+    "selectedKnowledgeBaseIds",
+    "promptContextUsage",
+    "statusMessage"
+  ],
+  "ConversationSelectionFields": [
+    "messages",
+    "input",
+    "activeChatSessionId",
+    "browserTask",
+    "selectedKnowledgeBaseIds",
+    "selectedAssistantId",
+    "params",
+    "selectedChatBackend",
+    "selectedCloudChatModelId",
+    "cloudApiConfig",
+    "promptContextUsage",
+    "contextCompressionPending",
+    "statusMessage"
+  ],
+  "ConversationPersistenceFields": [
+    "chatSessions",
+    "messages",
+    "activeChatSessionId",
+    "selectedKnowledgeBaseIds",
+    "promptContextUsage",
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "statusMessage"
+  ],
+  "ConversationSettlementFields": [
+    "messages",
+    "chatSessions",
+    "activeChatSessionId",
+    "webSearchDiagnostics",
+    "webSearchStatusMessage",
+    "statusMessage"
+  ],
+  "ConversationWorkflowFields": [
+    "messages",
+    "activeChatSessionId",
+    "chatSessions",
+    "promptContextUsage",
+    "statusMessage",
+    "input",
+    "isGenerating",
+    "pendingChatImageActionDraft",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats"
+  ],
+  "ChatAttachmentFields": [
+    "input",
+    "images",
+    "files",
+    "statusMessage"
+  ],
+  "ContextCompressionFields": [
+    "contextCompressionPending",
+    "messages",
+    "chatSessions",
+    "statusMessage",
+    "contextCompressionThresholdPercent",
+    "contextSummaryModelSelection"
+  ],
+  "ConversationTraceFields": [
+    "messages",
+    "chatSessions"
+  ],
+  "ConversationMessageFields": [
+    "messages",
+    "chatSessions",
+    "statusMessage"
+  ],
+  "ConversationStatusFields": [
+    "statusMessage"
+  ],
+  "AssistantImageContinuationFields": [
+    "input",
+    "messages",
+    "chatSessions",
+    "isGenerating",
+    "statusMessage",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats"
+  ],
+  "ConversationRegenerationFields": [
+    "messages",
+    "activeChatSessionId",
+    "chatSessions",
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationStats",
+    "promptContextUsage",
+    "statusMessage"
+  ],
+  "ConversationResetFields": [
+    "messages",
+    "input",
+    "activeChatSessionId",
+    "isGenerating",
+    "generationPhase",
+    "generationTokenProgress",
+    "generationPersistProgress",
+    "generationStats",
+    "promptContextUsage",
+    "engineLifecycle",
+    "statusMessage",
+    "contextCompressionPending"
+  ],
+  "SettingsOperationFields": [
+    "settingsOperations"
+  ],
+  "NavigationFields": [
+    "tab"
+  ],
+  "UiOperationFeedbackFields": [
+    "busy",
+    "statusMessage"
+  ],
+  "HubInputFields": [
+    "repoInput",
+    "hubQuery"
+  ],
+  "ChatLoraSelectionFields": [
+    "chatImageLoraSelections"
+  ],
+  "ImageModelSelectionFields": [
+    "localImageModels",
+    "qnnImageVerificationCurrentByModelId",
+    "selectedLocalImageModelId",
+    "selectedImageBackend",
+    "statusMessage"
+  ],
+  "ImageAssetCreationFields": [
+    "localImageModels",
+    "qnnImageVerificationCurrentByModelId",
+    "selectedLocalImageModelId",
+    "selectedImageBackend",
+    "pendingChatImageActionDraft",
+    "pendingChatImageTranslationDraft",
+    "statusMessage"
+  ],
+  "ImageAssetDeletionFields": [
+    "images",
+    "imageJobs",
+    "statusMessage"
+  ],
+  "ImageLibraryCommitFields": [
+    "images",
+    "imageJobs",
+    "messages",
+    "chatSessions",
+    "statusMessage"
+  ],
+  "ImageGenerationFields": [
+    "imageJobs",
+    "activeLocalImageLoraIds",
+    "activeLocalImageTextualInversionIds",
+    "deferGenerationImageGrantRelease",
+    "localImageLoras",
+    "localImageTextualInversionMessage",
+    "statusMessage"
+  ],
+  "LocalImageAdapterFields": [
+    "localImageLoraImporting",
+    "localImageLoraMessage",
+    "localImageLoras",
+    "deletingLocalImageTextualInversionIds",
+    "localImageTextualInversionImporting",
+    "localImageTextualInversionMessage",
+    "localImageTextualInversions"
+  ],
+  "ImageUpscalerCatalogFields": [
+    "localImageUpscalerDeletingId",
+    "localImageUpscalerImporting",
+    "localImageUpscalerMessage",
+    "localImageUpscalers",
+    "selectedLocalImageUpscalerId"
+  ],
+  "ImageUpscaleFields": [
+    "activeLocalImageUpscalerId",
+    "imageUpscaleJob",
+    "images",
+    "localImageUpscalerMessage",
+    "localImageUpscalers",
+    "selectedLocalImageUpscalerId",
+    "statusMessage"
+  ],
+  "ImageTranslationFields": [
+    "offlineTranslationStatus",
+    "imageJobs",
+    "statusMessage"
+  ],
+  "LocalApiImageFields": [
+    "activeLocalImageLoraIds",
+    "activeLocalImageTextualInversionIds",
+    "localImageLoras"
+  ],
+  "ImageLibraryBackupFields": [
+    "imageLibraryBackup",
+    "images",
+    "statusMessage"
+  ],
+  "AssetReconciliationFields": [
+    "chatSessions",
+    "files",
+    "images",
+    "knowledgeDocumentCounts",
+    "messages",
+    "statusMessage"
+  ],
+  "ImageWorkspaceFields": [
+    "busy",
+    "input",
+    "localImageModels",
+    "localImageTextualInversionMessage",
+    "qnnImageVerificationCurrentByModelId",
+    "selectedImageBackend",
+    "selectedLocalImageModelId",
+    "statusMessage"
+  ],
+  "ChatImageRequestFields": [
+    "messages",
+    "chatSessions"
+  ],
+  "SendChatImageFields": [
+    "activeChatSessionId",
+    "chatSessions",
+    "input",
+    "messages",
+    "statusMessage"
+  ],
+  "CloudModelConfigFields": [
+    "cloudApiConfig",
+    "cloudModels",
+    "editingCloudModelId",
+    "selectedChatBackend",
+    "selectedCloudChatModelId",
+    "selectedCloudImageModelId",
+    "selectedImageBackend",
+    "chatSessions",
+    "params",
+    "busy",
+    "pendingChatImageTranslationDraft",
+    "statusMessage"
+  ],
+  "DiagnosticsFields": [
+    "logs",
+    "agentLogs",
+    "benchmarkHistory",
+    "nativeStatsJson",
+    "diagnosticReport",
+    "statusMessage"
+  ],
+  "OfflineTranslationFields": [
+    "offlineTranslationInstalling",
+    "offlineTranslationDownloading",
+    "offlineTranslationDownloadBytes",
+    "offlineTranslationDownloadTotalBytes",
+    "offlineTranslationDownloadProgress",
+    "offlineTranslationStatus",
+    "offlineTranslationInstalled",
+    "input",
+    "statusMessage"
+  ],
+  "StatusFields": [
+    "statusMessage"
+  ],
+  "VisionAttachmentFields": [
+    "input",
+    "statusMessage"
+  ],
+  "ChatImageApprovalFields": [
+    "statusMessage"
+  ],
+  "ChatStreamFields": [
+    "messages",
+    "activeChatSessionId",
+    "chatSessions"
+  ]
+}

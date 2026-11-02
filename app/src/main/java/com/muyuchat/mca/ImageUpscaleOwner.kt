@@ -27,7 +27,7 @@ internal interface ImageUpscalePort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ImageUpscaleFields) -> ImageUpscaleFields)
 
     val imageAssetDirectory: File
 

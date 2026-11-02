@@ -1,0 +1,12 @@
+# H3 engine patch queue (Nightmare 757ce68e.., ported to HappyYzy a63954d + MCA 0001-0008/0011)
+# Apply order, top to bottom, at work/src. 078 (DitEngine ABI) is intentionally absent: LocalDream-only.
+40c3c6dfea2c6a99d2b5b3f64c03e3e541388a245d7854f7563b71bd69832cb4  069-hexagon-binary-wide-rows.ggml-reroot.patch
+b50098c434f92f238ca724420783e1242faa0e950f47041ee2888bdbb2ea7f27  070-minimax-h3-audio-vae-on-te-backend.sdcpp.patch
+56f7239bcce6fe4967fcfda3a6e93b3a8f5b9e79ae5a3f189d5973c9c1a4a99a  071-minimax-h3-fused-partial-rope.sdcpp.patch
+c5a38a8beb41895f6832fbf90e7bb83e0bd6d2eed541b2ed0cf55678189edbe6  072-minimax-h3-curve-knots.sdcpp.patch
+80b707a15359e94de65373c57a81056a742d82bc8f55ec712e9c0ebb5c9d66be  073-minimax-h3-htp-matmul-scale.sdcpp.patch
+3357e1bf3f2cf95a5aefcfea50dc96ab2f397ef81c5571ceeb9a3dde8837fc3e  074-minimax-h3-vae-fused-rope.sdcpp.patch
+33e2108286e1f169d8f5356b19d26e4d1c337dce6ece399c514760058bf5f10e  075-minimax-h3-vae-flash-attn.sdcpp.patch
+dec8d9f7e0aabb3c07a6ce7ad3c774bf05fe7ab1a82c713526163cbc381129fa  076a-minimax-h3-clipproj-hunks1-3.sdcpp.patch
+ae66c88806d80906871bf5c3cd1fb69bc1ab99ee971358a8fac2a2097eb2750a  076b-h3-clipproj-call-site.patch
+09499830727ca2d6baa1a384fa4cafbec16a4c161d7e7555ee41135aea885d59  079-minimax-h3-vae-encode-one-frame.sdcpp.patch

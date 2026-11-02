@@ -24,7 +24,7 @@ import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.core.benchmark.BenchmarkRunner
 
 internal class RuntimeProfileTransactionPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<RuntimeProfileFields>,
     override val runtimeProfileStore: ModelRuntimeProfileStore,
     override val engine: McaInferenceService,
     private val runtimeAdmission: RuntimeAdmissionState,
@@ -33,7 +33,7 @@ internal class RuntimeProfileTransactionPortAdapter(
 ) : RuntimeProfileTransactionPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (RuntimeProfileFields) -> RuntimeProfileFields) {
         store.update(transform)
     }
 
@@ -95,13 +95,15 @@ internal class RuntimeProfileTransactionPortAdapter(
 }
 
 internal class LocalApiAuxProviderPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateReadPort,
     private val engine: McaInferenceService,
     private val localApiPayloadPortProvider: () -> LocalApiPayloadPort,
     private val deviceProfileReader: DeviceProfileReader,
     private val buildRecommendationAction: (UserPreference) -> AgentRecommendation,
     private val benchmarkRunner: BenchmarkRunner,
     private val generateLocalApiImageAction: suspend (String, String) -> String,
+    private val generateLocalApiVideoAction: suspend (String, String) -> String,
+    private val stopLocalApiVideoAction: suspend (String) -> Boolean,
 ) : LocalApiAuxProviderPort {
     override fun analysisParamsJson(): String =
         engineApiGenerationParams(engine, store.current).toJson()
@@ -137,11 +139,17 @@ internal class LocalApiAuxProviderPortAdapter(
 
     override suspend fun generateImage(requestId: String, body: String): String =
         generateLocalApiImageAction(requestId, body)
+
+    override suspend fun generateVideo(requestId: String, body: String): String =
+        generateLocalApiVideoAction(requestId, body)
+
+    override suspend fun stopVideo(requestId: String): Boolean =
+        stopLocalApiVideoAction(requestId)
 }
 
 internal class LocalApiTuningControlPortAdapter(
     private val runtimeAdmission: RuntimeAdmissionState,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<RuntimeProfileFields>,
     private val runtimeProfileStore: ModelRuntimeProfileStore,
     private val tuningOwner: TuningOwner,
     private val localApiModelMatchesRef: (String, MainUiState, ModelManifest) -> Boolean,
@@ -199,7 +207,7 @@ internal class LocalApiTuningControlPortAdapter(
         assignActiveTuningJobIdRef(jobId)
     }
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (RuntimeProfileFields) -> RuntimeProfileFields) {
         store.update(transform)
     }
 

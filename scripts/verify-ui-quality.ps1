@@ -86,8 +86,9 @@ param(
     [ValidateSet('benchmark', 'debug', 'release')]
     [string] $Variant = 'benchmark',
     [int] $Iterations = 0,
-    [ValidateSet('default', 'partial', 'full', 'none', 'ignore')]
+    [ValidateSet('default', 'partial', 'partial-disable', 'partial-require', 'full', 'none')]
     [string] $CompilationMode = 'default',
+    [string] $ReplayFixtureSha256 = '',
     [string[]] $GradleTasks = @(),
     [string] $OutputDirectory = '',
     [switch] $RequireComposeReports
@@ -148,7 +149,8 @@ function Add-LaneResult {
         [string] $Status,
         [string] $Reason,
         [string] $LogPath,
-        [string[]] $Evidence = @()
+        [string[]] $Evidence = @(),
+        [hashtable] $Conclusions = @{}
     )
     $row = [pscustomobject]@{
         lane     = $Name
@@ -158,6 +160,7 @@ function Add-LaneResult {
         reason   = $Reason
         log      = $LogPath
         evidence = @($Evidence)
+        conclusions = $Conclusions
     }
     $results.Add($row) | Out-Null
     $color = switch ($Status) {
@@ -167,6 +170,9 @@ function Add-LaneResult {
         default { 'Yellow' }
     }
     Write-Host ("   [{0}] {1}: {2}" -f $Status, $Name, $Reason) -ForegroundColor $color
+    foreach ($key in $Conclusions.Keys) {
+        Write-Host ("       {0}: {1}" -f $key, $Conclusions[$key]) -ForegroundColor DarkGray
+    }
 }
 
 function Get-CurrentPowerShell {
@@ -230,6 +236,78 @@ function Measure-JUnitXml {
         skipped    = $summary.skipped
         directories = @($summary.directories)
         xmlFiles   = @($xmlFiles | ForEach-Object { $_.FullName })
+    }
+}
+
+function Measure-MacrobenchmarkSample {
+    param([string[]] $Directories, [datetime] $Since)
+    $files = New-Object System.Collections.Generic.List[object]
+    foreach ($dir in @($Directories)) {
+        if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Filter '*.json' -ErrorAction SilentlyContinue)) {
+            if ($file.LastWriteTime -lt $Since) { continue }
+            $files.Add($file) | Out-Null
+        }
+    }
+    $metricNames = New-Object System.Collections.Generic.List[string]
+    $maxRuns = 0
+    $parsedFiles = 0
+    foreach ($file in $files) {
+        $text = [System.IO.File]::ReadAllText($file.FullName)
+        # Tolerant scan of the Macrobenchmark result JSON. The exact nesting has changed across
+        # androidx.benchmark releases, so this counts per-metric "runs" arrays and the metric keys
+        # that carry an aggregate. It proves "how many samples exist", never a performance verdict.
+        $metricHit = $false
+        foreach ($match in [regex]::Matches($text, '"([A-Za-z][A-Za-z0-9_]*)"\s*:\s*\{\s*"(?:minimum|median|maximum)"')) {
+            $name = $match.Groups[1].Value
+            if (-not $metricNames.Contains($name)) { $metricNames.Add($name) | Out-Null }
+            $metricHit = $true
+        }
+        foreach ($match in [regex]::Matches($text, '"runs"\s*:\s*\[([^\]]*)\]')) {
+            $body = $match.Groups[1].Value.Trim()
+            $count = if ($body.Length -eq 0) { 0 } else { @($body -split ',').Count }
+            if ($count -gt 0) { $metricHit = $true }
+            if ($count -gt $maxRuns) { $maxRuns = $count }
+        }
+        if ($metricHit) { $parsedFiles++ }
+    }
+    return [pscustomobject]@{
+        files        = @($files | ForEach-Object { $_.FullName })
+        parsedFiles  = $parsedFiles
+        metricNames  = @($metricNames.ToArray())
+        maxIterations = $maxRuns
+        supported    = ($parsedFiles -gt 0 -and $maxRuns -gt 0)
+        scope        = 'Counts samples present in the raw Macrobenchmark JSON. It does not validate frame content, refresh rate or thresholds.'
+    }
+}
+
+function Get-McaReplayFixtureFacts {
+    param([string] $RepoRoot)
+    $root = Join-Path $RepoRoot 'benchmark\src\main\assets\controlled-replay'
+    $manifestPath = Join-Path $root 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        return [pscustomobject]@{ available = $false; reason = 'controlled-replay manifest is missing (benchmark/src/main/assets/controlled-replay/manifest.json)' }
+    }
+    try { $manifest = [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json }
+    catch { return [pscustomobject]@{ available = $false; reason = ('controlled-replay manifest is not valid JSON: ' + $_.Exception.Message) } }
+    if ([string]$manifest.schema -ne 'mca.controlled-replay.manifest/1') {
+        return [pscustomobject]@{ available = $false; reason = ("controlled-replay manifest schema is '{0}', expected mca.controlled-replay.manifest/1" -f [string]$manifest.schema) }
+    }
+    $fixturePath = Join-Path $root ([string]$manifest.fixture)
+    if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) {
+        return [pscustomobject]@{ available = $false; reason = ('controlled-replay fixture is missing: ' + $fixturePath) }
+    }
+    $sha = (Get-FileHash -LiteralPath $fixturePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $declared = ([string]$manifest.fixtureSha256).ToLowerInvariant()
+    return [pscustomobject]@{
+        available     = $true
+        manifestPath  = $manifestPath
+        fixturePath   = $fixturePath
+        fixtureSha256 = $sha
+        declaredSha256 = $declared
+        hashMatches   = ($declared -match '^[0-9a-f]{64}$' -and $sha -eq $declared)
+        cases         = @($manifest.cases)
+        chain         = $manifest.chain
     }
 }
 
@@ -378,31 +456,48 @@ $composeModules = @(
 )
 $composeFresh = 0
 $composeTotal = 0
+$composeFreshMetrics = 0
+$composeConfigOk = 0
+$composeConfigProblems = New-Object System.Collections.Generic.List[string]
 $composeLines = New-Object System.Collections.Generic.List[string]
 foreach ($module in $composeModules) {
+    $gradleFile = Join-Path $repo ($module.path + '\build.gradle.kts')
+    $configOk = $false
+    if (Test-Path -LiteralPath $gradleFile) {
+        $gradleText = [System.IO.File]::ReadAllText($gradleFile)
+        $configOk = ($gradleText -match 'reportsDestination\s*=' -and $gradleText -match 'metricsDestination\s*=')
+    }
+    if ($configOk) { $composeConfigOk++ } else { $composeConfigProblems.Add($module.name) | Out-Null }
     $source = Join-Path $repo ($module.path + '\build\compose-compiler')
     if (-not (Test-Path -LiteralPath $source)) {
-        $composeLines.Add(('{0}: reports=NONE' -f $module.name)) | Out-Null
+        $composeLines.Add(('{0}: config={1} reports=NONE' -f $module.name, $configOk)) | Out-Null
         continue
     }
     $dest = Join-Path $evidenceRoot ('compose-compiler\' + $module.name)
     $copied = Copy-EvidenceTree -Source $source -Destination $dest -Since $runStart.AddMinutes(-1)
     $moduleFiles = @(Get-ChildItem -LiteralPath $source -Recurse -File -ErrorAction SilentlyContinue)
-    $moduleFresh = @($moduleFiles | Where-Object { $_.LastWriteTime -ge $runStart.AddMinutes(-1) }).Count
+    $moduleFresh = @($moduleFiles | Where-Object { $_.LastWriteTime -ge $runStart.AddMinutes(-1) })
+    $metricsFiles = @($moduleFiles | Where-Object { $_.FullName -match '[\\/]metrics[\\/]' })
+    $freshMetrics = @($metricsFiles | Where-Object { $_.LastWriteTime -ge $runStart.AddMinutes(-1) })
     $composeTotal += $moduleFiles.Count
-    $composeFresh += $moduleFresh
-    $composeLines.Add(('{0}: files={1} fresh={2} archived={3}' -f $module.name, $moduleFiles.Count, $moduleFresh, $copied.Count)) | Out-Null
+    $composeFresh += $moduleFresh.Count
+    $composeFreshMetrics += $freshMetrics.Count
+    $composeLines.Add(('{0}: config={1} files={2} fresh={3} metricsFiles={4} metricsFresh={5} archived={6}' -f
+        $module.name, $configOk, $moduleFiles.Count, $moduleFresh.Count, $metricsFiles.Count, $freshMetrics.Count, $copied.Count)) | Out-Null
 }
 Write-Host '== Compose compiler reports ==' -ForegroundColor Cyan
 foreach ($line in $composeLines) { Write-Host ('   ' + $line) }
-$composeStatus = 'NOT_RUN'
-if ($composeTotal -gt 0) { $composeStatus = 'PASS' }
-if ($RequireComposeReports -and $composeFresh -eq 0) {
-    Add-LaneResult -Name 'compose-reports' -Command '(compiler report archive)' -ExitCode $null `
-        -Status 'FAIL' -Reason 'no fresh Compose compiler report/metrics file was produced by this run' -LogPath $null
+# `metrics/reports exist` only proves a file is on disk, never that the stability/skippable analysis
+# was reviewed. Report the configuration fact separately from the review fact.
+$notes.Add(('Compose compiler reports: reportsDestination/metricsDestination configured in {0}/{1} modules (missing: {2}).' -f
+    $composeConfigOk, $composeModules.Count, (($composeConfigProblems -join ', ') -replace '^$', 'none'))) | Out-Null
+$notes.Add('Compose metrics review (stability/skippable hotspots, long-list recomposition, layer reads) is NOT_RUN: this runner archives the files, it does not review them or produce a quality grade.') | Out-Null
+if ($RequireComposeReports -and ($composeFresh -eq 0 -or $composeFreshMetrics -eq 0)) {
+    Add-LaneResult -Name 'compose-reports' -Command '(compiler report archive)' -ExitCode $null -Status 'FAIL' `
+        -Reason ("no fresh Compose compiler report/metrics file was produced by this run (freshReports={0} freshMetrics={1})" -f $composeFresh, $composeFreshMetrics) -LogPath $null
 } elseif ($RequireComposeReports) {
-    Add-LaneResult -Name 'compose-reports' -Command '(compiler report archive)' -ExitCode $null `
-        -Status 'PASS' -Reason ("fresh report/metrics files: {0}" -f $composeFresh) -LogPath $null
+    Add-LaneResult -Name 'compose-reports' -Command '(compiler report archive)' -ExitCode $null -Status 'PASS' `
+        -Reason ("fresh report/metrics files: reports={0} metrics={1}; config modules={2}/{3}" -f $composeFresh, $composeFreshMetrics, $composeConfigOk, $composeModules.Count) -LogPath $null
 }
 if ($composeTotal -eq 0) {
     $notes.Add('Compose compiler reports: none found. Either Kotlin compilation did not run, the property disabled them, or the modules were not compiled.') | Out-Null
@@ -433,6 +528,11 @@ if ($Lane -contains 'macro') {
     $macroReason = $blockedReason
     $macroExit = $null
     $macroEvidence = @()
+    # Three separate conclusions. exit code 0 only ever satisfies `execution`.
+    $execution = 'BLOCKED'
+    $sampleValidity = 'NOT_RUN'
+    $performanceAcceptance = 'NOT_EVALUATED'
+    $sampleNotes = New-Object System.Collections.Generic.List[string]
     if (-not $blockedReason) {
         # Discover the real connected task instead of trusting a documented name.
         $tasks = Invoke-GradleUnderLock -Name 'benchmark-tasks' -Arguments @(
@@ -440,39 +540,45 @@ if ($Lane -contains 'macro') {
         ) -LockKind 'other'
         if ($null -eq $tasks) {
             $macroReason = 'could not acquire the shared build lock for :benchmark:tasks'
+            $execution = 'BLOCKED'
         } else {
             $taskText = [string]$tasks.text
             if ($tasks.exitCode -ne 0 -or $taskText -notmatch 'BUILD SUCCESSFUL') {
-                $macroStatus = 'BLOCKED'
                 if ($taskText -match 'Could not resolve|No cached version|Could not find androidx\.benchmark') {
+                    $macroStatus = 'BLOCKED'
+                    $execution = 'BLOCKED'
                     $macroReason = 'benchmark dependencies could not be resolved (dependency status: not verified; enable network and retry)'
                 } else {
                     $macroStatus = 'FAIL'
+                    $execution = 'FAIL'
                     $macroReason = 'gradle :benchmark:tasks failed; see gradle-benchmark-tasks.log'
                 }
             } else {
                 $suffix = (Get-Culture).TextInfo.ToTitleCase($Variant.ToLowerInvariant())
                 $expected = 'connected' + $suffix + 'AndroidTest'
-                $discovered = $null
-                foreach ($match in [regex]::Matches($taskText, '(?m)^\s*(connected[A-Za-z]+AndroidTest)\b')) {
-                    if ($match.Groups[1].Value -eq $expected) { $discovered = $match.Groups[1].Value; break }
-                }
-                if (-not $discovered) {
-                    foreach ($match in [regex]::Matches($taskText, '(?m)^\s*(connected[A-Za-z]+AndroidTest)\b')) {
-                        $discovered = $match.Groups[1].Value; break
+                $availableTasks = @([regex]::Matches($taskText, '(?m)^\s*(connected[A-Za-z]+AndroidTest)\b') |
+                    ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+                if ($availableTasks -notcontains $expected) {
+                    # No fallback: running connectedDebugAndroidTest while the operator asked for
+                    # the benchmark variant would silently measure a different binary.
+                    if ($availableTasks.Count -eq 0) {
+                        $macroStatus = 'BLOCKED'
+                        $execution = 'BLOCKED'
+                        $macroReason = 'no connected*AndroidTest task exists; :benchmark was not configured (opt-in include or AGP variant missing)'
+                    } else {
+                        $macroStatus = 'NOT_RUN'
+                        $execution = 'NOT_RUN'
+                        $macroReason = ("requested variant '{0}' has no task '{1}'; refusing to fall back to: {2}" -f
+                            $Variant, $expected, ($availableTasks -join ', '))
+                        $sampleNotes.Add('No benchmark task ran: the requested variant task is absent and no substitute variant is accepted.') | Out-Null
                     }
-                }
-                if (-not $discovered) {
-                    $macroStatus = 'BLOCKED'
-                    $macroReason = 'no connected*AndroidTest task exists; :benchmark was not configured (opt-in include or AGP variant missing)'
                 } else {
-                    $macroArgs = @('-p', $repo, (':benchmark:' + $discovered), '-Pmca.includeBenchmark=true', '--console=plain')
+                    $resolvedIterations = if ($Iterations -gt 0) { $Iterations } else { 10 }
+                    $macroArgs = @('-p', $repo, (':benchmark:' + $expected), '-Pmca.includeBenchmark=true', '--console=plain')
                     if ($TestFilters.Count -gt 0) {
                         $macroArgs += ('-Pandroid.testInstrumentationRunnerArguments.class=' + ($TestFilters -join ','))
                     }
-                    if ($Iterations -gt 0) {
-                        $macroArgs += ('-Pandroid.testInstrumentationRunnerArguments.mca.iterations=' + $Iterations)
-                    }
+                    $macroArgs += ('-Pandroid.testInstrumentationRunnerArguments.mca.iterations=' + $resolvedIterations)
                     $macroArgs += ('-Pandroid.testInstrumentationRunnerArguments.mca.compilationMode=' + $CompilationMode)
                     $previousSerial = $env:ANDROID_SERIAL
                     $env:ANDROID_SERIAL = $DeviceSerial
@@ -483,55 +589,143 @@ if ($Lane -contains 'macro') {
                     }
                     if ($null -eq $run) {
                         $macroReason = 'could not acquire the shared build lock for the Macrobenchmark task'
+                        $execution = 'BLOCKED'
                     } else {
                         $macroExit = $run.exitCode
                         if ([string]$run.text -match 'Could not resolve|No cached version|Could not find androidx\.benchmark') {
                             $macroStatus = 'BLOCKED'
+                            $execution = 'BLOCKED'
                             $macroReason = 'benchmark dependencies could not be resolved at execution time (dependency status: not verified; enable network and retry)'
                             $macroEvidence = @($run.log)
                         } else {
-                        $verdict = Get-GradleVerdict -Text ([string]$run.text) -ExitCode $run.exitCode
-                        $macroEvidence = @($run.log)
-                        $benchmarkResults = Join-Path $repo 'benchmark\build\test-results'
-                        $benchmarkOutputs = Join-Path $repo 'benchmark\build\outputs'
-                        # Connected-test XML lives under outputs/androidTest-results on AGP 8.x;
-                        # keep the unit-test path too so a layout change cannot hide the evidence.
-                        $benchmarkResultRoots = @(
-                            $benchmarkResults,
-                            (Join-Path $benchmarkOutputs 'androidTest-results'),
-                            (Join-Path $repo 'benchmark\build\reports\androidTests')
-                        )
-                        $junit = Measure-JUnitXml -Directories $benchmarkResultRoots -Since $runStart.AddMinutes(-1)
-                        if ($junit.tests -eq 0) {
-                            $macroStatus = 'FAIL'
-                            $macroReason = 'no fresh benchmark test XML; the benchmark task did not execute tests'
-                        } elseif ($junit.skipped -ge $junit.tests) {
-                            $macroStatus = 'NOT_RUN'
-                            $macroReason = 'all benchmark tests were skipped (fixture/device precondition); NOT a performance result'
-                        } elseif (-not $verdict.ok) {
-                            $macroStatus = 'FAIL'
-                            $macroReason = $verdict.reason
-                        } elseif ($junit.failures -gt 0 -or $junit.errors -gt 0) {
-                            $macroStatus = 'FAIL'
-                            $macroReason = ("benchmark failures={0} errors={1}" -f $junit.failures, $junit.errors)
-                        } else {
-                            $macroStatus = 'PASS'
-                            $macroReason = ("tests={0} failures=0 errors=0 skipped={1}; raw traces archived" -f $junit.tests, $junit.skipped)
-                            $notes.Add('Macrobenchmark PASS covers task execution only. Frame validity (non-zero valid frames, fixture consumed, refresh rate, temperature) must be checked manually against the raw traces before judging performance.') | Out-Null
-                        }
-                        $copiedResults = Copy-EvidenceTree -Source $benchmarkResults -Destination (Join-Path $evidenceRoot 'macro\test-results') -Since $runStart.AddMinutes(-1)
-                        $copiedOutputs = Copy-EvidenceTree -Source $benchmarkOutputs -Destination (Join-Path $evidenceRoot 'macro\outputs') -Since $runStart.AddMinutes(-1)
-                        $macroEvidence += $copiedResults
-                        $macroEvidence += $copiedOutputs
-                        $macroReason = $macroReason + ("; archived test-results={0} outputs={1}" -f $copiedResults.Count, $copiedOutputs.Count)
+                            $verdict = Get-GradleVerdict -Text ([string]$run.text) -ExitCode $run.exitCode
+                            $macroEvidence = @($run.log)
+                            $benchmarkResults = Join-Path $repo 'benchmark\build\test-results'
+                            $benchmarkOutputs = Join-Path $repo 'benchmark\build\outputs'
+                            $benchmarkAdditional = Join-Path $benchmarkOutputs 'connected_android_test_additional_output'
+                            # Connected-test XML lives under outputs/androidTest-results on AGP 8.x;
+                            # keep the unit-test path too so a layout change cannot hide the evidence.
+                            $benchmarkResultRoots = @(
+                                $benchmarkResults,
+                                (Join-Path $benchmarkOutputs 'androidTest-results'),
+                                (Join-Path $repo 'benchmark\build\reports\androidTests')
+                            )
+                            $junit = Measure-JUnitXml -Directories $benchmarkResultRoots -Since $runStart.AddMinutes(-1)
+                            $xmlText = ''
+                            foreach ($xmlFile in @($junit.xmlFiles)) {
+                                try { $xmlText += [System.IO.File]::ReadAllText([string]$xmlFile) } catch { }
+                            }
+                            if ($xmlText -match 'INSTALL_FAILED|Failed to install') {
+                                $macroStatus = 'BLOCKED'
+                                $execution = 'BLOCKED'
+                                $installDetail = [regex]::Match($xmlText, '(INSTALL_FAILED_[A-Z_]+)').Groups[1].Value
+                                if (-not $installDetail) { $installDetail = 'install failed' }
+                                $macroReason = ("benchmark target/test APK install was rejected by the device ({0}); no measurement ran" -f $installDetail)
+                                $sampleNotes.Add('Device install rejection is an environment BLOCK, not a benchmark FAIL and not a sample.') | Out-Null
+                            } elseif ($junit.tests -eq 0) {
+                                $macroStatus = 'FAIL'
+                                $execution = 'FAIL'
+                                $macroReason = 'no fresh benchmark test XML; the benchmark task did not execute tests'
+                            } elseif ($junit.skipped -ge $junit.tests) {
+                                $macroStatus = 'NOT_RUN'
+                                $execution = 'NOT_RUN'
+                                $macroReason = 'all benchmark tests were skipped (fixture/device precondition); NOT a performance result'
+                            } elseif (-not $verdict.ok) {
+                                $macroStatus = 'FAIL'
+                                $execution = 'FAIL'
+                                $macroReason = $verdict.reason
+                            } elseif ($junit.failures -gt 0 -or $junit.errors -gt 0) {
+                                $macroStatus = 'FAIL'
+                                $execution = 'FAIL'
+                                $macroReason = ("benchmark failures={0} errors={1}" -f $junit.failures, $junit.errors)
+                            } else {
+                                $macroStatus = 'PASS'
+                                $execution = 'PASS'
+                                $macroReason = ("tests={0} failures=0 errors=0 skipped={1}" -f $junit.tests, $junit.skipped)
+                            }
+
+                            # --- conclusion 2: sampleValidity ---------------------------------
+                            if ($execution -eq 'PASS') {
+                                # Two distinct classes: definitively invalid samples (FAIL) and
+                                # unprovable samples (NOT_RUN). Neither may be reported as PASS.
+                                $invalidReasons = New-Object System.Collections.Generic.List[string]
+                                $unprovenReasons = New-Object System.Collections.Generic.List[string]
+                                if ($resolvedIterations -lt 10) {
+                                    $invalidReasons.Add(("iterations={0} < 10 required valid iterations" -f $resolvedIterations)) | Out-Null
+                                }
+                                $requiresReplay = (@($TestFilters | Where-Object { $_ -match 'ControlledReplay' }).Count -gt 0)
+                                if ($requiresReplay) {
+                                    $fixtureFacts = Get-McaReplayFixtureFacts -RepoRoot $repo
+                                    if (-not $fixtureFacts.available) {
+                                        $invalidReasons.Add(('replay fixture unavailable: ' + [string]$fixtureFacts.reason)) | Out-Null
+                                    } elseif (-not $fixtureFacts.hashMatches) {
+                                        $invalidReasons.Add(('replay fixture SHA-256 does not match its manifest (actual={0} declared={1})' -f
+                                            $fixtureFacts.fixtureSha256, $fixtureFacts.declaredSha256)) | Out-Null
+                                    } elseif (-not $ReplayFixtureSha256) {
+                                        $unprovenReasons.Add('replay scenario was selected but -ReplayFixtureSha256 was not supplied, so the executed fixture is not pinned') | Out-Null
+                                    } elseif (([string]$ReplayFixtureSha256).ToLowerInvariant() -ne $fixtureFacts.fixtureSha256) {
+                                        $invalidReasons.Add(('-ReplayFixtureSha256 {0} does not match fixture {1}' -f $ReplayFixtureSha256, $fixtureFacts.fixtureSha256)) | Out-Null
+                                    }
+                                    if ($fixtureFacts.available) {
+                                        if (Test-Path -LiteralPath $fixtureFacts.manifestPath) { $macroEvidence += $fixtureFacts.manifestPath }
+                                        if (Test-Path -LiteralPath $fixtureFacts.fixturePath) { $macroEvidence += $fixtureFacts.fixturePath }
+                                    }
+                                }
+                                $sample = Measure-MacrobenchmarkSample -Directories @($benchmarkAdditional) -Since $runStart.AddMinutes(-1)
+                                $sampleIterations = 0
+                                if ($null -ne $sample) { $sampleIterations = [int]$sample.maxIterations }
+                                if ($null -eq $sample -or -not $sample.supported) {
+                                    $unprovenReasons.Add(('no parseable Macrobenchmark JSON under {0}; valid frames/iterations cannot be established' -f $benchmarkAdditional)) | Out-Null
+                                } elseif ($sampleIterations -lt $resolvedIterations) {
+                                    $invalidReasons.Add(('raw samples per metric={0} < requested iterations={1}' -f $sampleIterations, $resolvedIterations)) | Out-Null
+                                }
+                                if ($invalidReasons.Count -gt 0) {
+                                    $sampleValidity = 'FAIL'
+                                    $macroStatus = 'FAIL'
+                                    $macroReason = $macroReason + '; sampleValidity=FAIL: ' + ($invalidReasons -join ' | ')
+                                    foreach ($item in $invalidReasons) { $sampleNotes.Add($item) | Out-Null }
+                                } elseif ($unprovenReasons.Count -gt 0) {
+                                    $sampleValidity = 'NOT_RUN'
+                                    $macroStatus = 'NOT_RUN'
+                                    $macroReason = $macroReason + '; sampleValidity=NOT_RUN: ' + ($unprovenReasons -join ' | ')
+                                    foreach ($item in $unprovenReasons) { $sampleNotes.Add($item) | Out-Null }
+                                } else {
+                                    $sampleValidity = 'PASS'
+                                    $macroReason = $macroReason + ("; sampleValidity=PASS metricSamples={0} metrics={1}" -f
+                                        $sampleIterations, ($sample.metricNames -join ','))
+                                }
+                                if ($sample) { $macroEvidence += @($sample.files) }
+                            }
+
+                            $copiedResults = Copy-EvidenceTree -Source $benchmarkResults -Destination (Join-Path $evidenceRoot 'macro\test-results') -Since $runStart.AddMinutes(-1)
+                            $copiedOutputs = Copy-EvidenceTree -Source $benchmarkOutputs -Destination (Join-Path $evidenceRoot 'macro\outputs') -Since $runStart.AddMinutes(-1)
+                            $macroEvidence += $copiedResults
+                            $macroEvidence += $copiedOutputs
+                            $macroReason = $macroReason + ("; archived test-results={0} outputs={1}" -f $copiedResults.Count, $copiedOutputs.Count)
                         }
                     }
                 }
             }
         }
     }
+    $resolvedIterationsForRecord = if ($Iterations -gt 0) { $Iterations } else { 10 }
+    $macroConclusions = @{
+        execution              = $execution
+        sampleValidity         = $sampleValidity
+        performanceAcceptance  = $performanceAcceptance
+        iterationsRequested    = $resolvedIterationsForRecord
+        compilationMode        = $CompilationMode
+        thresholdJudgement     = 'NOT_EVALUATED: frame thresholds, refresh rate and thermal conditions are reviewed against raw traces by the performance task, not by this runner.'
+    }
     Add-LaneResult -Name 'macro' -Command ('connected ' + $Variant + ' AndroidTest on ' + $DeviceSerial) -ExitCode $macroExit `
-        -Status $macroStatus -Reason $macroReason -LogPath $null -Evidence $macroEvidence
+        -Status $macroStatus -Reason $macroReason -LogPath $null -Evidence $macroEvidence -Conclusions $macroConclusions
+    if ($execution -eq 'PASS') {
+        $sampleStatus = if ($sampleValidity -eq 'PASS') { 'PASS' } else { 'FAIL' }
+        Add-LaneResult -Name 'macro-sample' -Command '(raw Macrobenchmark JSON review)' -ExitCode $null `
+            -Status $sampleStatus -Reason ([string]$sampleValidity + ': ' + ($sampleNotes -join ' | ')) -LogPath $null
+    }
+    Add-LaneResult -Name 'macro-performance' -Command '(threshold acceptance)' -ExitCode $null `
+        -Status 'NOT_RUN' -Reason $macroConclusions.thresholdJudgement -LogPath $null
 }
 
 # --- extra explicit Gradle tasks --------------------------------------------------------------
@@ -594,9 +788,27 @@ foreach ($row in $results) {
     $statusLines.Add(('| {0} | {1} | {2} | {3} | {4} |' -f $row.lane, $row.status, $exitText, ($row.reason -replace '\|', '\|'), $logText))
 }
 $statusLines.Add('')
+$statusLines.Add('## Three separate conclusions (macro)')
+$statusLines.Add('')
+$statusLines.Add('| lane | execution | sampleValidity | performanceAcceptance |')
+$statusLines.Add('|---|---|---|---|')
+foreach ($row in $results) {
+    if ($row.lane -ne 'macro') { continue }
+    $statusLines.Add(('| macro | {0} | {1} | {2} |' -f
+        $row.conclusions.execution, $row.conclusions.sampleValidity, $row.conclusions.performanceAcceptance))
+    $statusLines.Add('')
+    $statusLines.Add('- iterations requested: ' + [string]$row.conclusions.iterationsRequested)
+    $statusLines.Add('- compilation mode: ' + [string]$row.conclusions.compilationMode)
+    $statusLines.Add('- threshold judgement: ' + [string]$row.conclusions.thresholdJudgement)
+}
+$statusLines.Add('')
+$statusLines.Add('`execution` = the task ran and fresh XML exists. `sampleValidity` = the requested iterations, pinned fixture and raw per-metric samples are present. `performanceAcceptance` is never derived from exit code 0 and stays NOT_EVALUATED in this runner.')
+$statusLines.Add('')
 $statusLines.Add('## Compose compiler reports')
 $statusLines.Add('')
+$statusLines.Add('- config modules with reportsDestination+metricsDestination: ' + $composeConfigOk + '/' + $composeModules.Count)
 foreach ($line in $composeLines) { $statusLines.Add('- ' + $line) }
+$statusLines.Add('- metric review (stability/skippable analysis): NOT_RUN in this runner')
 $statusLines.Add('')
 $statusLines.Add('## Evidence')
 $statusLines.Add('')
@@ -636,7 +848,11 @@ $runJson = [pscustomobject]@{
     composeCompiler = [pscustomobject]@{
         totalFiles = $composeTotal
         freshFiles = $composeFresh
+        freshMetrics = $composeFreshMetrics
+        configuredModules = $composeConfigOk
+        moduleCount = $composeModules.Count
         modules    = $composeLines.ToArray()
+        metricReview = 'NOT_RUN'
     }
     # PowerShell 5.1: `@($genericList)` can throw "Argument types do not match"; ToArray() is safe.
     lanes       = $results.ToArray()

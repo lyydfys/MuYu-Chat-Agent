@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong
  */
 internal class DocumentImportCoordinator(
     private val application: Application,
-    private val uiStateStore: UiStateStore,
+    private val uiStateStore: UiStateWriter<KnowledgeLibraryFields>,
     private val scope: CoroutineScope,
     private val knowledgeBaseStore: KnowledgeBaseStore,
     private val chatSessionStore: ChatSessionStore,
@@ -147,7 +147,7 @@ internal class DocumentImportCoordinator(
                 val bases = knowledgeBaseStore.loadBases()
                 val count = knowledgeBaseStore.documents(baseId).size
                 uiStateStore.update { current ->
-                    val ownerIsCurrent = owner.isCurrent(current)
+                    val ownerIsCurrent = owner.isCurrent(current.snapshot)
                     current.copy(
                         knowledgeBases = bases,
                         knowledgeDocumentCounts = current.knowledgeDocumentCounts + (baseId to count),

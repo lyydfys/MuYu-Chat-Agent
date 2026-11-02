@@ -1,0 +1,31 @@
+# Source: ggml/src/ggml-hexagon/ggml-hexagon.cpp (HappyYzy ggml f8758628, after 0002)
+# Change: reject elementwise MUL/ADD operands whose broadcast is finer than the row-broadcast
+#         form (src1 ne[1..3] == 1), so those nodes stay on the CPU instead of being claimed
+#         by the HTP backend.
+# Why:    The HTP elementwise kernels compute partial broadcasts incorrectly. Wan 2.2 TI2V-5B
+#         with more than one latent frame broadcasts the per-frame modulation ([dim,1,T,N])
+#         against the token tensor ([dim,L/T,T,N]) in every attention block, and
+#         Rope::apply_rope broadcasts its 3D PE the same way. On device the whole DiT diverges
+#         at block 0 (norm1 sumsq 95991 vs 49659 on CPU), latent rel_l2 1.69 and 480x480x5
+#         decoded hf 10.1/7.9 (noise). With these nodes on CPU the same run reaches latent
+#         rel_l2 0.050 (the T=1 quantization floor is 0.041) and hf 1.55/1.10.
+#         Keeping the nodes on CPU is a narrow compatibility fallback: only broadcast MUL/ADD
+#         is affected, all MUL_MAT/FLASH_ATTN/NORM/CONV_3D nodes stay on HTP.
+--- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+@@ -5193,6 +5193,15 @@
+         return false;
+     }
+ 
++    // The HTP elementwise kernels only compute same-shape and row-broadcast operands
++    // correctly. Partial broadcasts (e.g. [dim,1,T,N] against [dim,L/T,T,N], used by Wan's
++    // multi-latent-frame modulation, and the 3D PE broadcast in Rope::apply_rope) come back
++    // numerically wrong on device, so keep those nodes on the CPU.
++    if (!ggml_are_same_shape(src0, src1) &&
++        !(src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1)) {
++        return false;
++    }
++
+     return true;
+ 
+     GGML_UNUSED(sess);

@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -11,16 +13,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -29,14 +27,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 import com.muyuchat.core.engine.ReasoningMode
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ThinkingModeMark(
@@ -57,10 +55,10 @@ internal fun ThinkingModeMark(
     ) {
         Box(contentAlignment = Alignment.Center) {
             Icon(
-                imageVector = Icons.Default.Psychology,
+                imageVector = McaIcons.Psychology,
                 contentDescription = null,
                 tint = if (selected) selectedColor else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(20.dp)
+                modifier = Modifier.size(McaIconSize.M)
             )
             if (mode == ReasoningMode.ADVANCED) {
                 Box(
@@ -86,6 +84,7 @@ internal fun ReasoningModeInlineCapsule(
         modifier = modifier,
         color = if (darkTheme) MaterialTheme.colorScheme.surface else Color.White,
         shape = RoundedCornerShape(28.dp),
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
         shadowElevation = 14.dp
     ) {
         Column(
@@ -118,6 +117,7 @@ internal fun CapsuleMenuRow(
     content: @Composable () -> Unit
 ) {
     val interactionSource = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -126,7 +126,10 @@ internal fun CapsuleMenuRow(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
                 enabled = enabled,
-                onClick = onClick
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                }
             )
             .mcaPressScale(interactionSource, enabled = enabled)
             .padding(horizontal = 18.dp, vertical = 7.dp),
@@ -143,6 +146,7 @@ internal fun CapsuleMenuRow(
         }
     }
 }
+
 @Composable
 // P9/S13: private→internal（跨区入口：迁移的输入区复合区引用）
 internal fun ReasoningModePill(
@@ -153,6 +157,7 @@ internal fun ReasoningModePill(
     val darkTheme = isSystemInDarkTheme()
     val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
     val interactionSource = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -160,7 +165,10 @@ internal fun ReasoningModePill(
             .clickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
-                onClick = onClick
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                }
             )
             .mcaPressScale(interactionSource),
         color = if (selected) {
@@ -168,16 +176,21 @@ internal fun ReasoningModePill(
         } else {
             Color.Transparent
         },
-        shape = CircleShape
+        shape = CircleShape,
+        border = if (selected) {
+            BorderStroke(0.5.dp, selectedColor.copy(alpha = 0.45f))
+        } else {
+            null
+        }
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (selected) {
-                Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
+                Icon(McaIcons.Check, contentDescription = null, modifier = Modifier.size(McaIconSize.Optical.Inline), tint = selectedColor)
             } else {
-                Spacer(modifier = Modifier.size(17.dp))
+                Spacer(modifier = Modifier.size(McaIconSize.Optical.Inline))
             }
             Spacer(modifier = Modifier.width(8.dp))
             Text(

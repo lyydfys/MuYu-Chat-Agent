@@ -2,6 +2,10 @@
 
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIconButton
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -16,15 +20,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +35,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ImageEditorScaffold(
@@ -62,12 +63,14 @@ internal fun ImageEditorScaffold(
                         .heightIn(min = 52.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "返回",
                         onClick = onBack,
                         enabled = !saving,
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.L
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
+                        Icon(McaIcons.Back, contentDescription = null)
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(title, style = MaterialTheme.typography.titleMedium)
@@ -78,7 +81,7 @@ internal fun ImageEditorScaffold(
                             maxLines = 2
                         )
                     }
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = onConfirm,
                         // A save in flight must not be re-submittable: the spinner describes the
                         // operation, and the button stays disabled until the caller clears `saving`.

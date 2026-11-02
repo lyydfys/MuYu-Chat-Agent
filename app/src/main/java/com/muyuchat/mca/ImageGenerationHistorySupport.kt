@@ -127,6 +127,7 @@ internal fun ImageGenerationHistoryMetadata.executionFacets(): ImageHistoryExecu
     }
     val runtimeLabel = when (runtime) {
         LocalImageRuntime.QNN_HTP -> "QNN HTP"
+        LocalImageRuntime.MEDIATEK_NEURON -> "MediaTek Neuron NPU"
         LocalImageRuntime.MNN_DIFFUSION -> "MNN Diffusion"
         LocalImageRuntime.STABLE_DIFFUSION_CPP -> "stable-diffusion.cpp"
         LocalImageRuntime.ONNX_RUNTIME -> "ONNX Runtime"

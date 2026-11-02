@@ -106,6 +106,21 @@ internal class ChatRunOwnership(
     fun markPhase(runId: Long, owner: Any, phase: UiGenerationRuntimePhase): Boolean =
         ownership.markPhase(runId, owner, phase)
 
+    /**
+     * Registers the exact local engine request of [runId] before dispatch ([owner] is the run's own
+     * Job, i.e. the `===` identity used by every other ownership transition).
+     *
+     * The cancellation gate freezes this value atomically with [cancelCurrent]/[cancelCurrentAndCancelOwner],
+     * so the user stop can target that exact attempt instead of reading whatever token the engine
+     * currently owns. Returns false for a stale run, a different owner, another run's id, or a second
+     * conflicting attempt id for the same run.
+     */
+    fun markLocalAttempt(
+        runId: Long,
+        owner: Any,
+        attempt: ChatAttemptIdentity
+    ): Boolean = ownership.markLocalAttempt(runId, owner, attempt)
+
     fun finish(runId: Long, owner: Any) = ownership.finish(runId, owner)
 
     fun cancelPending(reservation: UiGenerationReservation): Boolean =

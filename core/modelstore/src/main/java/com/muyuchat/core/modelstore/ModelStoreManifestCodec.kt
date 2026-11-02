@@ -267,7 +267,8 @@ private fun String.isCanonicalSha256(): Boolean = CANONICAL_SHA256.matches(trim(
     private fun ModelStoreRepository.normalizeManifest(model: ModelManifest): ModelManifest = when (model.runtime) {
         ChatModelRuntime.MNN -> normalizeMnnManifest(model)
         ChatModelRuntime.GENIEX_QAIRT -> normalizeQairtManifest(model)
-        ChatModelRuntime.LLAMA_CPP -> normalizeLlamaManifest(model)
+        ChatModelRuntime.LLAMA_CPP,
+        ChatModelRuntime.GENIEX_LLAMA_CPP -> normalizeLlamaManifest(model)
         ChatModelRuntime.LITERT_LM -> normalizeLiteRtLmManifest(model)
     }
 

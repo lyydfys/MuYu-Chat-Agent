@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- The DSH host runs a loopback HTTP/WebSocket server and long-running agent tools. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!--
+          Dedicated DSH host process. Started on demand by DshRuntimeServiceClient and kept
+          alive only while the user's DSH work needs it. Exported=false: only MCA can bind.
+          The specialUse subtype is on-device agent runtime work; it is not a network
+          download/upload job, not media, and not a system service.
+        -->
+        <service
+            android:name="com.muyuchat.core.dsh.runtime.service.DshRuntimeService"
+            android:exported="false"
+            android:process=":dsh"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="on-device DeepSeek Harness agent runtime (local Node web host and tools)" />
+        </service>
+    </application>
+</manifest>

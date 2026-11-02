@@ -1,0 +1,1780 @@
+{
+ "graph": "ditc1c_w8_w16L1024s4",
+ "stub": {
+  "path": "aot/stub/ditc1c_w8_w16L1024s4.npug",
+  "bytes": 1306364,
+  "sha256": "5d92980596391a3aa67e94251eccaff75d799e59d93ddd8aad589891dab0c013"
+ },
+ "dla": {
+  "path": "aot/mt6993/np9/ditc1c_w8_w16L1024s4.dla",
+  "bytes": 447541580,
+  "sha256": "3a5b1ac7310d71d68f8b9262b2b923d6954e801d594c29c952fb7dea6460307d"
+ },
+ "schemaFile": "model-npug-schema-ditc1c_w8_w16L1024s4.json",
+ "schemaSHA256": "8bbbeb7fd2b4c38faa7f627b7c73bbfa33eaa4f40213b14ae53c7b08511d8c40",
+ "tensorCount": 8416,
+ "opCount": 3481,
+ "inputCount": 70,
+ "outputCount": 1,
+ "inputs": [
+  {
+   "routeIndex": 0,
+   "tensorId": 0,
+   "rank": 3,
+   "dims": [
+    1,
+    1024,
+    2048
+   ],
+   "shapeKey": "[1,1024,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0003345913137309253,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4194304,
+   "bytesIfFP32": 8388608
+  },
+  {
+   "routeIndex": 1,
+   "tensorId": 1,
+   "rank": 3,
+   "dims": [
+    1,
+    256,
+    1024
+   ],
+   "shapeKey": "[1,256,1024]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.609773532138206e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 524288,
+   "bytesIfFP32": 1048576
+  },
+  {
+   "routeIndex": 2,
+   "tensorId": 2,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    256
+   ],
+   "shapeKey": "[1,1,256]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.1208789852698047e-11,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 512,
+   "bytesIfFP32": 1024
+  },
+  {
+   "routeIndex": 3,
+   "tensorId": 3,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 6.857232074253261e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 4,
+   "tensorId": 4,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 5,
+   "tensorId": 5,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0008034350466914475,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 6,
+   "tensorId": 6,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 2.5948558686650358e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 7,
+   "tensorId": 7,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 8,
+   "tensorId": 8,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.000618501624558121,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 9,
+   "tensorId": 9,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.002249673241749406,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 10,
+   "tensorId": 10,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00146762584336102,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 11,
+   "tensorId": 11,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00014369153359439224,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 12,
+   "tensorId": 12,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 5.159818465472199e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 13,
+   "tensorId": 13,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 14,
+   "tensorId": 14,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.001234153169207275,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 15,
+   "tensorId": 15,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 3.8132318877615035e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 16,
+   "tensorId": 16,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 17,
+   "tensorId": 17,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0004775329143740237,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 18,
+   "tensorId": 18,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.002440663520246744,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 19,
+   "tensorId": 19,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0016150084557011724,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 20,
+   "tensorId": 20,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00013909941480960697,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 21,
+   "tensorId": 21,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 5.895140566281043e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 22,
+   "tensorId": 22,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 23,
+   "tensorId": 23,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0013091348810121417,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 24,
+   "tensorId": 24,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 3.379901318112388e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 25,
+   "tensorId": 25,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 26,
+   "tensorId": 26,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0006047534989193082,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 27,
+   "tensorId": 27,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.002952039008960128,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 28,
+   "tensorId": 28,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0012281970120966434,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 29,
+   "tensorId": 29,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0002374525211052969,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 30,
+   "tensorId": 30,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.39080577052664e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 31,
+   "tensorId": 31,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 32,
+   "tensorId": 32,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0013645621947944164,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 33,
+   "tensorId": 33,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 2.6063798941322602e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 34,
+   "tensorId": 34,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 35,
+   "tensorId": 35,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0009964685887098312,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 36,
+   "tensorId": 36,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0016159133519977331,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 37,
+   "tensorId": 37,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0017494293861091137,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 38,
+   "tensorId": 38,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00028056942392140627,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 39,
+   "tensorId": 39,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.397749944473617e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 40,
+   "tensorId": 40,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 41,
+   "tensorId": 41,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.001857575261965394,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 42,
+   "tensorId": 42,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.089478534297086e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 43,
+   "tensorId": 43,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 44,
+   "tensorId": 44,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0006933336262591183,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 45,
+   "tensorId": 45,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00336380023509264,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 46,
+   "tensorId": 46,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0018998251762241125,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 47,
+   "tensorId": 47,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0003833713417407125,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 48,
+   "tensorId": 48,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 3.2605876185698435e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 49,
+   "tensorId": 49,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 50,
+   "tensorId": 50,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0032462729141116142,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 51,
+   "tensorId": 51,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 3.604514495236799e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 52,
+   "tensorId": 52,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 53,
+   "tensorId": 53,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0013406920479610562,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 54,
+   "tensorId": 54,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0007064596866257489,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 55,
+   "tensorId": 55,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.004959329031407833,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 56,
+   "tensorId": 56,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0006708672153763473,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 57,
+   "tensorId": 57,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 2.619584665808361e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 58,
+   "tensorId": 58,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 59,
+   "tensorId": 59,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0043909912928938866,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 60,
+   "tensorId": 60,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 3.2380601624026895e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 61,
+   "tensorId": 61,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00016483516083098948,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 62,
+   "tensorId": 62,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0005247208173386753,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 63,
+   "tensorId": 63,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0012770147295668721,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 64,
+   "tensorId": 64,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0014391181757673621,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 65,
+   "tensorId": 65,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00043833389645442367,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 66,
+   "tensorId": 66,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.00018756918143481016,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 67,
+   "tensorId": 67,
+   "rank": 3,
+   "dims": [
+    1,
+    1,
+    2048
+   ],
+   "shapeKey": "[1,1,2048]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0009067199425771832,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 4096,
+   "bytesIfFP32": 8192
+  },
+  {
+   "routeIndex": 68,
+   "tensorId": 68,
+   "rank": 2,
+   "dims": [
+    1024,
+    128
+   ],
+   "shapeKey": "[1024,128]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.120879020774737e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 262144,
+   "bytesIfFP32": 524288
+  },
+  {
+   "routeIndex": 69,
+   "tensorId": 69,
+   "rank": 2,
+   "dims": [
+    1024,
+    128
+   ],
+   "shapeKey": "[1024,128]",
+   "field0": 0,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 4.120864105061628e-05,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 262144,
+   "bytesIfFP32": 524288
+  }
+ ],
+ "outputs": [
+  {
+   "routeIndex": 0,
+   "tensorId": 8415,
+   "rank": 2,
+   "dims": [
+    1024,
+    64
+   ],
+   "shapeKey": "[1024,64]",
+   "field0": 3,
+   "field1": 1,
+   "quantTag": 1,
+   "quant": {
+    "scale": 0.0002083965518977493,
+    "zeroPoint": 0
+   },
+   "dataOffset": 0,
+   "dataSize": 0,
+   "bytesIfFP16": 131072,
+   "bytesIfFP32": 262144
+  }
+ ],
+ "inputShapeGroups": [
+  {
+   "shapeKey": "[1,1024,2048]",
+   "count": 1,
+   "routeIndexes": [
+    0
+   ],
+   "quantTags": [
+    1
+   ],
+   "distinctScales": [
+    0.0003345913137309253
+   ],
+   "note": null
+  },
+  {
+   "shapeKey": "[1,256,1024]",
+   "count": 1,
+   "routeIndexes": [
+    1
+   ],
+   "quantTags": [
+    1
+   ],
+   "distinctScales": [
+    4.609773532138206e-05
+   ],
+   "note": null
+  },
+  {
+   "shapeKey": "[1,1,256]",
+   "count": 1,
+   "routeIndexes": [
+    2
+   ],
+   "quantTags": [
+    1
+   ],
+   "distinctScales": [
+    4.1208789852698047e-11
+   ],
+   "note": null
+  },
+  {
+   "shapeKey": "[1,1,2048]",
+   "count": 65,
+   "routeIndexes": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67
+   ],
+   "quantTags": [
+    1
+   ],
+   "distinctScales": [
+    2.5948558686650358e-05,
+    2.6063798941322602e-05,
+    2.619584665808361e-05,
+    3.2380601624026895e-05,
+    3.2605876185698435e-05,
+    3.379901318112388e-05,
+    3.604514495236799e-05,
+    3.8132318877615035e-05,
+    4.089478534297086e-05,
+    4.39080577052664e-05,
+    4.397749944473617e-05,
+    5.159818465472199e-05,
+    5.895140566281043e-05,
+    6.857232074253261e-05,
+    0.00013909941480960697,
+    0.00014369153359439224,
+    0.00016483516083098948,
+    0.00018756918143481016,
+    0.0002374525211052969,
+    0.00028056942392140627,
+    0.0003833713417407125,
+    0.00043833389645442367,
+    0.0004775329143740237,
+    0.0005247208173386753,
+    0.0006047534989193082,
+    0.000618501624558121,
+    0.0006708672153763473,
+    0.0006933336262591183,
+    0.0007064596866257489,
+    0.0008034350466914475,
+    0.0009067199425771832,
+    0.0009964685887098312,
+    0.0012281970120966434,
+    0.001234153169207275,
+    0.0012770147295668721,
+    0.0013091348810121417,
+    0.0013406920479610562,
+    0.0013645621947944164,
+    0.0014391181757673621,
+    0.00146762584336102,
+    0.0016150084557011724,
+    0.0016159133519977331,
+    0.0017494293861091137,
+    0.001857575261965394,
+    0.0018998251762241125,
+    0.002249673241749406,
+    0.002440663520246744,
+    0.002952039008960128,
+    0.0032462729141116142,
+    0.00336380023509264,
+    0.0043909912928938866,
+    0.004959329031407833
+   ],
+   "note": "one 4096 B AMOD segment (2048 x 16-bit units)"
+  },
+  {
+   "shapeKey": "[1024,128]",
+   "count": 2,
+   "routeIndexes": [
+    68,
+    69
+   ],
+   "quantTags": [
+    1
+   ],
+   "distinctScales": [
+    4.120864105061628e-05,
+    4.120879020774737e-05
+   ],
+   "note": null
+  }
+ ],
+ "checks": {
+  "inputCountMatchesSchema": true,
+  "outputCountMatchesSchema": true,
+  "allInputIdsValid": true,
+  "allInputScaleFinite": true,
+  "allOutputScaleFinite": true,
+  "routeIndexesContiguous": true
+ },
+ "checksAllPass": true
+}

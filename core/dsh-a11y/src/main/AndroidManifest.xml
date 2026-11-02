@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Accessibility service host of the official `dsh-tool-accessibility` wire (D17).
+
+      The service is the only platform entry of this module. It is bound by the system
+      (`Settings -> Accessibility`), not by the app; the BIND_ACCESSIBILITY_SERVICE permission keeps
+      every other app out. It is exported because the system settings UI must be able to bind it,
+      and it is protected by that signature|system permission.
+
+      The user must enable it explicitly. When it is disabled the module reports
+      `running=false` / NOT_ENABLED instead of pretending the capability works.
+    -->
+    <application>
+        <service
+            android:name="com.muyuchat.core.dsh.a11y.android.DshA11yService"
+            android:description="@string/dsh_a11y_service_description"
+            android:exported="true"
+            android:label="@string/dsh_a11y_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/dsh_a11y_service_config" />
+        </service>
+    </application>
+
+</manifest>

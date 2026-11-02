@@ -151,6 +151,57 @@ class StableDiffusionComponentSelectionTest {
         assertEquals(controlNet.canonicalPath, echoed.getString("controlNetPath"))
     }
 
+    @Test
+    fun `anima bundle binds diffusion vae and qwen3 llm slot`() = withTempBundle { root ->
+        val diffusion = root.touch("anima-preview.safetensors")
+        val vae = root.touch("qwen_image_vae.safetensors")
+        val text = root.touch("qwen_3_06b_base.safetensors")
+        writeRoleManifest(
+            root,
+            family = LocalImageModelFamily.ANIMA,
+            components = listOf(
+                component("DIFFUSION", diffusion.name),
+                component("VAE", vae.name),
+                component("TEXT_ENCODER", text.name)
+            )
+        )
+
+        val selection = resolveStableDiffusionComponentSelection(
+            model(root, diffusion, LocalImageModelFamily.ANIMA)
+        )
+
+        assertEquals(LocalImageModelFamily.ANIMA, selection.family)
+        assertEquals("diffusion", selection.primarySlot)
+        assertEquals("llm", selection.textEncoderSlot)
+        assertEquals(vae.canonicalPath, selection.vaePath)
+        assertEquals(text.canonicalPath, selection.textEncoderPath)
+        assertTrue(selection.requireVae)
+        assertTrue(selection.requireTextEncoder)
+        assertTrue(!selection.requireTokenizer)
+    }
+
+    @Test
+    fun `anima bundle without vae fails before native load`() = withTempBundle { root ->
+        val diffusion = root.touch("anima-preview.safetensors")
+        root.touch("qwen_3_06b_base.safetensors")
+        writeRoleManifest(
+            root,
+            family = LocalImageModelFamily.ANIMA,
+            components = listOf(
+                component("DIFFUSION", diffusion.name),
+                component("TEXT_ENCODER", "qwen_3_06b_base.safetensors")
+            )
+        )
+
+        val error = assertInvalid {
+            resolveStableDiffusionComponentSelection(
+                model(root, diffusion, LocalImageModelFamily.ANIMA)
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("VAE role"))
+    }
+
     private fun model(
         root: File,
         primary: File,

@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.muyuchat.core.engine.GenerationParams
@@ -11,6 +12,7 @@ import kotlinx.coroutines.Deferred
 // 逐项沿用 ChatScreen 既有参数的原类型与默认值；未做任何行为改动。
 // 可见性与 ChatUiState 一致（public），因为 ChatScreen 是 public 函数。
 
+@Immutable
 data class ChatConversationActions(
     val onClearHistory: () -> Unit,
     val onDeleteConversation: (String) -> Unit,
@@ -34,6 +36,7 @@ data class ChatConversationActions(
 )
 
 /** 生成与输入：发送、停止、重试、参数与推理模式、模型后端、附件。 */
+@Immutable
 data class ChatGenerationActions(
     val onInputChange: (String) -> Unit,
     val onSend: () -> Unit,
@@ -49,6 +52,7 @@ data class ChatGenerationActions(
 )
 
 /** 内容与背景：助手、世界书、知识库、助手记忆、聊天背景。 */
+@Immutable
 data class ChatContentActions(
     val onDeleteAssistant: (String) -> Unit = {},
     val onSaveAssistant: (AssistantEditorDraft) -> Boolean = { false },
@@ -56,6 +60,7 @@ data class ChatContentActions(
     val onImportAssistantCard: (String) -> Unit = {},
     val onImportAssistantCardFile: () -> Unit = {},
     val onDeleteWorldBook: (String) -> Unit = {},
+    val onSetWorldBookEnabled: (String, Boolean) -> Unit = { _, _ -> },
     val onImportWorldBookFile: (WorldBookImportScope) -> Unit = {},
     val onCreateKnowledgeBase: (String) -> Unit = {},
     val onDeleteKnowledgeBase: (String) -> Unit = {},
@@ -69,6 +74,7 @@ data class ChatContentActions(
 )
 
 /** 生图与图库：生图请求审批/重试、模型与 LoRA/反演/放大器管理、资产、放大、翻译草稿、token 计量。 */
+@Immutable
 data class ChatImageActions(
     val onApproveChatImageRequest: (String) -> Unit = {},
     val onRejectChatImageRequest: (String) -> Unit = {},
@@ -109,6 +115,7 @@ data class ChatImageActions(
 )
 
 /** 应用外壳与导航：菜单、状态提示、页面跳转、浏览器任务、网页搜索、文件资产、离线翻译。 */
+@Immutable
 data class ChatShellActions(
     val onAppMenuOpenChange: (Boolean) -> Unit = {},
     val onDismissStatusMessage: () -> Unit = {},
@@ -116,6 +123,12 @@ data class ChatShellActions(
     val onOpenRecommendedModels: () -> Unit,
     val onOpenSettings: () -> Unit,
     val onOpenAgent: () -> Unit,
+    /** Opens the independent Agent workspace; [onOpenAgent] keeps opening smart tuning. */
+    val onOpenAgentWorkspace: () -> Unit = {},
+    /** Opens the independent official-DSH workspace; it is a separate mode, not smart tuning. */
+    val onOpenDshWorkspace: () -> Unit = {},
+    /** Opens the native video workspace below the DSH entry; video runs outlive the page. */
+    val onOpenVideoWorkspace: () -> Unit = {},
     val onOpenApi: () -> Unit,
     val onOpenWebSearchSettings: () -> Unit = {},
     val onImportChatModel: () -> Unit,
@@ -130,6 +143,7 @@ data class ChatShellActions(
 )
 
 /** ChatScreen 的全部用户意图，按职责分组（方案 §五.2 的动作组）。 */
+@Immutable
 data class ChatScreenActions(
     val conversation: ChatConversationActions,
     val generation: ChatGenerationActions,

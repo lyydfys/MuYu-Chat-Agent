@@ -66,25 +66,45 @@ internal object BenchmarkArguments {
         ?: DEFAULT_STREAMING_PROMPT
 
     /**
-     * `default` (fresh-install-like partial compile), `full`, `none` or `partial`.
-     * Anything else is rejected instead of silently measuring a different compile state.
-     * (`CompilationMode.Ignore` is intentionally not exposed: it is still an experimental
-     * Macrobenchmark API and opt-in annotations in a measurement harness hide real compile
-     * state differences, which is exactly what this argument exists to control.)
+     * `default` (fresh-install-like partial compile), `full`, `none`, `partial`, `partial-baseline`
+     * or `partial-no-baseline`. Anything else is rejected instead of silently measuring a different
+     * compile state. (`CompilationMode.Ignore` is intentionally not exposed: it is still an
+     * experimental Macrobenchmark API and opt-in annotations in a measurement harness hide real
+     * compile state differences, which is exactly what this argument exists to control.)
+     *
+     * `partial` and `default` do NOT prove a Baseline Profile was installed:
+     * - `partial` is `BaselineProfileMode.Disable` (partial compile, no profile);
+     * - `partial-baseline` is `BaselineProfileMode.Require`, which fails the run when the profile is
+     *   missing instead of silently measuring an unprofiled install;
+     * - `partial-no-baseline` is the explicit `Disable` partner of `partial-baseline`, so a profile
+     *   A/B keeps every other input (compile mode, warmup, fixture) identical.
      */
     fun compilationMode(): CompilationMode = when (
         arguments.getString("mca.compilationMode")?.trim()?.lowercase() ?: "default"
     ) {
         "default" -> CompilationMode.DEFAULT
         "partial" -> CompilationMode.Partial(baselineProfileMode = BaselineProfileMode.Disable)
+        "partial-baseline" -> CompilationMode.Partial(baselineProfileMode = BaselineProfileMode.Require)
+        "partial-no-baseline" -> CompilationMode.Partial(baselineProfileMode = BaselineProfileMode.Disable)
         "full" -> CompilationMode.Full()
         "none" -> CompilationMode.None()
         else -> error(
-            "Unknown -e mca.compilationMode value; expected default|partial|full|none."
+            "Unknown -e mca.compilationMode value; expected " +
+                "default|partial|partial-baseline|partial-no-baseline|full|none."
         )
+    }
+
+    /** The baseline-profile policy of the current compilation mode, recorded with the sample. */
+    fun baselineProfileMode(): String = when (
+        arguments.getString("mca.compilationMode")?.trim()?.lowercase() ?: "default"
+    ) {
+        "partial-baseline" -> "require"
+        "partial", "partial-no-baseline", "default" -> "disable"
+        else -> "not-applicable"
     }
 
     fun describe(): String =
         "iterations=${iterations()}, compilationMode=${compilationMode()}, " +
+            "baselineProfile=${baselineProfileMode()}, " +
             "generationTimeoutMs=${generationTimeoutMs()}"
 }

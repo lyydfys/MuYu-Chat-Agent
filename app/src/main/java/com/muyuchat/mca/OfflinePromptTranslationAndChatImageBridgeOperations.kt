@@ -2,20 +2,19 @@ package com.muyuchat.mca
 
 import android.net.Uri
 import com.muyuchat.feature.chat.ChatImageActionKind
-import com.muyuchat.mca.composition.McaAppContainer
 import kotlinx.coroutines.CoroutineScope
 
 /**
  * R4-S18: 离线提示词翻译、生图准备与助手生图工具权限桥接整族下沉。
  */
 internal class OfflinePromptTranslationAndChatImageCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<OfflineTranslationFields>,
+    private val promptDraftStore: UiStateWriter<ChatPromptDraftFields>,
     private val admission: RuntimeAdmissionState,
     private val scope: CoroutineScope,
-    private val container: McaAppContainer,
+    private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort,
     private val installer: OfflinePromptTranslationBundleInstaller,
     private val downloader: OfflinePromptTranslationBundleDownloader,
-    private val offlinePromptTranslationServiceProvider: () -> OfflinePromptTranslationService,
     private val chatImageToolAuthorizationStore: ChatImageToolAuthorizationStore,
     private val prepareChatInput: (MainUiState) -> PreparedChatInput,
     private val showStatus: (String) -> Unit,
@@ -24,11 +23,10 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
     private val sendChatImageRequestWithPromptBridge: (visibleUserText: String, prompt: String, requestedOutputCount: Int?, allowCloudTranslationFallback: Boolean) -> Unit,
     private val sendPreparedMessage: (currentState: MainUiState, preparedInput: PreparedChatInput) -> Unit
 ) {
-    private val imagePromptTranslationPreviewPort: ImagePromptTranslationPreviewPort =
-        container.createImagePromptTranslationPreviewPort(
-            store,
-            offlinePromptTranslationServiceProvider
-        )
+    private val permissionStore = store.restrict(
+        project = { ConversationStatusFields(it.snapshot, statusMessage = it.statusMessage) },
+        merge = { parent, child -> parent.copy(statusMessage = child.statusMessage) },
+    )
 
     suspend fun translateImagePromptPreview(prompt: String): String =
         com.muyuchat.mca.translateImagePromptPreview(port = imagePromptTranslationPreviewPort, prompt = prompt)
@@ -78,7 +76,7 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
         com.muyuchat.mca.offlineTranslationBundleReadyStatus(bundle)
 
     fun invalidatePendingChatImagePreparation() {
-        invalidatePendingChatImagePreparationInto(store, admission)
+        invalidatePendingChatImagePreparationInto(promptDraftStore, admission)
     }
 
     fun cancelChatImageTranslationDraft(id: String) {
@@ -96,7 +94,7 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
         }
         val text = editedText.takeUtf8Prefix(MainViewModel.MAX_DIRECT_COMPOSER_UTF8_BYTES).text
         invalidatePendingChatImagePreparation()
-        store.update { it.copy(input = text) }
+        promptDraftStore.update { it.copy(input = text) }
         when (pending.kind) {
             ChatImageActionKind.AMBIGUOUS -> {
                 if (primary) {
@@ -174,7 +172,7 @@ internal class OfflinePromptTranslationAndChatImageCoordinator(
 
     fun setAssistantImageToolAutoApproval(enabled: Boolean) {
         setAssistantImageToolAutoApprovalFor(
-            store = store,
+            store = permissionStore,
             scope = scope,
             chatImageToolAuthorizationStore = chatImageToolAuthorizationStore,
             chatImageToolPermissionUiState = ::chatImageToolPermissionUiState,

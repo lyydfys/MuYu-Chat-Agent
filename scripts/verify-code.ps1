@@ -20,6 +20,22 @@
 .PARAMETER FullTests
     Run `:core:engine:test` and `:api:local:test` as well as the app unit tests.
 
+.PARAMETER FeatureTests
+    Run the chat feature module's own unit tests.
+
+.PARAMETER AgentTests
+    Run the Agent V1 contract/runtime/feature/app unit test tasks. Rejects combining with
+    -Tests/-FullTests/-FeatureTests/-Changed (Gradle --tests is invocation-global). Reports
+    tests=0 as a failure, so an empty Agent lane can never look green.
+
+.PARAMETER DshTests
+    Run the DSH contract/runtime/platform/gateway/workspace unit test tasks. Rejects combining
+    with other test-selection switches and reports tests=0 as a failure.
+
+.PARAMETER VideoTests
+    Run the video contract and workspace unit test tasks. Rejects combining with other
+    test-selection switches and reports tests=0 as a failure.
+
 .PARAMETER SkipTests
     Compile only.
 
@@ -28,6 +44,12 @@
 
 .EXAMPLE
     .\scripts\verify-code.ps1 -SkipTests
+
+.EXAMPLE
+    .\scripts\verify-code.ps1 -AgentTests -Rerun
+
+.EXAMPLE
+    .\scripts\verify-code.ps1 -DshTests -Rerun
 #>
 [CmdletBinding()]
 param(
@@ -35,6 +57,9 @@ param(
     [switch] $FullTests,
     [switch] $SkipTests,
     [switch] $FeatureTests,
+    [switch] $AgentTests,
+    [switch] $DshTests,
+    [switch] $VideoTests,
     [switch] $Rerun,
     [switch] $Changed,
     [string] $Since = 'HEAD'
@@ -90,7 +115,9 @@ if ($javaMajor -and $javaMajor -lt 21) {
 $compileTasks = @(
     ':app:compileDebugKotlin',
     ':core:engine:compileDebugKotlin',
-    ':api:local:compileDebugKotlin'
+    ':api:local:compileDebugKotlin',
+    ':core:video-contract:compileDebugKotlin',
+    ':feature:video-workspace:compileDebugKotlin'
 )
 
 $failed = @()
@@ -175,21 +202,73 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     # (observed: -FullTests passed one glued ':app:testDebugUnitTest:core:engine:...' argument).
     $testArgs = @(if ($FeatureTests) {
         ':feature:chat:testDebugUnitTest'
+    } elseif ($AgentTests) {
+        ':core:agent-contract:testDebugUnitTest',
+        ':core:agent-runtime:testDebugUnitTest',
+        ':feature:agent-workspace:testDebugUnitTest',
+        ':app:testDebugUnitTest'
+    } elseif ($DshTests) {
+        ':core:dsh-contract:testDebugUnitTest',
+        ':core:dsh-runtime:testDebugUnitTest',
+        ':core:dsh-platform:testDebugUnitTest',
+        ':core:dsh-android-actions:testDebugUnitTest',
+        ':core:dsh-a11y:testDebugUnitTest',
+        ':core:dsh-vscreen:testDebugUnitTest',
+        ':core:dsh-browser:testDebugUnitTest',
+        ':core:dsh-maintenance:testDebugUnitTest',
+        ':api:dsh-gateway:testDebugUnitTest',
+        ':feature:dsh-workspace:testDebugUnitTest'
+    } elseif ($VideoTests) {
+        ':core:video-contract:testDebugUnitTest',
+        ':feature:video-workspace:testDebugUnitTest'
     } else {
         ':app:testDebugUnitTest'
     })
     if ($Tests.Count -gt 0) {
         foreach ($t in $Tests) { $testArgs += @('--tests', $t) }
         Write-Host ('   filter: ' + ($Tests -join ', '))
+    } elseif ($AgentTests) {
+        Write-Host '   lane: Agent contract/runtime/feature/app unit tests (no filter)'
+    } elseif ($DshTests) {
+        Write-Host '   lane: DSH contract/runtime/platform/gateway/workspace unit tests (no filter)'
+    } elseif ($VideoTests) {
+        Write-Host '   lane: video contract/workspace unit tests (no filter)'
     } else {
         Write-Host '   filter: (whole module)'
     }
     # `-Changed` narrows the *selection* to the modules touched since `-Since`; it never narrows the
     # assertions. `--tests` filters are invocation-global, so combining it with any filter flag is
     # rejected the same way `-FullTests` rejects `-Tests` above: fail loudly, never run silently empty.
-    if ($Changed -and ($FullTests -or $FeatureTests -or $Tests.Count -gt 0)) {
-        Write-Host '   ERROR: -Changed/-Since cannot be combined with -Tests/-FullTests/-FeatureTests (Gradle --tests is invocation-global).' -ForegroundColor Red
+    if ($Changed -and ($FullTests -or $FeatureTests -or $AgentTests -or $DshTests -or $VideoTests -or $Tests.Count -gt 0)) {
+        Write-Host '   ERROR: -Changed/-Since cannot be combined with test-selection switches (Gradle --tests is invocation-global).' -ForegroundColor Red
         Write-Host '          Use -Changed alone for the affected-module lane, or the filter flags for the gate.' -ForegroundColor Red
+        exit 2
+    }
+    if ($AgentTests -and ($FullTests -or $FeatureTests -or $DshTests -or $VideoTests -or $Tests.Count -gt 0)) {
+        Write-Host '   ERROR: -AgentTests cannot be combined with other test-selection switches.' -ForegroundColor Red
+        Write-Host '          -AgentTests owns the module selection; use -Rerun to force fresh execution.' -ForegroundColor Red
+        exit 2
+    }
+    if ($VideoTests -and ($FullTests -or $FeatureTests -or $AgentTests -or $DshTests -or $Tests.Count -gt 0)) {
+        Write-Host '   ERROR: -VideoTests cannot be combined with other test-selection switches.' -ForegroundColor Red
+        Write-Host '          -VideoTests owns the module selection; use -Rerun to force fresh execution.' -ForegroundColor Red
+        exit 2
+    }
+    if ($VideoTests -and $SkipTests) {
+        Write-Host '   ERROR: -VideoTests requires tests; it cannot be combined with -SkipTests.' -ForegroundColor Red
+        exit 2
+    }
+    if ($AgentTests -and $SkipTests) {
+        Write-Host '   ERROR: -AgentTests requires tests; it cannot be combined with -SkipTests.' -ForegroundColor Red
+        exit 2
+    }
+    if ($DshTests -and ($FullTests -or $FeatureTests -or $AgentTests -or $VideoTests -or $Tests.Count -gt 0)) {
+        Write-Host '   ERROR: -DshTests cannot be combined with other test-selection switches.' -ForegroundColor Red
+        Write-Host '          -DshTests owns the module selection; use -Rerun to force fresh execution.' -ForegroundColor Red
+        exit 2
+    }
+    if ($DshTests -and $SkipTests) {
+        Write-Host '   ERROR: -DshTests requires tests; it cannot be combined with -SkipTests.' -ForegroundColor Red
         exit 2
     }
     if ($Changed) {
@@ -209,6 +288,16 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $map = [ordered]@{
             '^app/'              = ':app:testDebugUnitTest'
             '^core/engine/'      = ':core:engine:testDebugUnitTest'
+            '^core/agent-contract/' = ':core:agent-contract:testDebugUnitTest'
+            '^core/agent-runtime/'  = ':core:agent-runtime:testDebugUnitTest'
+            '^core/dsh-contract/' = ':core:dsh-contract:testDebugUnitTest'
+            '^core/dsh-runtime/' = ':core:dsh-runtime:testDebugUnitTest'
+            '^core/dsh-platform/' = ':core:dsh-platform:testDebugUnitTest'
+            '^core/dsh-android-actions/' = ':core:dsh-android-actions:testDebugUnitTest'
+            '^core/dsh-a11y/' = ':core:dsh-a11y:testDebugUnitTest'
+            '^core/dsh-vscreen/' = ':core:dsh-vscreen:testDebugUnitTest'
+            '^core/dsh-browser/' = ':core:dsh-browser:testDebugUnitTest'
+            '^core/dsh-maintenance/' = ':core:dsh-maintenance:testDebugUnitTest'
             '^core/download/'    = ':core:download:testDebugUnitTest'
             '^core/advisor/'     = ':core:advisor:testDebugUnitTest'
             '^core/benchmark/'   = ':core:benchmark:testDebugUnitTest'
@@ -217,10 +306,15 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             '^core/telemetry/'   = ':core:telemetry:testDebugUnitTest'
             '^core/tuning/'      = ':core:tuning:testDebugUnitTest'
             '^api/local/'        = ':api:local:testDebugUnitTest'
+            '^api/dsh-gateway/'  = ':api:dsh-gateway:testDebugUnitTest'
             '^feature/chat/'     = ':feature:chat:testDebugUnitTest'
             '^feature/agent/'    = ':feature:agent:testDebugUnitTest'
+            '^feature/agent-workspace/' = ':feature:agent-workspace:testDebugUnitTest'
+            '^feature/dsh-workspace/' = ':feature:dsh-workspace:testDebugUnitTest'
             '^feature/modelhub/' = ':feature:modelhub:testDebugUnitTest'
             '^feature/settings/' = ':feature:settings:testDebugUnitTest'
+            '^core/video-contract/' = ':core:video-contract:testDebugUnitTest'
+            '^feature/video-workspace/' = ':feature:video-workspace:testDebugUnitTest'
         }
         $sel = @()
         foreach ($k in $map.Keys) {
@@ -263,7 +357,9 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             ':feature:chat:testDebugUnitTest',
             ':feature:agent:testDebugUnitTest',
             ':feature:modelhub:testDebugUnitTest',
-            ':feature:settings:testDebugUnitTest'
+            ':feature:settings:testDebugUnitTest',
+            ':core:video-contract:testDebugUnitTest',
+            ':feature:video-workspace:testDebugUnitTest'
         )
         # NOTE: `--tests` is global to a Gradle invocation, so only pass filters when a single test
         # task is selected. `-FullTests` therefore rejects `-Tests` rather than silently reporting
@@ -273,7 +369,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
             Write-Host '          Use -FeatureTests for chat-module anchors, or -Tests alone for :app.' -ForegroundColor Red
             exit 2
         }
-        Write-Host '   plus :core:engine, :core:download, :core:advisor, :core:benchmark, :core:deviceprofile, :core:modelstore, :core:telemetry, :core:tuning, :api:local and the four :feature:* test tasks'
+        Write-Host '   plus :core:engine, :core:download, :core:advisor, :core:benchmark, :core:deviceprofile, :core:modelstore, :core:telemetry, :core:tuning, :api:local, the four :feature:* and the two video test tasks'
     }
     $testLog = Join-Path $env:TEMP "mca-verify-test-$runTag.log"
     if ($Rerun) {
@@ -316,6 +412,8 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
 
     $dir = if ($FeatureTests) {
         Join-Path $repo 'feature\chat\build\test-results\testDebugUnitTest'
+    } elseif ($DshTests) {
+        Join-Path $repo 'core\dsh-contract\build\test-results\testDebugUnitTest'
     } else {
         Join-Path $repo 'app\build\test-results\testDebugUnitTest'
     }
@@ -325,7 +423,25 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
         $extraResultDirs = @('core\engine', 'core\download', 'core\advisor', 'core\benchmark',
             'core\deviceprofile', 'core\modelstore', 'core\telemetry', 'core\tuning',
             'api\local', 'feature\chat', 'feature\agent',
-            'feature\modelhub', 'feature\settings') |
+            'feature\modelhub', 'feature\settings',
+            'core\video-contract', 'feature\video-workspace') |
+            ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
+            Where-Object { Test-Path $_ }
+    }
+    if ($AgentTests) {
+        $extraResultDirs += @('core\agent-contract', 'core\agent-runtime', 'feature\agent-workspace') |
+            ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
+            Where-Object { Test-Path $_ }
+    }
+    if ($DshTests) {
+        $extraResultDirs += @('core\dsh-runtime', 'core\dsh-platform', 'core\dsh-android-actions',
+            'core\dsh-a11y', 'core\dsh-vscreen', 'core\dsh-browser', 'core\dsh-maintenance',
+            'api\dsh-gateway', 'feature\dsh-workspace') |
+            ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
+            Where-Object { Test-Path $_ }
+    }
+    if ($VideoTests) {
+        $extraResultDirs += @('core\video-contract', 'feature\video-workspace') |
             ForEach-Object { Join-Path $repo "$_\build\test-results\testDebugUnitTest" } |
             Where-Object { Test-Path $_ }
     }
@@ -378,7 +494,7 @@ if (-not $SkipTests -and $failed.Count -eq 0) {
     # failure, and the message names the fix so it is actionable rather than mysterious.
     # (Skipped tests are separate: they are counted and reported above, and are not conflated
     # with "did not run" here.)
-    $testsWereRequested = ($FullTests -or $FeatureTests -or ($Tests.Count -gt 0))
+    $testsWereRequested = ($FullTests -or $FeatureTests -or $AgentTests -or $DshTests -or $VideoTests -or ($Tests.Count -gt 0))
     if ($testsWereRequested -and $totalTests -eq 0) {
         Write-Host '   ERROR: tests=0 - no test was actually executed, so a green result would prove nothing.' -ForegroundColor Red
         Write-Host '          Most common cause: -FullTests without -Rerun. Gradle then treats the test task as' -ForegroundColor Red

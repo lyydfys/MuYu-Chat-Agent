@@ -1,6 +1,8 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.presentation.KnowledgeLibraryOperations
 import com.muyuchat.mca.presentation.KnowledgeLibraryPort
+import com.muyuchat.mca.presentation.KnowledgeLibrarySnapshot
 import com.muyuchat.mca.presentation.WorldBookImportOutcome
 import com.muyuchat.mca.presentation.WorldBookImportRequest
 import com.muyuchat.mca.presentation.importWorldBook
@@ -247,5 +249,131 @@ class WorldBookImportOperationsTest {
         val port = FakePort()
         val outcome = runBlocking { port.importWorldBook(request(port, rawJson = regexJson)) }
         assertNotNull(outcome)
+    }
+
+    // ---- file-derived fallback name ---------------------------------------------------------
+
+    @Test
+    fun `a nameless export takes the file-derived fallback name`() = runBlocking {
+        // Tavern World Info exports carry no top-level name; the picked file name is the book name.
+        val nameless = """{"entries":[{"uid":"a","keys":"杭州","content":"西湖在杭州。"}]}"""
+        val port = FakePort()
+        val outcome = port.importWorldBook(request(port, rawJson = nameless).copy(fallbackName = "Eternal Wind Box"))
+        assertTrue(outcome is WorldBookImportOutcome.Committed)
+        assertEquals("Eternal Wind Box", port.upserted!!.name)
+        assertTrue(
+            "the message names the book by its file name",
+            (outcome as WorldBookImportOutcome.Committed).change.statusMessage.contains("已导入世界书：Eternal Wind Box")
+        )
+    }
+
+    @Test
+    fun `an embedded name still wins over the fallback`() = runBlocking {
+        val named = """{"name":"内嵌名","entries":[{"uid":"a","keys":"k","content":"c"}]}"""
+        val port = FakePort()
+        port.importWorldBook(request(port, rawJson = named).copy(fallbackName = "file.json"))
+        assertEquals("内嵌名", port.upserted!!.name)
+    }
+
+    @Test
+    fun `the file import path strips the extension and blanks mean no fallback`() {
+        assertEquals("Eternal Wind Box", worldBookFallbackNameFromFile("Eternal Wind Box.json"))
+        assertEquals("书名", worldBookFallbackNameFromFile("  书名.json "))
+        assertEquals("no-extension", worldBookFallbackNameFromFile("no-extension"))
+        assertEquals("a.b", worldBookFallbackNameFromFile("a.b.json"))
+        assertNull(worldBookFallbackNameFromFile(""))
+        assertNull(worldBookFallbackNameFromFile("   "))
+        assertNull(worldBookFallbackNameFromFile(".json"))
+    }
+
+    // ---- enable/disable toggle ---------------------------------------------------------------
+
+    @Test
+    fun `disabling a book upserts it with the flag flipped and says so`() {
+        val book = WorldBookRecord(
+            id = "book-1",
+            name = "江湖设定",
+            entries = listOf(WorldBookEntry(content = "x"))
+        )
+        val port = FakePort(upsertResult = listOf(book.copy(enabled = false)))
+        val change = KnowledgeLibraryOperations.setWorldBookEnabled(
+            port,
+            KnowledgeLibrarySnapshot(
+                worldBooks = listOf(book),
+                knowledgeBases = emptyList(),
+                knowledgeDocumentCounts = emptyMap(),
+                knowledgeBaseImportingIds = emptySet(),
+                selectedKnowledgeBaseIds = emptySet()
+            ),
+            worldBookId = "book-1",
+            enabled = false
+        )
+        assertNotNull(change)
+        assertEquals(false, port.upserted!!.enabled)
+        assertEquals("已停用世界书：江湖设定", change!!.statusMessage)
+    }
+
+    @Test
+    fun `enabling a disabled book flips the flag`() {
+        val book = WorldBookRecord(
+            id = "book-1",
+            name = "停用的书",
+            entries = listOf(WorldBookEntry(content = "x")),
+            enabled = false
+        )
+        val port = FakePort()
+        KnowledgeLibraryOperations.setWorldBookEnabled(
+            port,
+            KnowledgeLibrarySnapshot(
+                worldBooks = listOf(book),
+                knowledgeBases = emptyList(),
+                knowledgeDocumentCounts = emptyMap(),
+                knowledgeBaseImportingIds = emptySet(),
+                selectedKnowledgeBaseIds = emptySet()
+            ),
+            worldBookId = "book-1",
+            enabled = true
+        )
+        assertTrue(port.upserted!!.enabled)
+    }
+
+    @Test
+    fun `a same-state toggle publishes only a status line without writing`() {
+        val book = WorldBookRecord(
+            id = "book-1",
+            name = "已启用",
+            entries = listOf(WorldBookEntry(content = "x")),
+            enabled = true
+        )
+        val port = FakePort()
+        val change = KnowledgeLibraryOperations.setWorldBookEnabled(
+            port,
+            KnowledgeLibrarySnapshot(
+                worldBooks = listOf(book),
+                knowledgeBases = emptyList(),
+                knowledgeDocumentCounts = emptyMap(),
+                knowledgeBaseImportingIds = emptySet(),
+                selectedKnowledgeBaseIds = emptySet()
+            ),
+            worldBookId = "book-1",
+            enabled = true
+        )
+        assertEquals(0, port.upsertCalls)
+        assertTrue(change!!.statusMessage.contains("已是启用状态"))
+        assertNull(change.worldBooks)
+    }
+
+    @Test
+    fun `an unknown toggle target is a silent no-op`() {
+        val port = FakePort()
+        val snapshot = KnowledgeLibrarySnapshot(
+            worldBooks = emptyList(),
+            knowledgeBases = emptyList(),
+            knowledgeDocumentCounts = emptyMap(),
+            knowledgeBaseImportingIds = emptySet(),
+            selectedKnowledgeBaseIds = emptySet()
+        )
+        assertNull(KnowledgeLibraryOperations.setWorldBookEnabled(port, snapshot, "missing", enabled = true))
+        assertEquals(0, port.upsertCalls)
     }
 }

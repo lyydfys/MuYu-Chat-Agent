@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -25,6 +26,7 @@ enum class BrowserTaskKind {
     SEARCH
 }
 
+@Immutable
 data class BrowserTask(
     val taskId: String,
     val owner: String,

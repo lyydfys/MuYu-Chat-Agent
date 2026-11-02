@@ -1,9 +1,11 @@
 package com.muyuchat.mca
 
 import android.os.Process
+import android.os.SystemClock
 import android.util.Log
 import com.muyuchat.core.engine.LocalChatRuntime
 import kotlin.concurrent.thread
+import kotlinx.coroutines.CancellationException
 
     /**
      * Some native calls hold their own non-interruptible mutex. Do not enter
@@ -13,9 +15,16 @@ import kotlin.concurrent.thread
 internal fun LocalChatWorkerService.scheduleForcedRecoveryAfterStop(): Boolean {
         val stage = activeNativeStage ?: return false
         val token = activeNativeOperationToken
-        if (token == 0L || !nativeOperationGate.isLocked) return false
         val policy = watchdogOperationPolicy(stage, null)
-        if (!policy.forceProcessRecoveryOnCancel) return false
+        if (!shouldArmForcedStopRecovery(
+                stage = stage,
+                operationToken = token,
+                gateLocked = nativeOperationGate.isLocked,
+                forceProcessRecoveryOnCancel = policy.forceProcessRecoveryOnCancel
+            )
+        ) {
+            return false
+        }
         if (cancellationWatchdogs.containsKey(token)) return true
         val watchdog = Runnable {
             if (cancellationWatchdogs.remove(token) == null ||
@@ -34,13 +43,34 @@ internal fun LocalChatWorkerService.scheduleForcedRecoveryAfterStop(): Boolean {
                 operationLabel = policy.operationLabel
             )
             recordStageFailure(stage, diagnostic.code)
-            Log.w(WORKER_LOG_TAG, "${diagnostic.code}: ${diagnostic.message}")
+            Log.w(
+                WORKER_LOG_TAG,
+                "stop grace expired code=$cancellationCode stage=$stage op=$token " +
+                    "graceMs=$NATIVE_CANCEL_GRACE_TIMEOUT_MS; reclaiming the disposable worker"
+            )
             Process.killProcess(Process.myPid())
         }
         if (cancellationWatchdogs.putIfAbsent(token, watchdog) == null) {
             watchdogHandler.postDelayed(watchdog, NATIVE_CANCEL_GRACE_TIMEOUT_MS)
         }
         return true
+    }
+
+/**
+ * Every explicit user stop of a native prompt-prefill or token-decode must end within the
+ * cancellation grace window, whatever the runtime's normal `forceProcessRecoveryOnCancel` policy
+ * says. A stop that wedges behind a closed native/SDK mutex can otherwise leave the worker busy
+ * until the natural operation timeout (30 minutes). Process recovery is safe here because the
+ * worker is disposable and isolated from the UI process.
+ */
+internal fun shouldArmForcedStopRecovery(
+        stage: String?,
+        operationToken: Long,
+        gateLocked: Boolean,
+        forceProcessRecoveryOnCancel: Boolean
+    ): Boolean {
+        if (stage == null || operationToken == 0L || !gateLocked) return false
+        return stage == "prefill" || stage == "decode" || forceProcessRecoveryOnCancel
     }
 
 internal fun LocalChatWorkerService.scheduleMnnProducerRecoveryAfterStop() {
@@ -62,10 +92,35 @@ internal fun LocalChatWorkerService.scheduleMnnProducerRecoveryAfterStop() {
 
 internal fun LocalChatWorkerService.dispatchRunnerStop() {
         val runner = activeRunner ?: return
+        val stage = activeNativeStage
+        val token = activeNativeOperationToken
         // Some SDK-backed runners serialize cancellation with their generation
         // mutex. Never spend a Binder thread waiting for that mutex; the
         // isolated worker watchdog remains responsible for bounded recovery.
         thread(isDaemon = true, name = "mca-native-stop-${operationSequence.get()}") {
-            runCatching { runner.requestStop() }
+            val startedAtMs = SystemClock.elapsedRealtime()
+            try {
+                runner.requestStop()
+                Log.i(
+                    WORKER_LOG_TAG,
+                    "native stop call returned stage=${stage ?: "-"} op=$token " +
+                        "elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}"
+                )
+            } catch (cancellation: CancellationException) {
+                // Never report a cancelled dispatch as an accepted native stop.
+                Log.w(
+                    WORKER_LOG_TAG,
+                    "native stop call cancelled stage=${stage ?: "-"} op=$token " +
+                        "elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs}"
+                )
+                throw cancellation
+            } catch (error: Throwable) {
+                Log.w(
+                    WORKER_LOG_TAG,
+                    "native stop call failed stage=${stage ?: "-"} op=$token " +
+                        "elapsedMs=${SystemClock.elapsedRealtime() - startedAtMs} " +
+                        "error=${error::class.java.simpleName}"
+                )
+            }
         }
     }

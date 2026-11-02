@@ -1,0 +1,49 @@
+diff --git a/src/model/diffusion/minimax_h3.hpp b/src/model/diffusion/minimax_h3.hpp
+index f3b69a2..2743fa5 100644
+--- a/src/model/diffusion/minimax_h3.hpp
++++ b/src/model/diffusion/minimax_h3.hpp
+@@ -1148,8 +1148,43 @@ namespace MiniMaxH3 {
+                 std::vector<int32_t> indices(layout.timesteps.size());
+                 std::vector<int32_t> upper_indices(layout.timesteps.size());
+                 std::vector<float> fractions(layout.timesteps.size());
++                // nightmare (dit/072): a table's rows sit on a uniform t grid (leejet's / Comfy's pruned H3, 1025 rows)
++                // OR on the timesteps one sampler visits: Gestura's FastH3 "euler4 table9" has 9 rows at t = 1 - sigma
++                // of 4 Euler steps, video at shift 12 (0, 1/37, 1/13, 0.2) and audio at shift 3 (0.1, 0.25, 0.5), plus
++                // the visual condition's 0.999 and the audio condition's 1.0 (its `gestura.adaln.timesteps` lists the
++                // first 8). Read as a uniform grid, every block got another step's modulation: noise on every backend.
++                // NM_H3_CURVE_KNOTS="a,b,..." (one per row, ascending) overrides the knots.
++                std::vector<float> knots;
++                if (const char* env = std::getenv("NM_H3_CURVE_KNOTS"); env != nullptr && env[0] != 0) {
++                    for (const char* q = env; *q;) {
++                        char* end = nullptr;
++                        float v   = std::strtof(q, &end);
++                        if (end == q) break;
++                        knots.push_back(v);
++                        q = (*end == ',') ? end + 1 : end;
++                    }
++                } else if (config.adaln_curve_grid == 9) {
++                    knots = {0.f, 1.f / 37.f, 1.f / 13.f, 0.1f, 0.2f, 0.25f, 0.5f, 0.999f, 1.f};
++                }
++                if (!knots.empty() && static_cast<int64_t>(knots.size()) != config.adaln_curve_grid) {
++                    LOG_WARN("minimax_h3: %zu curve knots for a %" PRId64 "-row table, using a uniform grid",
++                             knots.size(), config.adaln_curve_grid);
++                    knots.clear();
++                }
+                 for (size_t i = 0; i < layout.timesteps.size(); ++i) {
+-                    float position   = std::clamp(layout.timesteps[i], 0.f, 1.f) * (config.adaln_curve_grid - 1);
++                    float t = std::clamp(layout.timesteps[i], 0.f, 1.f);
++                    if (!knots.empty()) {
++                        int k = 0;
++                        while (k + 2 < static_cast<int>(knots.size()) && t >= knots[k + 1]) {
++                            ++k;
++                        }
++                        float span       = knots[k + 1] - knots[k];
++                        indices[i]       = k;
++                        upper_indices[i] = k + 1;
++                        fractions[i]     = span > 0.f ? std::clamp((t - knots[k]) / span, 0.f, 1.f) : 0.f;
++                        continue;
++                    }
++                    float position   = t * (config.adaln_curve_grid - 1);
+                     int index        = std::min(static_cast<int>(std::floor(position)),
+                                                 static_cast<int>(config.adaln_curve_grid - 2));
+                     indices[i]       = index;

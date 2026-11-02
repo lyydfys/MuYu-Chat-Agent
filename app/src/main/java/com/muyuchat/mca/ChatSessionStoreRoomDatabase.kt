@@ -7,6 +7,58 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.muyuchat.mca.agent.data.AgentApprovalDao
+import com.muyuchat.mca.agent.data.AgentApprovalEntity
+import com.muyuchat.mca.agent.data.AgentArtifactCommitDao
+import com.muyuchat.mca.agent.data.AgentArtifactCommitEntity
+import com.muyuchat.mca.agent.data.AgentArtifactDao
+import com.muyuchat.mca.agent.data.AgentArtifactEntity
+import com.muyuchat.mca.agent.data.AgentCommandDao
+import com.muyuchat.mca.agent.data.AgentCommandEntity
+import com.muyuchat.mca.agent.data.AgentCommandResultDao
+import com.muyuchat.mca.agent.data.AgentCommandResultEntity
+import com.muyuchat.mca.agent.data.AgentDatabaseMigration
+import com.muyuchat.mca.agent.data.AgentEventDao
+import com.muyuchat.mca.agent.data.AgentEventEntity
+import com.muyuchat.mca.agent.data.AgentExtensionDao
+import com.muyuchat.mca.agent.data.AgentExtensionEntity
+import com.muyuchat.mca.agent.data.AgentGrantDao
+import com.muyuchat.mca.agent.data.AgentGrantEntity
+import com.muyuchat.mca.agent.data.AgentInvocationDao
+import com.muyuchat.mca.agent.data.AgentInvocationEntity
+import com.muyuchat.mca.agent.data.AgentModelAttemptDao
+import com.muyuchat.mca.agent.data.AgentModelAttemptEntity
+import com.muyuchat.mca.agent.data.AgentDispatchOutboxDao
+import com.muyuchat.mca.agent.data.AgentDispatchOutboxEntity
+import com.muyuchat.mca.agent.data.AgentDispatchOutboxSchema
+import com.muyuchat.mca.agent.data.AgentWorkflowCheckpointDao
+import com.muyuchat.mca.agent.data.AgentWorkflowCheckpointEntity
+import com.muyuchat.mca.agent.data.AgentWorkflowCheckpointSchema
+import com.muyuchat.mca.agent.data.AgentParkTokenDao
+import com.muyuchat.mca.agent.data.AgentParkTokenEntity
+import com.muyuchat.mca.agent.data.AgentParkTokenSchema
+import com.muyuchat.mca.agent.data.AgentQuestionDao
+import com.muyuchat.mca.agent.data.AgentQuestionEntity
+import com.muyuchat.mca.agent.data.AgentRunDao
+import com.muyuchat.mca.agent.data.AgentRunEntity
+import com.muyuchat.mca.agent.data.AgentStepDao
+import com.muyuchat.mca.agent.data.AgentStepEntity
+import com.muyuchat.mca.agent.data.AgentTaskDao
+import com.muyuchat.mca.agent.data.AgentTaskEntity
+import com.muyuchat.mca.agent.data.AgentWorkspaceDao
+import com.muyuchat.mca.agent.data.AgentWorkspaceEntity
+import com.muyuchat.mca.agent.memory.data.AgentMemoryChunkEntity
+import com.muyuchat.mca.agent.memory.data.AgentMemoryDao
+import com.muyuchat.mca.agent.memory.data.AgentMemoryItemEntity
+import com.muyuchat.mca.agent.memory.data.AgentMemorySchema
+import com.muyuchat.mca.agent.memory.data.AgentMemorySpaceEntity
+import com.muyuchat.mca.agent.memory.data.AgentMemoryTaskSelectionEntity
+import com.muyuchat.mca.video.data.VideoDatabaseSchema
+import com.muyuchat.mca.video.data.VideoMediaAssetEntity
+import com.muyuchat.mca.video.data.VideoRunEntity
+import com.muyuchat.mca.video.data.VideoRunEventEntity
+import com.muyuchat.mca.video.data.VideoWorkflowDao
+import com.muyuchat.mca.video.data.VideoWorkflowRevisionEntity
 
 /**
  * The Room database definition and its migration chain for chat history.
@@ -28,15 +80,78 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         KnowledgeBaseEntity::class,
         KnowledgeDocumentEntity::class,
         KnowledgeChunkEntity::class,
-        ChatKnowledgeBaseBindingEntity::class
+        ChatKnowledgeBaseBindingEntity::class,
+        // Agent V1 tables (architecture 10.1). They share mca.db but have an independent owner,
+        // DAO set and migration; no Agent row is read by the chat/assistant/knowledge queries.
+        AgentWorkspaceEntity::class,
+        AgentTaskEntity::class,
+        AgentRunEntity::class,
+        AgentQuestionEntity::class,
+        AgentModelAttemptEntity::class,
+        AgentStepEntity::class,
+        AgentInvocationEntity::class,
+        AgentApprovalEntity::class,
+        AgentEventEntity::class,
+        AgentCommandEntity::class,
+        AgentCommandResultEntity::class,
+        AgentExtensionEntity::class,
+        AgentGrantEntity::class,
+        AgentArtifactEntity::class,
+        AgentArtifactCommitEntity::class,
+        // Durable park/wake token for a run parked in WAITING_APPROVAL / WAITING_USER. Additive:
+        // one row per run, written by the Agent data layer; no chat query reads it.
+        AgentParkTokenEntity::class,
+        // Durable approved-dispatch outbox row (N03/N19 follow-up). Additive: one row per approved
+        // invocation, written inside the owner's approval transaction.
+        AgentDispatchOutboxEntity::class,
+        // Durable workflow frames (N19 follow-up). Additive: one row per task-root frame key.
+        AgentWorkflowCheckpointEntity::class,
+        // Agent V1.1 memory tables (plan §7.1). Same additive ownership rule as the Agent tables:
+        // one mca.db, one migration chain, no chat/knowledge query reads these rows.
+        AgentMemorySpaceEntity::class,
+        AgentMemoryItemEntity::class,
+        AgentMemoryChunkEntity::class,
+        AgentMemoryTaskSelectionEntity::class,
+        // Native video workflow tables (proposal mca-native-video-workflow-v1 §8.1). Additive
+        // only: revisions/runs/events with their own DAO and owner; image_assets is untouched.
+        VideoWorkflowRevisionEntity::class,
+        VideoRunEntity::class,
+        VideoRunEventEntity::class,
+        VideoMediaAssetEntity::class
     ],
-    version = 27,
+    version = 35,
     // Exported so the migration chain can be checked against the exact structure Room
     // validates at runtime; see the room.schemaLocation argument in app/build.gradle.kts.
     exportSchema = true
 )
 abstract class McaRoomDatabase : RoomDatabase() {
     abstract fun chatSessionDao(): ChatSessionDao
+
+    // Agent V1 DAOs. The database is only the schema/transaction host; Agent business rules stay
+    // in AgentRunOwner/AgentJournal implementations under app/.../agent.
+    abstract fun agentTaskDao(): AgentTaskDao
+    abstract fun agentWorkspaceDao(): AgentWorkspaceDao
+    abstract fun agentRunDao(): AgentRunDao
+    abstract fun agentStepDao(): AgentStepDao
+    abstract fun agentModelAttemptDao(): AgentModelAttemptDao
+    abstract fun agentInvocationDao(): AgentInvocationDao
+    abstract fun agentApprovalDao(): AgentApprovalDao
+    abstract fun agentEventDao(): AgentEventDao
+    abstract fun agentArtifactDao(): AgentArtifactDao
+    abstract fun agentArtifactCommitDao(): AgentArtifactCommitDao
+    abstract fun agentQuestionDao(): AgentQuestionDao
+    abstract fun agentCommandDao(): AgentCommandDao
+    abstract fun agentCommandResultDao(): AgentCommandResultDao
+    abstract fun agentExtensionDao(): AgentExtensionDao
+    abstract fun agentGrantDao(): AgentGrantDao
+    abstract fun agentParkTokenDao(): AgentParkTokenDao
+    abstract fun agentDispatchOutboxDao(): AgentDispatchOutboxDao
+    abstract fun agentWorkflowCheckpointDao(): AgentWorkflowCheckpointDao
+
+    // Agent V1.1 memory DAO. One accessor: the memory domain owns exactly one bounded DAO, and the
+    // store/composition code never opens a second database handle.
+    abstract fun agentMemoryDao(): AgentMemoryDao
+    abstract fun videoWorkflowDao(): VideoWorkflowDao
 
     companion object {
         @Volatile
@@ -68,7 +183,27 @@ abstract class McaRoomDatabase : RoomDatabase() {
                         MIGRATION_23_24,
                         MIGRATION_24_25,
                         MIGRATION_25_26,
-                        MIGRATION_26_27
+                        MIGRATION_26_27,
+                        // 27 -> 28 creates the Agent tables/indices; SQL lives in the Agent data
+                        // package so this file stays the single registration point only.
+                        MIGRATION_27_28,
+                        // 28 -> 29 creates the memory tables/indices; SQL lives in the memory data
+                        // package. Additive only; no earlier table is rewritten.
+                        MIGRATION_28_29,
+                        // 29 -> 30 creates the video workflow/run/event tables; SQL lives in the
+                        // video data package. Additive only; no earlier table is rewritten.
+                        VideoDatabaseSchema.MIGRATION_29_30,
+                        // 30 -> 31 adds the published video media table (V1-04). Additive only.
+                        VideoDatabaseSchema.MIGRATION_30_31,
+                        // 31 -> 32 adds non-secret remote prompt identity (V3-01). Additive only.
+                        VideoDatabaseSchema.MIGRATION_31_32,
+                        // 32 -> 33 adds the durable park/wake token (one row per parked run).
+                        // SQL lives in the Agent data package; additive only.
+                        AgentParkTokenSchema.MIGRATION_32_33,
+                        // 33 -> 34 adds the durable approved-dispatch outbox row. Additive only.
+                        AgentDispatchOutboxSchema.MIGRATION_33_34,
+                        // 34 -> 35 moves workflow frames from the file CAS store into Room.
+                        AgentWorkflowCheckpointSchema.MIGRATION_34_35
                     )
                     .build()
                     .also { instance = it }
@@ -290,6 +425,43 @@ abstract class McaRoomDatabase : RoomDatabase() {
                 db.execSQL(
                     "ALTER TABLE chat_sessions ADD COLUMN mixedAssistantHistory INTEGER NOT NULL DEFAULT 0"
                 )
+            }
+        }
+
+        /**
+         * 27 -> 28 wrapper. The SQL is owned by [AgentDatabaseMigration] under app/.../agent/data;
+         * this declaration keeps the migration registration and the schema-contract tests, which
+         * read this file as the database owner, in one place.
+         */
+        internal val MIGRATION_27_28: Migration = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                AgentDatabaseMigration.MIGRATION_27_28.migrate(db)
+            }
+        }
+
+        /**
+         * 29 -> 30 compatibility wrapper. This declaration is intentionally **not** registered on the
+         * builder: the production chain registers [VideoDatabaseSchema.MIGRATION_29_30] directly
+         * (see the builder above), and this file remains the schema-contract registration point only.
+         *
+         * The wrapper is kept as a typed edge for reflection-based JVM migration tests that execute
+         * the exact production object without importing the video package. Do not add it to the
+         * builder twice and do not edit its SQL here; SQL authority is [VideoDatabaseSchema].
+         */
+        internal val MIGRATION_29_30: Migration = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // SQL lives with the video tables; this file is the registration point only.
+                com.muyuchat.mca.video.data.VideoDatabaseSchema.MIGRATION_29_30.migrate(db)
+            }
+        }
+
+        /**
+         * 28 -> 29 wrapper. The SQL is owned by [AgentMemorySchema] under app/.../agent/memory/data;
+         * this declaration is the production registration point and the schema-contract walk.
+         */
+        internal val MIGRATION_28_29: Migration = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                AgentMemorySchema.MIGRATION_28_29.migrate(db)
             }
         }
 

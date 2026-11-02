@@ -350,6 +350,7 @@ class RuntimeIdentityFactoryTest {
         runtime = when (model.runtime) {
             ChatModelRuntime.MNN -> LocalChatRuntime.MNN_CPU
             ChatModelRuntime.GENIEX_QAIRT -> LocalChatRuntime.GENIEX_QAIRT
+            ChatModelRuntime.GENIEX_LLAMA_CPP -> LocalChatRuntime.GENIEX_LLAMA_CPP
             ChatModelRuntime.LLAMA_CPP -> LocalChatRuntime.LLAMA_CPP
             ChatModelRuntime.LITERT_LM -> LocalChatRuntime.LITERT_LM
         },

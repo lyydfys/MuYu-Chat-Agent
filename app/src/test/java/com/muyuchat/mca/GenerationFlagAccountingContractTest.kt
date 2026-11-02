@@ -29,7 +29,7 @@ import org.junit.Test
  *   `GenerationStateTransitions.kt`. A test that pins an incomplete accounting is worse than no
  *   test, because it claims coverage it does not have.
  *
- * The four files scanned below are the ones that write `MainUiState.isGenerating` (the third,
+ * The production files scanned below are the ones that write `MainUiState.isGenerating` (the third,
  * `ChatGenerationUiPublisher`, is where the gated writes moved during R1; the fourth,
  * `ChatStopGenerationOperations`, is where the stop-path settlement moved). The other
  * `isGenerating = …` occurrences in the repository are not this field: they are Compose parameters
@@ -107,6 +107,14 @@ import org.junit.Test
  * `sendMessage` / `sendPreparedMessageAsync` moved to `ChatWorkflowCoordinator.kt`; one raw
  * `isGenerating = true` start site left `MainViewModel` (2 -> 1). The accounting now scans the
  * workflow coordinator file (1 start, 0 reset).
+ *
+ * ## Re-derivation recorded (D02 field-limited writers)
+ *
+ * Regeneration admission and clear-chat reset now live in ConversationReplayOperations (1 start,
+ * 1 reset), preserving the named entry and cancellation order. MainViewModel has no raw start.
+ * RuntimeFieldTransitions (2 resets) and ChatExecutionFieldTransitions (1 start, 2 resets) are the
+ * field-limited equivalents of the existing pure root transitions. Both remain in this inventory
+ * while the legacy pure helpers still have compatibility-test callers.
  */
 class GenerationFlagAccountingContractTest {
 
@@ -141,12 +149,22 @@ class GenerationFlagAccountingContractTest {
         sourceFile("app/src/main/java/com/muyuchat/mca/ChatWorkflowCoordinator.kt")
     }
 
+    private val conversationReplay: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/ConversationReplayOperations.kt")
+    }
+    private val runtimeFieldTransitions: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/RuntimeFieldTransitions.kt")
+    }
+    private val chatExecutionFieldTransitions: String by lazy {
+        sourceFile("app/src/main/java/com/muyuchat/mca/presentation/ChatExecutionFieldTransitions.kt")
+    }
+
     /**
      * Measured baseline across the files that own the flag's transitions.
      *
      * A change here is a prompt to re-derive the grouping, not a number to update silently.
      */
-    private val expectedTrueInViewModel = 1
+    private val expectedTrueInViewModel = 0
     private val expectedFalseInViewModel = 1
     private val expectedTrueInTransitions = 1
     private val expectedFalseInTransitions = 5
@@ -160,6 +178,11 @@ class GenerationFlagAccountingContractTest {
     private val expectedFalseInAssistantImageContinuation = 1
     private val expectedTrueInChatWorkflow = 1
     private val expectedFalseInChatWorkflow = 0
+    private val expectedTrueInConversationReplay = 1
+    private val expectedFalseInConversationReplay = 1
+    private val expectedFalseInRuntimeFieldTransitions = 2
+    private val expectedTrueInChatExecutionFieldTransitions = 1
+    private val expectedFalseInChatExecutionFieldTransitions = 2
 
     private val assignment = Regex("""(?<![\w.])isGenerating\s*=\s*(true|false)\b""")
 
@@ -267,6 +290,16 @@ class GenerationFlagAccountingContractTest {
         val falseInAssistantImageContinuation = assignments(assistantImageContinuation).count { it.second == "false" }
         val trueInChatWorkflow = assignments(chatWorkflow).count { it.second == "true" }
         val falseInChatWorkflow = assignments(chatWorkflow).count { it.second == "false" }
+        assertEquals("ConversationReplay starts changed", expectedTrueInConversationReplay,
+            assignments(conversationReplay).count { it.second == "true" })
+        assertEquals("ConversationReplay resets changed", expectedFalseInConversationReplay,
+            assignments(conversationReplay).count { it.second == "false" })
+        assertEquals("RuntimeFieldTransitions resets changed", expectedFalseInRuntimeFieldTransitions,
+            assignments(runtimeFieldTransitions).count { it.second == "false" })
+        assertEquals("ChatExecutionFieldTransitions starts changed", expectedTrueInChatExecutionFieldTransitions,
+            assignments(chatExecutionFieldTransitions).count { it.second == "true" })
+        assertEquals("ChatExecutionFieldTransitions resets changed", expectedFalseInChatExecutionFieldTransitions,
+            assignments(chatExecutionFieldTransitions).count { it.second == "false" })
         assertEquals("MainViewModel resets changed", expectedFalseInViewModel, falseInViewModel)
         assertEquals("GenerationStateTransitions starts changed", expectedTrueInTransitions, trueInTransitions)
         assertEquals("GenerationStateTransitions resets changed", expectedFalseInTransitions, falseInTransitions)
@@ -308,23 +341,24 @@ class GenerationFlagAccountingContractTest {
 
     @Test
     fun `the start sites still live in the recorded functions`() {
-        val lines = mainViewModel.lines()
+        val lines = conversationReplay.lines()
         fun ownerOf(index: Int): String {
             for (cursor in index downTo 0) {
-                Regex("""^    (?:private |internal |public )?(?:suspend )?fun (\w+)\(""")
+                Regex("""^\s*(?:private |internal |public )?(?:suspend )?fun (\w+)\(""")
                     .find(lines[cursor])?.let { return it.groupValues[1] }
             }
             return "?"
         }
-        val owners = assignments(mainViewModel).filter { it.second == "true" }.map { ownerOf(it.first) }.toSet()
+        val owners = assignments(conversationReplay).filter { it.second == "true" }.map { ownerOf(it.first) }.toSet()
         assertEquals(
             "Start sites moved; this test's KDoc lists the entry points and must move with them.",
-            setOf("regenerateLastResponseFor"),
+            setOf("regenerateConversationResponseFor"),
             owners
         )
         assertTrue(
             "The public regenerate entry point must continue delegating to the guarded site.",
-            mainViewModel.contains("fun regenerateLastResponse() = regenerateLastResponseFor(null)")
+            mainViewModel.contains("fun regenerateLastResponse() = regenerateLastResponseFor(null)") &&
+                mainViewModel.contains("private fun regenerateLastResponseFor(target: ChatMessageIdentity?) = regenerateConversationResponseFor(")
         )
         val continuationLines = assistantImageContinuation.lines()
         fun continuationOwnerOf(index: Int): String {
@@ -366,6 +400,24 @@ class GenerationFlagAccountingContractTest {
         assertEquals("ChatStopGenerationOperations", 0, exceptionSafeResets(stopOperations))
         assertEquals("AssistantImageToolContinuationOperations", 0, exceptionSafeResets(assistantImageContinuation))
         assertEquals("ChatWorkflowCoordinator", 0, exceptionSafeResets(chatWorkflow))
+        assertEquals("ConversationReplayOperations", 0, exceptionSafeResets(conversationReplay))
+        assertEquals("RuntimeFieldTransitions", 0, exceptionSafeResets(runtimeFieldTransitions))
+        assertEquals("ChatExecutionFieldTransitions", 0, exceptionSafeResets(chatExecutionFieldTransitions))
+    }
+
+    @Test
+    fun `every production app flag assignment belongs to the recorded source inventory`() {
+        val sources = listOf(
+            mainViewModel, transitions, publisher, stopOperations, chatSessionPersistence,
+            runtimeLifecycle, assistantImageContinuation, chatWorkflow, conversationReplay,
+            runtimeFieldTransitions, chatExecutionFieldTransitions,
+        )
+        val root = sourcePath("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+            .parentFile
+        val actual = root.walkTopDown().filter { it.isFile && it.extension == "kt" }
+            .map { it.readText(Charsets.UTF_8) }.filter { assignments(it).isNotEmpty() }.toSet()
+        assertEquals("A flag writer was added or moved without reviewing its owner and terminal path",
+            sources.filter { assignments(it).isNotEmpty() }.toSet(), actual)
     }
 
     // ── Positive controls ───────────────────────────────────────────────────────────────
@@ -406,11 +458,13 @@ class GenerationFlagAccountingContractTest {
         assertEquals("reads are not assignments", 0, assignments(sample).size)
     }
 
-    private fun sourceFile(relativePath: String): String {
+    private fun sourceFile(relativePath: String): String = sourcePath(relativePath).readText(Charsets.UTF_8)
+
+    private fun sourcePath(relativePath: String): File {
         var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
         repeat(8) {
             val root = directory ?: return@repeat
-            File(root, relativePath).takeIf(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            File(root, relativePath).takeIf(File::isFile)?.let { return it }
             directory = root.parentFile
         }
         error("Unable to locate $relativePath")

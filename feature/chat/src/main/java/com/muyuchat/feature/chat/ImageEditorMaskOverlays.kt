@@ -1,6 +1,11 @@
 @file:OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -9,25 +14,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaDialog
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun PositionedMaskDrawingDialog(
@@ -41,7 +39,7 @@ internal fun PositionedMaskDrawingDialog(
     onApply: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    AlertDialog(
+    McaDialog(
         onDismissRequest = onDismiss,
         title = { Text("定位绘制") },
         text = {
@@ -58,7 +56,7 @@ internal fun PositionedMaskDrawingDialog(
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf(0.05 to "步长 5%", 0.10 to "步长 10%").forEach { (step, label) ->
-                        FilterChip(
+                        McaChip(
                             selected = stepFraction == step,
                             onClick = { onStepFractionChange(step) },
                             label = { Text(label) },
@@ -70,38 +68,46 @@ internal fun PositionedMaskDrawingDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "光标向上移动",
                         onClick = { onMove(0, -1) },
-                        modifier = Modifier.size(48.dp)
-                    ) { Icon(Icons.Default.KeyboardArrowUp, contentDescription = "光标向上移动") }
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.L
+                    ) { Icon(McaIcons.KeyboardArrowUp, contentDescription = null) }
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "光标向左移动",
                         onClick = { onMove(-1, 0) },
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.L
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = "光标向左移动")
+                        Icon(McaIcons.Previous, contentDescription = null)
                     }
                     Spacer(Modifier.size(48.dp))
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "光标向右移动",
                         onClick = { onMove(1, 0) },
-                        modifier = Modifier.size(48.dp)
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.L
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = "光标向右移动")
+                        Icon(McaIcons.Forward, contentDescription = null)
                     }
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.Center
                 ) {
-                    IconButton(
+                    McaIconButton(
+                        contentDescription = "光标向下移动",
                         onClick = { onMove(0, 1) },
-                        modifier = Modifier.size(48.dp)
-                    ) { Icon(Icons.Default.KeyboardArrowDown, contentDescription = "光标向下移动") }
+                        modifier = Modifier.size(48.dp),
+                        glyphSize = McaIconSize.L
+                    ) { Icon(McaIcons.KeyboardArrowDown, contentDescription = null) }
                 }
                 error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -109,13 +115,13 @@ internal fun PositionedMaskDrawingDialog(
             }
         },
         confirmButton = {
-            Button(
+            McaButton(style = McaButtonStyle.Primary,
                 onClick = onApply,
                 modifier = Modifier.heightIn(min = 48.dp)
             ) { Text("在当前位置应用") }
         },
         dismissButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onDismiss,
                 modifier = Modifier.heightIn(min = 48.dp)
             ) { Text("关闭") }

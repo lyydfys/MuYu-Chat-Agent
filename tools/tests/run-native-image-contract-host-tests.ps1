@@ -173,6 +173,18 @@ try {
             (Join-Path $repoRoot 'core\sd-native\src\main\cpp\CMakeLists.txt')
         )
 
+    $sdAnimaTokenizer = Build-HostTest `
+        -Name 'stable_diffusion_anima_tokenizer_contract_test' `
+        -Sources @(Join-Path $sdTests 'stable_diffusion_anima_tokenizer_contract_test.cpp')
+    Run-HostTest `
+        -Name 'stable_diffusion_anima_tokenizer_contract_test' `
+        -Executable $sdAnimaTokenizer `
+        -Arguments @(
+            (Join-Path $repoRoot 'core\sd-native\src\main\cpp\sd_anima_tokenize.cpp'),
+            (Join-Path $repoRoot 'core\sd-native\src\main\java\com\muyuchat\core\sdnative\NativeStableDiffusionBridge.kt'),
+            (Join-Path $repoRoot 'core\sd-native\src\main\cpp\CMakeLists.txt')
+        )
+
     $qnnInpaint = Build-HostTest `
         -Name 'qnn_inpaint_contract_test' `
         -Sources @(Join-Path $nativeTests 'qnn_inpaint_contract_test.cpp')

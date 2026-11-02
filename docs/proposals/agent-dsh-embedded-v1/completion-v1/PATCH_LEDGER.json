@@ -1,0 +1,173 @@
+{
+  "schema": "mca.dsh.patch-ledger.v1",
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-20T14:30:15+08:00",
+  "task": "C00",
+  "scope": "已知 payload 语义弱化、平台补丁与依赖替换。只记录源码/归档可确认的事实；所有运行时验证均为 NOT_RUN。",
+  "statusVocabulary": ["NOT_RUN", "DIAGNOSED", "BLOCKED"],
+  "statusMeaning": {
+    "NOT_RUN": "尚未做源码诊断，也未跑探针。",
+    "DIAGNOSED": "源码/归档已读通并定位行为与调用点；运行时探针未跑或未通过，不能当作生产行为已确认。",
+    "BLOCKED": "存在具体外部条件阻塞（缺源、平台原语不可用、构建锁等），且已记录阻塞条件。"
+  },
+  "snapshot": {
+    "head": "68b6eef1e67870b02bfef6afda2e625d36663da9",
+    "branch": "codex/enterprise-refactor",
+    "payloadSha256": "975146516216ced02299676689c1731c7f390962389dbef56821cd59a3bf69ab",
+    "payloadSize": 160464248,
+    "payloadZipEntries": 36541,
+    "payloadNodeAddons": 0,
+    "payloadSource": "woaiys3/deepseek-harness-android-app v1.20.1 (apkSha256 c324272bff00e8cce06e0baa2ebb9b88e524a5d246e06f8cb55d39df7c66dafa)；stage.ps1 只按 hash 原样复制，payload 内 Android 适配补丁来自 pinned reference payload",
+    "note": "payload.zip 内的文件用 payloadRelativePath 引用，行号指该文件自身行号；evidence 记录 sha256 以便在 payload 更新后识别失效。"
+  },
+  "entries": [
+    {
+      "id": "PL-001",
+      "title": "node-addon-system flock：Android 无原生 binding 时退化为 no-op 锁",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js",
+      "observedBehavior": "loadBinding() 在 platform 不是 linux/darwin 时直接返回 noopBinding；linux/darwin 下 require.resolve 平台包失败也返回 noopBinding。noopBinding 的 tryLock(fd, cb) 恒回调 0（=获取成功），仅 DSH_FLOCK_DEBUG=1 时 warn。结论：Android 上所有经该入口的锁“一律成功”，没有互斥。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/flock.js:9-12（平台守卫）, 34-42（加载失败捕获）, 44-49（noopBinding 恒回调 0）, 62-74（tryLockExclusive 把 0 当成功）",
+        "sha256(flock.js)=15c582844759598ed70f447d5aa01cafe32d1a77ad6a4c30fe0255d3840acd3b size=3692",
+        "同包 package.json:36-40：optionalDependencies 只有 darwin-arm64/x64、linux-x64/arm64，无 Android 平台包",
+        "命令：扫描 payload.zip 的 36,541 个条目，文件名匹配 \\.node$ 的条目数为 0"
+      ],
+      "productionCallSite": "dsh-session-persistence-jsonl/lib/index.js:12 import { tryLockExclusive }；:621-649 session.lock 的 flock 语义说明；:696 await tryLockExclusive(handle.fd)。会话/配置文件锁共用该惰性入口。",
+      "verification": "探针 V06（NOT_RUN）：在 :dsh Node 内启动两个进程对同一 session.lock 调 tryLockExclusive，期望第二个以 EAGAIN/EWOULDBLOCK reject；当前实现预计 resolve。再测持锁进程被 kill 后下一进程可获取。",
+      "owner": "C02a（payload/native 收口；payload-analyst 只读调查，整合者重打包并更新 payload-lock/MANIFEST）",
+      "status": "DIAGNOSED",
+      "nextAction": "C02a 决策：实现 Bionic 真 flock（Node-API addon 或受控 native helper），或明确声明“单 Node 进程”假设并在多进程竞争时 fail-closed；两条路都必须同步 MANIFEST/payload-lock 并跑 V06。"
+    },
+    {
+      "id": "PL-002",
+      "title": "dsh-fs-local：无 hardlink 时 stat→rename，存在覆盖竞态",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js",
+      "observedBehavior": "createIfAbsent 路径先 link(tempPath, absolutePath)（:588-590）；错误码属于 EACCES/EPERM/ENOTSUP/EOPNOTSUPP/EXDEV/EMLINK 时走 publishCreateWithoutHardlink：先 lstat/stat 目标（:523-532），不存在才 rename（:533）。lstat 与 rename 之间若有并发创建者，rename 会覆盖对方文件，违反“目标必须不存在”的 no-replace 契约。代码注释（:509-515）自述该残余竞态是平台限制。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-fs-local/lib/index.js:126-137（isHardlinkUnsupported 错误码集合）, 509-534（fallback 注释与实现）, 588-593（link 失败分派）",
+        "sha256(dsh-fs-local/lib/index.js)=8813cf90aca7b6c260b21ecf9ccfbcda3ccbcea2d18e56b3b1d92afdecceff85 size=43707"
+      ],
+      "productionCallSite": "官方 fs seam 的 create/write 路径（dsh-fs-local 是 fs seam 实现）；文件工具与任何经官方 fs 服务创建文件的调用者都走此分支。MCA 未另写文件发布实现。",
+      "verification": "探针（NOT_RUN）：在 :dsh Node 内并发写同一不存在目标；在 lstat 与 rename 之间插入并发创建，期望第二个写以 FS_NOT_OBSERVED 失败，当前实现预计覆盖；另测 renameat2(RENAME_NOREPLACE) 在 Android bionic 的可用性。",
+      "owner": "C02b（payload JS 补丁 owner）",
+      "status": "DIAGNOSED",
+      "nextAction": "C02b 优先使用 renameat2(RENAME_NOREPLACE)；不可用则用目录/O_EXCL 锁等原子替代；补并发负例，重打包 payload 并同步 MANIFEST/payload-lock，跑 V06/V07。"
+    },
+    {
+      "id": "PL-003",
+      "title": "dsh-subprocess-local：纯 JS ptmx/pts 真 TTY + resize 空实现 + 失败回退管道",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js",
+      "observedBehavior": "openAndroidPty() 打开 /dev/ptmx，并在 /dev/pts/0..PTY_PROBE_LIMIT 中按 fstat rdev≠0 找从设备；spawnWithPty() 把从设备 fd 作为子进程 stdio、master 用 64 KiB 同步读泵；真 TTY 与管道两条路径的 resize() 都是空函数（:1046、:1159）；无 setsid/TIOCSCTTY/controlling tty/前台进程组；失败时 console.log 后回退 spawnWithPipes（纯 JS 回显/行编辑/Ctrl-C/Ctrl-D/\\r→\\n，:1050-1161）。模式只打印日志，不是可查询能力位。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js:943-973（openAndroidPty）, 975-1048（spawnWithPty）, 1046（resize 空）, 1050-1161（spawnWithPipes）, 1159（管道 resize 空）, 1163-1176（spawnPtyCompat 选择与 console.log）",
+        "sha256(dsh-subprocess-local/lib/index.js)=b823f830da910a39b9ea2b7be09ec4f98c543931289e01e092e55a4087a4a453 size=72738"
+      ],
+      "productionCallSite": "dsh-terminal-bash/lib/index.js:1040 注入 spawnTerminal=(spec)=>ctx.subprocess.spawnTerminal(spec)，:1054 实际 spawn → subprocess seam → dsh-subprocess-local/lib/index.js:1926 spawnPtyCompat(...)（:1924-1926 注释：原 requireNodePty 在 Android 必失败）。用户入口是官方 web terminal UI。",
+      "verification": "探针 P1–P5（NOT_RUN，必须在 :dsh Node 内，不能用 adb shell 代替）：/dev/pts 可见性；isatty(0/1/2)；stty size；resize 前后 TIOCSWINSZ 是否生效；Ctrl-C 是否命中子进程而不杀 Node；是否存在 controlling tty/前台组。",
+      "owner": "C08（真 PTY 收口）",
+      "status": "DIAGNOSED",
+      "nextAction": "C08 先跑 P1–P5；模式诚实上报 pty/pipe + 原因 + resize 能力位；若 pts 不可用或无前台组，评估 Termux terminal-emulator JNI（openpty/setsid/TIOCSCTTY/TIOCSWINSZ/fork/exec）。管道结果不得记作 PTY 通过。"
+    },
+    {
+      "id": "PL-004",
+      "title": "dsh-bash-local：sandboxMode 硬编码 workspace-write，执行器从不调用 ctx.sandbox",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js",
+      "observedBehavior": "LocalBashExecutor 只 static inject = ['subprocess']（:68）；get sandboxMode() 恒返回 'workspace-write'（:84-86），不读取任何 policy。注释自述：基类默认 undefined 会被 permission-presets 判为“未受限”并抛错，Android 补丁显式报告 workspace-write 以让 permission/sandbox-policy 工作，并明确“本执行器只 inject subprocess，从不调用 ctx.sandbox”（:78-82）。因此 workspace-write 是声明，不是 OS 强制。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-local/lib/index.js:59-95（类注释、inject、sandboxMode getter）",
+        "sha256(dsh-bash-local/lib/index.js)=5628f1a6e2f944de32ff26356a371ef2c3067a74d5d4acbdd6f694ba24252d73 size=13807"
+      ],
+      "productionCallSite": "MCA seeder 把 bash-local 作为唯一 ctx.shell provider 插入：core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/config/DshGatewayConfigSeeder.kt:625-630（工作树快照 sha256 52f114cba16a3dbabdc4a4fd6261b677ec25cdf2afb258877863f071cc6d4897）。payload 模板同样插入：dshhome/cordis.patch.yml:59-66。dsh-tool-bash 与 dsh-permission-presets 读取 ctx.shell.sandboxMode。",
+      "verification": "探针 V08（NOT_RUN）：composed tree 打印实际 ctx.shell provider / sandboxMode / permission preset；在 workspace-write 下执行写工作区外路径的 bash 命令，期望被拒；若成功即证明只是声明。",
+      "owner": "C02c（overlay/provider）+ C08（沙箱语义）",
+      "status": "DIAGNOSED",
+      "nextAction": "对外只声明“无 OS 强制的本地执行”，不得把 workspace-write 当隔离；需要强隔离时走 bash-sandbox + 可用 landlock runner（见 PL-005）或单独立 ADR。"
+    },
+    {
+      "id": "PL-005",
+      "title": "dsh-bash-sandbox：无 Landlock runner 时 fail-closed；danger-full-access 绕过 confine",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-sandbox/lib/index.js",
+      "observedBehavior": "SandboxBashExecutor 构造取 ctx.sandboxPolicy.defaultMode（:46-49）。execute()：mode==='danger-full-access' 直接 super.execute() 并标 denied:false（:68-74）；否则 confine() 生成 argv（:76-83），runner 失败由 classifyRunnerFailure 识别并抛 SandboxUnavailableError（:104-105），spawn 失败同样（:114-117）。runner 来自 @deepseek-ai/node-addon-system-<platform>-<arch>/bin/landlock-run；该包 optionalDependencies 无 Android，payload 无 .node ⇒ Android 上 probe 判定 unusable，启用即 fail-closed。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-bash-sandbox/lib/index.js:30-118（构造、getter、execute 分支、SandboxUnavailableError）",
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/node-addon-system/lib/index.js:21-58（LAUNCHER_BIN、平台包解析与 probe 语义：missing binary probe 为 unusable）",
+        "node-addon-system/package.json:36-40（无 Android 平台包）；payload 内 .node 条目数 0",
+        "sha256(dsh-bash-sandbox/lib/index.js)=0f788f99113ba7411eb33af71cdafabd07b73cf012c1715c819e03f3f77f342d size=6170"
+      ],
+      "productionCallSite": "官方 dsh-base 默认注册 bash-sandbox；MCA seeder 当前工作树显式 disable（DshGatewayConfigSeeder.kt:578-579），payload 模板也 disable（dshhome/cordis.patch.yml:25-26）。若被恢复且 preset 为 workspace-write，bash 工具将以 SANDBOX_UNAVAILABLE 失败。",
+      "verification": "探针（NOT_RUN）：临时启用 bash-sandbox（workspace-write）跑 echo，期望 SandboxUnavailableError/SANDBOX_UNAVAILABLE；再验证 danger-full-access 分支可执行但无隔离，且 MCA 绝不继承该默认。",
+      "owner": "C02c（overlay）+ C08（沙箱）",
+      "status": "DIAGNOSED",
+      "nextAction": "保持 disabled；在设备上抓一次 fail-closed 负例作为诚实边界证据；若未来要真隔离，必须先解决 Android landlock runner 的交付。"
+    },
+    {
+      "id": "PL-006",
+      "title": "payload 模板平台 patch 未合并进 MCA overlay（旧状态：seeder 只生成三条）",
+      "payloadRelativePath": "dshhome/cordis.patch.yml",
+      "mcaSourcePath": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/config/DshGatewayConfigSeeder.kt",
+      "observedBehavior": "payload 模板 v4 含 4 条 disabled（bash-sandbox/pwsh-sandbox/session-log-download/session-telemetry-otel，:25-39）+ permission（:46-58，默认 danger-full-access + approval: never）+ insert（bash-local + tool-shizuku/tool-android/tool-accessibility/tool-vscreen/tool-browser，:59-79）。HEAD 中不存在 core/dsh-runtime（git ls-tree HEAD 0 命中）；12:36 草稿记录 MCA overlay 只有 permission/workspace-controller/llm-pi-ai 三部分。快照时点 14:23:43 工作树已由 C02c 补上 4 条 disabled（:578-585）+ permission(workspace-write/ask)（:586-598）+ workspace-controller（:603-605）+ llm-pi-ai（:606-621）+ insert bash-local（:625-630）；仍不复制 5 个参考工具插件（有意，C11 替代），也不继承 danger-full-access/never。C02c 未提交、未构建、未设备验证；DSH_COMPLETION_ACCEPTANCE_V1.md:7 仍写旧状态。",
+      "evidence": [
+        "payload.zip::dshhome/cordis.patch.yml:1-80；sha256=807fc6bb9e8da1675ac20502eac88fb7654eff8cacce6b9499fc465ef14bdb72 size=4686",
+        "DshGatewayConfigSeeder.kt:565-631（buildOverlay）；快照 size=31374 mtime=2026-10-20 14:23:43 sha256=52f114cba16a3dbabdc4a4fd6261b677ec25cdf2afb258877863f071cc6d4897",
+        "DshGatewayConfigSeederTest.kt:121-151（currentHomeReseedRewritesTheOverlayWithPlatformPatchRows）、:494-521（assertPlatformPatchRows 断言 4 条 disabled 与 bash-local insert）；快照 sha256=9191e3837efd2ca9f70b0b34bc4ddb98bc7bf5699f2885747890b5a49565beb2",
+        "命令：git -C E:\\MAC ls-tree -r --name-only HEAD | Select-String 'dsh-runtime|DshGatewayConfigSeeder' → 0 命中",
+        "docs/proposals/agent-dsh-embedded-v1/DSH_COMPLETION_ACCEPTANCE_V1.md:7（仍描述 overlay 只生成三部分）"
+      ],
+      "productionCallSite": "DshGatewayConfigSeeder.buildOverlay() 写 $DSH_HOME/cordis.patch.yml；官方 app-boot 读取 home patch 层（验收规范 §0 记录 loadOptionalPatches(join(context.home,'cordis.patch.yml'))）。",
+      "verification": "V02/V08（NOT_RUN）：composed tree 证明 bash-local 是 ctx.shell、4 条平台行 disabled、permission defaultPreset=workspace-write、无 danger-full-access/never、无 5 个参考工具插件；设备上 bash echo 成功且无 SANDBOX_UNAVAILABLE。",
+      "owner": "C02c（pack-writer 实现中）+ Lead 构建锁内验证",
+      "status": "DIAGNOSED",
+      "nextAction": "C02c 完成后由 Lead 在构建锁内跑测试；设备跑 V02/V08；随后更新 acceptance §0/plan G14 的旧措辞（C00 不改这些文档）。"
+    },
+    {
+      "id": "PL-007",
+      "title": "dsh-attachment-local：sharp 原生库替换为纯 JS sharp-shim",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/sharp-shim.js",
+      "observedBehavior": "attachment-local 的 sharp lazy access 改为 import sharpShim from './sharp-shim.js' + const requireSharp = () => sharpShim（lib/index.js:129-142）。shim 用纯 JS 实现 PNG 真解码/编码/resize（chunk+CRC、inflate、反滤波；IHDR 位深 1/2/4/8/16、颜色类型 0/2/3/4/6、隔行 0/1），JPEG/WebP/GIF 原样直通但 toBuffer() 返回真实 mediaType，metadataOf() 返回真实 hasAlpha。sharp 0.35.5 仍是 dependency（package.json:39），payload 无 native build。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/sharp-shim.js:1-34（动机与诚实语义）, 35-…（toBytes/probeImageBytes/decodePng/encodePng/resizeRgba/metadataOf/Pipeline/export default）",
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/lib/index.js:129-142（requireSharp 指向 shim）",
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-attachment-local/package.json:36-39（sharp 0.35.5 dependency）",
+        "payload 内 sharp 的 build/Release 与 .node 条目数均为 0",
+        "sha256(sharp-shim.js)=5e6f24b560be8055aedbe8c55899d4c0730cd19b68354587921d78e3ba5c9b88 size=24595"
+      ],
+      "productionCallSite": "聊天图片附件入库/编码路径：dsh-attachment-local 的 detectImage / encodingLadder / verifyRequestImage 调用 requireSharp()。",
+      "verification": "探针（NOT_RUN）：坏 PNG 在入库时被拒（raw() 真解码）；PNG 缩放；非 JPEG 不缩放时声明格式==实际字节；与真 sharp 对照记录 JPEG/WebP/GIF 不重编码的限制。",
+      "owner": "C07/C14（依赖替换与插件兼容）",
+      "status": "DIAGNOSED",
+      "nextAction": "用真实图片跑探针；把“非 PNG 不重编码”写成限制；V1 不引入 native sharp。"
+    },
+    {
+      "id": "PL-008",
+      "title": "node-pty 未安装：terminal 走 spawnPtyCompat，依赖声明仍在",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/package.json",
+      "observedBehavior": "package.json 仍声明 koffi 3.1.1 与 node-pty 1.2.0-beta.15（:48-53），并有 postinstall ensure-spawn-helper（:60-62）；payload 内 node-pty 条目数 0。lib/index.js:1924-1926 注释说明原 requireNodePty().spawn 在 Android 必然报 Cannot find module 'node-pty'，已改为 spawnPtyCompat。koffi 仅在 lib/runner-launch-B2zsQ1Dz.js 出现 35 处，lib/index.js 无引用。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/package.json:48-53（dependencies）, 60-62（postinstall）",
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-subprocess-local/lib/index.js:1922-1926（node-pty→spawnPtyCompat 补丁）",
+        "命令：扫描 payload.zip 条目，node-pty 命中 0",
+        "sha256(dsh-subprocess-local/package.json)=8793e9e9c55400665ac3637f36abb6ce929601caae5bac64b6e8684fad5f6ae8 size=1726"
+      ],
+      "productionCallSite": "终端 spawn 链：dsh-terminal-bash/lib/index.js:1040/1054 → dsh-subprocess seam → dsh-subprocess-local/lib/index.js manageTerminal:1922-1926。",
+      "verification": "探针（NOT_RUN）：在 :dsh Node 内 import('node-pty') 期望 MODULE_NOT_FOUND；确认运行期不触发 postinstall；确认 PTY 路径实际是 spawnPtyCompat。",
+      "owner": "C08 + payload integrator",
+      "status": "DIAGNOSED",
+      "nextAction": "V1 保持无 node-pty；若后续真 PTY 需要原生，走 Termux terminal-emulator JNI，不把 node-pty 装进 payload。"
+    },
+    {
+      "id": "PL-009",
+      "title": "dsh-session-persistence-jsonl：Android 下 link→rename 发布",
+      "payloadRelativePath": "dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js",
+      "observedBehavior": "模块 import link/rename（:4）。会话世代文件发布先 link(tmp, finalPath)（:3270），错误码为 EPERM/EXDEV/ENOSYS/EACCES 时改用 rename(tmp, finalPath)（:3264-3278 注释“语义等价”）。rename 不保证 no-replace；代码依赖 :3259 rejectExistingLog(finalPath, id) 先确认目标不存在，仍有 TOCTOU 窗口。另一处 :2051 的 link 有独立契约注释（:2056-2057）。",
+      "evidence": [
+        "payload.zip::dshroot/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session-persistence-jsonl/lib/index.js:4（imports）, 12（tryLockExclusive 导入）, 621-649（session.lock 语义）, 696（实际 tryLockExclusive）, 2049-2057（link 契约）, 3259-3278（Android link→rename）",
+        "sha256(lib/index.js)=772720cf2bd01c9526c1fe06da8dc2ba2ae4c3770a72ae7015ac1622fcaa59c8 size=149932"
+      ],
+      "productionCallSite": "官方会话持久化写入路径（session JSONL 世代发布）；MCA 无第二套 session store。",
+      "verification": "探针（NOT_RUN）：并发创建同一 session 世代是否被覆盖；tmp→final 的 fsync/崩溃恢复；确认 EEXIST 语义不被 rename 破坏。",
+      "owner": "C02b（与 PL-002 同类收口）+ 数据/升级 owner",
+      "status": "DIAGNOSED",
+      "nextAction": "与 PL-002 统一：优先 RENAME_NOREPLACE；至少补并发负例与崩溃恢复证据，并在 payload 更新后同步 MANIFEST/payload-lock。"
+    }
+  ]
+}

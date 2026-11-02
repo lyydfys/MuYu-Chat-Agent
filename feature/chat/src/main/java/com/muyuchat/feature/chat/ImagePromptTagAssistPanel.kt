@@ -1,4 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.designsystem.rememberMcaHaptics
 
 import android.os.SystemClock
 import android.content.Context
@@ -19,24 +22,13 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Redo
-import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -72,6 +64,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun ImagePromptTagAssistPanel(
@@ -85,6 +78,7 @@ internal fun ImagePromptTagAssistPanel(
     modifier: Modifier = Modifier
 ) {
     val session = LocalImagePromptTagAutocompleteSession.current
+    val haptics = rememberMcaHaptics()
     var dismissal by remember {
         mutableStateOf(ImagePromptTagPanelDismissState(value.text, focused, dismissed = false))
     }
@@ -196,6 +190,7 @@ internal fun ImagePromptTagAssistPanel(
                                     suggestion
                                 ) ?: return@ImagePromptTagSuggestionRow
                                 if (!session.activateSuggestion(suggestion)) {
+                                    haptics.reject()
                                     return@ImagePromptTagSuggestionRow
                                 }
                                 onEdit(TextFieldValue(edit.text, TextRange(edit.cursor)))
@@ -353,37 +348,37 @@ private fun ImagePromptTagToolRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         PromptTagToolButton(
-            Icons.Default.Add,
+            McaIcons.Add,
             "标签权重增加 0.1",
             onIncrease,
             enabled = tagActionsEnabled
         )
         PromptTagToolButton(
-            Icons.Default.Remove,
+            McaIcons.Remove,
             "标签权重减少 0.1",
             onDecrease,
             enabled = tagActionsEnabled
         )
         PromptTagToolButton(
-            Icons.Default.Clear,
+            McaIcons.Clear,
             "清除当前标签",
             onClear,
             enabled = tagActionsEnabled,
             destructive = true
         )
         PromptTagToolButton(
-            Icons.AutoMirrored.Filled.Undo,
+            McaIcons.Undo,
             "撤销提示词编辑",
             onUndo,
             enabled = undoEnabled,
         )
         PromptTagToolButton(
-            Icons.AutoMirrored.Filled.Redo,
+            McaIcons.Redo,
             "重做提示词编辑",
             onRedo,
             enabled = redoEnabled,
         )
-        PromptTagToolButton(Icons.Default.Close, "关闭本次标签建议", onDismiss)
+        PromptTagToolButton(McaIcons.Close, "关闭本次标签建议", onDismiss)
     }
 }
 
@@ -395,15 +390,18 @@ private fun PromptTagToolButton(
     enabled: Boolean = true,
     destructive: Boolean = false
 ) {
-    IconButton(
+    McaIconButton(
+        contentDescription = description,
         onClick = onClick,
         enabled = enabled,
-        modifier = Modifier.size(MIN_TOUCH_TARGET_DP)
+        modifier = Modifier.size(MIN_TOUCH_TARGET_DP),
+        size = MIN_TOUCH_TARGET_DP,
+        glyphSize = McaIconSize.M
     ) {
         Icon(
             icon,
-            contentDescription = description,
-            modifier = Modifier.size(20.dp),
+            contentDescription = null,
+            modifier = Modifier.size(McaIconSize.M),
             tint = if (destructive && enabled) {
                 MaterialTheme.colorScheme.error
             } else {

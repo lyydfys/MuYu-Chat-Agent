@@ -11,7 +11,6 @@ import com.muyuchat.core.engine.Role
 import com.muyuchat.core.engine.compressChatRequestContext
 import com.muyuchat.core.engine.localContextWindowAdmission
 import com.muyuchat.feature.chat.ChatMessageIdentity
-import com.muyuchat.mca.presentation.withGenerationProgressCleared
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -23,7 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Coordinates chat conversation workflow mutations, including turn deletion and rollbacks.
  */
 internal class ChatWorkflowCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ConversationWorkflowFields>,
     private val rejectWhileConversationMutationInProgress: () -> Boolean,
     private val showStatus: (String) -> Unit,
     private val isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean = ::isChatImageRequestActive,
@@ -72,24 +71,25 @@ internal class ChatWorkflowCoordinator(
         }
         val rollback = state.conversationMutationRollbackState()
         val sessionId = chatSessionId ?: state.activeChatSessionId ?: UUID.randomUUID().toString()
-        var updatedSessions: List<ChatSessionRecord> = state.chatSessions
-        store.update {
-            updatedSessions = if (prune.messages.isEmpty()) {
+        val occurredAt = System.currentTimeMillis()
+        val committed = store.updateAndGet {
+            val updatedSessions = if (prune.messages.isEmpty()) {
                 it.chatSessions.map { session ->
                     if (session.id == sessionId) session.copy(
                         messages = emptyList(),
                         contextSummaries = emptyList(),
-                        updatedAt = System.currentTimeMillis()
+                        updatedAt = occurredAt
                     ) else session
                 }
             } else {
                 it.chatSessions.upsertSessionFor(
-                    state = it,
+                    state = it.snapshot,
                     sessionId = sessionId,
                     messages = prune.messages,
                     assistantId = it.selectedAssistantId,
                     modelMode = it.selectedChatBackend.bindingValue(),
-                    modelId = it.currentChatModelId()
+                    modelId = it.snapshot.currentChatModelId(),
+                    occurredAt = occurredAt
                 )
             }
             it.copy(
@@ -102,7 +102,7 @@ internal class ChatWorkflowCoordinator(
         }
         removedRequests.forEach { pendingAssistantImageToolTurns.remove(it.id) }
         persistConversationMutation(
-            updatedSessions,
+            committed.chatSessions,
             rollback,
             true // preserveReusableNativePrefix = true
         )
@@ -188,9 +188,10 @@ internal class ChatWorkflowCoordinator(
                     return
                 }
             } else if (!isLocalVisionRunnerAvailable(viewModel.visionAttachmentPort)) {
-                store.update {
-                    it.copy(statusMessage = localVisionUnavailableReason(state, runCatching { viewModel.runtimeAssembly.nativeStatsJson() }.getOrNull()))
-                }
+                val unavailable = localVisionUnavailableReason(
+                    state, runCatching { viewModel.runtimeAssembly.nativeStatsJson() }.getOrNull()
+                )
+                store.showStatus(unavailable)
                 return
             }
         }
@@ -393,22 +394,25 @@ internal class ChatWorkflowCoordinator(
         ) return
         viewModel.discardPendingAssistantOutput()
         val assistant = ChatMessage(Role.ASSISTANT, "")
-        var sessionsToPersist: List<ChatSessionRecord> = emptyList()
-        var chatSessionIdForKnowledgeBinding: String? = null
-        var selectedKnowledgeBaseIdsForBinding: Set<String> = emptySet()
-        store.update {
-            val sessionId = it.activeChatSessionId ?: UUID.randomUUID().toString()
-            chatSessionIdForKnowledgeBinding = sessionId
-            selectedKnowledgeBaseIdsForBinding = it.selectedKnowledgeBaseIds
+        val fallbackSessionId = UUID.randomUUID().toString()
+        val occurredAt = System.currentTimeMillis()
+        val promptContextUsage = viewModel.contextCompressionCoordinator.promptContextUsageFor(
+            plan = rebuiltPreflightContext,
+            admission = admission,
+            params = conversationParams
+        )
+        val (sessionsToPersist, chatSessionIdForKnowledgeBinding, selectedKnowledgeBaseIdsForBinding) = store.updateWithResult {
+            val sessionId = it.activeChatSessionId ?: fallbackSessionId
             val messages = it.messages + user + assistant
-            sessionsToPersist = it.chatSessions.upsertSessionFor(
-                state = it,
+            val sessionsToPersist = it.chatSessions.upsertSessionFor(
+                state = it.snapshot,
                 sessionId = sessionId,
                 messages = messages,
                 assistantId = conversationAssistantId,
                 assistantSnapshot = assistantSnapshot,
                 modelMode = it.selectedChatBackend.bindingValue(),
-                modelId = it.currentChatModelId()
+                modelId = it.snapshot.currentChatModelId(),
+                occurredAt = occurredAt
             )
             it.copy(
                 input = "",
@@ -416,13 +420,13 @@ internal class ChatWorkflowCoordinator(
                 activeChatSessionId = sessionId,
                 chatSessions = sessionsToPersist,
                 isGenerating = true,
-                promptContextUsage = viewModel.contextCompressionCoordinator.promptContextUsageFor(
-                    plan = rebuiltPreflightContext,
-                    admission = admission,
-                    params = conversationParams
-                ),
-                statusMessage = null
-            ).withGenerationProgressCleared()
+                promptContextUsage = promptContextUsage,
+                statusMessage = null,
+                generationPhase = null,
+                generationTokenProgress = null,
+                generationPersistProgress = null,
+                generationStats = null
+            ) to Triple(sessionsToPersist, sessionId, it.selectedKnowledgeBaseIds)
         }
         viewModel.hostPersistChatSessions(
             sessions = sessionsToPersist,

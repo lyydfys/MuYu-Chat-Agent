@@ -1,4 +1,9 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -7,13 +12,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,17 +26,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S26：从 ImageWorkspaceScreens.kt 等值移出的图库工具栏簇（工具栏 + 日期过滤对话框 + 日期范围格式化）。
 // 原样逐字迁移，未做行为改动；跨区入口按协议提升 internal。
@@ -119,11 +116,11 @@ internal fun ImageLibraryToolbar(
             value = query,
             onValueChange = onQueryChange,
             label = { Text("搜索图片、提示词或模型") },
-            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            leadingIcon = { Icon(McaIcons.Search, contentDescription = null) },
             trailingIcon = if (query.isNotEmpty()) {
                 {
-                    IconButton(onClick = { onQueryChange("") }) {
-                        Icon(Icons.Default.Close, contentDescription = "清空搜索")
+                    McaIconButton(contentDescription = "清空搜索", onClick = { onQueryChange("") }, glyphSize = McaIconSize.L) {
+                        Icon(McaIcons.Close, contentDescription = null)
                     }
                 }
             } else {
@@ -138,26 +135,26 @@ internal fun ImageLibraryToolbar(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            FilterChip(
+            McaChip(
                 selected = favoritesOnly,
                 onClick = { onFavoritesOnlyChange(!favoritesOnly) },
                 label = { Text("收藏") },
                 leadingIcon = {
                     Icon(
-                        if (favoritesOnly) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                        if (favoritesOnly) McaIcons.Favorite else McaIcons.FavoriteBorder,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             )
             if (models.isNotEmpty()) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedModelId != null,
                         onClick = { showModelMenu = true },
                         label = { Text(selectedModelLabel ?: "模型") },
                         leadingIcon = {
-                            Icon(Icons.Default.FilterList, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(McaIcons.FilterList, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                         }
                     )
                     DropdownMenu(
@@ -185,7 +182,7 @@ internal fun ImageLibraryToolbar(
             }
             if (taskModes.isNotEmpty()) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedTaskMode != null,
                         onClick = { showTaskMenu = true },
                         label = { Text(selectedTaskLabel ?: "模式") }
@@ -222,7 +219,7 @@ internal fun ImageLibraryToolbar(
             }
             if (operations.isNotEmpty() || selectedOperation != null) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedOperation != null,
                         onClick = { showOperationMenu = true },
                         label = { Text(selectedOperationLabel ?: "操作") }
@@ -250,7 +247,7 @@ internal fun ImageLibraryToolbar(
                     }
                 }
             }
-            FilterChip(
+            McaChip(
                 selected = selectedDateRange != null,
                 onClick = { showDatePicker = true },
                 label = {
@@ -259,7 +256,7 @@ internal fun ImageLibraryToolbar(
             )
             if (dimensions.isNotEmpty() || selectedDimensionsKey != null) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedDimensionsKey != null,
                         onClick = { showDimensionsMenu = true },
                         label = {
@@ -295,7 +292,7 @@ internal fun ImageLibraryToolbar(
             }
             if (schedulers.isNotEmpty() || selectedScheduler != null) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedScheduler != null,
                         onClick = { showSchedulerMenu = true },
                         label = { Text(selectedScheduler ?: "Scheduler") }
@@ -325,7 +322,7 @@ internal fun ImageLibraryToolbar(
             }
             if (runtimes.isNotEmpty() || selectedRuntime != null) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedRuntime != null,
                         onClick = { showRuntimeMenu = true },
                         label = { Text(selectedRuntime ?: "Runtime") }
@@ -355,7 +352,7 @@ internal fun ImageLibraryToolbar(
             }
             if (devices.isNotEmpty() || selectedDevice != null) {
                 Box {
-                    FilterChip(
+                    McaChip(
                         selected = selectedDevice != null,
                         onClick = { showDeviceMenu = true },
                         label = { Text(selectedDevice ?: "执行设备") }
@@ -383,22 +380,22 @@ internal fun ImageLibraryToolbar(
                     }
                 }
             }
-            FilterChip(
+            McaChip(
                 selected = !newestFirst,
                 onClick = { onNewestFirstChange(!newestFirst) },
                 label = { Text(if (newestFirst) "最新优先" else "最早优先") }
             )
             if (activeFilterCount > 0) {
-                FilterChip(
+                McaChip(
                     selected = false,
                     onClick = onClearFilters,
                     label = { Text("清除筛选 ($activeFilterCount)") },
                     leadingIcon = {
-                        Icon(Icons.Default.Close, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(McaIcons.Close, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                     }
                 )
             }
-            FilterChip(
+            McaChip(
                 selected = selectionMode,
                 onClick = { onSelectionModeChange(!selectionMode) },
                 label = { Text(if (selectionMode) "完成选择" else "选择") }
@@ -415,7 +412,7 @@ internal fun ImageLibraryToolbar(
                         modifier = Modifier.weight(1f),
                         style = MaterialTheme.typography.bodyMedium
                     )
-                    TextButton(onClick = onSelectAllVisible, enabled = resultCount > 0 && !batchSaving) {
+                    McaButton(style = McaButtonStyle.Text,onClick = onSelectAllVisible, enabled = resultCount > 0 && !batchSaving) {
                         Text(if (allVisibleSelected) "取消全选" else "全选结果")
                     }
                 }
@@ -423,11 +420,16 @@ internal fun ImageLibraryToolbar(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
-                    TextButton(onClick = onBatchSave, enabled = selectedCount > 0 && !batchSaving) {
+                    McaButton(style = McaButtonStyle.Text,onClick = onBatchSave, enabled = selectedCount > 0 && !batchSaving) {
                         Text(if (batchSaving) "保存中…" else "保存")
                     }
-                    TextButton(onClick = onBatchDelete, enabled = selectedCount > 0 && !batchSaving) {
-                        Text("删除", color = MaterialTheme.colorScheme.error)
+                    McaButton(
+                        style = McaButtonStyle.Text,
+                        onClick = onBatchDelete,
+                        enabled = selectedCount > 0 && !batchSaving,
+                        contentColor = MaterialTheme.colorScheme.error
+                    ) {
+                        Text("删除")
                     }
                 }
             }
@@ -442,8 +444,8 @@ internal fun ImageLibraryToolbar(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            TextButton(onClick = onOpenBackup) {
-                Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+            McaButton(style = McaButtonStyle.Text,onClick = onOpenBackup) {
+                Icon(McaIcons.Download, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("备份与恢复")
             }

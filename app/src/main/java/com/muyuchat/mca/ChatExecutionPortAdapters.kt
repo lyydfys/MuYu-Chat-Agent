@@ -36,7 +36,7 @@ import com.muyuchat.mca.presentation.lifecycleAfterGeneration
 internal class ChatLocalApiProviderPortAdapter(
     override val engine: McaInferenceService,
     override val chatRuns: ChatRunOwnership,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<GenerationLifecycleFields>,
     private val cancelActiveLocalApiImageGenerationAction: (String) -> Boolean,
     private val localApiPayloadPortProvider: () -> LocalApiPayloadPort,
     override val chatExecutionFacade: com.muyuchat.mca.facade.ChatExecutionFacade,
@@ -44,7 +44,7 @@ internal class ChatLocalApiProviderPortAdapter(
     override val uiState: StateFlow<MainUiState>
         get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (GenerationLifecycleFields) -> GenerationLifecycleFields) {
         store.update(transform)
     }
 
@@ -62,7 +62,7 @@ internal class ChatLocalApiProviderPortAdapter(
 
 internal class ChatGenerationExecutionPortAdapter(
     private val application: Application,
-    private val store: UiStateStore,
+    private val store: UiStateWriter<GenerationExecutionFields>,
     override val engine: McaInferenceService,
     override val chatRuns: ChatRunOwnership,
     override val chatSessionStore: ChatSessionStore,
@@ -96,9 +96,8 @@ internal class ChatGenerationExecutionPortAdapter(
     override val uiState: StateFlow<MainUiState>
         get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override val generationUiWriter: UiStateWriter<GenerationExecutionFields>
+        get() = store
 
     override val localConversationContextInvalidationSequence: AtomicLong
         get() = runtimeAdmission.localConversationContextInvalidationSequence
@@ -309,7 +308,7 @@ internal class ChatGenerationExecutionPortAdapter(
 }
 
 internal class ChatImagePromptBridgePortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ChatPromptDraftFields>,
     private val chatContextComposer: ChatContextComposer,
     private val cloudChatProvider: OpenAiCompatibleChatProvider,
     private val engine: McaInferenceService,
@@ -331,7 +330,7 @@ internal class ChatImagePromptBridgePortAdapter(
 
     override fun currentState(): MainUiState = store.state.value
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ChatPromptDraftFields) -> ChatPromptDraftFields) {
         store.update(transform)
     }
 
@@ -436,7 +435,7 @@ internal class ChatImagePromptBridgePortAdapter(
 }
 
 internal class ChatStopGenerationPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<GenerationStopFields>,
     private val engine: McaInferenceService,
     private val chatRuns: ChatRunOwnership,
     private val stopScopeRef: () -> CoroutineScope,
@@ -451,9 +450,8 @@ internal class ChatStopGenerationPortAdapter(
 
     override fun currentState(): MainUiState = store.state.value
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override fun updateUiState(transform: (GenerationStopFields) -> GenerationStopFields): GenerationStopFields =
+        store.updateAndGet(transform)
 
     override fun stopScope(): CoroutineScope = stopScopeRef()
 
@@ -472,17 +470,21 @@ internal class ChatStopGenerationPortAdapter(
 
     override fun isRunCurrent(runId: Long?): Boolean = chatRuns.isCurrent(runId)
 
-    override fun currentRunId(): Long = chatRuns.currentRunId()
-
     override fun cancelCurrentGeneration(): UiGenerationCancellation =
         cancelGenerationJobRef()
 
-    override fun activeUiStopRequestId(): String? =
-        engine.activeGenerationStopToken()?.requestId
+    override fun frozenLocalAttempt(cancellation: UiGenerationCancellation): ChatAttemptIdentity? =
+        // The identity was registered before admission and captured under the ownership lock with
+        // the cancellation. Only that exact request may be stopped; null (cloud, pending, idle)
+        // means this stop must not touch the engine at all.
+        cancellation.localAttempt
 
-    override suspend fun requestRuntimeStop() {
-        // E06: the user-facing stop shares the single chat entry.
-        chatExecutionFacade.stopGeneration()
+    override suspend fun requestRuntimeStop(attempt: ChatAttemptIdentity) {
+        // P03: exact attempt only. The frozen request id is never re-derived from the engine's
+        // current token, and there is deliberately no unconditional fallback stop: a late chat
+        // stop for an already-finished attempt is a no-op, and an Agent/API/image request that
+        // owns the engine now is never a target.
+        chatExecutionFacade.stopGenerationIfActive(attempt.requestId)
     }
 
     override fun runtimeLifecycle(): AgentEngineLifecycle =

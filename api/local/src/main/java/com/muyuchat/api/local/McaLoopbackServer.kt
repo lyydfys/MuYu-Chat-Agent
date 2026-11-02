@@ -236,6 +236,9 @@ class McaLoopbackServer(
                 method == "POST" && path in IMAGE_GENERATION_PATHS -> {
                     handleImageGeneration(client, body, validatedClientRequestId(headers))
                 }
+                method == "POST" && path == "/v1/video" -> {
+                    handleVideoGeneration(client, body, validatedClientRequestId(headers))
+                }
                 method == "POST" && path in RESPONSES_PATHS -> {
                     val clientRequestId = validatedClientRequestId(headers)
                     val streaming = body.isStreamingRequest(headers)

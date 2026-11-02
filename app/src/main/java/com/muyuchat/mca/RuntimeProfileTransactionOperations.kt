@@ -18,7 +18,6 @@ import com.muyuchat.feature.agent.AgentTuningJobState
 import com.muyuchat.core.tuning.ExecutionProfileKind
 import com.muyuchat.core.engine.GenerationParams
 import org.json.JSONObject
-import kotlinx.coroutines.flow.MutableStateFlow
 import com.muyuchat.core.tuning.ProfileVerificationLevel
 import java.util.UUID
 
@@ -41,8 +40,8 @@ internal interface RuntimeProfileTransactionPort {
     /** The live UI state. Published atomically through [updateUiState]. */
     fun uiState(): MainUiState
 
-    /** The single atomic publish, delegating to `MutableStateFlow.update` so the CAS is kept. */
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    /** The field-limited atomic publish; the store retains its single CAS transaction. */
+    fun updateUiState(transform: (RuntimeProfileFields) -> RuntimeProfileFields)
 
     /** The persisted runtime profile journal. */
     val runtimeProfileStore: ModelRuntimeProfileStore

@@ -53,8 +53,9 @@ class ModelStoreRepository(private val context: Context) {
         repoId: String,
         revision: String,
         license: String? = null,
-        source: ModelSource = ModelSource.MODELSCOPE
-    ): ModelManifest = registerDownloadedModelImpl(file, repoId, revision, license, source)
+        source: ModelSource = ModelSource.MODELSCOPE,
+        runtime: ChatModelRuntime = ChatModelRuntime.LLAMA_CPP
+    ): ModelManifest = registerDownloadedModelImpl(file, repoId, revision, license, source, runtime)
 
     fun registerDownloadedLiteRtLmModel(
         file: File,

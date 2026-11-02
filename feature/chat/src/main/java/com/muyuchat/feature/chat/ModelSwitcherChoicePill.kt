@@ -1,8 +1,16 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIconSize
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,30 +22,28 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Check
-import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.rememberMcaHaptics
+import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 
 @Composable
 internal fun ModelChoicePill(
@@ -48,6 +54,8 @@ internal fun ModelChoicePill(
 ) {
     val darkTheme = isSystemInDarkTheme()
     val selectedColor = if (darkTheme) MaterialTheme.colorScheme.primary else Color(0xFF1A73E8)
+    val interactionSource = remember { MutableInteractionSource() }
+    val haptics = rememberMcaHaptics()
     var customGpuDialogVisible by rememberSaveable(model.id) { mutableStateOf(false) }
     var customGpuLayersText by rememberSaveable(model.id, model.customGpuLayers) {
         mutableStateOf((model.customGpuLayers ?: 32).toString())
@@ -81,11 +89,12 @@ internal fun ModelChoicePill(
                 }
             },
             confirmButton = {
-                TextButton(onClick = {
+                McaButton(style = McaButtonStyle.Text, hapticsEnabled = false, onClick = {
                     val layers = customGpuLayersText.toIntOrNull()
                     if (layers == null || layers !in 0..4096) {
                         customGpuLayerError = "请输入 0 到 4096 之间的整数。"
                     } else {
+                        haptics.confirm()
                         onBackendChange(model.id, "custom:$layers")
                         customGpuDialogVisible = false
                         customGpuLayerError = null
@@ -93,7 +102,7 @@ internal fun ModelChoicePill(
                 }) { Text("保存并加载") }
             },
             dismissButton = {
-                TextButton(onClick = {
+                McaButton(style = McaButtonStyle.Text,onClick = {
                     customGpuDialogVisible = false
                     customGpuLayerError = null
                 }) { Text("取消") }
@@ -104,22 +113,36 @@ internal fun ModelChoicePill(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 48.dp)
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                enabled = enabled,
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                }
+            )
+            .mcaPressScale(interactionSource, enabled = enabled),
         color = if (model.loaded) {
             if (darkTheme) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.42f) else Color(0xFFE8F0FE)
         } else {
             Color.Transparent
         },
-        shape = RoundedCornerShape(22.dp)
+        shape = RoundedCornerShape(22.dp),
+        border = if (model.loaded) {
+            BorderStroke(0.5.dp, selectedColor.copy(alpha = 0.45f))
+        } else {
+            null
+        }
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (model.loaded) {
-                Icon(Icons.Rounded.Check, contentDescription = null, modifier = Modifier.size(17.dp), tint = selectedColor)
+                Icon(McaIcons.Check, contentDescription = null, modifier = Modifier.size(McaIconSize.Optical.Inline), tint = selectedColor)
             } else {
-                Spacer(modifier = Modifier.size(17.dp))
+                Spacer(modifier = Modifier.size(McaIconSize.Optical.Inline))
             }
             Spacer(modifier = Modifier.width(8.dp))
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -157,7 +180,7 @@ internal fun ModelChoicePill(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         model.backendOptions.forEach { option ->
-                            FilterChip(
+                            McaChip(
                                 selected = model.selectedBackendId == option.id,
                                 onClick = {
                                     if (option.id == "custom") {

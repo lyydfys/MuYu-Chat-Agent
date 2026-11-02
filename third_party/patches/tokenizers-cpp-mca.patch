@@ -1,0 +1,865 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 65bfd26980c9ea7c3fcbd00038e4e73280e13428..5cd91b4c1dceb1182d72c49395b62c8f5800ae51 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -159,6 +159,20 @@ add_custom_command(
+   RUSTFLAGS="${TOKENIZERS_CPP_RUST_FLAGS}"
+   ${CARGO_EXECUTABLE} build ${TOKENIZERS_CPP_CARGO_FLAGS}
+   WORKING_DIRECTORY ${TOKENIZERS_CPP_CARGO_SOURCE_PATH}
++  # Without DEPENDS this command had only an OUTPUT, so cargo was re-run ONLY when the
++  # output file happened to be missing. Editing rust/src/lib.rs therefore did not trigger
++  # a rebuild, and a STALE Rust archive was silently reused while the C++ side was rebuilt
++  # correctly through add_library's own source dependencies. The result was a link failure
++  # that gave no hint that half the dependency was old:
++  #   ld.lld: error: undefined symbol: tokenizers_last_error
++  #     >>> huggingface_tokenizer.cc.o:(tokenizers::LastError()) in archive libtokenizers_cpp.a
++  # Declaring the Rust inputs makes that stale-artefact reuse impossible.
++  # (Before this was in place, the workaround was to delete the stale archive and the cargo
++  #  fingerprint by hand after touching any Rust glue.)
++  DEPENDS
++  ${TOKENIZERS_CPP_CARGO_SOURCE_PATH}/src/lib.rs
++  ${TOKENIZERS_CPP_CARGO_SOURCE_PATH}/Cargo.toml
++  ${TOKENIZERS_CPP_CARGO_SOURCE_PATH}/Cargo.lock
+   POST_BUILD COMMAND
+   ${CMAKE_COMMAND} -E copy
+   ${TOKENIZERS_RUST_LIB} "${CMAKE_CURRENT_BINARY_DIR}"
+diff --git a/include/tokenizers_c.h b/include/tokenizers_c.h
+index 4276ee860dd6af0a684238fad1019689fc57f1c2..5d772b9ba1cf0cc9360cd465c766365020e5b6b0 100644
+--- a/include/tokenizers_c.h
++++ b/include/tokenizers_c.h
+@@ -19,8 +19,18 @@ typedef void* TokenizerHandle;
+ typedef struct {
+     int* token_ids;
+     size_t len;
++    /* 0 on success. Non-zero means the Rust side refused the call instead of
++     * unwinding a panic across the extern "C" boundary (which aborts the whole
++     * process). On refusal token_ids is NULL and len is 0; call
++     * tokenizers_last_error() for the readable reason. */
++    int error_code;
+ } TokenizerEncodeResult;
+ 
++/* Handle-returning entry points return NULL when the input cannot build a real
++ * tokenizer. Callers MUST check for NULL before using the handle; the reason is
++ * available from tokenizers_last_error(). Handle-taking entry points tolerate a
++ * NULL handle and report the failure through their out parameter. */
++
+ TokenizerHandle tokenizers_new_from_str(const char* json, size_t len);
+ 
+ TokenizerHandle byte_level_bpe_tokenizers_new_from_str(const char* vocab, size_t vocab_len,
+@@ -47,6 +57,10 @@ void tokenizers_id_to_token(TokenizerHandle handle, uint32_t id, const char** da
+ // tokenizers_token_to_id stores -1 to *id if the token is not in the vocab
+ void tokenizers_token_to_id(TokenizerHandle handle, const char* token, size_t len, int32_t* id);
+ 
++/* Readable reason for the most recent refusal, or an empty string when the last
++ * call succeeded. Owned by the library: copy it before the next call. */
++const char* tokenizers_last_error(void);
++
+ void tokenizers_free(TokenizerHandle handle);
+ 
+ #ifdef __cplusplus
+diff --git a/include/tokenizers_cpp.h b/include/tokenizers_cpp.h
+index d37aa57e02ffa86b5edf193de9f04cf353f5962e..7582cf34fdb28a91d5bd9701c42655259ad9c6c8 100644
+--- a/include/tokenizers_cpp.h
++++ b/include/tokenizers_cpp.h
+@@ -106,5 +106,16 @@ class Tokenizer {
+   static std::unique_ptr<Tokenizer> FromBlobRWKVWorld(const std::string& model_blob);
+ };
+ 
++/*!
++ * \brief Readable reason for the most recent refusal by the tokenizer backend.
++ *
++ * The constructor factories return nullptr when a blob cannot build a real
++ * tokenizer (for example a tokenizer.json that is valid JSON but has no usable
++ * model definition). This returns the backend's message so callers can surface a
++ * recoverable error instead of aborting; it is empty when the last call
++ * succeeded. Owned by the library: copy it before the next call.
++ */
++std::string LastError();
++
+ }  // namespace tokenizers
+ #endif  // TOKENIZERS_CPP_H_
+diff --git a/rust/src/lib.rs b/rust/src/lib.rs
+index 2697ca147515e736f56c9042f573795debbe6d3d..9619e7f4e9fbf2072cd934ca180038d1e4840490 100644
+--- a/rust/src/lib.rs
++++ b/rust/src/lib.rs
+@@ -1,7 +1,19 @@
+ // A simple C wrapper of tokenzier library
++//
++// MCA R1 (audit fix): every fallible operation returns Result and every
++// extern "C" entry point reports a failure through an explicit handle/error
++// instead of unwinding a panic across the C ABI. The previous revision called
++// `Tokenizer::from_str(json).unwrap()`, so a tokenizer.json that passes the C++
++// structural checks but cannot build a real tokenizer (for example
++// {"model":{"type":"BPE"}} with no vocab/merges) aborted the whole process:
++// a Rust panic cannot unwind out of `extern "C"`, and on `panic=abort` builds
++// no catch layer in C++, Kotlin or Rust can convert it into an error.
+ use ahash::AHashMap;
+ use serde_json::Value;
++use std::ffi::CString;
++use std::panic::{catch_unwind, AssertUnwindSafe};
+ use std::str::FromStr;
++use std::sync::Mutex;
+ use tokenizers::models::bpe::BPE;
+ use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+ use tokenizers::tokenizer::Tokenizer;
+@@ -19,14 +31,84 @@ pub type Merges = Vec<(String, String)>;
+ pub struct TokenizerEncodeResult {
+     token_ids: *mut u32,
+     len: usize,
++    // 0 on success. Non-zero means the call was refused; token_ids is null,
++    // len is 0 and tokenizers_last_error() carries the readable reason.
++    error_code: i32,
++}
++
++/// Readable reason for the most recent refusal. Stored as a CString so the
++/// pointer handed to C stays valid until the next refusal.
++static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
++
++static EMPTY_ERROR: [u8; 1] = [0];
++
++fn set_last_error(message: impl Into<String>) {
++    let text = message.into().replace('\0', " ");
++    if let Ok(mut slot) = LAST_ERROR.lock() {
++        *slot = CString::new(text).ok();
++    }
++}
++
++fn clear_last_error() {
++    if let Ok(mut slot) = LAST_ERROR.lock() {
++        *slot = None;
++    }
++}
++
++/// Backstop only. The primary mechanism is that no fallible path in this file
++/// panics: the constructors, encode, encode_batch and decode all return Result
++/// and report failures through error_code or a null handle. This wrapper exists
++/// for a panic raised *inside* the upstream tokenizers crate, and it is only
++/// effective while the crate is compiled with the default `panic = "unwind"`
++/// strategy (the vendored crate declares no [profile] and the vendor CMake
++/// passes no -Cpanic=abort), so it must never be treated as the fix itself.
++fn backstop<T>(context: &str, fallback: T, body: impl FnOnce() -> T) -> T {
++    match catch_unwind(AssertUnwindSafe(body)) {
++        Ok(value) => value,
++        Err(payload) => {
++            set_last_error(format!("{}: {}", context, panic_text(&*payload)));
++            fallback
++        }
++    }
++}
++
++fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
++    if let Some(text) = payload.downcast_ref::<&str>() {
++        return (*text).to_string();
++    }
++    if let Some(text) = payload.downcast_ref::<String>() {
++        return text.clone();
++    }
++    "unexpected panic".to_string()
++}
++
++/// Writes a refusal so the C side never reads a stale or null result silently.
++unsafe fn write_error_result(out_result: *mut TokenizerEncodeResult) {
++    *out_result = TokenizerEncodeResult {
++        token_ids: std::ptr::null_mut(),
++        len: 0,
++        error_code: 1,
++    };
++}
++
++unsafe fn write_ok_result(encoded: Vec<u32>, out_result: *mut TokenizerEncodeResult) {
++    let encoded_len = encoded.len();
++    *out_result = TokenizerEncodeResult {
++        token_ids: Box::into_raw(encoded.into_boxed_slice()) as *mut u32,
++        len: encoded_len,
++        error_code: 0,
++    };
+ }
+ 
+ impl TokenizerWrapper {
+-    pub fn from_str(json: &str) -> TokenizerWrapper {
+-        TokenizerWrapper {
+-            tokenizer: Tokenizer::from_str(json).unwrap().into(),
+-            decode_str: String::new(),
+-            id_to_token_result: String::new(),
++    pub fn from_str(json: &str) -> Result<TokenizerWrapper, String> {
++        match Tokenizer::from_str(json) {
++            Ok(tokenizer) => Ok(TokenizerWrapper {
++                tokenizer: tokenizer.into(),
++                decode_str: String::new(),
++                id_to_token_result: String::new(),
++            }),
++            Err(error) => Err(format!("Invalid tokenizer.json: {}", error)),
+         }
+     }
+ 
+@@ -34,46 +116,67 @@ impl TokenizerWrapper {
+         vocab: &str,
+         merges: &str,
+         added_tokens: &str,
+-    ) -> TokenizerWrapper {
+-        let vocab_json: Value = serde_json::from_str(vocab).unwrap();
++    ) -> Result<TokenizerWrapper, String> {
++        let vocab_json: Value = serde_json::from_str(vocab)
++            .map_err(|error| format!("Invalid vocab.json: {}", error))?;
+         let mut vocab = ahash::AHashMap::new();
+         match vocab_json {
+             Value::Object(m) => {
+                 for (token, id) in m {
+                     if let Value::Number(id) = id {
+-                        let id = id.as_u64().unwrap() as u32;
+-                        vocab.insert(token, id);
++                        let id = id.as_u64().ok_or_else(|| {
++                            "Invalid vocab.json: token id is not a u64.".to_string()
++                        })?;
++                        vocab.insert(token, id as u32);
+                     }
+                 }
+             }
+-            _ => panic!("Invalid vocab.json file."),
++            _ => return Err("Invalid vocab.json file.".to_string()),
+         };
+         if !added_tokens.is_empty() {
+-            let added_tokens_json: Value = serde_json::from_str(added_tokens).unwrap();
++            let added_tokens_json: Value = serde_json::from_str(added_tokens)
++                .map_err(|error| format!("Invalid added_tokens.json: {}", error))?;
+             match added_tokens_json {
+                 Value::Object(m) => {
+                     for (token, id) in m {
+                         if let Value::Number(id) = id {
+-                            let id = id.as_u64().unwrap() as u32;
+-                            vocab.insert(token, id);
++                            let id = id.as_u64().ok_or_else(|| {
++                                "Invalid added_tokens.json: token id is not a u64.".to_string()
++                            })?;
++                            vocab.insert(token, id as u32);
+                         }
+                     }
+                 }
+-                _ => panic!("Invalid added_tokens.json file."),
++                _ => return Err("Invalid added_tokens.json file.".to_string()),
+             };
+         }
+ 
++        let mut merges_error: Option<String> = None;
+         let merges = merges
+             .lines()
+             .filter(|line| !line.starts_with("#version"))
+-            .map(|line| {
+-                let parts = line.split(' ').collect::<Vec<_>>();
+-                if parts.len() != 2 {
+-                    panic!("Invalid merges.txt file.")
++            .filter_map(|line| {
++                let mut parts = line.split(' ');
++                let first = parts.next();
++                let second = parts.next();
++                let extra = parts.next();
++                match (first, second, extra) {
++                    (Some(first), Some(second), None) => {
++                        Some((first.to_string(), second.to_string()))
++                    }
++                    _ => {
++                        if merges_error.is_none() {
++                            merges_error = Some("Invalid merges.txt file.".to_string());
++                        }
++                        None
++                    }
+                 }
+-                return (parts[0].to_string(), parts[1].to_string()); // Add the `return` keyword here
+             })
+             .collect::<Vec<(String, String)>>();
++        if let Some(error) = merges_error {
++            return Err(error);
++        }
++
+         let byte_level = ByteLevel::new(
+             /*add_prefix_space=*/ false, /*trim_offsets=*/ false,
+             /*use_regex=*/ false,
+@@ -82,41 +185,73 @@ impl TokenizerWrapper {
+         tokenizer
+             .with_pre_tokenizer(Some(byte_level))
+             .with_decoder(Some(byte_level));
+-        TokenizerWrapper {
++        Ok(TokenizerWrapper {
+             tokenizer: tokenizer,
+             decode_str: String::new(),
+             id_to_token_result: String::new(),
+-        }
++        })
+     }
+ 
+-    pub fn encode(&mut self, text: &str, add_special_tokens: bool) -> Vec<u32> {
+-        let encoded = self.tokenizer.encode(text, add_special_tokens).unwrap();
+-        return encoded.get_ids().to_vec();
++    pub fn encode(&mut self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>, String> {
++        self.tokenizer
++            .encode(text, add_special_tokens)
++            .map(|encoded| encoded.get_ids().to_vec())
++            .map_err(|error| format!("tokenizer encode failed: {}", error))
+     }
+ 
+-    pub fn encode_batch(&mut self, texts: Vec<&str>, add_special_tokens: bool) -> Vec<Vec<u32>> {
+-        let results = self.tokenizer.encode_batch(texts, add_special_tokens).unwrap()
+-            .into_iter()
+-            .map(|encoded| encoded.get_ids().to_vec())
+-            .collect::<Vec<Vec<u32>>>();
+-        return results;
++    pub fn encode_batch(
++        &mut self,
++        texts: Vec<&str>,
++        add_special_tokens: bool,
++    ) -> Result<Vec<Vec<u32>>, String> {
++        self.tokenizer
++            .encode_batch(texts, add_special_tokens)
++            .map(|encoded| {
++                encoded
++                    .into_iter()
++                    .map(|encoded| encoded.get_ids().to_vec())
++                    .collect::<Vec<Vec<u32>>>()
++            })
++            .map_err(|error| format!("tokenizer encode_batch failed: {}", error))
+     }
+ 
+-    pub fn decode(&mut self, ids: &[u32], skip_special_tokens: bool) {
+-        self.decode_str = self.tokenizer.decode(ids, skip_special_tokens).unwrap();
++    pub fn decode(&mut self, ids: &[u32], skip_special_tokens: bool) -> Result<(), String> {
++        match self.tokenizer.decode(ids, skip_special_tokens) {
++            Ok(decoded) => {
++                self.decode_str = decoded;
++                Ok(())
++            }
++            Err(error) => {
++                self.decode_str.clear();
++                Err(format!("tokenizer decode failed: {}", error))
++            }
++        }
+     }
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_new_from_str(input_cstr: *const u8, len: usize) -> *mut TokenizerWrapper {
+-    unsafe {
+-        let json = &String::from_utf8_lossy(std::slice::from_raw_parts(input_cstr, len));
+-        return Box::into_raw(Box::new(TokenizerWrapper::from_str(json)));
+-    }
++pub extern "C" fn tokenizers_new_from_str(input_cstr: *const u8, len: usize) -> *mut TokenizerWrapper {
++    backstop("tokenizers_new_from_str", std::ptr::null_mut(), || unsafe {
++        if input_cstr.is_null() {
++            set_last_error("tokenizers_new_from_str: null input.");
++            return std::ptr::null_mut();
++        }
++        let json = String::from_utf8_lossy(std::slice::from_raw_parts(input_cstr, len));
++        match TokenizerWrapper::from_str(&json) {
++            Ok(wrapper) => {
++                clear_last_error();
++                Box::into_raw(Box::new(wrapper))
++            }
++            Err(error) => {
++                set_last_error(error);
++                std::ptr::null_mut()
++            }
++        }
++    })
+ }
+ 
+ #[no_mangle]
+-extern "C" fn byte_level_bpe_tokenizers_new_from_str(
++pub extern "C" fn byte_level_bpe_tokenizers_new_from_str(
+     input_vocab_str: *const u8,
+     len_vocab: usize,
+     input_merges_str: *const u8,
+@@ -124,44 +259,81 @@ extern "C" fn byte_level_bpe_tokenizers_new_from_str(
+     input_added_tokens_str: *const u8,
+     len_added_tokens: usize,
+ ) -> *mut TokenizerWrapper {
+-    unsafe {
+-        let vocab =
+-            &String::from_utf8_lossy(std::slice::from_raw_parts(input_vocab_str, len_vocab));
+-        let merges =
+-            &String::from_utf8_lossy(std::slice::from_raw_parts(input_merges_str, len_merges));
+-        let added_tokens = &String::from_utf8_lossy(std::slice::from_raw_parts(
+-            input_added_tokens_str,
+-            len_added_tokens,
+-        ));
+-        return Box::into_raw(Box::new(TokenizerWrapper::byte_level_bpe_from_str(
+-            vocab,
+-            merges,
+-            added_tokens,
+-        )));
+-    }
++    backstop(
++        "byte_level_bpe_tokenizers_new_from_str",
++        std::ptr::null_mut(),
++        || unsafe {
++            if input_vocab_str.is_null() || input_merges_str.is_null() {
++                set_last_error("byte_level_bpe_tokenizers_new_from_str: null input.");
++                return std::ptr::null_mut();
++            }
++            let vocab =
++                String::from_utf8_lossy(std::slice::from_raw_parts(input_vocab_str, len_vocab));
++            let merges =
++                String::from_utf8_lossy(std::slice::from_raw_parts(input_merges_str, len_merges));
++            let added_tokens = if input_added_tokens_str.is_null() {
++                std::borrow::Cow::Borrowed("")
++            } else {
++                String::from_utf8_lossy(std::slice::from_raw_parts(
++                    input_added_tokens_str,
++                    len_added_tokens,
++                ))
++            };
++            match TokenizerWrapper::byte_level_bpe_from_str(&vocab, &merges, &added_tokens) {
++                Ok(wrapper) => {
++                    clear_last_error();
++                    Box::into_raw(Box::new(wrapper))
++                }
++                Err(error) => {
++                    set_last_error(error);
++                    std::ptr::null_mut()
++                }
++            }
++        },
++    )
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_encode(
++pub extern "C" fn tokenizers_encode(
+     handle: *mut TokenizerWrapper,
+     input_cstr: *const u8,
+     len: usize,
+     add_special_tokens: i32,
+     out_result: *mut TokenizerEncodeResult,
+ ) {
+-    unsafe {
+-        let input_data = std::str::from_utf8(std::slice::from_raw_parts(input_cstr, len)).unwrap();
+-        let encoded = (*handle).encode(input_data, add_special_tokens != 0);
+-        let len = encoded.len();
+-        *out_result = TokenizerEncodeResult {
+-            token_ids: Box::into_raw(encoded.into_boxed_slice()) as *mut u32,
+-            len: len,
++    backstop("tokenizers_encode", (), || unsafe {
++        if out_result.is_null() {
++            set_last_error("tokenizers_encode: null result pointer.");
++            return;
++        }
++        if handle.is_null() || input_cstr.is_null() {
++            set_last_error("tokenizers_encode: null handle or input.");
++            write_error_result(out_result);
++            return;
++        }
++        let input_data = match std::str::from_utf8(std::slice::from_raw_parts(input_cstr, len)) {
++            Ok(text) => text,
++            Err(error) => {
++                set_last_error(format!("tokenizers_encode: input is not valid UTF-8: {}", error));
++                write_error_result(out_result);
++                return;
++            }
+         };
+-    }
++        match (*handle).encode(input_data, add_special_tokens != 0) {
++            Ok(encoded) => {
++                clear_last_error();
++                write_ok_result(encoded, out_result);
++            }
++            Err(error) => {
++                set_last_error(error);
++                write_error_result(out_result);
++            }
++        }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_encode_batch(
++pub extern "C" fn tokenizers_encode_batch(
+     handle: *mut TokenizerWrapper,
+     input_cstr: *const *const u8,
+     input_len: *const usize,
+@@ -169,105 +341,198 @@ extern "C" fn tokenizers_encode_batch(
+     add_special_tokens: i32,
+     out_result: *mut TokenizerEncodeResult,
+ ) {
+-    unsafe {
+-        let input_data = (0..num_seqs)
+-            .map(|i| {
+-                std::str::from_utf8(std::slice::from_raw_parts(*input_cstr.offset(i as isize), *input_len.offset(i as isize))).unwrap()
+-            })
+-            .collect::<Vec<&str>>();
+-        let encoded_batch = (*handle).encode_batch(input_data, add_special_tokens != 0);
+-        for (i, encoded) in encoded_batch.into_iter().enumerate() {
+-            let len = encoded.len();
+-            let result = TokenizerEncodeResult {
+-                token_ids: Box::into_raw(encoded.into_boxed_slice()) as *mut u32,
+-                len: len,
+-            };
+-            *out_result.offset(i as isize) = result;
++    backstop("tokenizers_encode_batch", (), || unsafe {
++        if out_result.is_null() {
++            set_last_error("tokenizers_encode_batch: null result pointer.");
++            return;
+         }
+-    }
++        let fail_all = |message: &str| {
++            set_last_error(message);
++            for index in 0..num_seqs {
++                write_error_result(out_result.offset(index as isize));
++            }
++        };
++        if handle.is_null() || input_cstr.is_null() || input_len.is_null() {
++            fail_all("tokenizers_encode_batch: null handle or input.");
++            return;
++        }
++        let mut inputs: Vec<&str> = Vec::with_capacity(num_seqs);
++        for i in 0..num_seqs {
++            let data = *input_cstr.offset(i as isize);
++            let data_len = *input_len.offset(i as isize);
++            if data.is_null() {
++                fail_all("tokenizers_encode_batch: null sequence.");
++                return;
++            }
++            match std::str::from_utf8(std::slice::from_raw_parts(data, data_len)) {
++                Ok(text) => inputs.push(text),
++                Err(error) => {
++                    fail_all(&format!(
++                        "tokenizers_encode_batch: input {} is not valid UTF-8: {}",
++                        i, error
++                    ));
++                    return;
++                }
++            }
++        }
++        match (*handle).encode_batch(inputs, add_special_tokens != 0) {
++            Ok(encoded_batch) => {
++                clear_last_error();
++                for (i, encoded) in encoded_batch.into_iter().enumerate() {
++                    write_ok_result(encoded, out_result.offset(i as isize));
++                }
++            }
++            Err(error) => {
++                fail_all(&error);
++            }
++        }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_free_encode_results(results: *mut TokenizerEncodeResult, num_seqs: usize) {
+-    unsafe {
++pub extern "C" fn tokenizers_free_encode_results(results: *mut TokenizerEncodeResult, num_seqs: usize) {
++    backstop("tokenizers_free_encode_results", (), || unsafe {
++        if results.is_null() {
++            return;
++        }
+         let slice = std::slice::from_raw_parts_mut(results, num_seqs);
+         for result in &mut *slice {
+-            drop(Box::from_raw(std::slice::from_raw_parts_mut(result.token_ids, result.len)));
++            // Refused entries carry a null pointer; rebuilding a slice from it
++            // would be undefined behaviour.
++            if result.token_ids.is_null() {
++                result.len = 0;
++                result.error_code = 0;
++                continue;
++            }
++            drop(Box::from_raw(std::slice::from_raw_parts_mut(
++                result.token_ids,
++                result.len,
++            )));
++            result.token_ids = std::ptr::null_mut();
++            result.len = 0;
+         }
+-    }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_decode(
++pub extern "C" fn tokenizers_decode(
+     handle: *mut TokenizerWrapper,
+     input_ids: *const u32,
+     len: usize,
+     skip_special_tokens: i32,
+ ) {
+-    unsafe {
++    backstop("tokenizers_decode", (), || unsafe {
++        if handle.is_null() || (input_ids.is_null() && len != 0) {
++            set_last_error("tokenizers_decode: null handle or input.");
++            return;
++        }
+         let input_data = std::slice::from_raw_parts(input_ids, len);
+-        (*handle).decode(input_data, skip_special_tokens != 0);
+-    }
++        if let Err(error) = (*handle).decode(input_data, skip_special_tokens != 0) {
++            set_last_error(error);
++        } else {
++            clear_last_error();
++        }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_get_decode_str(
++pub extern "C" fn tokenizers_get_decode_str(
+     handle: *mut TokenizerWrapper,
+     out_cstr: *mut *mut u8,
+     out_len: *mut usize,
+ ) {
+-    unsafe {
++    backstop("tokenizers_get_decode_str", (), || unsafe {
++        if out_cstr.is_null() || out_len.is_null() {
++            return;
++        }
++        if handle.is_null() {
++            *out_cstr = std::ptr::null_mut();
++            *out_len = 0;
++            return;
++        }
+         *out_cstr = (*handle).decode_str.as_mut_ptr();
+         *out_len = (&(*handle).decode_str).len();
+-    }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_free(wrapper: *mut TokenizerWrapper) {
+-    unsafe {
++pub extern "C" fn tokenizers_last_error() -> *const u8 {
++    backstop("tokenizers_last_error", std::ptr::null(), || match LAST_ERROR.lock() {
++        Ok(slot) => match slot.as_ref() {
++            Some(message) => message.as_ptr() as *const u8,
++            None => EMPTY_ERROR.as_ptr(),
++        },
++        Err(_) => EMPTY_ERROR.as_ptr(),
++    })
++}
++
++#[no_mangle]
++pub extern "C" fn tokenizers_free(wrapper: *mut TokenizerWrapper) {
++    backstop("tokenizers_free", (), || unsafe {
++        if wrapper.is_null() {
++            return;
++        }
+         drop(Box::from_raw(wrapper));
+-    }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_get_vocab_size(handle: *mut TokenizerWrapper, size: *mut usize) {
+-    unsafe {
++pub extern "C" fn tokenizers_get_vocab_size(handle: *mut TokenizerWrapper, size: *mut usize) {
++    backstop("tokenizers_get_vocab_size", (), || unsafe {
++        if size.is_null() {
++            return;
++        }
++        if handle.is_null() {
++            *size = 0;
++            return;
++        }
+         *size = (*handle).tokenizer.get_vocab_size(true);
+-    }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_id_to_token(
++pub extern "C" fn tokenizers_id_to_token(
+     handle: *mut TokenizerWrapper,
+     id: u32,
+     out_cstr: *mut *mut u8,
+     out_len: *mut usize,
+ ) {
+-    unsafe {
+-        let str = (*handle).tokenizer.id_to_token(id);
+-        (*handle).id_to_token_result = match str {
+-            Some(s) => s,
+-            None => String::from(""),
+-        };
+-
++    backstop("tokenizers_id_to_token", (), || unsafe {
++        if out_cstr.is_null() || out_len.is_null() {
++            return;
++        }
++        if handle.is_null() {
++            *out_cstr = std::ptr::null_mut();
++            *out_len = 0;
++            return;
++        }
++        let wrapper = &mut *handle;
++        wrapper.id_to_token_result = wrapper.tokenizer.id_to_token(id).unwrap_or_default();
+         *out_cstr = (*handle).id_to_token_result.as_mut_ptr();
+         *out_len = (&(*handle).id_to_token_result).len();
+-    }
++    });
+ }
+ 
+ #[no_mangle]
+-extern "C" fn tokenizers_token_to_id(
++pub extern "C" fn tokenizers_token_to_id(
+     handle: *mut TokenizerWrapper,
+     token: *const u8,
+     len: usize,
+     out_id: *mut i32,
+ ) {
+-    unsafe {
++    backstop("tokenizers_token_to_id", (), || unsafe {
++        if out_id.is_null() {
++            return;
++        }
++        if handle.is_null() || token.is_null() {
++            *out_id = -1;
++            return;
++        }
+         let token: &str = &String::from_utf8_lossy(std::slice::from_raw_parts(token, len));
+-        let id = (*handle).tokenizer.token_to_id(token);
+-        *out_id = match id {
++        let wrapper = &*handle;
++        *out_id = match wrapper.tokenizer.token_to_id(token) {
+             Some(id) => id as i32,
+             None => -1,
+         };
+-    }
++    });
+ }
+diff --git a/src/huggingface_tokenizer.cc b/src/huggingface_tokenizer.cc
+index 6cbe0d8972e4449b499cfb66e9e750922c7d6d6e..bf1be427b1923976e3ed11ae8100f84a2a4146f4 100644
+--- a/src/huggingface_tokenizer.cc
++++ b/src/huggingface_tokenizer.cc
+@@ -8,8 +8,22 @@
+ #include <tokenizers_cpp.h>
+ 
+ #include <cassert>
++#include <stdexcept>
+ 
+ namespace tokenizers {
++namespace {
++/*!
++ * \brief Copies the library-owned refusal reason into a std::string.
++ */
++std::string current_error() {
++  const char* message = tokenizers_last_error();
++  if (message == nullptr || message[0] == '\0') {
++    return "tokenizer call failed";
++  }
++  return std::string(message);
++}
++}  // namespace
++
+ /*!
+  * \brief A simple c++ header of tokenizer via C API.
+  */
+@@ -33,8 +47,16 @@ class HFTokenizer : public Tokenizer {
+   // use i32 to be consistent with sentencepiece
+   std::vector<int32_t> Encode(const std::string& text, bool add_special_tokens) {
+     TokenizerEncodeResult result;
++    result.token_ids = nullptr;
++    result.len = 0;
++    result.error_code = 0;
+     tokenizers_encode(handle_, text.data(), text.length(), static_cast<int>(add_special_tokens),
+                       &result);
++    if (result.error_code != 0) {
++      // The Rust glue refused the call: raise it as an error instead of reading
++      // a null token buffer.
++      throw std::runtime_error(current_error());
++    }
+     std::vector<int32_t> ret(result.token_ids, result.token_ids + result.len);
+     tokenizers_free_encode_results(&result, 1);
+     return ret;
+@@ -55,15 +77,32 @@ class HFTokenizer : public Tokenizer {
+       seq_lens.push_back(text.length());
+     }
+     std::vector<TokenizerEncodeResult> results(num_seqs);
+-    tokenizers_encode_batch(handle_, texts_raw.data(), seq_lens.data(), texts.size(),
+-                            static_cast<int>(add_special_tokens), results.data());
++    for (auto& entry : results) {
++      entry.token_ids = nullptr;
++      entry.len = 0;
++      entry.error_code = 0;
++    }
++    if (num_seqs != 0) {
++      tokenizers_encode_batch(handle_, texts_raw.data(), seq_lens.data(), texts.size(),
++                              static_cast<int>(add_special_tokens), results.data());
++    }
+     std::vector<std::vector<int32_t>> ret;
+     ret.reserve(texts.size());
++    bool failed = false;
+     for (size_t i = 0; i < texts.size(); ++i) {
++      if (results[i].error_code != 0) {
++        failed = true;
++        continue;
++      }
+       ret.push_back(
+           std::vector<int32_t>(results[i].token_ids, results[i].token_ids + results[i].len));
+     }
+-    tokenizers_free_encode_results(results.data(), texts.size());
++    if (num_seqs != 0) {
++      tokenizers_free_encode_results(results.data(), texts.size());
++    }
++    if (failed) {
++      throw std::runtime_error(current_error());
++    }
+     return ret;
+   }
+ 
+@@ -78,13 +117,16 @@ class HFTokenizer : public Tokenizer {
+     const char* data;
+     size_t len;
+     tokenizers_get_decode_str(handle_, &data, &len);
++    if (data == nullptr) {
++      return std::string();
++    }
+     return std::string(data, len);
+   }
+ 
+   std::string Decode(const std::vector<int32_t>& ids) final { return Decode(ids, false); }
+ 
+   size_t GetVocabSize() final {
+-    size_t size;
++    size_t size = 0;
+     tokenizers_get_vocab_size(handle_, &size);
+     assert(size > 0);
+     return size;
+@@ -94,11 +136,14 @@ class HFTokenizer : public Tokenizer {
+     const char* data;
+     size_t len;
+     tokenizers_id_to_token(handle_, static_cast<uint32_t>(id), &data, &len);
++    if (data == nullptr) {
++      return std::string();
++    }
+     return std::string(data, len);
+   }
+ 
+   int32_t TokenToId(const std::string& token) final {
+-    int32_t id;
++    int32_t id = -1;
+     tokenizers_token_to_id(handle_, token.data(), token.length(), &id);
+     return id;
+   }
+@@ -109,14 +154,26 @@ class HFTokenizer : public Tokenizer {
+ };
+ 
+ std::unique_ptr<Tokenizer> Tokenizer::FromBlobJSON(const std::string& json) {
+-  return std::make_unique<HFTokenizer>(tokenizers_new_from_str(json.data(), json.length()));
++  TokenizerHandle handle = tokenizers_new_from_str(json.data(), json.length());
++  if (handle == nullptr) {
++    // Returning a wrapper around a null handle would turn a clean refusal into a
++    // null dereference on the first Encode() call.
++    return nullptr;
++  }
++  return std::make_unique<HFTokenizer>(handle);
+ }
+ 
+ std::unique_ptr<Tokenizer> Tokenizer::FromBlobByteLevelBPE(const std::string& vocab,
+                                                            const std::string& merges,
+                                                            const std::string& added_tokens) {
+-  return std::make_unique<HFTokenizer>(byte_level_bpe_tokenizers_new_from_str(
++  TokenizerHandle handle = byte_level_bpe_tokenizers_new_from_str(
+       vocab.data(), vocab.length(), merges.data(), merges.length(), added_tokens.data(),
+-      added_tokens.length()));
++      added_tokens.length());
++  if (handle == nullptr) {
++    return nullptr;
++  }
++  return std::make_unique<HFTokenizer>(handle);
+ }
++
++std::string LastError() { return current_error(); }
+ }  // namespace tokenizers

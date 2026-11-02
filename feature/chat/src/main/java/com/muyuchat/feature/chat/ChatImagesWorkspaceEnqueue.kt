@@ -1,8 +1,25 @@
 package com.muyuchat.feature.chat
 
-import android.widget.Toast
+/**
+ * Shown when the image submit callback returns false without publishing a specific reason. The
+ * chat image path already ends a rejected request with the equivalent wording
+ * (SendChatImageRequestOperations); the image workspace used to drop the rejection entirely, which
+ * made a fail-closed admission indistinguishable from an unwired button.
+ */
+internal const val IMAGE_GENERATE_REJECTED_FALLBACK = "无法开始图片生成，请检查已选模型与生成设置。"
 
-internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayBindings, prompt: String) {
+/**
+ * Returns the fallback to publish for a rejected submit, or null when a more precise validation
+ * error is already visible (never overwrite the owner's concrete reason).
+ */
+internal fun imageGenerationRejectionFallback(currentValidationError: String?): String? =
+    if (currentValidationError == null) IMAGE_GENERATE_REJECTED_FALLBACK else null
+
+internal fun imagesWorkspaceEnqueueImagePrompt(
+    bindings: ImagesWorkspaceOverlayBindings,
+    prompt: String,
+    notify: (String) -> Unit,
+) {
     with(bindings) {
         imageValidationError = null
         val cleanPrompt = prompt.trim()
@@ -102,7 +119,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                     "UltraFix 目标尺寸不能小于源图"
                 else -> "图片尺寸不符合当前模型的范围或步进要求"
             }
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            notify(message)
             return
         }
         val stepsValue = localControls?.let { imageStepsText.toIntOrNull() }
@@ -111,11 +128,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                     stepsValue !in localControls.imageMinSteps..localControls.imageMaxSteps
                 )
         ) {
-            Toast.makeText(
-                context,
-                "采样步数必须为 ${localControls.imageMinSteps}-${localControls.imageMaxSteps}",
-                Toast.LENGTH_SHORT
-            ).show()
+            notify("采样步数必须为 ${localControls.imageMinSteps}-${localControls.imageMaxSteps}")
             return
         }
         val cfgScaleValue = localControls?.let { imageCfgScaleText.toDoubleOrNull() }
@@ -147,7 +160,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
             val availableIds = state.imageLoras.mapTo(mutableSetOf(), ImageLoraUiItem::id)
             val drafts = imageLoraDraftsFromJson(imageLoraDraftJson)
             if (drafts.any { it.id !in availableIds }) {
-                Toast.makeText(context, "所选 LoRA 已删除，请重新选择", Toast.LENGTH_SHORT).show()
+                notify("所选 LoRA 已删除，请重新选择")
                 return
             }
             val invalid = drafts.firstOrNull { draft ->
@@ -156,7 +169,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                     kotlin.math.abs(value) < 0.01
             }
             if (invalid != null) {
-                Toast.makeText(context, "LoRA 倍率必须在 [-4, -0.01] 或 [0.01, 4]", Toast.LENGTH_SHORT).show()
+                notify("LoRA 倍率必须在 [-4, -0.01] 或 [0.01, 4]")
                 return
             }
             drafts.map { draft ->
@@ -171,11 +184,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
         val textualInversionIds = if (supportsImageTextualInversion) {
             val requestedIds = imageTextualInversionIdsFromJson(imageTextualInversionIdsJson)
             if (requestedIds.isNotEmpty() && state.imageTextualInversionImporting) {
-                Toast.makeText(
-                    context,
-                    "Textual Inversion 库仍在加载或更新，请稍后重试",
-                    Toast.LENGTH_SHORT
-                ).show()
+                notify("Textual Inversion 库仍在加载或更新，请稍后重试")
                 return
             }
             val availableById = state.imageTextualInversions
@@ -185,7 +194,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                 .associateBy(ImageTextualInversionUiItem::id)
             requestedIds.also { ids ->
                 if (ids.size > 8 || ids.any { it !in availableById }) {
-                    Toast.makeText(context, "所选 Textual Inversion 已失效，请重新选择", Toast.LENGTH_SHORT).show()
+                    notify("所选 Textual Inversion 已失效，请重新选择")
                     return
                 }
                 val missingTriggers = ids.mapNotNull(availableById::get).map { it.trigger }
@@ -194,11 +203,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                             imagePromptContainsTextualInversionTrigger(imageNegativePrompt, trigger)
                     }
                 if (missingTriggers.isNotEmpty()) {
-                    Toast.makeText(
-                        context,
-                        "请在提示词中保留触发词：${missingTriggers.take(3).joinToString()}",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    notify("请在提示词中保留触发词：${missingTriggers.take(3).joinToString()}")
                     return
                 }
             }
@@ -210,7 +215,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                 imageInputUri == null || widthValue == null || heightValue == null ||
                 localControls == null
             ) {
-                Toast.makeText(context, "当前输入或模型不能执行 UltraFix", Toast.LENGTH_SHORT).show()
+                notify("当前输入或模型不能执行 UltraFix")
                 return
             }
             val ultraStrength = imageUltraFixStrengthText.toDoubleOrNull()
@@ -238,7 +243,7 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
                 tileSize > minOf(widthValue, heightValue) ||
                 overlap == null || !overlap.isFinite() || overlap !in 0.0..0.5
             ) {
-                Toast.makeText(context, "UltraFix 参数不符合执行合同", Toast.LENGTH_SHORT).show()
+                notify("UltraFix 参数不符合执行合同")
                 return
             }
             ImageGenerationUiUltraFixOptions(
@@ -309,8 +314,13 @@ internal fun imagesWorkspaceEnqueueImagePrompt(bindings: ImagesWorkspaceOverlayB
         if (ultraFixOptions != null) {
             pendingUltraFixSubmission = cleanPrompt to generationOptions
         } else {
-            if (onGenerateImagePrompt(cleanPrompt, generationOptions)) {
+            val admitted = onGenerateImagePrompt(cleanPrompt, generationOptions)
+            if (admitted) {
                 imageGenerationStartSignal++
+            } else {
+                imageGenerationRejectionFallback(imageValidationError)?.let { fallback ->
+                    imageValidationError = fallback
+                }
             }
         }
         imagePrompt = cleanPrompt

@@ -147,5 +147,15 @@ internal val identityRules: List<BuiltInImageProfileIdentityRule> = listOf(
         repositories = setOf("vantagewithai/LongCat-Image-GGUF"),
         artifacts = setOf("LongCat-Image-Q4_0.gguf"),
         fingerprints = setOf("d494513ea95e82fb7069cdb914738f22dfc940fc770000fbbc8ad0a7a445f601")
+    ),
+    ImageExecutionProfileResolver.identityRule(
+        "anima_preview_q4",
+        repositories = setOf("Bedovyy/Anima-GGUF", "circlestone-labs/Anima"),
+        artifacts = setOf(
+            "anima-preview-Q4_K_M.gguf",
+            "qwen_image_vae.safetensors",
+            "qwen_3_06b_base.safetensors"
+        ),
+        fingerprints = setOf("219ff28288177b526ec3197309045ab0c11ede88ed7d6f6a27d0148033a8de00")
     )
 )

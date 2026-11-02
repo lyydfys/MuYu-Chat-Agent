@@ -1,5 +1,7 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
@@ -18,19 +20,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -109,13 +106,13 @@ internal fun WebSearchTestStatusPanel(
         }
         if (message.shouldShowWebSearchNetworkTroubleshootingActions()) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = { context.openMcaNetworkSettings() },
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("打开网络设置")
                 }
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = { context.openMcaAppSettings() },
                     modifier = Modifier.weight(1f)
                 ) {
@@ -161,7 +158,7 @@ internal fun BackupProviderEditor(
             ) {
                 Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(12.dp))
-                Switch(checked = enabled, onCheckedChange = onEnabledChange)
+                McaSwitch(checked = enabled, onCheckedChange = onEnabledChange, contentDescription = title)
             }
             Text(
                 if (enabled) "已加入故障接力链路" else "关闭时不会发起请求",
@@ -172,7 +169,7 @@ internal fun BackupProviderEditor(
         if (enabled) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 providerItems.forEach { item ->
-                    FilterChip(
+                    McaChip(
                         selected = provider == item.first,
                         onClick = { onProviderChange(item.first) },
                         label = { Text(item.second) }
@@ -331,7 +328,7 @@ internal fun WebSearchDiagnosticCard(
                     )
                 }
             }
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 modifier = Modifier.fillMaxWidth(),
                 onClick = {
                     scope.launch {
@@ -346,7 +343,7 @@ internal fun WebSearchDiagnosticCard(
                     }
                 }
             ) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                Icon(McaIcons.ContentCopy, contentDescription = null)
                 Text("复制诊断", modifier = Modifier.padding(start = 6.dp))
             }
         }

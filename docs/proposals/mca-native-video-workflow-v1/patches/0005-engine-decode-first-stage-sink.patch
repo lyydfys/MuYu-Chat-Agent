@@ -1,0 +1,79 @@
+# Source: src/pipeline/diffusion_engine.h, src/pipeline/diffusion_engine.cpp
+# Change: thread the VAE tile sink through StableDiffusionGGML::decode_first_stage, return an empty tensor when streaming succeeded, and skip the whole-video retry-tiling loop on the streaming path.
+# Why:    The pipeline must be able to ask the VAE to stream and must not treat "no whole video tensor" as a failure nor decode a second time (that would duplicate frames).
+diff --git a/src/pipeline/diffusion_engine.cpp b/src/pipeline/diffusion_engine.cpp
+index e944c9a..8629d3b 100644
+--- a/src/pipeline/diffusion_engine.cpp
++++ b/src/pipeline/diffusion_engine.cpp
+@@ -2621,13 +2621,42 @@ sd::Tensor<float> StableDiffusionGGML::encode_first_stage(const sd::Tensor<float
+     return latents;
+ }
+ 
+-sd::Tensor<float> StableDiffusionGGML::decode_first_stage(const sd::Tensor<float>& x, bool decode_video) {
++sd::Tensor<float> StableDiffusionGGML::decode_first_stage(const sd::Tensor<float>& x,
++                                                         bool decode_video,
++                                                         const VAETileSink& on_tile,
++                                                         bool* streamed_out) {
++    if (streamed_out != nullptr) {
++        *streamed_out = false;
++    }
+     if (sd_version_is_pid(version) || sd_version_is_minit2i(version)) {
++        if (on_tile) {
++            LOG_VERBOSE("this model version has no VAE decode step; ignoring the tile sink");
++        }
+         return sd::ops::clamp((x + 1.f) * 0.5f, 0.0f, 1.0f);
+     }
+     auto latents                      = first_stage_model->diffusion_to_vae_latents(x);
+-    auto decoded                      = first_stage_model->decode(n_threads, latents, vae_tiling_params, decode_video, circular_x, circular_y);
++    auto decoded                      = first_stage_model->decode(n_threads,
++                                                                  latents,
++                                                                  vae_tiling_params,
++                                                                  decode_video,
++                                                                  circular_x,
++                                                                  circular_y,
++                                                                  false,
++                                                                  on_tile,
++                                                                  streamed_out);
++    if (streamed_out != nullptr && *streamed_out) {
++        // Frames were already handed to the sink, so there is no whole-video tensor to inspect.
++        return {};
++    }
+     const bool prefer_temporal_tiling = decode_video && first_stage_model->can_temporal_tile_decode();
++    if (on_tile) {
++        // A streaming attempt must not be retried: it may already have delivered frames, and a
++        // second decode would duplicate them. Report failure instead.
++        if (decoded.empty()) {
++            LOG_WARN("streaming VAE decode produced no frames and no whole-video tensor");
++        }
++        return decoded;
++    }
+     while (decoded.empty() &&
+            sd::backend_fit::prepare_vae_decode_retry_tiling(vae_tiling_params, prefer_temporal_tiling)) {
+         decoded = first_stage_model->decode(n_threads, latents, vae_tiling_params, decode_video, circular_x, circular_y);
+diff --git a/src/pipeline/diffusion_engine.h b/src/pipeline/diffusion_engine.h
+index 15175e1..c363d94 100644
+--- a/src/pipeline/diffusion_engine.h
++++ b/src/pipeline/diffusion_engine.h
+@@ -17,6 +17,7 @@
+ #include "core/tensor.hpp"
+ #include "core/util.h"
+ #include "model/adapter/lora.hpp"
++#include "model/vae/vae_tiling.hpp"
+ #include "model_builders.h"
+ #include "model_manager.h"
+ #include "stable-diffusion.h"
+@@ -462,7 +463,13 @@ public:
+ 
+     sd::Tensor<float> encode_first_stage(const sd::Tensor<float>& x);
+ 
+-    sd::Tensor<float> decode_first_stage(const sd::Tensor<float>& x, bool decode_video = false);
++    // `on_tile` empty -> original whole-video decode. When set, the VAE may deliver decoded frames
++    // tile by tile and then return an empty tensor with `*streamed_out = true`; there is no
++    // whole-video tensor in that case and the tiling retry is skipped (frames already delivered).
++    sd::Tensor<float> decode_first_stage(const sd::Tensor<float>& x,
++                                         bool decode_video         = false,
++                                         const VAETileSink& on_tile = VAETileSink(),
++                                         bool* streamed_out         = nullptr);
+ 
+     sd::Tensor<float> normalize_ltx_video_latents(const sd::Tensor<float>& x);
+ 

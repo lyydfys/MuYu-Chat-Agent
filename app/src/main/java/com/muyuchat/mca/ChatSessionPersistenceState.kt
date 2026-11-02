@@ -50,7 +50,7 @@ internal fun List<ChatSessionRecord>.upsertSessionFor(
                 (assistantSnapshot != null && assistantSnapshot.assistantId != existingOwner))) return this
         val capturedSnapshot = existing?.assistantSnapshot ?: assistantSnapshot
             ?: assistantId?.let { owner ->
-                state.assistants.firstOrNull { it.id == owner }?.toConversationSnapshot()
+                state.assistants.firstOrNull { it.id == owner }?.toConversationSnapshot(occurredAt)
             }
         val record = ChatSessionRecord(
             id = sessionId,
@@ -124,7 +124,7 @@ internal fun reconciledChatSessionsAfterSaveFor(
 
 /** R3/C3-S11：`publishReconciledChatSessions` 顶层化（体逐字等价；store 参数化）。 */
 internal fun publishReconciledChatSessionsInto(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationPersistenceFields>,
     chatRuns: ChatRunOwnership,
     requested: List<ChatSessionRecord>,
     persisted: List<ChatSessionRecord>
@@ -132,16 +132,14 @@ internal fun publishReconciledChatSessionsInto(
         if (requested == persisted) return
         val requestedById = requested.associateBy { it.id }
         val correctedById = persisted.filter { it.mixedAssistantHistory }.associateBy { it.id }
-        var activeCorrection = false
-        store.update { current ->
+        val activeCorrection = store.updateWithResult { current ->
             val corrected = current.chatSessions.map { session ->
                 correctedById[session.id]?.takeIf { requestedById[session.id] == session } ?: session
             }
-            if (corrected == current.chatSessions) current else {
+            if (corrected == current.chatSessions) current to false else {
                 val activeBefore = current.chatSessions.firstOrNull { it.id == current.activeChatSessionId }
                 val activeAfter = corrected.firstOrNull { it.id == current.activeChatSessionId }
                 val activeWasCorrected = activeAfter != activeBefore
-                if (activeWasCorrected) activeCorrection = true
                 current.copy(
                     chatSessions = corrected,
                     messages = if (activeWasCorrected) activeAfter?.messages.orEmpty() else current.messages,
@@ -152,7 +150,7 @@ internal fun publishReconciledChatSessionsInto(
                     statusMessage = if (activeWasCorrected) {
                         "会话角色归属不明确，原始消息已保留；可从历史菜单创建角色分支。"
                     } else current.statusMessage
-                )
+                ) to activeWasCorrected
             }
         }
         if (activeCorrection) chatRuns.cancelCurrentAndCancelOwner()
@@ -162,7 +160,7 @@ internal fun publishReconciledChatSessionsInto(
 internal fun cleanupPendingWorldBooksAfterOwnerCommitFor(
     persistenceState: ChatSessionPersistenceState,
     worldBookStore: WorldBookStore,
-    store: UiStateStore,
+    store: UiStateWriter<KnowledgeLibraryFields>,
     scope: WorldBookScope,
     retainedOwnerIds: Set<String>
 ) {

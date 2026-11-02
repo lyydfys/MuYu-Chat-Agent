@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import android.os.SystemClock
 import android.content.Context
 import android.net.Uri
@@ -19,24 +21,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Redo
-import androidx.compose.material.icons.automirrored.filled.Undo
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Clear
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material3.AlertDialog
+
+
+
+
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -334,7 +330,7 @@ internal fun ImagePromptTagAutocompleteProvider(
             )
         }
         pendingClear?.let { kind ->
-            AlertDialog(
+            McaDialog(
                 onDismissRequest = { pendingClear = null },
                 title = { Text("清除标签词典？") },
                 text = {
@@ -347,7 +343,7 @@ internal fun ImagePromptTagAutocompleteProvider(
                     )
                 },
                 confirmButton = {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = {
                             pendingClear = null
                             scope.launch { session.clearDictionary(kind) }
@@ -358,7 +354,7 @@ internal fun ImagePromptTagAutocompleteProvider(
                     }
                 },
                 dismissButton = {
-                    TextButton(
+                    McaButton(style = McaButtonStyle.Text,
                         onClick = { pendingClear = null },
                         modifier = Modifier.heightIn(min = MIN_TOUCH_TARGET_DP)
                     ) { Text("取消") }

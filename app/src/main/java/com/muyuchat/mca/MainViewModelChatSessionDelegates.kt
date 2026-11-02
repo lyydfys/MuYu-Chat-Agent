@@ -1,13 +1,15 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.composition.browserTaskWriter
+
 fun MainViewModel.onInputChange(value: String) = chatInputAndAttachmentCoordinator.onInputChange(value)
 fun MainViewModel.clearStatusMessage() = chatInputAndAttachmentCoordinator.clearStatusMessage()
 
 fun MainViewModel.startBrowserTask(request: com.muyuchat.feature.chat.BrowserTaskLaunch) =
-    startBrowserTaskFor(uiStateStore, request)
+    startBrowserTaskFor(uiStateStore.browserTaskWriter(), request)
 
 fun MainViewModel.onBrowserTaskEvent(event: com.muyuchat.feature.chat.BrowserTaskEvent) =
-    onBrowserTaskEventFor(uiStateStore, { activeWebSearchTaskId }, { activeWebSearchDeferred?.cancel() }, event)
+    onBrowserTaskEventFor(uiStateStore.browserTaskWriter(), { activeWebSearchTaskId }, { activeWebSearchDeferred?.cancel() }, event)
 
 fun MainViewModel.requestContextCompression() = contextCompressionCoordinator.requestContextCompression()
 fun MainViewModel.toggleMessagePinned(messageId: String) = contextCompressionCoordinator.toggleMessagePinned(messageId)

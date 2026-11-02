@@ -185,8 +185,8 @@ internal fun genieXGenerationParameterApplication(
         backend = "geniex",
         requestedJson = requestedJson,
         submitted = submitted,
-        ignored = mapOf("thinking_budget" to "geniex-0.3.12_exposes_template_enable_thinking_without_budget"),
-        source = "geniex-0.3.12:GenerationConfig",
+        ignored = mapOf("thinking_budget" to "geniex-0.10.0_exposes_template_enable_thinking_without_budget"),
+        source = "geniex-0.10.0:GenerationConfig",
         normalizedReasons = mapOf(
             "seed" to "null_seed_uses_geniex_default_zero",
             "enable_thinking" to "applied_to_native_chat_template",

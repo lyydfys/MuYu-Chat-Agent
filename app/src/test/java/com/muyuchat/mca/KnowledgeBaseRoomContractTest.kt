@@ -279,8 +279,12 @@ class KnowledgeBaseRoomContractTest {
     fun migrationChainFrom16To22CreatesKnowledgeTablesWithoutReplacingExistingData() {
         val source = chatSessionStoreSource()
 
-        // Later character memory migrations extend the same non-destructive chain.
-        assertTrue(Regex("""version\s*=\s*27""").containsMatchIn(source))
+        // Later character memory, Agent, video and prompt-identity migrations extend the same
+        // non-destructive chain; the database version must advance with every registered step.
+        // Derive it here: RoomSchemaContractTest already pins the exact declared/exported version.
+        val declaredVersion = Regex("""@Database\([\s\S]*?version\s*=\s*(\d+)""")
+            .find(source)?.groupValues?.get(1)?.toInt()
+        assertTrue("the database version must be declared", declaredVersion != null && declaredVersion >= 34)
         val builder = source.substring(
             source.indexOf("Room.databaseBuilder"),
             source.indexOf(".build()", source.indexOf("Room.databaseBuilder"))
@@ -294,6 +298,10 @@ class KnowledgeBaseRoomContractTest {
         assertTrue(builder.contains("MIGRATION_24_25"))
         assertTrue(builder.contains("MIGRATION_25_26"))
         assertTrue(builder.contains("MIGRATION_26_27"))
+        assertTrue(builder.contains("MIGRATION_28_29"))
+        assertTrue(builder.contains("VideoDatabaseSchema.MIGRATION_29_30"))
+        assertTrue(builder.contains("VideoDatabaseSchema.MIGRATION_30_31"))
+        assertTrue(builder.contains("VideoDatabaseSchema.MIGRATION_31_32"))
 
         val migration16To17 = region(source, "private val MIGRATION_16_17", "private val MIGRATION_17_18")
         assertTrue(migration16To17.contains("createKnowledgeBaseTablesIfMissing(db)"))

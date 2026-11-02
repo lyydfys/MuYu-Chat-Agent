@@ -103,6 +103,21 @@ class LocalImageProvider(context: Context) {
                 onProgress: (LocalImageProgress) -> Unit
             ): LocalImageResult =
                 runQwenImage21Generation(localImageQwenImage21Port, model, prompt, options, onProgress)
+
+            override fun generateMediaTekAnima(
+                model: LocalImageModelRecord,
+                prompt: String,
+                options: LocalImageGenerationOptions,
+                isCancellationRequested: () -> Boolean,
+                onProgress: (LocalImageProgress) -> Unit
+            ): LocalImageResult = executeMediaTekAnimaGeneration(
+                context = appContext,
+                model = model,
+                prompt = prompt,
+                options = options,
+                isCancellationRequested = isCancellationRequested,
+                onProgress = onProgress
+            )
         }
 
     private val localImageUpscalePort: LocalImageUpscalePort =

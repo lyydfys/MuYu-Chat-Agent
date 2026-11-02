@@ -1,6 +1,9 @@
-﻿<resources>
+<resources>
     <string name="app_name">MCA</string>
     <string name="brand_en">MuYu Chat Agent</string>
     <string name="brand_short">MCA</string>
+    <string name="dsh_capability_consent_allow">允许</string>
+    <string name="dsh_capability_consent_deny">拒绝</string>
+    <string name="dsh_capability_consent_default_detail">DSH 请求执行受管理的手机能力，请确认来源和操作。</string>
 </resources>
 

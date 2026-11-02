@@ -1,5 +1,8 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -36,27 +39,22 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.rounded.BrokenImage
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Search
+
+
+
+
+
+
+
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.runtime.Composable
@@ -83,6 +81,7 @@ import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 /** Displays every asset from a batch in the chat event itself. */
 @Composable
@@ -134,9 +133,9 @@ internal fun ChatGeneratedImageGrid(
                                     verticalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
                                     Icon(
-                                        Icons.Rounded.BrokenImage,
+                                        McaIcons.BrokenImage,
                                         contentDescription = null,
-                                        modifier = Modifier.size(22.dp),
+                                        modifier = Modifier.size(McaIconSize.M),
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                     Text(
@@ -144,7 +143,7 @@ internal fun ChatGeneratedImageGrid(
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                    TextButton(onClick = { retryEpoch++ }) { Text("重试") }
+                                    McaButton(style = McaButtonStyle.Text,onClick = { retryEpoch++ }) { Text("重试") }
                                 }
                                 ChatImageLoadState.Loading -> CircularProgressIndicator(
                                     modifier = Modifier.align(Alignment.Center).size(18.dp),

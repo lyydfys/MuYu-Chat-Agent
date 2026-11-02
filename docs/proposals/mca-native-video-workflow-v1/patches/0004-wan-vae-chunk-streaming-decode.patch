@@ -1,0 +1,65 @@
+# Source: src/model/vae/wan_vae.hpp (Wan VAE stateful chunk decode)
+# Change: override _compute_temporal_tiled for the Wan stateful chunk decoder so it delivers each decoded tile to the sink via process_vae_temporal_tiles_streaming and never builds the whole-video tensor.
+# Why:    Wan is the target model; this is the backend that actually realises the memory win (one tile resident instead of all latent frames), and it keeps the global chunk index (tile.start) so per-chunk state stays correct.
+diff --git a/src/model/vae/wan_vae.hpp b/src/model/vae/wan_vae.hpp
+index 9810e06..cfb1759 100644
+--- a/src/model/vae/wan_vae.hpp
++++ b/src/model/vae/wan_vae.hpp
+@@ -1507,8 +1507,13 @@ namespace WAN {
+         sd::Tensor<float> _compute_temporal_tiled(const int n_threads,
+                                                   const sd::Tensor<float>& input,
+                                                   VAETemporalDirection direction,
+-                                                  const VAETemporalTilingConfig& config) override {
++                                                  const VAETemporalTilingConfig& config,
++                                                  const VAETileSink& on_tile = VAETileSink(),
++                                                  bool* streamed_out         = nullptr) override {
+             GGML_ASSERT(direction == VAETemporalDirection::DECODE);
++            if (streamed_out != nullptr) {
++                *streamed_out = false;
++            }
+             VAETemporalTilingConfig stateful_config = config;
+             stateful_config.overlap                 = 0;
+             auto plan                               = make_vae_temporal_tile_plan(input.shape()[2], stateful_config);
+@@ -1521,19 +1526,40 @@ namespace WAN {
+             free_cache_ctx_and_buffer();
+             ae.clear_cache();
+ 
+-            auto output = process_vae_temporal_tiles(input, plan, [&](const sd::Tensor<float>& input_tile, const VAETemporalTile& tile) {
++            auto decode_tile = [&](const sd::Tensor<float>& input_tile, const VAETemporalTile& tile) {
+                 LOG_VERBOSE("Wan VAE temporal tile %d/%d: latent frames [%lld, %lld)",
+                             tile.index + 1,
+                             (int)plan.tiles.size(),
+                             (long long)tile.start,
+                             (long long)tile.end);
+                 auto get_graph = [&]() -> ggml_cgraph* {
++                    // tile.start is the global chunk index; it must not be renumbered per tile.
+                     return build_temporal_tile_graph(input_tile, static_cast<int>(tile.start));
+                 };
+                 return restore_trailing_singleton_dims(
+                     GGMLRunner::compute(get_graph, n_threads, false),
+                     static_cast<size_t>(input.dim()));
+-            });
++            };
++
++            if (on_tile) {
++                // Incremental path: every finished tile is handed to the consumer and released
++                // immediately; the whole-video tensor is never built.
++                const bool ok = process_vae_temporal_tiles_streaming(
++                    input,
++                    plan,
++                    decode_tile,
++                    [&](const VAETemporalTile& tile, const sd::Tensor<float>& output_tile) {
++                        return on_tile(tile, output_tile);
++                    });
++                free_cache_ctx_and_buffer();
++                ae.clear_cache();
++                if (streamed_out != nullptr) {
++                    *streamed_out = ok;
++                }
++                return {};
++            }
++
++            auto output = process_vae_temporal_tiles(input, plan, decode_tile);
+ 
+             free_cache_ctx_and_buffer();
+             ae.clear_cache();

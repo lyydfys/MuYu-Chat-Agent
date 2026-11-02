@@ -1,5 +1,7 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.*
+
 import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -12,21 +14,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaIconButton
 import kotlinx.coroutines.launch
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 fun LocalApiToolScreen(
@@ -85,11 +81,11 @@ fun LocalApiToolScreen(
                 McaIconButton(
                     contentDescription = "返回",
                     onClick = { if (showApiDocs) showApiDocs = false else onBack() },
-                    glyphSize = 24.dp,
+                    glyphSize = McaIconSize.L,
                     // Preserve the previous IconButton content colour while adding press feedback.
                     tint = LocalContentColor.current
                 ) {
-                    Icon(Icons.Rounded.Close, contentDescription = null)
+                    Icon(McaIcons.Close, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text(if (showApiDocs) "API使用文档" else "本地 API", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -101,7 +97,7 @@ fun LocalApiToolScreen(
                 }
             }
             Spacer(Modifier.width(8.dp))
-            TextButton(onClick = { showApiDocs = !showApiDocs }) {
+            McaButton(style = McaButtonStyle.Text, onClick = { showApiDocs = !showApiDocs }) {
                 Text(if (showApiDocs) "接口信息" else "API使用文档")
             }
         }
@@ -159,7 +155,7 @@ fun LocalApiToolScreen(
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Text("本机调用", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                                 Spacer(Modifier.width(12.dp))
-                                Switch(checked = state.apiEnabled, onCheckedChange = onApiToggle)
+                                McaSwitch(checked = state.apiEnabled, onCheckedChange = onApiToggle, contentDescription = "本机调用")
                             }
                             Text("供同一台设备上的客户端、浏览器或本机组件访问。", style = MaterialTheme.typography.bodySmall)
                         }
@@ -168,7 +164,7 @@ fun LocalApiToolScreen(
                             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Text("开放端口", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                                 Spacer(Modifier.width(12.dp))
-                                Switch(checked = state.restEnabled, onCheckedChange = onRestToggle)
+                                McaSwitch(checked = state.restEnabled, onCheckedChange = onRestToggle, contentDescription = "开放端口")
                             }
                             Text("开启后同网段设备可通过 HTTP 访问本机模型服务。", style = MaterialTheme.typography.bodySmall)
                         }
@@ -285,17 +281,17 @@ private fun ApiStatusCard(
                 value = if (apiKey.isBlank()) "未生成" else "已生成，复制后填入客户端 Key/Token"
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                McaButton(style = McaButtonStyle.Outlined, onClick = onCopyLocalBase, modifier = Modifier.weight(1f)) {
+                    Icon(McaIcons.ContentCopy, contentDescription = null)
                     Text("本机", modifier = Modifier.padding(start = 6.dp))
                 }
-                OutlinedButton(onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
-                    Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+                McaButton(style = McaButtonStyle.Outlined, onClick = onCopyOpenBase, modifier = Modifier.weight(1f)) {
+                    Icon(McaIcons.ContentCopy, contentDescription = null)
                     Text("局域网", modifier = Modifier.padding(start = 6.dp))
                 }
             }
-            Button(onClick = onCopyKey, enabled = apiKey.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
-                Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+            McaButton(style = McaButtonStyle.Primary, onClick = onCopyKey, enabled = apiKey.isNotBlank(), modifier = Modifier.fillMaxWidth()) {
+                Icon(McaIcons.ContentCopy, contentDescription = null)
                 Text("复制 API Key", modifier = Modifier.padding(start = 6.dp))
             }
         }
@@ -327,14 +323,14 @@ private fun ApiSelfTestCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onTestModels,
                     enabled = enabled && !busy,
                     modifier = Modifier.weight(1f)
                 ) {
                     Text("测试模型列表")
                 }
-                OutlinedButton(
+                McaButton(style = McaButtonStyle.Outlined,
                     onClick = onTestChat,
                     enabled = enabled && !busy,
                     modifier = Modifier.weight(1f)
@@ -342,7 +338,7 @@ private fun ApiSelfTestCard(
                     Text("测试聊天接口")
                 }
             }
-            OutlinedButton(
+            McaButton(style = McaButtonStyle.Outlined,
                 onClick = onTestVision,
                 enabled = enabled && !busy,
                 modifier = Modifier.fillMaxWidth()

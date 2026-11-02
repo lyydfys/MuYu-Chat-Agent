@@ -49,7 +49,6 @@ internal fun detectCodeLanguage(lines: List<String>): String? {
         else -> null
     }
 }
-
 // 探测用正则只在类加载时编译一次：detectCodeLanguage 会随每个代码块调用。
 private val PYTHON_HINT = Regex("""(?m)^(def|from|import|elif|except|print)\b""")
 private val KOTLIN_HINT = Regex("""(?m)^(fun|val|var|package|override|private|suspend)\b""")
@@ -348,3 +347,48 @@ private fun Char.isCjkLike(): Boolean =
 // P9/S3: private→internal（纯渲染助手/只读常量；跨文件被 ChatChromeScreens 复合区引用）
 internal const val MESSAGE_RENDER_PAGE_CHARS = 16_384
 internal const val STREAMING_SCROLL_CHAR_STEP = 512
+
+private val CODE_SYNTAX_TOKEN_PATTERN = Regex(
+    pattern = """(//[^\n]*|#[^\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|@[A-Za-z_][A-Za-z0-9_]*|\b(?:fun|val|var|class|interface|object|data|sealed|enum|override|private|internal|public|protected|suspend|inline|return|if|else|elif|when|switch|case|for|while|do|try|catch|except|finally|throw|raise|import|from|package|as|is|in|def|lambda|yield|with|pass|async|await|const|let|function|export|default|type|struct|namespace|using|void|int|long|float|double|boolean|bool|char|string|String|Int|Long|Float|Double|Boolean|Unit|List|Map|Set|true|false|null|None|True|False|self|this|super|new|delete|select|where|insert|into|update|join|left|right|inner|outer|group|order|by|limit|create|alter|drop|table|values|and|or|not)\b|\b\d+(?:\.\d+)?[fFdDlL]?\b)"""
+)
+
+private val CODE_COMMENT_COLOR = Color(0xFF9AA0A6)
+private val CODE_STRING_COLOR = Color(0xFF81C995)
+private val CODE_KEYWORD_COLOR = Color(0xFF8AB4F8)
+private val CODE_ANNOTATION_COLOR = Color(0xFFFDD663)
+private val CODE_NUMBER_COLOR = Color(0xFF78D9EC)
+
+/**
+ * Lightweight, allocation-bounded syntax highlighting using the existing MCA dark code palette.
+ * Preserves 100% of original characters, whitespace, and line endings (`result.text == code`).
+ */
+internal fun buildHighlightedCode(code: String, language: String?): AnnotatedString {
+    if (code.isEmpty() || code.length > MESSAGE_RENDER_PAGE_CHARS) {
+        return AnnotatedString(code)
+    }
+    val normalizedLang = language?.trim()?.lowercase().orEmpty()
+    if (normalizedLang in setOf("text", "plain", "txt", "markdown", "md")) {
+        return AnnotatedString(code)
+    }
+    return buildAnnotatedString {
+        append(code)
+        for (match in CODE_SYNTAX_TOKEN_PATTERN.findAll(code)) {
+            val token = match.value
+            val first = token[0]
+            val color = when {
+                token.startsWith("//") || token.startsWith("/*") ||
+                    (first == '#' && normalizedLang !in setOf("c", "cpp", "c++", "css", "html")) ->
+                    CODE_COMMENT_COLOR
+                first == '"' || first == '\'' || first == '`' -> CODE_STRING_COLOR
+                first == '@' || first == '#' -> CODE_ANNOTATION_COLOR
+                first.isDigit() -> CODE_NUMBER_COLOR
+                else -> CODE_KEYWORD_COLOR
+            }
+            addStyle(
+                style = SpanStyle(color = color),
+                start = match.range.first,
+                end = match.range.last + 1
+            )
+        }
+    }
+}

@@ -116,11 +116,9 @@ internal class RuntimeAdmissionState(
 }
 
 /** R3/C3-S9：`rejectWhileConversationMutationInProgress` 顶层化（体逐字等价，store/holder 参数化）。 */
-internal fun rejectWhileConversationMutationInProgressInto(store: UiStateStore, admission: RuntimeAdmissionState): Boolean {
+internal fun rejectWhileConversationMutationInProgressInto(store: UiStatusWriter, admission: RuntimeAdmissionState): Boolean {
         if (admission.conversationMutationBarrier?.isActive != true) return false
-        store.update {
-            it.copy(statusMessage = "正在保存上一项对话修改，请稍候。")
-        }
+        store.showStatus("正在保存上一项对话修改，请稍候。")
         return true
 }
 
@@ -142,7 +140,7 @@ internal fun hasActiveAssistantImageExecutionIn(state: MainUiState, chatSessionI
 }
 
 /** R3/C3-S9：`markLocalConversationContextInvalid` 顶层化（体逐字等价；admission/scope/engine 参数化）。 */
-internal fun markLocalConversationContextInvalidInto(admission: RuntimeAdmissionState, store: UiStateStore, scope: CoroutineScope, engine: McaInferenceService) {
+internal fun markLocalConversationContextInvalidInto(admission: RuntimeAdmissionState, store: UiStatusWriter, scope: CoroutineScope, engine: McaInferenceService) {
         admission.localConversationContextNeedsInvalidation = true
         val sequence = admission.localConversationContextInvalidationSequence.incrementAndGet()
         // A durable deletion owns its own Room-then-KV barrier and must not be
@@ -159,9 +157,7 @@ internal fun markLocalConversationContextInvalidInto(admission: RuntimeAdmission
                 }
                 .onFailure { error ->
                     if (admission.localConversationContextInvalidationSequence.get() == sequence) {
-                        store.update {
-                            it.copy(statusMessage = "上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}")
-                        }
+                        store.showStatus("上下文重置失败，下次本地生成前将重试：${error.message ?: "native runtime error"}")
                     }
                 }
         }
@@ -190,16 +186,26 @@ internal data class PendingChatImageAction(
 )
 
 /** R3/C3-S10：`invalidatePendingChatImagePreparation` 顶层化（体逐字等价；store/holder 参数化）。 */
-internal fun invalidatePendingChatImagePreparationInto(store: UiStateStore, admission: RuntimeAdmissionState) {
+internal fun invalidatePendingChatImagePreparationInto(store: UiStateWriter<ChatPromptDraftFields>, admission: RuntimeAdmissionState) {
+    invalidatePendingChatImagePreparationFor(admission) {
+        store.update { it.copy(
+            pendingChatImageTranslationDraft = null,
+            pendingChatImageActionDraft = null
+        ) }
+    }
+}
+
+/** Invalidates the runtime work before the caller clears only its owned pending-draft fields. */
+internal fun invalidatePendingChatImagePreparationFor(
+    admission: RuntimeAdmissionState,
+    clearPendingDrafts: () -> Unit
+) {
         admission.chatImagePromptBridgeGeneration.incrementAndGet()
         admission.chatImagePromptBridgeJob?.cancel()
         admission.chatImagePromptBridgeJob = null
         admission.pendingImageTranslation = null
         admission.pendingChatImageAction = null
-        store.update { it.copy(
-            pendingChatImageTranslationDraft = null,
-            pendingChatImageActionDraft = null
-        ) }
+        clearPendingDrafts()
 }
 
 /** R3/C3-S10：`findChatGeneratedImageRequest` 顶层化（纯函数，体逐字等价，state 参数化）。 */

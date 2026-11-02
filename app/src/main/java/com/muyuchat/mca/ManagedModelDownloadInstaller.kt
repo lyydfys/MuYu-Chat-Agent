@@ -138,6 +138,21 @@ internal class ManagedModelDownloadInstaller(internal val context: Context, priv
                             executionMessage = _uiState.value.executionMessage)
                     }
                 }
+                recommendation.remoteImageBundle != null -> {
+                    val image = downloadRecommendedRemoteImageBundle(
+                        recommendation,
+                        request.imageBundleVariantId
+                    )
+                    val checks = _uiState.value
+                    return InstalledManagedDownload(
+                        imageId = image.id,
+                        message = "已下载并导入生图模型：${image.displayName}",
+                        integrityStatus = checks.integrityStatus,
+                        integrityMessage = checks.integrityMessage,
+                        executionStatus = checks.executionStatus,
+                        executionMessage = checks.executionMessage
+                    )
+                }
                 recommendation.imageEngineBundle != null -> {
                     val image = downloadRecommendedImageBundle(recommendation)
                     val checks = _uiState.value
@@ -153,7 +168,7 @@ internal class ManagedModelDownloadInstaller(internal val context: Context, priv
             }
         }
         val remote = request.remote ?: modelScopeClient.recommendedFile(requireNotNull(recommendation))
-        return when (val result = download(remote)) {
+        return when (val result = download(remote, recommendation?.chatRuntime)) {
             is DownloadedModelRegistration.Chat -> InstalledManagedDownload(modelId = result.model.id, message = "已下载并导入：${result.model.displayName}",
                 integrityStatus = _uiState.value.integrityStatus, integrityMessage = _uiState.value.integrityMessage,
                 executionStatus = _uiState.value.executionStatus, executionMessage = _uiState.value.executionMessage)
@@ -173,7 +188,10 @@ internal class ManagedModelDownloadInstaller(internal val context: Context, priv
         receipt.record()
     }
 
-    private suspend fun download(remote: RemoteModelFile): DownloadedModelRegistration {
+    private suspend fun download(
+        remote: RemoteModelFile,
+        chatRuntime: RecommendedChatRuntime? = null
+    ): DownloadedModelRegistration {
         return run {
                 val remoteKind = remote.fileKind()
                 if (remoteKind == RemoteModelFileKind.MNN_COMPONENT) {
@@ -225,7 +243,12 @@ internal class ManagedModelDownloadInstaller(internal val context: Context, priv
                             repoId = remote.repoId,
                             revision = remote.revision,
                             license = remote.license,
-                            source = remote.provider.toModelSource()
+                            source = remote.provider.toModelSource(),
+                            runtime = if (chatRuntime == RecommendedChatRuntime.GENIEX_LLAMA_CPP) {
+                                com.muyuchat.core.modelstore.ChatModelRuntime.GENIEX_LLAMA_CPP
+                            } else {
+                                com.muyuchat.core.modelstore.ChatModelRuntime.LLAMA_CPP
+                            }
                         )
                     )
                 }

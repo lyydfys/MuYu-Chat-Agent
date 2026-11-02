@@ -1,7 +1,9 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.content.ClipData
-import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,14 +20,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -37,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
@@ -45,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaIconButton
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.launch
+import com.muyuchat.core.designsystem.McaIconSize
 
 /**
  * The assistant role page: the role screen, its cards and the assistant editor page.
@@ -68,6 +67,7 @@ internal fun AssistantRoleScreen(
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
+    modelChoices: List<ChatModelChoice> = emptyList(),
     onSaveAssistant: (AssistantEditorDraft) -> Boolean,
     onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean>,
     onDeleteAssistantMemory: (assistantId: String, id: String) -> Unit,
@@ -77,6 +77,7 @@ internal fun AssistantRoleScreen(
     onImportAssistantCardFile: () -> Unit,
     onImportWorldBookFile: (WorldBookImportScope) -> Unit,
     onDeleteWorldBook: (String) -> Unit,
+    onSetWorldBookEnabled: (String, Boolean) -> Unit,
     onCreateKnowledgeBase: (String) -> Unit,
     onImportKnowledgeDocument: (String) -> Unit,
     onSetKnowledgeBaseSelected: (String, Boolean) -> Unit,
@@ -87,6 +88,7 @@ internal fun AssistantRoleScreen(
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
     var editing by remember { mutableStateOf<AssistantUiItem?>(null) }
     var creating by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
@@ -113,9 +115,9 @@ internal fun AssistantRoleScreen(
                 McaIconButton(
                     contentDescription = "关闭",
                     onClick = onBack,
-                    glyphSize = 24.dp
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.Default.Close, contentDescription = null)
+                    Icon(McaIcons.Close, contentDescription = null)
                 }
                 Column(modifier = Modifier.weight(1f)) {
                     Text("助手与角色", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
@@ -125,7 +127,7 @@ internal fun AssistantRoleScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                TextButton(onClick = { creating = true }) {
+                McaButton(style = McaButtonStyle.Text,onClick = { creating = true }) {
                     Text("新建")
                 }
             }
@@ -140,19 +142,19 @@ internal fun AssistantRoleScreen(
                     selected?.let { item ->
                         scope.launch {
                             clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("MCA assistant", item.exportJson)))
-                            Toast.makeText(context, "已复制角色卡 JSON", Toast.LENGTH_SHORT).show()
+                            notify("已复制角色卡 JSON")
                         }
                     }
                 }
             )
 
             Spacer(modifier = Modifier.height(16.dp))
-            Button(
+            McaButton(style = McaButtonStyle.Primary,
                 onClick = { managingContext = true },
                 // 2.0x font: keep the 48dp minimum but let the button grow instead of clipping.
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
             ) {
-                Icon(Icons.Default.Folder, contentDescription = null)
+                Icon(McaIcons.Folder, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("世界书与知识库")
             }
@@ -192,15 +194,15 @@ internal fun AssistantRoleScreen(
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
-                Button(onClick = { importing = true }, modifier = Modifier.weight(1f)) {
+                McaButton(style = McaButtonStyle.Primary,onClick = { importing = true }, modifier = Modifier.weight(1f)) {
                     Text("导入角色卡")
                 }
-                Button(
+                McaButton(style = McaButtonStyle.Primary,
                     onClick = {
                         selected?.let { item ->
                             scope.launch {
                                 clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("MCA assistant", item.exportJson)))
-                                Toast.makeText(context, "已复制当前助手角色卡", Toast.LENGTH_SHORT).show()
+                                notify("已复制当前助手角色卡")
                             }
                         }
                     },
@@ -227,6 +229,7 @@ internal fun AssistantRoleScreen(
                     onBack = closePage,
                     onImportWorldBook = onImportWorldBookFile,
                     onDeleteWorldBook = onDeleteWorldBook,
+                    onSetWorldBookEnabled = onSetWorldBookEnabled,
                     onCreateKnowledgeBase = onCreateKnowledgeBase,
                     onImportKnowledgeDocument = onImportKnowledgeDocument,
                     onSetKnowledgeBaseSelected = onSetKnowledgeBaseSelected,
@@ -239,6 +242,7 @@ internal fun AssistantRoleScreen(
                     selectedModelName = selectedModelName,
                     selectedModelId = selectedModelId,
                     selectedModelIsCloud = selectedModelIsCloud,
+                    modelChoices = modelChoices,
                     onDelete = onDeleteAssistant,
                     onSave = onSaveAssistant,
                     modifier = pageModifier
@@ -250,6 +254,7 @@ internal fun AssistantRoleScreen(
                     selectedModelName = selectedModelName,
                     selectedModelId = selectedModelId,
                     selectedModelIsCloud = selectedModelIsCloud,
+                    modelChoices = modelChoices,
                     onDelete = { id ->
                         onDeleteAssistant(id)
                         closePage()

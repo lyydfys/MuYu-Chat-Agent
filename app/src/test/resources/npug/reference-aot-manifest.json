@@ -1,0 +1,148 @@
+{
+  "schema": "mca.mediatek-image/4",
+  "family": "ANIMA",
+  "runtime": "MEDIATEK_NEURON",
+  "modelIdentity": {
+    "architecture": "ANIMA",
+    "modelSha256": "b0bd7e79e6ebc0cac291377585474d23c266d4bb0708a2d25a78e138369a9151"
+  },
+  "executionVariants": [
+    {
+      "id": "npug-aot",
+      "transport": "NEURON_COMPILED_NETWORK",
+      "topology": {
+        "asset": {
+          "file": "assets/npug/ditc1c_w8_w16L1024s4.npug",
+          "sha256": "5d92980596391a3aa67e94251eccaff75d799e59d93ddd8aad589891dab0c013",
+          "sizeBytes": 1306364,
+          "mediaType": "application/x-npug"
+        },
+        "containerMagic": "NPUG",
+        "mode": "STUB_TOPOLOGY",
+        "tensorCount": 8416,
+        "operationCount": 3481,
+        "weightDataBytes": 0
+      },
+      "compiledNetwork": {
+        "asset": {
+          "file": "assets/npug/ditc1c_w8_w16L1024s4.dla",
+          "sha256": "3a5b1ac7310d71d68f8b9262b2b923d6954e801d594c29c952fb7dea6460307d",
+          "sizeBytes": 447541580,
+          "mediaType": "application/x-neuron-dla"
+        },
+        "runtimeMajor": 9,
+        "graphId": "ditc1c_w8_w16L1024s4"
+      },
+      "route": {
+        "asset": {
+          "file": "assets/npug/ditc1c.route.json",
+          "sha256": "c30b8a4dee20840726b771275c184804ff7fcba11dc5f1454731cd95a4ab9aab",
+          "sizeBytes": 29998,
+          "mediaType": "application/json"
+        },
+        "graphId": "ditc1c_w8_w16L1024s4",
+        "inputCount": 70,
+        "outputCount": 1,
+        "inputEncoding": {
+          "defaultEncoding": "SCALED_SIGNED_INT16",
+          "overrides": {},
+          "rounding": "HALF_AWAY_FROM_ZERO",
+          "saturates": true
+        }
+      },
+      "jitFallbackAllowed": false
+    }
+  ],
+  "conditioning": {
+    "mode": "FIXED_CONTEXT",
+    "promptEffective": false,
+    "contextVersion": 1,
+    "contextAsset": {
+      "file": "assets/npug/ctx.bin",
+      "sha256": "bd6ac6be090f9e7e34186c71d1c3c1aee39046d8885a8f3fd5cc3e823fe6f1c8",
+      "sizeBytes": 1048592,
+      "mediaType": "application/octet-stream"
+    },
+    "contextDtype": "float32",
+    "contextShape": [
+      256,
+      1024
+    ],
+    "textAssets": []
+  },
+  "parameters": {
+    "supportsNegativePrompt": false,
+    "cfgMode": "NONE"
+  },
+  "profiles": [
+    {
+      "id": "reference-1024-32x32",
+      "widthPixels": 512,
+      "heightPixels": 512,
+      "gridWidth": 32,
+      "gridHeight": 32,
+      "tokenCount": 1024,
+      "supportedSteps": [
+        6
+      ],
+      "defaultSteps": 6,
+      "defaultCfgScale": 1.0,
+      "minimumCfgScale": 1.0,
+      "maximumCfgScale": 1.0,
+      "sigmaSchedule": "SHIFTED_FLOW_MATCHING_3T",
+      "modulations": [
+        {
+          "asset": {
+            "file": "assets/npug/modsq16s4_1024_6.bin",
+            "sha256": "d2cc0256e0d56ce997ed43202a25a33c174a29019edd0aaff614cadc9c10698a",
+            "sizeBytes": 6242324,
+            "mediaType": "application/octet-stream"
+          },
+          "stepCount": 6,
+          "blockCount": 28,
+          "blockSegments": 9,
+          "finalSegments": 2
+        }
+      ],
+      "ropeAsset": {
+        "file": "assets/npug/rope_32x32.bin",
+        "sha256": "efa63465c9a3587818283ea4ae3a66cf3784f47713cfdded86ea49ced12dbd2c",
+        "sizeBytes": 524288,
+        "mediaType": "application/octet-stream"
+      },
+      "vae": {
+        "transport": "NEURON_COMPILED_NETWORK",
+        "asset": {
+          "file": "assets/npug/vaedec_64.dla",
+          "sha256": "90c9dccb3de3bfaa7eedd0117a5b7d27f7e3e13c101aa62aa16d7b28303ea390",
+          "sizeBytes": 26432870,
+          "mediaType": "application/x-neuron-dla"
+        },
+        "input": {
+          "dims": [
+            1,
+            64,
+            64,
+            16
+          ],
+          "dtype": "SCALED_SIGNED_INT16",
+          "layout": "NHWC",
+          "scale": 0.00019019890169147402,
+          "zeroPoint": 0
+        },
+        "output": {
+          "dims": [
+            1,
+            512,
+            512,
+            3
+          ],
+          "dtype": "SCALED_SIGNED_INT16",
+          "layout": "NHWC",
+          "scale": 0.00004065645771333948,
+          "zeroPoint": 0
+        }
+      }
+    }
+  ]
+}

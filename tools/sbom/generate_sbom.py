@@ -30,6 +30,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT = REPO_ROOT / "tools" / "sbom" / "mca-sbom.spdx.json"
 DOCUMENT_ID = "SPDXRef-DOCUMENT"
 GENERATOR_VERSION = "2.0.0"
+LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r"(?i)(?:\b[A-Z]:[\\/]|"
+    r"\\\\[^\\\s]+\\[^\\\s]+|"
+    r"file:(?:/{2,3})[^\s;,)]*|"
+    r"(?:^|[\s=])/(?!/)[^\s;,)]*)"
+)
 
 # Compatibility identities consumed by release tooling. Package fields are
 # assembled from repository inputs; labels that cannot be derived from a
@@ -167,6 +173,16 @@ def slug(value: str) -> str:
 
 def short_hash(value: str, length: int = 10) -> str:
     return hashlib.sha1(value.encode("utf-8")).hexdigest()[:length]
+
+
+def contains_local_absolute_path(value: Any) -> bool:
+    if isinstance(value, str):
+        return LOCAL_ABSOLUTE_PATH_RE.search(value) is not None
+    if isinstance(value, dict):
+        return any(contains_local_absolute_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(contains_local_absolute_path(item) for item in value)
+    return False
 
 
 def parse_properties(path: Path) -> dict[str, str]:
@@ -598,18 +614,21 @@ class FileRegistry:
         key = str(path).casefold()
         if key in self.path_to_id:
             return self.path_to_id[key]
-        name = display_name or rel_posix(path, self.root)
+        relative_name = rel_posix(path, self.root)
+        name = display_name or relative_name
         if not name:
-            name = "external/" + re.sub(r"[^A-Za-z0-9._-]+", "_", path.as_posix().lstrip("/"))
+            name = f"external/local-input-{sha256_file(path)[:16]}{path.suffix}"
         name = name.replace("\\", "/")
         if name in self.display_to_id:
             name_path = Path(name)
-            name = str(name_path.with_name(f"{name_path.stem}-{short_hash(str(path), 8)}{name_path.suffix}"))
+            name = str(name_path.with_name(
+                f"{name_path.stem}-{short_hash(sha256_file(path), 8)}{name_path.suffix}"
+            ))
         base_id = "SPDXRef-File-" + slug(name)
         spdx_id = base_id
         counter = 2
         while spdx_id in self.files:
-            spdx_id = f"{base_id}-{short_hash(str(path) + str(counter), 8)}"
+            spdx_id = f"{base_id}-{short_hash(sha256_file(path) + str(counter), 8)}"
             counter += 1
         sha1, sha256 = file_digests(path)
         record: dict[str, Any] = {
@@ -621,7 +640,7 @@ class FileRegistry:
         if comment:
             record["comment"] = comment
         elif rel_posix(path, self.root) is None:
-            record["comment"] = f"externalLocalFile={path.as_posix()}"
+            record["comment"] = f"externalInput={name}"
         self.files[spdx_id] = record
         self.path_to_id[key] = spdx_id
         self.display_to_id[name] = spdx_id
@@ -786,8 +805,6 @@ def find_qairt_sdk(root: Path) -> Path | None:
             candidates.append(Path(value))
     candidates.extend([
         root / "build" / "qnn-runtime-sdk" / "qairt" / version,
-        Path("E:/tools/qairt-sdk") / version,
-        Path("D:/tools/qairt-sdk") / version,
         Path.home() / "qairt-sdk" / version,
     ])
     for base in sorted(candidates, key=lambda item: item.as_posix()):
@@ -965,8 +982,8 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         qairt_manifest = parse_qairt_manifest(manifest_path)
         qairt_version = qairt_manifest["metadata"].get("version") or qairt_version
         qairt_provenance = "repository-input"
-        qairt_sources = [f"qairtSdkRoot={qairt_root.as_posix()}",
-                         f"qairtManifest={manifest_path.as_posix()}"]
+        qairt_sources = ["sdkRoot=external-sdk",
+                         f"qairtManifest=external/qairt-sdk/{qairt_version}/sdk.yaml"]
         qairt_files.append((manifest_path, f"external/qairt-sdk/{qairt_version}/sdk.yaml"))
         for notice_name in ("QNN_NOTICE.txt", "QAIRT_ReleaseNotes.txt"):
             notice = qairt_root / notice_name
@@ -1004,7 +1021,8 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
             license_declared=license_name, license_concluded=license_name,
             description=f"Dependency declared by the local QAIRT SDK manifest as {dependency_name}.",
             provenance="qairt-sdk-manifest",
-            source_info=[f"qairtManifest={qairt_root / 'sdk.yaml'}" if qairt_root else "qairt-sdk-manifest unavailable",
+            source_info=[f"qairtManifest=external/qairt-sdk/{qairt_version}/sdk.yaml"
+                         if qairt_root else "qairt-sdk-manifest unavailable",
                          f"declaredDependencyName={dependency_name}"],
             external_refs=[{"referenceCategory": "OTHER", "referenceType": "sdk-dependency",
                             "referenceLocator": f"mca:qairt-dependency:{dependency_name}"}],
@@ -1084,9 +1102,25 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
     sd_dir = root / "third_party" / "stable-diffusion.cpp"
     sd_commit = git_submodule_commit(root, "third_party/stable-diffusion.cpp")
     sd_url = gitmodules.get("third_party/stable-diffusion.cpp", {}).get("url") or git_remote(sd_dir) or "NOASSERTION"
+    sd_ggml_props_path = root / "vendor" / "stable-diffusion-ggml.properties"
+    sd_ggml_props = parse_properties(sd_ggml_props_path)
+    sd_ggml_dir = sd_dir / "ggml"
+    sd_ggml_commit = run_readonly(["git", "rev-parse", "HEAD"], sd_ggml_dir)
+    sd_ggml_commit = sd_ggml_commit or sd_ggml_props.get("baseCommit", "NOASSERTION")
+    sd_ggml_patch = root / sd_ggml_props.get(
+        "patch", "third_party/patches/stable-diffusion-ggml-wan-5d.patch")
+    sd_ggml_patch_sha = sha256_file(sd_ggml_patch) if sd_ggml_patch.is_file() else ""
+    expected_sd_ggml_patch_sha = sd_ggml_props.get("patchSha256", "").lower()
+    if expected_sd_ggml_patch_sha and sd_ggml_patch_sha != expected_sd_ggml_patch_sha:
+        warnings.append(
+            "stable-diffusion nested ggml MCA patch checksum mismatch: "
+            f"declared={expected_sd_ggml_patch_sha} actual={sd_ggml_patch_sha or 'MISSING'}"
+        )
     sd_files: list[Path] = []
     add_if_file(sd_files, root / ".gitmodules")
     add_if_file(sd_files, root / "third_party" / "patches" / "stable-diffusion.cpp-mca-android.patch")
+    add_if_file(sd_files, sd_ggml_props_path)
+    add_if_file(sd_files, sd_ggml_patch)
     sd_files.extend(submodule_files(sd_dir, [
         "LICENSE", "CMakeLists.txt", "README.md", ".gitmodules",
         "src/stable-diffusion.cpp", "include/stable-diffusion.h",
@@ -1095,10 +1129,12 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         name="stable-diffusion-cpp", version=CORE_CONTRACT["stable-diffusion-cpp"],
         supplier="Person: leejet and contributors", originator="Person: leejet",
         download_location=sd_url, license_declared="MIT", license_concluded="MIT",
-        description="stable-diffusion.cpp source submodule with MCA Android patch.",
+        description="stable-diffusion.cpp source with MCA Android and pinned nested ggml Wan 5D patches.",
         provenance="static-fallback", files=sd_files,
         source_info=["input=.gitmodules", f"resolvedCommit={sd_commit or 'NOASSERTION'}",
-                     f"gitDescribe={git_describe(sd_dir) or 'NOASSERTION'}"],
+                     f"gitDescribe={git_describe(sd_dir) or 'NOASSERTION'}",
+                     f"nestedGgmlCommit={sd_ggml_commit}",
+                     f"nestedGgmlPatchSha256={sd_ggml_patch_sha or 'NOASSERTION'}"],
         external_refs=[{"referenceCategory": "OTHER", "referenceType": "vcs",
                         "referenceLocator": f"git+{sd_url}@{sd_commit or 'NOASSERTION'}"}],
         extra_comment="versionInfoCompatibility=static-fallback; resolvedCommit is source authority",
@@ -1109,18 +1145,33 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
     tokenizers_dir = root / "third_party" / "tokenizers-cpp"
     tokenizers_commit = git_submodule_commit(root, "third_party/tokenizers-cpp")
     tokenizers_url = gitmodules.get("third_party/tokenizers-cpp", {}).get("url") or git_remote(tokenizers_dir) or "NOASSERTION"
+    tokenizers_manifest_path = root / "vendor" / "tokenizers-cpp.properties"
+    tokenizers_props = parse_properties(tokenizers_manifest_path)
+    tokenizers_patch = root / tokenizers_props.get("patch", "third_party/patches/tokenizers-cpp-mca.patch")
+    expected_tokenizers_patch_sha = tokenizers_props.get("patchSha256", "").lower()
+    actual_tokenizers_patch_sha = sha256_file(tokenizers_patch) if tokenizers_patch.is_file() else ""
+    if expected_tokenizers_patch_sha and actual_tokenizers_patch_sha != expected_tokenizers_patch_sha:
+        warnings.append(
+            "tokenizers-cpp MCA patch checksum mismatch: "
+            f"declared={expected_tokenizers_patch_sha} actual={actual_tokenizers_patch_sha or 'MISSING'}"
+        )
     tokenizers_files = submodule_files(tokenizers_dir, ["LICENSE", "CMakeLists.txt", "README.md", "src/tokenizers.cpp"])
     add_if_file(tokenizers_files, root / ".gitmodules")
+    add_if_file(tokenizers_files, tokenizers_manifest_path)
+    add_if_file(tokenizers_files, tokenizers_patch)
     tokenizers_id = registry.add_package(
         name="tokenizers-cpp", version=git_describe(tokenizers_dir) or tokenizers_commit or "NOASSERTION",
         supplier="Organization: MLC AI", originator="Organization: MLC AI",
         download_location=tokenizers_url,
         license_declared=detect_license(tokenizers_dir, "Apache-2.0"),
         license_concluded=detect_license(tokenizers_dir, "Apache-2.0"),
-        description="tokenizers-cpp source submodule.", provenance="repository-input",
+        description="tokenizers-cpp source submodule with the pinned MCA error-boundary and rebuild-dependency patch.",
+        provenance="repository-input",
         files=tokenizers_files,
         source_info=["input=.gitmodules", f"resolvedCommit={tokenizers_commit or 'NOASSERTION'}",
-                     f"gitDescribe={git_describe(tokenizers_dir) or 'NOASSERTION'}"],
+                     f"gitDescribe={git_describe(tokenizers_dir) or 'NOASSERTION'}",
+                     f"patchBase={tokenizers_props.get('baseCommit', 'NOASSERTION')}",
+                     f"patchSha256={actual_tokenizers_patch_sha or 'NOASSERTION'}"],
         external_refs=[{"referenceCategory": "OTHER", "referenceType": "vcs",
                         "referenceLocator": f"git+{tokenizers_url}@{tokenizers_commit or 'NOASSERTION'}"}],
     )
@@ -1130,7 +1181,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
 
     geniex_props_path = root / "vendor" / "geniex" / "geniex-vendor.properties"
     geniex_props = parse_properties(geniex_props_path)
-    geniex_aar = root / "vendor" / "geniex" / "geniex-android-0.3.12-mca1.aar"
+    geniex_aar = root / "vendor" / "geniex" / "geniex-android-0.10.0-mca1.aar"
     geniex_files = [path for path in [
         geniex_aar, geniex_props_path,
         root / "vendor" / "geniex" / "LICENSE-GenieX.txt",
@@ -1150,20 +1201,58 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         download_location=geniex_props.get("upstreamRepository", "NOASSERTION"),
         license_declared=geniex_props.get("license", "BSD-3-Clause"),
         license_concluded=geniex_props.get("license", "BSD-3-Clause"),
-        description="Locally patched Qualcomm GenieX Android AAR.",
+        description="Official Qualcomm GenieX Android AAR, vendored without source modifications.",
         provenance="repository-input", files=geniex_files,
         source_info=["input=vendor/geniex/geniex-vendor.properties",
                      f"coordinates={geniex_props.get('coordinates', 'NOASSERTION')}",
-                     f"upstreamCommit={geniex_props.get('upstreamCommit', 'NOASSERTION')}",
+                     f"upstreamTag={geniex_props.get('upstreamTag', 'NOASSERTION')}",
                      f"vendoredAarSha256={geniex_props.get('vendoredAarSha256', 'NOASSERTION')}"],
         external_refs=[{"referenceCategory": "OTHER", "referenceType": "vcs",
-                        "referenceLocator": f"git+{geniex_props.get('upstreamRepository', 'NOASSERTION')}@{geniex_props.get('upstreamCommit', 'NOASSERTION')}"}],
-        checksums=geniex_checksums, extra_comment="artifact=geniex-android-0.3.12-mca1.aar",
+                        "referenceLocator": f"git+{geniex_props.get('upstreamRepository', 'NOASSERTION')}@{geniex_props.get('upstreamTag', 'NOASSERTION')}"}],
+        checksums=geniex_checksums, extra_comment="artifact=geniex-android-0.10.0-mca1.aar",
     )
     if ":core:engine" in module_ids:
         registry.add_relationship(module_ids[":core:engine"], "DEPENDS_ON", geniex_id)
     if ":app" in module_ids:
         registry.add_relationship(module_ids[":app"], "DEPENDS_ON", geniex_id)
+
+    geniex_reference_props_path = root / "vendor" / "geniex" / "geniex-0.3.12-reference.properties"
+    geniex_reference_props = parse_properties(geniex_reference_props_path)
+    geniex_reference_aar = root / "vendor" / "geniex" / "geniex-android-0.3.12-mca1.aar"
+    geniex_reference_files = [path for path in [
+        geniex_reference_aar, geniex_reference_props_path,
+        root / "vendor" / "geniex" / "0001-reserve-llm-chat-message-string-storage.patch",
+        root / "vendor" / "geniex" / "LICENSE-GenieX.txt",
+        root / "vendor" / "geniex" / "NOTICE-GenieX.txt",
+    ] if path.is_file()]
+    geniex_reference_checksums: list[dict[str, str]] = []
+    if geniex_reference_aar.is_file():
+        actual = sha256_file(geniex_reference_aar)
+        geniex_reference_checksums.append({"algorithm": "SHA256", "checksumValue": actual})
+        declared = geniex_reference_props.get("vendoredAarSha256", "").lower()
+        if declared and declared != actual:
+            warnings.append(
+                f"GenieX reference AAR checksum mismatch: declared={declared} actual={actual}"
+            )
+    geniex_reference_id = registry.add_package(
+        name="geniex-android-reference",
+        version=geniex_reference_props.get("localVersion", "NOASSERTION"),
+        supplier="Organization: Qualcomm Technologies, Inc.",
+        originator="Organization: Qualcomm Technologies, Inc.",
+        download_location=geniex_reference_props.get("upstreamRepository", "NOASSERTION"),
+        license_declared=geniex_reference_props.get("license", "BSD-3-Clause"),
+        license_concluded=geniex_reference_props.get("license", "BSD-3-Clause"),
+        description="Archived Qualcomm GenieX AAR retained for rollback/reference; not used by production variants.",
+        provenance="repository-input", files=geniex_reference_files,
+        source_info=["input=vendor/geniex/geniex-0.3.12-reference.properties",
+                     f"coordinates={geniex_reference_props.get('coordinates', 'NOASSERTION')}",
+                     f"upstreamCommit={geniex_reference_props.get('upstreamCommit', 'NOASSERTION')}",
+                     f"vendoredAarSha256={geniex_reference_props.get('vendoredAarSha256', 'NOASSERTION')}"],
+        external_refs=[{"referenceCategory": "OTHER", "referenceType": "vcs",
+                        "referenceLocator": f"git+{geniex_reference_props.get('upstreamRepository', 'NOASSERTION')}@{geniex_reference_props.get('upstreamCommit', 'NOASSERTION')}"}],
+        checksums=geniex_reference_checksums,
+        extra_comment="artifact=geniex-android-0.3.12-mca1.aar; runtimeDependency=false",
+    )
 
     litert_root = root / "vendor" / "litert" / "qualcomm"
     litert_files = sorted((path for path in litert_root.rglob("*.so") if path.is_file()),
@@ -1264,7 +1353,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
             cached = find_gradle_cache_artifact(group, artifact, aggregate["version"])
             if cached:
                 checksums = [{"algorithm": "SHA256", "checksumValue": sha256_file(cached)}]
-                checksum_source = rel_posix(cached, root) or cached.as_posix()
+                checksum_source = "gradle-cache-artifact"
                 checksum_scope = "gradle-artifact"
                 break
         if not checksums:
@@ -1272,7 +1361,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
                 metadata = find_gradle_cache_metadata(group, artifact, aggregate["version"])
                 if metadata:
                     checksums = [{"algorithm": "SHA256", "checksumValue": sha256_file(metadata)}]
-                    checksum_source = rel_posix(metadata, root) or metadata.as_posix()
+                    checksum_source = "gradle-cache-metadata"
                     checksum_scope = "gradle-metadata"
                     break
         provenance = "static-fallback" if aggregate["version"] == "NOASSERTION" else "repository-input"
@@ -1321,7 +1410,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         description="Android SDK platform used by compileSdk.",
         provenance="repository-input" if platform_files else "static-fallback",
         external_files=platform_files,
-        source_info=[f"sdkRoot={android_sdk.as_posix()}" if android_sdk else "sdkRoot=NOT_FOUND",
+        source_info=["sdkRoot=external/android-sdk" if android_sdk else "sdkRoot=NOT_FOUND",
                      f"compileSdk={compile_sdk}"],
         extra_comment="manifest=source.properties" if platform_files else "manifestUnavailable=true",
     )
@@ -1333,7 +1422,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         description="Android NDK used by MCA native modules.",
         provenance="repository-input" if ndk_files else "static-fallback",
         external_files=ndk_files,
-        source_info=[f"sdkRoot={android_sdk.as_posix()}" if android_sdk else "sdkRoot=NOT_FOUND",
+        source_info=["sdkRoot=external/android-sdk" if android_sdk else "sdkRoot=NOT_FOUND",
                      f"ndkVersion={ndk_version}"],
         extra_comment="manifest=source.properties" if ndk_files else "manifestUnavailable=true",
     )
@@ -1356,7 +1445,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
             license_declared="Apache-2.0", license_concluded="Apache-2.0",
             description="Final MCA Android APK artifact bound by SHA256 and byte size.",
             provenance="repository-input",
-            source_info=[f"apkPath={rel_posix(apk_path, root) or apk_path.as_posix()}",
+            source_info=[f"apkInput={rel_posix(apk_path, root) or 'external-apk'}",
                          f"apkSha256={metadata['sha256']}", f"abi={metadata['abis']}",
                          f"variation={metadata['variation']}"],
             files_analyzed=False,
@@ -1379,7 +1468,7 @@ def build_sbom(root: Path, apk_path: Path | None = None) -> tuple[dict[str, Any]
         except SbomError:
             continue
         registry.add_relationship(DOCUMENT_ID, "DESCRIBES", core_id)
-    for described_id in (geniex_id, litert_id, qwen_id, tokenizers_id):
+    for described_id in (geniex_id, geniex_reference_id, litert_id, qwen_id, tokenizers_id):
         registry.add_relationship(DOCUMENT_ID, "DESCRIBES", described_id)
     if apk_id:
         registry.add_relationship(DOCUMENT_ID, "DESCRIBES", apk_id)
@@ -1438,6 +1527,8 @@ def checksum_errors(checksums: Any, owner: str) -> list[str]:
 def verify_document(document: dict[str, Any], output_path: Path, root: Path,
                     apk_path: Path | None = None) -> list[str]:
     errors: list[str] = []
+    if contains_local_absolute_path(document):
+        errors.append("document contains a local absolute path")
     if document.get("spdxVersion") != "SPDX-2.3":
         errors.append("spdxVersion must be SPDX-2.3")
     if document.get("dataLicense") != "CC0-1.0":

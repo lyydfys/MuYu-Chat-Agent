@@ -1,4 +1,9 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaChip
+import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.McaIconButton
 
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
@@ -11,19 +16,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.PhotoLibrary
 import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
+import com.muyuchat.core.designsystem.McaChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,7 +32,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import android.content.Context
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -44,14 +41,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.Replay
+
+
+
+
+
+
+
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.LaunchedEffect
@@ -65,6 +61,7 @@ import androidx.compose.ui.semantics.Role as SemanticsRole
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S25：从 ImageWorkspaceScreens.kt 等值移出的输入支持簇（参数导入对话框 + 角色/强度输入行）。
 // 原样逐字迁移，未做行为改动；3 个跨区入口按协议提升 internal。
@@ -124,7 +121,7 @@ internal fun ImageGenerationParameterImportDialog(
                     )
                 } else {
                     selection.compatibleFields.forEach { field ->
-                        FilterChip(
+                        McaChip(
                             selected = field in selection.selectedFields,
                             onClick = { onSelectionChange(selection.toggle(field)) },
                             label = { Text(field.label) }
@@ -134,13 +131,13 @@ internal fun ImageGenerationParameterImportDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            McaButton(style = McaButtonStyle.Text,
                 onClick = onConfirm,
                 enabled = selection.selectedFields.isNotEmpty()
             ) { Text("应用") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("取消") }
+            McaButton(style = McaButtonStyle.Text,onClick = onDismiss) { Text("取消") }
         }
     )
 }
@@ -160,8 +157,8 @@ internal fun ImageInputRoleRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Button(onClick = { onPick(role) }) {
-            Icon(Icons.Default.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+        McaButton(style = McaButtonStyle.Primary,onClick = { onPick(role) }) {
+            Icon(McaIcons.PhotoLibrary, contentDescription = null, modifier = Modifier.size(McaIconSize.S))
             Spacer(modifier = Modifier.width(6.dp))
             Text(if (uri == null) "选择$label" else "更换$label")
         }
@@ -175,15 +172,17 @@ internal fun ImageInputRoleRow(
         )
         if (uri != null) {
             if (onEdit != null) {
-                IconButton(
+                McaIconButton(
+                    contentDescription = "裁剪$label",
                     onClick = { onEdit(role) },
-                    modifier = Modifier.size(48.dp)
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.L
                 ) {
-                    Icon(Icons.Default.Edit, contentDescription = "裁剪$label")
+                    Icon(McaIcons.Edit, contentDescription = null)
                 }
             }
-            IconButton(onClick = { onClear(role) }) {
-                Icon(Icons.Default.Close, contentDescription = "清除$label")
+            McaIconButton(contentDescription = "清除$label", onClick = { onClear(role) }, glyphSize = McaIconSize.L) {
+                Icon(McaIcons.Close, contentDescription = null)
             }
         }
     }

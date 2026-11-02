@@ -1,5 +1,6 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.runtime.Immutable
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.GenerationPhase
@@ -14,6 +15,7 @@ import com.muyuchat.core.engine.TokenProgress
 internal const val CLOUD_REASONING_LOCKED_TIP = "云端思考由模型服务商控制，MCA 已默认启用，暂不支持切换。"
 internal const val CHAT_BACKGROUND_MAX_DECODE_EDGE = 2048
 
+@Immutable
 data class ChatUiState(
     val modelLoadMessage: String? = null,
     val modelReadinessLabel: String? = null,
@@ -96,6 +98,7 @@ data class ChatUiState(
 )
 
 /** Visual preferences for the conversation canvas. URI is copied to app-private storage by the host. */
+@Immutable
 data class ChatBackgroundState(
     val imageUri: String? = null,
     val scrimAlpha: Float = 0.22f,
@@ -107,6 +110,7 @@ enum class ChatBackgroundScaleMode { CROP, FIT, CENTER }
 
 enum class ChatBackgroundScope { GLOBAL, ASSISTANT, SESSION }
 
+@Immutable
 data class ImageLibraryBackupUiState(
     val running: Boolean = false,
     val importing: Boolean = false,
@@ -116,6 +120,7 @@ data class ImageLibraryBackupUiState(
     val failed: Boolean = false
 )
 
+@Immutable
 data class ImageLoraUiItem(
     val id: String,
     val name: String,
@@ -125,6 +130,7 @@ data class ImageLoraUiItem(
     val isQwenImage21ViggleV021: Boolean = false
 )
 
+@Immutable
 data class ImageTextualInversionUiItem(
     val id: String,
     val name: String,
@@ -140,6 +146,7 @@ data class ImageTextualInversionUiItem(
 internal const val IMAGE_GENERATION_UI_PARAMETER_PREFS = "mca_image_generation_ui_parameters"
 // P9/S30: private→internal（prefs 名/键前缀保留在本文件以维持 SharedPreferencesSurfaceGoldenTest 同文件解析，跨文件被 ChatImageGenerationSupport 引用）
 internal const val IMAGE_GENERATION_UI_PARAMETER_KEY_PREFIX = "model:"
+@Immutable
 data class ChatModelChoice(
     val id: String,
     val displayName: String,
@@ -228,6 +235,7 @@ data class ChatModelChoice(
     }
 }
 
+@Immutable
 data class ChatHistoryItem(
     val id: String,
     val title: String,

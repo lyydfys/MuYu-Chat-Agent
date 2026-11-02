@@ -201,7 +201,7 @@ class ParameterFieldPolicyRegistry(
                     runtime == LocalChatRuntime.LITERT_LM && support == ParameterExecutionSupport.UNKNOWN ->
                         "litertlm-0.16.1:conversation-sampler-cpu-gpu-only; inspect request trace for delegate"
                     runtime in setOf(LocalChatRuntime.GENIEX_QAIRT, LocalChatRuntime.GENIEX_LLAMA_CPP) && field == "thinking_budget" ->
-                        "geniex-0.3.12:template-enable-thinking-only"
+                        "geniex-0.10.0:template-enable-thinking-only"
                     support == ParameterExecutionSupport.HOST_ENFORCED -> "mca-request-context-and-stream-policy"
                     else -> "adapter-submission; native acknowledgement is separate"
                 }

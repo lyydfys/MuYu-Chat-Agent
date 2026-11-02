@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.composition.conversationSessionWriter
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -18,7 +20,7 @@ class NewChatContextInvalidationTest {
         ))
         val events = mutableListOf<String>()
         val created = newChatForAssistantFor(
-            store = store,
+            store = store.conversationSessionWriter(),
             rejectWhileConversationMutationInProgress = { false },
             hasActiveAssistantImageExecution = { false },
             showStatus = { error(it) },
@@ -48,7 +50,7 @@ class NewChatContextInvalidationTest {
         var invalidations = 0
         var writes = 0
         val created = newChatForAssistantFor(
-            store = store,
+            store = store.conversationSessionWriter(),
             rejectWhileConversationMutationInProgress = { false },
             hasActiveAssistantImageExecution = { false },
             showStatus = {},

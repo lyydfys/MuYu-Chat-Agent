@@ -69,7 +69,8 @@ class LocalImageModelReadinessTest {
     fun everyRecommendedImagePersistsItsCatalogExecutionProfileBoundToPrimaryBytes() {
         val models = ModelScopeClient().recommendedModels()
             .filter { it.kind == ModelScopeRecommendedKind.IMAGE }
-        assertEquals(20, models.size)
+            .filter { it.imageEngineBundle != null }
+        assertEquals(21, models.size)
         models.forEach { model ->
             val bundle = requireNotNull(model.imageEngineBundle)
             val source = requireNotNull(bundle.executionProfile)

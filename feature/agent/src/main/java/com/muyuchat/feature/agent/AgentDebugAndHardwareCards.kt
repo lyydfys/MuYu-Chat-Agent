@@ -2,6 +2,8 @@
 
 package com.muyuchat.feature.agent
 
+import com.muyuchat.core.designsystem.*
+
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,16 +11,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ExpandLess
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.deviceprofile.DeviceAccelerationAnalyzer
 import com.muyuchat.core.deviceprofile.DeviceProfile
+import com.muyuchat.core.designsystem.McaIconSize
 
 @Composable
 internal fun HardwareOverview(profile: DeviceProfile) {
@@ -148,12 +147,12 @@ internal fun DebugDetailsCard(presentation: AgentDebugDetailsPresentation) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 SectionTitle("调试详情")
-                TextButton(onClick = { expanded = !expanded }) {
+                McaButton(style = McaButtonStyle.Text, onClick = { expanded = !expanded }) {
                     Text(if (expanded) "收起" else "查看")
                     Icon(
-                        if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                        if (expanded) McaIcons.ExpandLess else McaIcons.ExpandMore,
                         contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        modifier = Modifier.size(McaIconSize.S)
                     )
                 }
             }

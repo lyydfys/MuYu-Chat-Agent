@@ -24,7 +24,7 @@ internal interface ChatImageRequestApprovalPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ChatImageApprovalFields) -> ChatImageApprovalFields)
 
     /** The running image job, if any; the retry path refuses while it is active. */
     val imageGenerationJob: Job?

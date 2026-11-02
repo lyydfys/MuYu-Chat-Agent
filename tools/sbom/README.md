@@ -53,7 +53,8 @@ The generator reads, in sorted order:
 3. production dependency declarations in each reachable <code>build.gradle.kts</code> (<code>implementation</code>,
    <code>api</code>, <code>compileOnly</code>, <code>runtimeOnly</code>, and code-generation/build configurations);
 4. <code>vendor/mnn/mnn-vendor.properties</code>, <code>vendor/llama/llama-vendor.properties</code>,
-   <code>vendor/geniex/geniex-vendor.properties</code>, and Qwen runtime files;
+   <code>vendor/tokenizers-cpp.properties</code>, <code>vendor/geniex/</code> vendor manifests and AARs,
+   and Qwen runtime files;
 5. <code>.gitmodules</code> plus local Git submodule commits for llama.cpp, stable-diffusion.cpp, and
    tokenizers-cpp;
 6. local QAIRT <code>sdk.yaml</code> (environment candidates plus repository/local-tool fallbacks) and Android
@@ -100,6 +101,8 @@ SHA-256 over the canonical sorted file-digest set. Direct Maven packages use a S
 checksum when the artifact is present in the local Gradle cache; otherwise they bind the cached
 Gradle <code>.module</code>/<code>.pom</code> metadata and expose <code>checksumScope=gradle-metadata</code>. QAIRT manifest-only
 dependencies bind the local <code>sdk.yaml</code> with <code>checksumScope=qairt-sdk-manifest</code>.
+The generated document uses stable logical names for local SDK/cache inputs and does not serialize
+machine-specific absolute paths. <code>--verify</code> rejects local absolute paths anywhere in the SPDX document.
 
 <code>--verify</code> checks:
 

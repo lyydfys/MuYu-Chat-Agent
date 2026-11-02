@@ -1,0 +1,86 @@
+# Source: include/stable-diffusion.h, src/stable-diffusion.cpp
+# Change: export generate_video_streaming(...) plus the sd_video_frame_sink_t callback type; it reuses the pipeline with a sink and returns the delivered frame count.
+# Why:    The JNI shim libmca_wan.so imports generate_video_streaming (verified in --dyn-syms), so the app cannot stream frames without this public ABI entry point.
+diff --git a/include/stable-diffusion.h b/include/stable-diffusion.h
+index e24b84d..98b42bd 100644
+--- a/include/stable-diffusion.h
++++ b/include/stable-diffusion.h
+@@ -524,6 +524,29 @@ SD_API bool generate_video(sd_ctx_t* sd_ctx,
+                            int* num_frames_out,
+                            sd_audio_t** audio_out);
+ 
++// Incremental video frame consumer.
++//
++// `frame` points at one decoded frame and is only valid for the duration of the call.
++// `frame_index` is the global 0-based frame number in output order.
++// Returning false aborts generation; no partial result is published.
++typedef bool (*sd_video_frame_sink_t)(void* sink_user,
++                                      const sd_image_t* frame,
++                                      int64_t frame_index);
++
++// Same generation as generate_video(), but every decoded frame is passed to `sink` in output
++// order instead of being accumulated into a single sd_image_t array.
++//
++// `num_frames_out` receives the number of frames delivered before returning.
++// `audio_out` behaves as in generate_video() and must be freed by the caller.
++// generate_video() keeps its original contract; this entry point exists so callers can encode or
++// stream frames without holding all RGB frames at once.
++SD_API bool generate_video_streaming(sd_ctx_t* sd_ctx,
++                                     const sd_vid_gen_params_t* sd_vid_gen_params,
++                                     sd_video_frame_sink_t sink,
++                                     void* sink_user,
++                                     int64_t* num_frames_out,
++                                     sd_audio_t** audio_out);
++
+ typedef struct upscaler_ctx_t upscaler_ctx_t;
+ 
+ SD_API upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path,
+diff --git a/src/stable-diffusion.cpp b/src/stable-diffusion.cpp
+index a50c75d..9211aea 100644
+--- a/src/stable-diffusion.cpp
++++ b/src/stable-diffusion.cpp
+@@ -752,6 +752,44 @@ SD_API bool generate_video(sd_ctx_t* sd_ctx,
+     return sd::pipeline::generate_video(sd_ctx->sd, sd_vid_gen_params, frames_out, num_frames_out, audio_out);
+ }
+ 
++SD_API bool generate_video_streaming(sd_ctx_t* sd_ctx,
++                                     const sd_vid_gen_params_t* sd_vid_gen_params,
++                                     sd_video_frame_sink_t sink,
++                                     void* sink_user,
++                                     int64_t* num_frames_out,
++                                     sd_audio_t** audio_out) {
++    if (num_frames_out != nullptr) {
++        *num_frames_out = 0;
++    }
++    if (audio_out != nullptr) {
++        *audio_out = nullptr;
++    }
++    if (sd_ctx == nullptr || sd_ctx->sd == nullptr || sd_vid_gen_params == nullptr || sink == nullptr) {
++        return false;
++    }
++
++    StableDiffusionGGML::ExecutionScope execution(*sd_ctx->sd);
++    if (!execution.ready) {
++        return false;
++    }
++
++    // Frames are handed to the sink as each temporal tile finishes decoding; the pipeline never
++    // builds the whole-video frame array on this path.
++    int64_t delivered = 0;
++    const bool ok     = sd::pipeline::generate_video(sd_ctx->sd,
++                                                 sd_vid_gen_params,
++                                                 /*frames_out*/ nullptr,
++                                                 /*num_frames_out*/ nullptr,
++                                                 audio_out,
++                                                 sink,
++                                                 sink_user,
++                                                 &delivered);
++    if (num_frames_out != nullptr) {
++        *num_frames_out = delivered;
++    }
++    return ok;
++}
++
+ SD_API void free_sd_images(sd_image_t* result_images, int num_images) {
+     if (result_images == nullptr) {
+         return;

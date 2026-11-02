@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import com.muyuchat.api.local.imagePromptExecutionSha256
 import com.muyuchat.core.download.ImageEngineMinDeviceTier
+import com.muyuchat.core.mediatek.MediaTekAnimaManifest
 import java.io.File
 import java.math.BigDecimal
 import org.json.JSONArray
@@ -38,6 +39,13 @@ internal fun inspectLocalImageBundleManifestFromRoot(
         ?.trim()
         ?.takeIf(String::isNotEmpty)
     if (declaredSchema != null && declaredSchema != OWNED_IMAGE_BUNDLE_SCHEMA) {
+        if (declaredSchema == MediaTekAnimaManifest.SCHEMA ||
+            manifest.optString("runtime").trim().equals("MEDIATEK_NEURON", ignoreCase = true)
+        ) {
+            return LocalImageBundleManifestInspection.Invalid(
+                "MediaTek Anima v3 is a component manifest; the bundle root must use the MCA v1 envelope."
+            )
+        }
         return LocalImageBundleManifestInspection.Undeclared
     }
     val ownedSchema = declaredSchema == OWNED_IMAGE_BUNDLE_SCHEMA
@@ -78,6 +86,7 @@ private fun parseLocalImageBundleManifest(
 ): LocalImageBundleManifest {
     val runtime = manifest.optString("runtime").takeIf { it.isNotBlank() }?.let(LocalImageRuntime::from)
     val family = manifest.optString("family").takeIf { it.isNotBlank() }?.let(LocalImageModelFamily::from)
+    val task = manifest.optString("task").trim().uppercase().takeIf(String::isNotBlank)
     val imageSize = manifest.manifestImageSize()
     val smoke = manifest.strictOptionalObject("smoke")
         ?: manifest.strictOptionalObject("smokeSpec")
@@ -91,6 +100,40 @@ private fun parseLocalImageBundleManifest(
         ?: emptyList()
     val components = manifest.strictOptionalArray("components")
     val componentContracts = components?.toLocalImageBundleComponentContracts().orEmpty()
+    val mediatekManifestPath = manifest.strictOptionalNonBlankString("mediatekAnimaManifestPath")
+    val mediatekBundle = if (runtime == LocalImageRuntime.MEDIATEK_NEURON) {
+        require(family == LocalImageModelFamily.ANIMA && task == "TEXT_TO_IMAGE") {
+            "MediaTek Neuron image bundles must declare family ANIMA and task TEXT_TO_IMAGE."
+        }
+        val path = requireNotNull(mediatekManifestPath) {
+            "MediaTek Neuron bundle is missing mediatekAnimaManifestPath."
+        }
+        parseMediaTekComponentBundleManifest(root, path, componentContracts).also { parsed ->
+            if (parsed.animaManifest != null) {
+                require(parsed.animaManifest.sampling.generationProfiles.any { profile ->
+                    profile.widthPixels == (smoke?.optInt("width", 0) ?: 0) &&
+                        profile.heightPixels == (smoke?.optInt("height", 0) ?: 0) &&
+                        profile.defaultSteps == (smoke?.optInt("steps", 0) ?: 0)
+                }) {
+                    "MCA smoke defaults must select a declared MediaTek Anima v3 generation profile."
+                }
+            }
+            if (parsed.aotManifest != null) {
+                require(parsed.aotManifest.profiles.any { profile ->
+                    profile.widthPixels == (smoke?.optInt("width", 0) ?: 0) &&
+                        profile.heightPixels == (smoke?.optInt("height", 0) ?: 0) &&
+                        profile.defaultSteps == (smoke?.optInt("steps", 0) ?: 0)
+                }) {
+                    "MCA smoke defaults must select a declared MediaTek NPUG/AOT generation profile."
+                }
+            }
+        }
+    } else {
+        require(mediatekManifestPath == null) {
+            "Only MediaTek Neuron bundles may declare mediatekAnimaManifestPath."
+        }
+        null
+    }
     val executionProfileDeclared = manifest.has("executionProfile")
     val executionProfile = manifest.strictOptionalObject("executionProfile")
     val effectiveExecutionProfile = executionProfile?.takeIf { resolveVersionedProfile }?.let {
@@ -144,10 +187,7 @@ private fun parseLocalImageBundleManifest(
         displayName = manifest.optString("title").takeIf { it.isNotBlank() }
             ?: manifest.optString("displayName").takeIf { it.isNotBlank() }
             ?: manifest.optString("name").takeIf { it.isNotBlank() },
-        task = manifest.optString("task")
-            .trim()
-            .uppercase()
-            .takeIf(String::isNotBlank),
+        task = task,
         runtime = runtime,
         family = family,
         imageSize = imageSize,
@@ -171,7 +211,11 @@ private fun parseLocalImageBundleManifest(
         executionProfileGraphPaths = executionProfilePaths.graphPaths,
         executionProfileQnnSdk = executionProfileQnnSdk,
         executionProfileDeclared = executionProfileDeclared,
-        componentCount = components?.length() ?: 0
+        componentCount = components?.length() ?: 0,
+        mediatekAnimaManifestPath = mediatekBundle?.manifestPath,
+        mediatekAnimaManifest = mediatekBundle?.animaManifest,
+        mediatekAotManifest = mediatekBundle?.aotManifest,
+        mediatekAnimaRequiredPaths = mediatekBundle?.requiredPaths.orEmpty()
     )
 }
 

@@ -1,4 +1,5 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -13,12 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Image
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -31,7 +28,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.muyuchat.core.designsystem.mcaPressScale
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S17：从 ChatChromeScreens.kt 等值移出的消息气泡/参数弹窗/助手块簇。
 // 原样逐字迁移，未做行为改动；入口原即 internal，双向扫描按协议处理。
@@ -82,7 +79,7 @@ internal fun AttachmentPreview(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = if (isImageAttachment) Icons.Default.Image else Icons.Default.Folder,
+                        imageVector = if (isImageAttachment) McaIcons.Image else McaIcons.Folder,
                         contentDescription = null,
                         tint = if (isImageAttachment) statusColor else MaterialTheme.colorScheme.primary,
                         modifier = Modifier.size(15.dp)
@@ -129,15 +126,16 @@ internal fun AttachmentPreview(
                     }
                 }
             }
-            IconButton(
+            McaIconButton(
+                contentDescription = "移除附件",
                 onClick = onRemove,
-                modifier = Modifier.size(30.dp).mcaPressScale(removeInteraction),
+                size = 30.dp,
+                glyphSize = McaIconSize.Xs,
                 interactionSource = removeInteraction
             ) {
                 Icon(
-                    Icons.Default.Close,
-                    contentDescription = "移除附件",
-                    modifier = Modifier.size(16.dp),
+                    McaIcons.Close,
+                    contentDescription = null,
                     tint = contentColor.copy(alpha = 0.74f)
                 )
             }

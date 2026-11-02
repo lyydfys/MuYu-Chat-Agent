@@ -356,7 +356,8 @@ private fun LocalImageModelFamily.requiresExplicitStableDiffusionCompanions(): B
     LocalImageModelFamily.LONGCAT_IMAGE,
     LocalImageModelFamily.DREAMLITE,
     LocalImageModelFamily.FLUX,
-    LocalImageModelFamily.WAN -> true
+    LocalImageModelFamily.WAN,
+    LocalImageModelFamily.ANIMA -> true
 
     LocalImageModelFamily.SANA,
     LocalImageModelFamily.SD_TURBO,

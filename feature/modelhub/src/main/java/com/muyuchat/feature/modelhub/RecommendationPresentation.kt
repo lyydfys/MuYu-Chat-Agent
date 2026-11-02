@@ -1,5 +1,6 @@
 package com.muyuchat.feature.modelhub
 
+import com.muyuchat.core.download.ImageEngineAccelerator
 import com.muyuchat.core.download.ImageEngineBundleRuntime
 import com.muyuchat.core.download.MnnModelBundleInstallProfile
 import com.muyuchat.core.download.ModelScopeRecommendedKind
@@ -14,9 +15,12 @@ private const val QWEN_IMAGE_21_SIZE_LINE =
 
 internal fun recommendationSpecificationLine(model: ModelScopeRecommendedModel): String {
     val format = when {
+        model.plannedImageAccelerator == ImageEngineAccelerator.MEDIATEK_NPU -> "MCA Anima v4"
+        model.plannedImageAccelerator != null -> "MCA Anima v3"
         model.imageEngineBundle?.runtime == ImageEngineBundleRuntime.QNN_HTP -> "QNN"
         model.imageEngineBundle?.runtime == ImageEngineBundleRuntime.MNN_DIFFUSION -> "MNN"
         model.mnnModelBundle != null || model.chatRuntime == RecommendedChatRuntime.MNN -> "MNN"
+        model.chatRuntime == RecommendedChatRuntime.GENIEX_LLAMA_CPP -> "QNN"
         model.chatRuntime == RecommendedChatRuntime.GENIEX_QAIRT -> "QNN"
         model.chatRuntime == RecommendedChatRuntime.LITERT_LM -> "LiteRT-LM"
         model.recommendedFileName.endsWith(".safetensors", ignoreCase = true) -> "Safetensors"
@@ -27,6 +31,11 @@ internal fun recommendationSpecificationLine(model: ModelScopeRecommendedModel):
 }
 
 internal fun recommendationCapabilityLine(model: ModelScopeRecommendedModel): String {
+    if (model.status == RecommendedModelStatus.IN_DEVELOPMENT ||
+        model.plannedImageAccelerator == ImageEngineAccelerator.MEDIATEK_NPU
+    ) {
+        return "Anima 文生图"
+    }
     if (model.status == RecommendedModelStatus.PENDING_INTEGRATION) {
         return "MCA 暂不支持此模型"
     }
@@ -62,6 +71,17 @@ internal fun recommendationCapabilityLine(model: ModelScopeRecommendedModel): St
  */
 internal fun recommendationImageSizeLine(model: ModelScopeRecommendedModel): String? =
     QWEN_IMAGE_21_SIZE_LINE.takeIf { model.id == QWEN_IMAGE_21_RECOMMENDATION_ID }
+
+internal fun recommendationDownloadSizeLine(
+    model: ModelScopeRecommendedModel,
+    sizeBytes: Long?
+): String = when {
+    model.status == RecommendedModelStatus.IN_DEVELOPMENT -> "下载大小：模型包发布后提供"
+    model.remoteImageBundle != null -> "下载大小：固定约 1.8 GB / 动态约 3.3 GB（默认动态包）"
+    model.manualImportRequired -> "下载大小：手动导入约 1.8–3.3 GB"
+    sizeBytes != null -> "下载大小：约 ${formatBytes(sizeBytes)}"
+    else -> "下载大小：见文件列表"
+}
 
 /**
  * Explain native-runtime ABI limits before a user starts a large download.
@@ -102,7 +122,7 @@ internal fun recommendationDownloadBlockLine(reason: String?): String {
 }
 
 internal fun recommendationNpuImageSectionDescription(): String =
-    "Qualcomm QNN / HTP 生图模型，设备兼容信息会显示在对应模型卡片中。"
+    "已接入的骁龙 QNN / HTP 生图模型与待开发的天玑 Anima 模型包。"
 
 /** Only files in the default download plan count; optional add-ons must not inflate the card. */
 internal fun recommendationDownloadSizeBytes(model: ModelScopeRecommendedModel): Long? {

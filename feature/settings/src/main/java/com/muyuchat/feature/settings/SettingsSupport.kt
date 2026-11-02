@@ -1,5 +1,6 @@
 package com.muyuchat.feature.settings
 
+import com.muyuchat.core.designsystem.McaIcons
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
@@ -15,8 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -158,7 +157,7 @@ private fun ExpandableSettingsHeader(
         }
         // Decorative: the header row above already announces expanded/collapsed.
         Icon(
-            imageVector = Icons.Rounded.KeyboardArrowDown,
+            imageVector = McaIcons.KeyboardArrowDown,
             contentDescription = null,
             modifier = Modifier.graphicsLayer { rotationZ = rotation }
         )

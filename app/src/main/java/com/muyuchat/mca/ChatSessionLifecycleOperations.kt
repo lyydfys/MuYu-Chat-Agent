@@ -18,7 +18,7 @@ private data class MessageDeleteCommit(
 )
 
 internal fun deleteMessageFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
     isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
@@ -43,47 +43,45 @@ internal fun deleteMessageFor(
     val rollback = state.conversationMutationRollbackState()
     // Preserve the legacy unsaved-conversation path: a message list may exist before its
     // durable session id is assigned. The identity then uses null for both sides, and the
-    // write below creates the session id exactly once inside the authoritative update.
+    // write below allocates the session id once before the retryable authoritative update.
     val sessionId = target.conversationId ?: UUID.randomUUID().toString()
-    var commit: MessageDeleteCommit? = null
-    store.update {
-        commit = null
+    val occurredAt = System.currentTimeMillis()
+    val applied = store.updateWithResult {
         if (target.conversationId != it.activeChatSessionId ||
-            !it.canWriteToActiveAssistantSession() ||
+            !it.snapshot.canWriteToActiveAssistantSession() ||
             it.isGenerating
-        ) return@update it
+        ) return@updateWithResult it to null
         val currentIndex = target.resolveIndex(it.messages, it.activeChatSessionId)
-            ?: return@update it
+            ?: return@updateWithResult it to null
         val currentRequest = it.messages[currentIndex].generatedImageRequest
-        if (currentRequest?.let(isChatImageRequestActive) == true) return@update it
+        if (currentRequest?.let(isChatImageRequestActive) == true) return@updateWithResult it to null
         val nextMessages = it.messages.filterIndexed { messageIndex, _ -> messageIndex != currentIndex }
         val nextSessions = if (nextMessages.isEmpty()) {
             it.chatSessions.map { session ->
                 if (session.id == sessionId) session.copy(
                     messages = emptyList(), contextSummaries = emptyList(),
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = occurredAt
                 ) else session
             }
         } else {
             it.chatSessions.upsertSessionFor(
-                state = it,
+                state = it.snapshot,
                 sessionId = sessionId,
                 messages = nextMessages,
                 assistantId = it.selectedAssistantId,
                 modelMode = it.selectedChatBackend.bindingValue(),
-                modelId = it.currentChatModelId()
+                modelId = it.snapshot.currentChatModelId(),
+                occurredAt = occurredAt
             )
         }
-        commit = MessageDeleteCommit(nextSessions, currentRequest)
         it.copy(
             messages = nextMessages,
             activeChatSessionId = sessionId,
             chatSessions = nextSessions,
             promptContextUsage = null,
             statusMessage = "已删除消息"
-        )
-    }
-    val applied = commit ?: return
+        ) to MessageDeleteCommit(nextSessions, currentRequest)
+    } ?: return
     applied.removedRequest?.let { pendingAssistantImageToolTurns.remove(it.id) }
     persistConversationMutation(applied.sessions, rollback)
 }
@@ -93,7 +91,7 @@ internal fun deleteMessageFor(
  * to a message identity first; all deletion work then goes through [deleteMessageFor].
  */
 internal fun deleteMessageAtFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
     isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
@@ -119,7 +117,7 @@ internal fun deleteMessageAtFor(
 }
 
 internal fun deleteLastConversationTurnFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationWorkflowFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
     isChatImageRequestActive: (ChatGeneratedImageRequest) -> Boolean,
@@ -137,7 +135,7 @@ internal fun deleteLastConversationTurnFor(
 }
 
 internal fun newChatForAssistantFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     hasActiveAssistantImageExecution: (String?) -> Boolean,
     showStatus: (String) -> Unit,
@@ -178,15 +176,14 @@ internal fun newChatForAssistantFor(
         modelMode = modelMode,
         modelId = modelId
     )
-    var sessionsToPersist: List<ChatSessionRecord>? = null
-    store.update {
-        sessionsToPersist = (listOf(greetingSession) + it.chatSessions).sortedForHistory()
+    val committed = store.updateAndGet {
+        val sessionsToPersist = (listOf(greetingSession) + it.chatSessions).sortedForHistory()
         it.copy(
             messages = greetingSession.messages,
             input = "",
             activeChatSessionId = greetingSession.id,
             selectedAssistantId = targetAssistant.id,
-            chatSessions = sessionsToPersist ?: it.chatSessions,
+            chatSessions = sessionsToPersist,
             browserTask = it.browserTask?.let { task ->
                 com.muyuchat.feature.chat.BrowserTaskStateMachine.cancel(task, "Conversation owner changed")
             },
@@ -196,13 +193,13 @@ internal fun newChatForAssistantFor(
             statusMessage = "已新建对话"
         )
     }
-    sessionsToPersist?.let { persistChatSessions(it) }
+    persistChatSessions(committed.chatSessions)
     markLocalConversationContextInvalid()
     return true
 }
 
 internal fun branchMixedChatSessionFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     hasActiveAssistantImageExecution: (String?) -> Boolean,
     persistChatSessions: (List<ChatSessionRecord>) -> Job?,
@@ -234,7 +231,7 @@ internal fun branchMixedChatSessionFor(
 }
 
 internal fun deleteChatSessionFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     scope: CoroutineScope,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
@@ -299,7 +296,7 @@ internal fun deleteChatSessionFor(
 }
 
 internal fun renameChatSessionFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
     persistChatSessions: (List<ChatSessionRecord>) -> Job?,
@@ -312,14 +309,14 @@ internal fun renameChatSessionFor(
         showStatus("标题不能为空")
         return
     }
-    var updatedSessions: List<ChatSessionRecord> = emptyList()
-    store.update { state ->
-        updatedSessions = state.chatSessions.map { session ->
+    val occurredAt = System.currentTimeMillis()
+    val committed = store.updateAndGet { state ->
+        val updatedSessions = state.chatSessions.map { session ->
             if (session.id == sessionId) {
                 session.copy(
                     title = cleanTitle,
                     manualTitle = true,
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = occurredAt
                 )
             } else {
                 session
@@ -330,25 +327,24 @@ internal fun renameChatSessionFor(
             statusMessage = "已重命名对话"
         )
     }
-    persistChatSessions(updatedSessions)
+    persistChatSessions(committed.chatSessions)
 }
 
 internal fun toggleChatSessionPinnedFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     persistChatSessions: (List<ChatSessionRecord>) -> Job?,
     sessionId: String
 ) {
     if (rejectWhileConversationMutationInProgress()) return
-    var updatedSessions: List<ChatSessionRecord> = emptyList()
-    var pinned = false
-    store.update { state ->
-        updatedSessions = state.chatSessions.map { session ->
+    val occurredAt = System.currentTimeMillis()
+    val committed = store.updateAndGet { state ->
+        val pinned = state.chatSessions.firstOrNull { it.id == sessionId }?.let { !it.pinned } ?: false
+        val updatedSessions = state.chatSessions.map { session ->
             if (session.id == sessionId) {
-                pinned = !session.pinned
                 session.copy(
                     pinned = pinned,
-                    updatedAt = System.currentTimeMillis()
+                    updatedAt = occurredAt
                 )
             } else {
                 session
@@ -359,11 +355,11 @@ internal fun toggleChatSessionPinnedFor(
             statusMessage = if (pinned) "已置顶对话" else "已取消置顶"
         )
     }
-    persistChatSessions(updatedSessions)
+    persistChatSessions(committed.chatSessions)
 }
 
 internal fun clearChatHistoryFor(
-    store: UiStateStore,
+    store: UiStateWriter<ConversationSessionFields>,
     scope: CoroutineScope,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     showStatus: (String) -> Unit,
@@ -431,7 +427,7 @@ internal fun clearChatHistoryFor(
 }
 
 internal fun chatSessionExportFileNameFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     sessionId: String
 ): String {
     val session = store.state.value.chatSessions.firstOrNull { it.id == sessionId }
@@ -440,7 +436,7 @@ internal fun chatSessionExportFileNameFor(
 }
 
 internal fun exportChatSessionFor(
-    store: UiStateStore,
+    store: UiStatusWriter,
     scope: CoroutineScope,
     application: Application,
     fail: (String) -> Unit,
@@ -457,9 +453,7 @@ internal fun exportChatSessionFor(
             } ?: error("无法写入所选位置。")
             session
         }.onSuccess { session ->
-            store.update {
-                it.copy(statusMessage = "已导出对话：${session.title}")
-            }
+            store.showStatus("已导出对话：${session.title}")
         }.onFailure { error ->
             fail("对话导出失败：${error.message}")
         }

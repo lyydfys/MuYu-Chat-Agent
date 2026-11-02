@@ -74,7 +74,7 @@ bool LlamaModelLoader::ensure_backends_loaded(
     backend_load_diagnostic.clear();
     const bool android_opencl_available =
             load_android_opencl_runtime_if_available_locked(android_opencl_handle, backend_load_diagnostic);
-    load_baseline_cpu_backend_if_needed(native_lib_dir, last_error);
+    load_mca_ggml_backends(native_lib_dir, backend_load_diagnostic);
 
     if (!native_lib_dir.empty()) {
         const std::string mca_opencl = join_path(native_lib_dir, "libggml-opencl-mca.so");
@@ -94,7 +94,6 @@ bool LlamaModelLoader::ensure_backends_loaded(
         }
     }
 #if MCA_WITH_LLAMA_CPP
-    ggml_backend_load_all();
     if (!backend_initialized) {
         llama_backend_init();
         backend_initialized = true;

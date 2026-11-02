@@ -29,7 +29,12 @@ class ChatLocalApiProviderOperationsTest {
             Regex("""if \(ownsUiLifecycle\(\)\)""").findAll(body).count()
         )
         assertTrue(body.contains("state.afterGenerationStarted()"))
-        assertTrue(body.contains("state.afterGenerationCompleted(engine.stats.value)"))
+        // Freeze the runtime snapshot before the retryable field reducer; retain the same mirroring.
+        val completion = body.substring(body.indexOf(".onCompletion"))
+        val frozenStats = completion.indexOf("val completedStats = engine.stats.value")
+        assertTrue(frozenStats >= 0)
+        assertTrue(frozenStats < completion.indexOf("port.updateUiState {"))
+        assertTrue(completion.contains("state.afterGenerationCompleted(completedStats)"))
         assertTrue(body.contains("LocalApiRuntime.stopGenerationProvider = {"))
         assertTrue(body.contains("port.cancelActiveLocalApiImageGeneration("))
         assertTrue(

@@ -1,11 +1,12 @@
 package com.muyuchat.feature.chat
 
-import android.widget.Toast
 import androidx.compose.runtime.Composable
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import kotlinx.coroutines.launch
 
 @Composable
 internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBindings) {
+    val notify = rememberMcaNotify()
     with(bindings) {
             SmoothRightToLeftPage(
                 visible = showImages,
@@ -97,7 +98,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                      prompt = imagePrompt,
                      onMeasureImagePromptTokens = onMeasureImagePromptTokens,
                      onPromptChange = { imagePrompt = it },
-                    onSubmitPrompt = { enqueueImagePrompt(imagePrompt) },
+                    onSubmitPrompt = { enqueueImagePrompt(imagePrompt, notify) },
                     onCancelGeneration = onCancelImageGeneration,
                     onRetryJob = { job -> onRetryImageGeneration(job.id) },
                     onRecreateImageAsset = onRecreateImageAsset,
@@ -218,7 +219,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                         val current = imageLoraDraftsFromJson(imageLoraDraftJson)
                         val alreadySelected = current.any { it.id == id }
                         if (!alreadySelected && current.size >= 8) {
-                            Toast.makeText(context, "单次最多选择 8 个 LoRA", Toast.LENGTH_SHORT).show()
+                            notify("单次最多选择 8 个 LoRA")
                         } else {
                             val next = if (alreadySelected) {
                                 current.filterNot { it.id == id }
@@ -242,11 +243,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                     onToggleTextualInversion = onToggleTextualInversion@ { id ->
                         val artifact = state.imageTextualInversions.firstOrNull { it.id == id }
                         if (artifact == null) {
-                            Toast.makeText(
-                                context,
-                                "该 Textual Inversion 已不存在",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            notify("该 Textual Inversion 已不存在")
                             return@onToggleTextualInversion
                         }
                         val current = imageTextualInversionIdsFromJson(
@@ -255,11 +252,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                         if (id !in current &&
                             !artifact.isSupportedBy(supportedImageTextualInversionFormats)
                         ) {
-                            Toast.makeText(
-                                context,
-                                "当前模型不支持 ${artifact.format} 格式的 Textual Inversion",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            notify("当前模型不支持 ${artifact.format} 格式的 Textual Inversion")
                             return@onToggleTextualInversion
                         }
                         val next = if (id in current) {
@@ -281,11 +274,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                             imageTextualInversionTriggerById[id] = artifact.trigger
                             current + id
                         } else {
-                            Toast.makeText(
-                                context,
-                                "单次最多选择 8 个 Textual Inversion",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            notify("单次最多选择 8 个 Textual Inversion")
                             current
                         }
                         imageTextualInversionIdsJson = imageTextualInversionIdsToJson(next)
@@ -329,25 +318,23 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                         val model = selectedImageModelChoice
                             ?.takeIf(ChatModelChoice::supportsImageUltraFix)
                         if (imageInputUri == null) {
-                            Toast.makeText(context, "请先选择 UltraFix 源图", Toast.LENGTH_SHORT).show()
+                            notify("请先选择 UltraFix 源图")
                             return@onUltraFixEnabledChange false
                         }
                         if (imageInputDimensionsProbing) {
-                            Toast.makeText(context, "正在检查源图尺寸，请稍后重试", Toast.LENGTH_SHORT).show()
+                            notify("正在检查源图尺寸，请稍后重试")
                             return@onUltraFixEnabledChange false
                         }
                         if (imageInputDimensionsUri != imageInputUri ||
                             imageInputSourceWidth <= 0 || imageInputSourceHeight <= 0
                         ) {
-                            Toast.makeText(
-                                context,
+                            notify(
                                 if (imageInputDimensionsProbeFailed) {
                                     "无法安全读取源图尺寸，请重新选择或先裁剪图片"
                                 } else {
                                     "请等待源图尺寸检查完成"
                                 },
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            )
                             return@onUltraFixEnabledChange false
                         }
                         val sourceTarget = model?.ultraFixTargetSizeForSourceOrNull(
@@ -355,11 +342,7 @@ internal fun ImagesWorkspaceMainPageSection(bindings: ImagesWorkspaceOverlayBind
                             imageInputSourceHeight
                         )
                         if (model == null || sourceTarget == null) {
-                            Toast.makeText(
-                                context,
-                                "源图尺寸超出当前模型的 UltraFix 目标范围，请先裁剪图片",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            notify("源图尺寸超出当前模型的 UltraFix 目标范围，请先裁剪图片")
                             return@onUltraFixEnabledChange false
                         }
                         if (!imageUltraFixEnabled) {

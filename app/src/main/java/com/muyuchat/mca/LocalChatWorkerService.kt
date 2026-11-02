@@ -46,9 +46,15 @@ open class LocalChatWorkerService : Service() {
     internal val cancellationWatchdogs = ConcurrentHashMap<Long, Runnable>()
     internal val liteRtCancellationState = LocalChatCancellationState()
     internal val liteRtCancellationWatchdogs = ConcurrentHashMap<Long, Runnable>()
+    /** Bounded request -> stop-observed -> worker-idle latency evidence for exactly one stop. */
+    internal val stopLatencyTrace = LocalChatStopLatencyTrace { android.os.SystemClock.elapsedRealtime() }
     private val runners = mutableMapOf<LocalChatRuntime, LocalChatRunner>()
 
     internal lateinit var stageJournal: LocalChatWorkerStageJournal
+
+    /** Prompt-free request identity parsed from the begin payload; used only in stop-latency logs. */
+    @Volatile
+    internal var activeRequestKey: String? = null
 
     @Volatile
     internal var diagnosticRuntime: String? = null
@@ -265,6 +271,7 @@ open class LocalChatWorkerService : Service() {
 
         override fun beginCompletion(requestPayload: ParcelFileDescriptor): Int {
             val request = readBeginRequest(requestPayload)
+            activeRequestKey = LocalChatWorkerStopRequestKey.fromParamsJson(request.paramsJson)
             decodeStageJournaled = false
             return guarded(
                 stage = "prefill",
@@ -284,6 +291,7 @@ open class LocalChatWorkerService : Service() {
             requestPayload: ParcelFileDescriptor
         ): Int {
             val request = readBeginRequest(requestPayload)
+            activeRequestKey = LocalChatWorkerStopRequestKey.fromParamsJson(request.paramsJson)
             decodeStageJournaled = false
             return guarded(
                 stage = "prefill",
@@ -332,6 +340,8 @@ open class LocalChatWorkerService : Service() {
         }
 
         override fun requestStop() {
+            // Time only the exact native operation that is active when this one-way stop lands.
+            recordStopRequested("requestStop")
             if (requestLiteRtStop() != null) return
             if ((activeOperationTarget?.runtime ?: activeRuntime) == LocalChatRuntime.MNN_CPU) {
                 // MNN publishes cancellation through a lock-free native flag,
@@ -352,7 +362,10 @@ open class LocalChatWorkerService : Service() {
         }
 
         override fun requestStopIfActive(): Boolean {
-            requestLiteRtStop()?.let { return it }
+            requestLiteRtStop()?.let { accepted ->
+                if (accepted) recordStopRequested("requestStopIfActive")
+                return accepted
+            }
             // This method is used by the Local API stop route, which needs a
             // synchronous accepted/not-accepted result. Do not call a native
             // requestStopIfActive() here: some runners serialize that query
@@ -362,6 +375,7 @@ open class LocalChatWorkerService : Service() {
             // without waiting for native generation to return.
             val active = activeNativeStage != null || activeRunner?.isGenerationRunning() == true
             if (!active) return false
+            recordStopRequested("requestStopIfActive")
             scheduleForcedRecoveryAfterStop()
             scheduleMnnProducerRecoveryAfterStop()
             dispatchRunnerStop()
@@ -515,6 +529,7 @@ open class LocalChatWorkerService : Service() {
             activeOperationTarget = null
             activeNativeStage = null
             activeNativeOperationToken = 0L
+            activeRequestKey = null
             runners.clear()
             retainedLoadFailureStatsJson = null
             invalidateRuntimeStatsLocked()

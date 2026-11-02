@@ -1,6 +1,7 @@
 package com.muyuchat.feature.agent
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,6 +61,24 @@ class AgentStaticStatusTagContractTest {
         assertTrue(source.contains("onClick = { onPreferenceChange(state.preference.copy(mode = mode)) }"))
         assertTrue(source.contains("onClick = { selectedMode = mode }"))
         assertTrue(source.contains("selected = state.preference.mode == mode"))
+    }
+
+    @Test
+    fun headerAndInfoButtonsDelegatePressAndTickToTheirSharedButton() {
+        val actions = sourceFile("AgentScreen.kt").substringAfter("private fun AgentInfoPage(")
+        assertEquals(4, Regex("""McaButton\(""").findAll(actions).count())
+        assertFalse("nested press scale must not compound 0.97 into 0.9409", actions.contains(".mcaPressScale("))
+        assertFalse("the shared button already owns the click tick", actions.contains("haptics.tick()"))
+        listOf("confirmInteraction", "scanTextInteraction", "scanButtonInteraction", "benchmarkButtonInteraction").forEach { owner ->
+            assertTrue("ripple and press scale must still share $owner", actions.contains("interactionSource = $owner"))
+        }
+    }
+
+    @Test
+    fun autoApplySwitchHasOneAccessibleActionName() {
+        val source = sourceFile("AgentTuningCards.kt")
+        assertTrue(source.contains("contentDescription = \"通过后自动应用\""))
+        assertTrue(source.contains("enabled = !jobState.isActive && !state.isBusy"))
     }
 
     private fun sourceFile(fileName: String): String {

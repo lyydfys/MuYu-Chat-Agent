@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MODULE_MAP = {
     "app": "app",
     "core:engine": "core/engine",
+    "core:agent-contract": "core/agent-contract",
+    "core:agent-runtime": "core/agent-runtime",
     "core:native": "core/native",
     "core:sd-native": "core/sd-native",
     "core:modelstore": "core/modelstore",
@@ -30,6 +32,7 @@ MODULE_MAP = {
     "api:local": "api/local",
     "feature:chat": "feature/chat",
     "feature:agent": "feature/agent",
+    "feature:agent-workspace": "feature/agent-workspace",
     "feature:modelhub": "feature/modelhub",
     "feature:settings": "feature/settings",
 }

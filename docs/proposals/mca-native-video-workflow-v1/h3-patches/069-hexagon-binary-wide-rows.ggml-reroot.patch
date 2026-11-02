@@ -1,0 +1,60 @@
+diff --git a/ggml/src/ggml-hexagon/ggml-hexagon.cpp b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+index 83ba19c..5f90cf4 100644
+--- a/ggml/src/ggml-hexagon/ggml-hexagon.cpp
++++ b/ggml/src/ggml-hexagon/ggml-hexagon.cpp
+@@ -5248,6 +5248,22 @@ static bool ggml_hexagon_supported_mul_mat_id(const struct ggml_hexagon_session
+     return true;
+ }
+ 
++// nightmare (dit/069): the row kernels (binary-ops.c `spad_row_total`, act-ops.c `htp_act_vtcm_layout_build`) need at
++// least ONE row of every operand per thread in VTCM, double-buffered; a row too wide aborts the graph with VTCM-TOO-SMALL.
++// MiniMax-H3's AdaLN curve rows are 96768 floats and its audio decoder's are a clip's samples (160k at 32 kHz x 5 s):
++// such an op stays on the CPU, and every narrower one (a DiT's residuals, 5376 wide) stays on the NPU.
++static bool nm_rows_fit_vtcm(const struct ggml_hexagon_session * sess, const struct ggml_tensor * a,
++                             const struct ggml_tensor * b, const struct ggml_tensor * d) {
++    if (!sess || sess->vtcm_size == 0) {
++        return true;
++    }
++    auto row = [](const struct ggml_tensor * t) -> size_t {
++        return t ? (((size_t) t->ne[0] * ggml_type_size(t->type)) + 127) & ~(size_t) 127 : 0;
++    };
++    const size_t nt = sess->n_threads > 0 ? sess->n_threads : 1;
++    return 2 * (row(a) + row(b) + row(d)) * nt + row(b) <= sess->vtcm_size;
++}
++
+ static bool ggml_hexagon_supported_binary(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+     const struct ggml_tensor * src0 = op->src[0];
+     const struct ggml_tensor * src1 = op->src[1];
+@@ -5285,9 +5301,7 @@ static bool ggml_hexagon_supported_binary(const struct ggml_hexagon_session * se
+         return false;
+     }
+ 
+-    return true;
+-
+-    GGML_UNUSED(sess);
++    return nm_rows_fit_vtcm(sess, src0, src1, dst);
+ }
+ 
+ static bool ggml_hexagon_supported_add_id(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+@@ -5364,9 +5378,7 @@ static bool ggml_hexagon_supported_unary(const struct ggml_hexagon_session * ses
+         return false;
+     }
+ 
+-    return true;
+-
+-    GGML_UNUSED(sess);
++    return nm_rows_fit_vtcm(sess, src0, nullptr, dst);
+ }
+ 
+ static bool ggml_hexagon_supported_sum_rows(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {
+@@ -5421,9 +5433,7 @@ static bool ggml_hexagon_supported_activations(const struct ggml_hexagon_session
+         }
+     }
+ 
+-    return true;
+-
+-    GGML_UNUSED(sess);
++    return nm_rows_fit_vtcm(sess, op->src[0], op->src[1], op);
+ }
+ 
+ static bool ggml_hexagon_supported_softmax(const struct ggml_hexagon_session * sess, const struct ggml_tensor * op) {

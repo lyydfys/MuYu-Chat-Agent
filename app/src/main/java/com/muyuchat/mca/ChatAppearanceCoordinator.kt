@@ -14,7 +14,7 @@ import kotlinx.coroutines.withContext
  */
 internal class ChatAppearanceCoordinator(
     private val scope: CoroutineScope,
-    private val uiStateStore: UiStateStore,
+    private val uiStateStore: UiStateWriter<ChatAppearanceFields>,
     private val globalChatAppearanceStore: GlobalChatAppearanceStore,
     private val backgroundImageStore: BackgroundImageStore,
     private val assistantStore: AssistantStore,

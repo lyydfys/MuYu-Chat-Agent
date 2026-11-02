@@ -22,7 +22,7 @@ internal fun updatedAssistantsWithParams(
 }
 
 internal fun applyAssistantDefaultModelFor(
-    store: UiStateStore,
+    store: UiStateReadPort,
     showStatus: (String) -> Unit,
     selectCloudChatModel: (String) -> Unit,
     loadModel: (ModelManifest) -> Unit,
@@ -61,7 +61,7 @@ internal fun applyAssistantDefaultModelFor(
 }
 
 internal fun finishSelectingNewAssistantFor(
-    store: UiStateStore,
+    store: UiStateWriter<AssistantProfileFields>,
     assistantStore: AssistantStore,
     modelGenerationProfileStore: ModelGenerationProfileStore,
     application: Application,

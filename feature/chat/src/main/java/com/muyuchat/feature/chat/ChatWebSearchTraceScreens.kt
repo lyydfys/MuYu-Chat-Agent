@@ -1,8 +1,10 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import android.content.ClipData
 import android.net.Uri
-import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -15,15 +17,11 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -40,9 +38,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S7：从 ChatChromeScreens.kt 等值移出的 Web 搜索追踪/来源展示簇。
 // 原样逐字迁移，未做行为改动；跨区复用的私有 UI/文案/颜色助手按协议提升为 internal。
@@ -114,6 +114,7 @@ internal fun WebSearchSourceDetailCard(
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
     Surface(
@@ -149,11 +150,15 @@ internal fun WebSearchSourceDetailCard(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                IconButton(onClick = onClose, modifier = Modifier.size(48.dp)) {
+                McaIconButton(
+                    contentDescription = "收起来源详情",
+                    onClick = onClose,
+                    modifier = Modifier.size(48.dp),
+                    glyphSize = McaIconSize.Xs
+                ) {
                     Icon(
-                        Icons.Default.Close,
-                        contentDescription = "收起来源详情",
-                        modifier = Modifier.size(16.dp),
+                        McaIcons.Close,
+                        contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -198,19 +203,19 @@ internal fun WebSearchSourceDetailCard(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(
+                McaButton(style = McaButtonStyle.Text,
                     onClick = {
                         scope.launch {
                             clipboard.setClipEntry(
                                 ClipEntry(ClipData.newPlainText("MCA 来源链接", source.url))
                             )
-                            Toast.makeText(context, "已复制来源链接", Toast.LENGTH_SHORT).show()
+                            notify("已复制来源链接")
                         }
                     }
                 ) {
                     Text("复制链接")
                 }
-                Button(onClick = onOpen) {
+                McaButton(style = McaButtonStyle.Primary,onClick = onOpen) {
                     Text("应用内打开")
                 }
             }

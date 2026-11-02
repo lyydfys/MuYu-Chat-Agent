@@ -245,7 +245,7 @@ internal object CreateLocalGeneratedImageAssetOperations {
 internal fun recordLocalImageExecutionOutcomeFor(
     localImageModelStore: LocalImageModelStore,
     readinessGate: ManagedRuntimeReadinessRefreshGate,
-    store: UiStateStore,
+    store: UiStateWriter<ImageModelSelectionFields>,
     model: LocalImageModelRecord,
     failureMessage: String?
 ) {

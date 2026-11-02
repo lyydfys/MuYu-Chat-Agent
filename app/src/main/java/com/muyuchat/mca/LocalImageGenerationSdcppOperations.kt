@@ -242,6 +242,9 @@ internal suspend fun CoroutineScope.runStableDiffusionCppGeneration(
             throwLocalImageNativeFailure(json, "stable-diffusion.cpp image generation failed.")
         }
         ImageExecutionProfileNativeContract.parseAndValidate(profileResolution, json)
+        if (effectiveFamily == LocalImageModelFamily.ANIMA) {
+            requireAnimaSdcppExecutionEvidence(json)
+        }
         if (profile.variant == ImageModelVariant.QWEN_IMAGE_21) {
             requireQwenImage21GgufExecutionEvidence(json)
             QwenImage21TurboSchedule.verifyNativeEcho(json, qwenTurboSchedule)

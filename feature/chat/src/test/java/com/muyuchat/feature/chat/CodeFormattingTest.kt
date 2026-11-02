@@ -1,5 +1,7 @@
 package com.muyuchat.feature.chat
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -115,5 +117,41 @@ class CodeFormattingTest {
             listOf("val one = 1\n", "print('two')\n", "{\"three\": 3}\n"),
             codes.map { it.copyCode }
         )
+    }
+
+    @Test
+    fun syntaxHighlighterPreservesExactTextAndAppliesSpans() {
+        val sample = "// comment\nval answer: String = \"42\"\nreturn answer.length + 1\n"
+        val highlighted = buildHighlightedCode(sample, "kotlin")
+        assertEquals(sample, highlighted.text)
+        assertTrue(highlighted.spanStyles.isNotEmpty())
+        highlighted.spanStyles.forEach { range ->
+            assertTrue(range.start >= 0 && range.end <= sample.length && range.start < range.end)
+        }
+    }
+
+    @Test
+    fun markdownBlockKindKeysAreDistinctPerVariant() {
+        val blocks = listOf(
+            MarkdownBlock.Heading("H", 1),
+            MarkdownBlock.Quote("Q"),
+            MarkdownBlock.BulletList(listOf("a")),
+            MarkdownBlock.NumberedList(listOf(OrderedMarkdownItem(1, "a"))),
+            MarkdownBlock.Table(listOf(listOf("h", "c"))),
+            MarkdownBlock.Code("kt", "val x = 1", ""),
+            MarkdownBlock.Divider,
+            MarkdownBlock.Paragraph("p")
+        )
+        assertEquals(blocks.size, blocks.map { it.blockKindKey }.distinct().size)
+    }
+
+    @Test
+    fun streamingTailSettlesDuringANetworkPauseWithoutChangingTextSpans() {
+        // Colour is now masked at draw time; no appended colour spans override inline code/links.
+        val tracker = StreamingTailTracker()
+        val tail = tracker.update("Streaming typography fade", true, 0L)
+        assertTrue(tail.isNotEmpty())
+        assertTrue(tail.last().alpha(0L) < 1f)
+        assertEquals(1f, tail.last().alpha(160_000_000L), 0f)
     }
 }

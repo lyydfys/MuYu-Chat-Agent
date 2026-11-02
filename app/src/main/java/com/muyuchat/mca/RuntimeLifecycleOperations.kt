@@ -8,7 +8,6 @@ import com.muyuchat.feature.agent.AgentCandidateProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.feature.agent.AgentProfileRecordState
 import com.muyuchat.feature.agent.AgentTuningJobState
-import com.muyuchat.mca.presentation.afterGenerationTerminated
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -20,7 +19,7 @@ import kotlinx.coroutines.launch
  * 用户动作（launch 由 scope 参数承载，`cancelGeneration` 以函数参数注入——VM 传 `{ cancelGenerationJob() }`）。
  */
 internal suspend fun restoreLoadedRuntimeSnapshotFor(
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     engine: McaInferenceService,
     runtimeProfileStore: ModelRuntimeProfileStore,
@@ -43,16 +42,18 @@ internal suspend fun restoreLoadedRuntimeSnapshotFor(
     val nativeStats = engine.nativeStatsJsonOrEmpty()
     val recentLogs = engine.recentEngineLogsOrEmpty()
     readinessGate.invalidate()
+    val restoredModels = modelStore.listModels()
+    val restoredStats = engine.stats.value
     store.update { state ->
         state.copy(
-            models = modelStore.listModels(),
+            models = restoredModels,
             loadedModelId = snapshot.model.id,
             loadedModelName = snapshot.model.displayName,
             selectedChatBackend = snapshot.uiState.selectedChatBackend,
             busy = false,
             isGenerating = false,
             params = mergedExecutionProfile(snapshot.uiState.params, activeProfile),
-            stats = engine.stats.value,
+            stats = restoredStats,
             autoTuningInProgress = false,
             rollbackParams = null,
             profileId = activeProfile.profileId,
@@ -83,7 +84,7 @@ internal suspend fun restoreLoadedRuntimeSnapshotFor(
 
 internal fun unloadModelFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     engine: McaInferenceService,
     runtimeProfileStore: ModelRuntimeProfileStore,
@@ -113,7 +114,7 @@ internal fun unloadModelFor(
             val message = "卸载失败：${error?.message ?: "未知错误"}"
             val stats = engine.stats.value
             store.update {
-                it.afterGenerationTerminated(
+                it.afterRuntimeGenerationTerminated(
                     stats = stats,
                     statusMessage = message
                 ).copy(busy = false)
@@ -154,7 +155,7 @@ internal fun unloadModelFor(
 
 internal fun deleteModelFor(
     scope: CoroutineScope,
-    store: UiStateStore,
+    store: UiStateWriter<RuntimeProfileFields>,
     admission: RuntimeAdmissionState,
     engine: McaInferenceService,
     runtimeProfileStore: ModelRuntimeProfileStore,
@@ -250,7 +251,7 @@ internal fun deleteModelFor(
             readinessGate.invalidate()
             store.update { state ->
                 val releasedGeneration = if (wasLoaded && !nativeReleased) {
-                    state.afterGenerationTerminated(
+                    state.afterRuntimeGenerationTerminated(
                         stats = stats,
                         statusMessage = failureMessage
                     )

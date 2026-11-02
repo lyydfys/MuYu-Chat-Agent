@@ -1,7 +1,8 @@
 package com.muyuchat.feature.chat
 
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
 import android.content.Context
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -14,14 +15,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import com.muyuchat.core.designsystem.rememberMcaNotify
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import com.muyuchat.core.designsystem.McaDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.sync.Mutex
 
@@ -43,6 +44,7 @@ internal fun ChatImagesWorkspaceOverlay(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
     val scope = rememberCoroutineScope()
     val imageParameterPreferences = remember(context) {
         context.applicationContext.getSharedPreferences(
@@ -194,11 +196,7 @@ internal fun ChatImagesWorkspaceOverlay(
         uri?.let { selectedUri ->
             val selected = persistGenerationImageUri(context, selectedUri)
             if (selected == null) {
-                Toast.makeText(
-                    context,
-                    "无法保留该图片的读取权限，请重新选择。",
-                    Toast.LENGTH_SHORT
-                ).show()
+                notify("无法保留该图片的读取权限，请重新选择。")
                 return@rememberLauncherForActivityResult
             }
             when (pendingGenerationImageRole) {
@@ -388,7 +386,7 @@ internal fun ChatImagesWorkspaceOverlay(
 
             pendingUltraFixSubmission?.let { (prompt, options) ->
                 val ultraFix = requireNotNull(options.ultraFix)
-                AlertDialog(
+                McaDialog(
                     onDismissRequest = { pendingUltraFixSubmission = null },
                     title = { Text("开始 UltraFix 精修？") },
                     text = {
@@ -412,17 +410,22 @@ internal fun ChatImagesWorkspaceOverlay(
                         }
                     },
                     confirmButton = {
-                        TextButton(
+                        McaButton(style = McaButtonStyle.Text,
                             onClick = {
                                 pendingUltraFixSubmission = null
-                                if (onGenerateImagePrompt(prompt, options)) {
+                                val admitted = onGenerateImagePrompt(prompt, options)
+                                if (admitted) {
                                     imageGenerationStartSignal++
+                                } else {
+                                    imageGenerationRejectionFallback(imageValidationError)?.let { fallback ->
+                                        imageValidationError = fallback
+                                    }
                                 }
                             }
                         ) { Text("开始精修") }
                     },
                     dismissButton = {
-                        TextButton(onClick = { pendingUltraFixSubmission = null }) {
+                        McaButton(style = McaButtonStyle.Text,onClick = { pendingUltraFixSubmission = null }) {
                             Text("取消")
                         }
                     }

@@ -99,6 +99,7 @@ internal fun LocalImageModelRecord.legacySupportedImageTaskModesForUi(
         }
         LocalImageRuntime.MNN_DIFFUSION,
         LocalImageRuntime.QNN_HTP,
+        LocalImageRuntime.MEDIATEK_NEURON,
         LocalImageRuntime.ONNX_RUNTIME,
         LocalImageRuntime.CUSTOM -> setOf(ImageGenerationUiTaskMode.TEXT_TO_IMAGE)
     }

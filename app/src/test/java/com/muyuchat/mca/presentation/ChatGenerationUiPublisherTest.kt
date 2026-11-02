@@ -20,12 +20,18 @@ import com.muyuchat.core.engine.TokenProgress
 import com.muyuchat.feature.agent.AgentEngineLifecycle
 import com.muyuchat.mca.ChatRunOwnership
 import com.muyuchat.mca.MainUiState
+import com.muyuchat.mca.GenerationExecutionFields
+import com.muyuchat.mca.UiStateWriter
+import com.muyuchat.mca.UiStateReadPort
+import com.muyuchat.mca.UiFieldCommit
+import com.muyuchat.mca.UiFieldCommitter
+import com.muyuchat.mca.mergeInto
 import com.muyuchat.mca.ReplyGenerationMetrics
 import com.muyuchat.mca.WebSearchDiagnosticRecord
 import com.muyuchat.mca.WebSearchResearchMode
 import com.muyuchat.mca.WebSearchTurnMode
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -33,6 +39,39 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
+
+internal fun MutableStateFlow<MainUiState>.generationWriter(
+    beforeCompareAndSet: (attempt: Int) -> Unit = {},
+    afterCommit: () -> Unit = {}
+): UiStateWriter<GenerationExecutionFields> {
+    val mutable = this
+    val source = object : UiStateReadPort {
+        override val current: MainUiState get() = mutable.value
+        override val state: StateFlow<MainUiState> get() = mutable
+    }
+    return UiStateWriter(
+        source,
+        object : UiFieldCommitter<GenerationExecutionFields> {
+            override fun <Result> commit(
+                reducer: (MainUiState, GenerationExecutionFields) -> UiFieldCommit<GenerationExecutionFields, Result>
+            ): UiFieldCommit<GenerationExecutionFields, Result> {
+                var attempt = 0
+                while (true) {
+                    val snapshot = mutable.value
+                    val outcome = reducer(snapshot, GenerationExecutionFields(snapshot))
+                    val committed = outcome.fields.mergeInto(snapshot)
+                    beforeCompareAndSet(++attempt)
+                    if (mutable.compareAndSet(snapshot, committed)) {
+                        afterCommit()
+                        return UiFieldCommit(GenerationExecutionFields(committed), outcome.result)
+                    }
+                }
+            }
+        },
+        { message -> mutable.value = mutable.value.copy(statusMessage = message) }
+    )
+}
+
 
 /**
  * Pins the guard semantics and the exact field set of ChatGenerationUiPublisher's publications.
@@ -66,8 +105,7 @@ class ChatGenerationUiPublisherTest {
     ): ChatGenerationUiPublisher = ChatGenerationUiPublisher(
         chatRuns,
         runId,
-        uiState,
-        { transform -> uiState.update(transform) },
+        uiState.generationWriter(),
         clock
     )
 
@@ -76,7 +114,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val runId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         publisher.publishContextCompressedStatus(7)
         assertEquals("已压缩 7 条较早对话，保留角色设定和最近消息", uiState.value.statusMessage)
@@ -94,7 +132,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val runId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         val usage = usage()
         publisher.publishPromptContextUsage(usage)
@@ -107,7 +145,7 @@ class ChatGenerationUiPublisherTest {
         val runId = ownershipWithFreshRun(chatRuns)
         val inFlightPersist = PersistProgress(PersistStage.WRITING, writtenBytes = 1, totalBytes = 2)
         val uiState = MutableStateFlow(MainUiState(generationPersistProgress = inFlightPersist))
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         val stats = RuntimeStats(loaded = true, completionTokens = 3)
         publisher.publishStreamPhase(stats, GenerationPhase.PREFILL, TokenProgress(1, 4))
@@ -131,7 +169,7 @@ class ChatGenerationUiPublisherTest {
                 generationPersistProgress = PersistProgress(PersistStage.ENCODING, 1, 2)
             )
         )
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         val stats = RuntimeStats(loaded = true, completionTokens = 9)
         publisher.publishStreamChunkStats(stats)
@@ -153,11 +191,7 @@ class ChatGenerationUiPublisherTest {
         val publisher = ChatGenerationUiPublisher(
             chatRuns,
             runId,
-            uiState,
-            { transform ->
-                stateWrites += 1
-                uiState.update(transform)
-            },
+            uiState.generationWriter(beforeCompareAndSet = { stateWrites += 1 }),
             { nowNanos }
         )
         val firstStats = RuntimeStats(loaded = true, completionTokens = 1, decodeTps = 1.0)
@@ -274,7 +308,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val runId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         val progress = PersistProgress(PersistStage.WRITING, writtenBytes = 5, totalBytes = 9)
         publisher.publishPersistProgress(progress)
@@ -298,7 +332,7 @@ class ChatGenerationUiPublisherTest {
                 engineLifecycle = AgentEngineLifecycle.GENERATING
             )
         )
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         publisher.refuseGenerationBeforeStream("未加载云端推理模型")
 
@@ -319,7 +353,7 @@ class ChatGenerationUiPublisherTest {
         val stats = RuntimeStats(loaded = true, completionTokens = 3)
         val assistant = ChatMessage(Role.ASSISTANT, "answer")
         val uiState = MutableStateFlow(MainUiState(messages = listOf(assistant)))
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
         var metricsCalls = 0
 
         // An idle state is left untouched, and the metrics are never finished.
@@ -350,7 +384,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val firstRunId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState, { transform -> uiState.update(transform) })
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState.generationWriter())
 
         // A replacement run reserves -- the epoch advances and the first run is superseded.
         val secondRunId = ownershipWithFreshRun(chatRuns)
@@ -369,7 +403,7 @@ class ChatGenerationUiPublisherTest {
         assertEquals(MainUiState(), uiState.value)
 
         // Positive control: the replacement owner publishes through the same surface.
-        val freshPublisher = ChatGenerationUiPublisher(chatRuns, secondRunId, uiState, { transform -> uiState.update(transform) })
+        val freshPublisher = ChatGenerationUiPublisher(chatRuns, secondRunId, uiState.generationWriter())
         freshPublisher.publishContextStatusMessage("fresh")
         assertEquals("fresh", uiState.value.statusMessage)
     }
@@ -386,7 +420,7 @@ class ChatGenerationUiPublisherTest {
                 webSearchOneShotEnabled = true
             )
         )
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         val normalized = uiState.value.params.copy(nPredict = 321)
         publisher.publishNormalizedTurnParams(normalized)
@@ -408,7 +442,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val firstRunId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState(webSearchTurnMode = WebSearchTurnMode.ON))
-        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState, { transform -> uiState.update(transform) })
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState.generationWriter())
         ownershipWithFreshRun(chatRuns)
 
         val normalized = uiState.value.params.copy(nPredict = 321)
@@ -442,7 +476,7 @@ class ChatGenerationUiPublisherTest {
                 statusMessage = "previous status"
             )
         )
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         publisher.publishWebSearchOutcome(
             webSearchStatusMessage = null,
@@ -468,7 +502,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val runId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
         val task = BrowserTaskStateMachine.beginBackgroundSearch(
             owner = "test", sessionId = null, messageId = null, query = "q"
         )
@@ -488,7 +522,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val firstRunId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState())
-        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState, { transform -> uiState.update(transform) })
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, firstRunId, uiState.generationWriter())
         ownershipWithFreshRun(chatRuns)
 
         val task = BrowserTaskStateMachine.beginBackgroundSearch(
@@ -506,7 +540,7 @@ class ChatGenerationUiPublisherTest {
             owner = "test", sessionId = null, messageId = null, query = "q"
         )
         val uiState = MutableStateFlow(MainUiState(browserTask = task))
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         // A task id the UI no longer owns is left untouched.
         publisher.publishBrowserSearchResults("browser-other", listOf("https://a.example/x"), "done")
@@ -545,7 +579,7 @@ class ChatGenerationUiPublisherTest {
         val chatRuns = ChatRunOwnership()
         val runId = ownershipWithFreshRun(chatRuns)
         val uiState = MutableStateFlow(MainUiState(messages = messages, activeChatSessionId = "session-1"))
-        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val publisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
 
         // Foreign frozen session: the run owns the UI but the session identity does not match, so
         // nothing is activated and the (empty) session list is left unchanged.
@@ -574,7 +608,7 @@ class ChatGenerationUiPublisherTest {
         )
 
         // Superseded run: the gate refuses before the transform runs.
-        val stalePublisher = ChatGenerationUiPublisher(chatRuns, runId, uiState, { transform -> uiState.update(transform) })
+        val stalePublisher = ChatGenerationUiPublisher(chatRuns, runId, uiState.generationWriter())
         ownershipWithFreshRun(chatRuns)
         val before = uiState.value
         assertFalse(

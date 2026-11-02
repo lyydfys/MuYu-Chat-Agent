@@ -8,20 +8,26 @@ import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatGeneratedImageRequest
 
 internal class ChatTerminalSettlementPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ConversationSettlementFields>,
     private val chatRunsRef: ChatRunOwnership,
     private val diagnosticStoreRef: WebSearchDiagnosticStore,
     private val accumulatorRef: ChatStreamAccumulator
 ) : ChatTerminalSettlementPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ConversationSettlementFields) -> ConversationSettlementFields) {
         store.update(transform)
     }
+
+    override fun <Result> updateUiStateWithResult(
+        transform: (ConversationSettlementFields) -> Pair<ConversationSettlementFields, Result>
+    ): Result = store.updateWithResult(transform)
 
     override fun currentChatModelId(state: MainUiState): String? = state.currentChatModelId()
 
     override fun upsertSession(
+        state: MainUiState,
+        occurredAt: Long,
         sessions: List<ChatSessionRecord>,
         sessionId: String,
         messages: List<ChatMessage>,
@@ -29,7 +35,8 @@ internal class ChatTerminalSettlementPortAdapter(
         modelMode: String?,
         modelId: String?
     ): List<ChatSessionRecord> = sessions.upsertSessionFor(
-        state = store.current,
+        state = state,
+        occurredAt = occurredAt,
         sessionId = sessionId,
         messages = messages,
         assistantId = assistantId,
@@ -48,7 +55,8 @@ internal class ChatTerminalSettlementPortAdapter(
 }
 
 internal class ChatSessionPersistencePortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ConversationPersistenceFields>,
+    private val knowledgeStore: UiStateWriter<KnowledgeLibraryFields>,
     private val scopeRef: CoroutineScope,
     private val engineRef: McaInferenceService,
     private val chatRunsRef: ChatRunOwnership,
@@ -61,7 +69,7 @@ internal class ChatSessionPersistencePortAdapter(
     override val uiState: StateFlow<MainUiState>
         get() = store.state
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (ConversationPersistenceFields) -> ConversationPersistenceFields) {
         store.update(transform)
     }
 
@@ -99,7 +107,7 @@ internal class ChatSessionPersistencePortAdapter(
         publishReconciledChatSessionsInto(store, chatRunsRef, requested, persisted)
 
     override fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
-        cleanupPendingWorldBooksAfterOwnerCommitFor(persistenceState, worldStoreRef, store, scope, retainedOwnerIds)
+        cleanupPendingWorldBooksAfterOwnerCommitFor(persistenceState, worldStoreRef, knowledgeStore, scope, retainedOwnerIds)
 
     override fun cancelPendingWorldBookCleanup(scope: WorldBookScope, ownerIds: Set<String>) =
         cancelPendingWorldBookCleanupIn(persistenceState, scope, ownerIds)
@@ -131,14 +139,14 @@ internal class ChatSessionPersistencePortAdapter(
 
 /** R3/C3-S12：图片请求簿记端口的具名适配器（真实依赖：store + 已容器化的持久化端口）。 */
 internal class ChatImageRequestPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ChatImageRequestFields>,
     private val persistencePort: ChatSessionPersistencePort
 ) : ChatImageRequestPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override fun <Result> updateUiStateWithResult(
+        transform: (ChatImageRequestFields) -> Pair<ChatImageRequestFields, Result>
+    ): Result = store.updateWithResult(transform)
 
     override fun persistChatSessions(
         sessions: List<ChatSessionRecord>?,
@@ -173,7 +181,7 @@ internal class ChatImageCommitRecoveryPortAdapter(
 
 /** R3/C3-S14：图片发送端口具名化（真实依赖：store/holder/持久化端口/请求端口/owner/协调器）。 */
 internal class SendChatImageRequestPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<SendChatImageFields>,
     private val admission: RuntimeAdmissionState,
     private val persistencePort: ChatSessionPersistencePort,
     private val requestPort: ChatImageRequestPort,
@@ -182,9 +190,9 @@ internal class SendChatImageRequestPortAdapter(
 ) : SendChatImageRequestPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
-        store.update(transform)
-    }
+    override fun <Result> updateUiStateWithResult(
+        transform: (SendChatImageFields) -> Pair<SendChatImageFields, Result>
+    ): Result = store.updateWithResult(transform)
 
     override fun showStatus(message: String) {
         store.showStatus(message)
@@ -218,6 +226,8 @@ internal class SendChatImageRequestPortAdapter(
         chatImageOptionsForCurrentSelectionFor(state)
 
     override fun upsertSession(
+        state: MainUiState,
+        occurredAt: Long,
         sessions: List<ChatSessionRecord>,
         sessionId: String,
         messages: List<ChatMessage>,
@@ -226,7 +236,8 @@ internal class SendChatImageRequestPortAdapter(
         modelMode: String?,
         modelId: String?
     ): List<ChatSessionRecord> = sessions.upsertSessionFor(
-        state = store.current,
+        state = state,
+        occurredAt = occurredAt,
         sessionId = sessionId,
         messages = messages,
         assistantId = assistantId,
@@ -280,7 +291,8 @@ internal class SendChatImageRequestPortAdapter(
 
 /** R3/C3-S14：图片重试/清理端口具名化（journal 以 provider 传入，保持原 lazy 时机）。 */
 internal class ChatImageRetryPortAdapter(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<CloudModelConfigFields>,
+    private val promptDraftStore: UiStateWriter<ChatPromptDraftFields>,
     private val admission: RuntimeAdmissionState,
     private val cloudApiStoreRef: CloudApiStore,
     private val localImageModelStoreRef: LocalImageModelStore,
@@ -290,7 +302,7 @@ internal class ChatImageRetryPortAdapter(
 ) : ChatImageRetryPort {
     override fun uiState(): MainUiState = store.current
 
-    override fun updateUiState(transform: (MainUiState) -> MainUiState) {
+    override fun updateUiState(transform: (CloudModelConfigFields) -> CloudModelConfigFields) {
         store.update(transform)
     }
 
@@ -311,7 +323,7 @@ internal class ChatImageRetryPortAdapter(
     }
 
     override fun invalidatePendingChatImagePreparation() {
-        invalidatePendingChatImagePreparationInto(store, admission)
+        invalidatePendingChatImagePreparationInto(promptDraftStore, admission)
     }
 
     override fun sendChatImageRequest(

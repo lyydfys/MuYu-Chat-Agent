@@ -40,9 +40,9 @@ internal data class AssistantImageModelBinding(
  */
 internal interface ChatGenerationExecutionPort {
 
-    // R3/S27: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
+    // Field-limited capability; execution cannot replace the app's root snapshot.
     val uiState: StateFlow<MainUiState>
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    val generationUiWriter: UiStateWriter<GenerationExecutionFields>
 
     val engine: McaInferenceService
 

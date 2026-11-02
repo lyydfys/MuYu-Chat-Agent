@@ -169,6 +169,9 @@ class ChatViewModel(
 
     fun deleteWorldBook(worldBookId: String) = capabilities.content.onDeleteWorldBook(worldBookId)
 
+    fun setWorldBookEnabled(worldBookId: String, enabled: Boolean) =
+        capabilities.content.onSetWorldBookEnabled(worldBookId, enabled)
+
     fun importWorldBookFile(scope: WorldBookImportScope) =
         capabilities.content.onImportWorldBookFile(scope)
 
@@ -319,6 +322,12 @@ class ChatViewModel(
 
     fun openAgent() = capabilities.shell.onOpenAgent()
 
+    fun openAgentWorkspace() = capabilities.shell.onOpenAgentWorkspace()
+
+    fun openDshWorkspace() = capabilities.shell.onOpenDshWorkspace()
+
+    fun openVideoWorkspace() = capabilities.shell.onOpenVideoWorkspace()
+
     fun openApi() = capabilities.shell.onOpenApi()
 
     fun openWebSearchSettings() = capabilities.shell.onOpenWebSearchSettings()
@@ -389,6 +398,7 @@ class ChatViewModel(
             onImportAssistantCard = ::importAssistantCard,
             onImportAssistantCardFile = ::importAssistantCardFile,
             onDeleteWorldBook = ::deleteWorldBook,
+            onSetWorldBookEnabled = ::setWorldBookEnabled,
             onImportWorldBookFile = ::importWorldBookFile,
             onCreateKnowledgeBase = ::createKnowledgeBase,
             onDeleteKnowledgeBase = ::deleteKnowledgeBase,
@@ -446,6 +456,9 @@ class ChatViewModel(
             onOpenRecommendedModels = ::openRecommendedModels,
             onOpenSettings = ::openSettings,
             onOpenAgent = ::openAgent,
+            onOpenAgentWorkspace = ::openAgentWorkspace,
+            onOpenDshWorkspace = ::openDshWorkspace,
+            onOpenVideoWorkspace = ::openVideoWorkspace,
             onOpenApi = ::openApi,
             onOpenWebSearchSettings = ::openWebSearchSettings,
             onImportChatModel = ::importChatModel,

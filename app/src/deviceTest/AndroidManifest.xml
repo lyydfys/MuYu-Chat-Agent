@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.muyuchat.mca.mediateknputest" />
+    </queries>
+    <application>
+        <activity
+            android:name="com.muyuchat.mca.debug.LocalChatSmokeActivity"
+            android:exported="true" />
+    </application>
+</manifest>

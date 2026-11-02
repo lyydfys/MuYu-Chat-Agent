@@ -178,6 +178,7 @@ internal fun mainChatScreenActions(
             onImportAssistantCard = viewModel::importAssistantCard,
             onImportAssistantCardFile = { host.onImportAssistantCardFile() },
             onDeleteWorldBook = viewModel::deleteWorldBook,
+            onSetWorldBookEnabled = viewModel::setWorldBookEnabled,
             onImportWorldBookFile = { scope -> host.onImportWorldBookFile(scope) },
             onCreateKnowledgeBase = { name -> viewModel.createKnowledgeBase(name) },
             onDeleteKnowledgeBase = viewModel::deleteKnowledgeBase,
@@ -255,6 +256,9 @@ internal fun mainChatScreenActions(
                     host.onTab(AppTab.SETTINGS)
                 },
             onOpenAgent = { host.onTab(AppTab.AGENT) },
+            onOpenAgentWorkspace = { host.onTab(AppTab.AGENT_WORKSPACE) },
+            onOpenDshWorkspace = { host.onTab(AppTab.DSH_WORKSPACE) },
+            onOpenVideoWorkspace = { host.onTab(AppTab.VIDEO_WORKSPACE) },
             onOpenApi = { host.onTab(AppTab.API) },
             onOpenWebSearchSettings = {
                     host.setStartSettingsInWebSearch(true)

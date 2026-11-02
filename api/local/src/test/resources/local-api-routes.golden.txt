@@ -15,3 +15,4 @@
 /v1/tuning/jobs
 /v1/tuning/jobs/
 /v1/tuning/rollback
+/v1/video

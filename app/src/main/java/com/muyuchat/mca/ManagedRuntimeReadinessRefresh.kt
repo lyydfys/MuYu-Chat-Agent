@@ -19,7 +19,7 @@ internal interface ManagedRuntimeReadinessPort {
 
     fun uiState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ModelCatalogFields) -> ModelCatalogFields): ModelCatalogFields
 
     fun listLocalModels(): List<ModelManifest>
 
@@ -112,7 +112,7 @@ internal fun refreshRuntimeReadiness(
             val qairtVerifiedLocalModelIds = currentQairtVerifiedLocalModelIds(port.context, localModels)
             if (!port.isReadinessRefreshCurrent(refreshToken)) return
 
-            port.updateUiState { latest ->
+            val committed = port.updateUiState { latest ->
                 if (!port.isReadinessRefreshCurrent(refreshToken)) {
                     latest
                 } else {
@@ -126,9 +126,6 @@ internal fun refreshRuntimeReadiness(
                         qnnVerificationCurrentByModelId = qnnVerificationCurrentByModelId,
                         preferredId = preferredImageModelId
                     )
-                    if (selectedImageModelId != persistedImageModelId) {
-                        port.saveSelectedImageModelId(selectedImageModelId)
-                    }
                     val selectedImageBackend = if (
                         selectedImageModelId == null && latest.selectedImageBackend == ImageBackend.LOCAL
                     ) {
@@ -157,6 +154,15 @@ internal fun refreshRuntimeReadiness(
                         selectedImageBackend = selectedImageBackend
                     )
                 }
+            }
+            // Persist only the successful CAS result; the reducer must remain replay-pure.
+            // A newer selection or invalidated refresh owns persistence from that point onward.
+            val selectedId = committed.selectedLocalImageModelId
+            if (port.isReadinessRefreshCurrent(refreshToken) &&
+                port.uiState().selectedLocalImageModelId == selectedId &&
+                selectedId != persistedImageModelId
+            ) {
+                port.saveSelectedImageModelId(selectedId)
             }
         } catch (error: CancellationException) {
             throw error

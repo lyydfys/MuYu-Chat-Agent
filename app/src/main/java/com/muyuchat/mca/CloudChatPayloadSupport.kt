@@ -110,8 +110,8 @@ internal fun buildOpenAiChatJson(config: CloudApiConfig, request: ChatRequest): 
     return JSONObject()
         .put("model", config.chatModel.trim())
         .put("messages", JSONArray(request.messagesJson(multimodal = true)))
-        .put("stream", true)
-        .put("stream_options", JSONObject().put("include_usage", true))
+        .put("stream", config.streaming)
+        .also { root -> if (config.streaming) root.put("stream_options", JSONObject().put("include_usage", true)) }
         .put("temperature", params.temperature.toDouble())
         .put("top_p", params.topP.toDouble())
         .put("presence_penalty", params.presencePenalty.toDouble())

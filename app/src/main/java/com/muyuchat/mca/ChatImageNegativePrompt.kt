@@ -133,7 +133,8 @@ internal fun chatImageFallbackNegativePromptForModel(
         LocalImageModelFamily.Z_IMAGE,
         LocalImageModelFamily.SD_TURBO,
         LocalImageModelFamily.QWEN_IMAGE,
-        LocalImageModelFamily.WAN -> null
+        LocalImageModelFamily.WAN,
+        LocalImageModelFamily.ANIMA -> null
     }
 }
 
@@ -168,6 +169,7 @@ internal fun chatImageDefaultNegativePromptForTopology(
         LocalImageModelFamily.FLUX,
         LocalImageModelFamily.Z_IMAGE,
         LocalImageModelFamily.SD_TURBO,
-        LocalImageModelFamily.WAN -> null
+        LocalImageModelFamily.WAN,
+        LocalImageModelFamily.ANIMA -> null
     }
 }

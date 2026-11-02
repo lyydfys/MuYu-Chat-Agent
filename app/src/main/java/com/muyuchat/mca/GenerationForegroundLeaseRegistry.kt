@@ -1,5 +1,7 @@
 package com.muyuchat.mca
 
+import com.muyuchat.mca.agent.platform.AgentStopAction
+
 /** Opaque identity: a completed request can release only its own process-protection lease. */
 internal class GenerationForegroundLease internal constructor()
 
@@ -9,14 +11,24 @@ internal class GenerationForegroundLease internal constructor()
  * the old stop. The callbacks are bounded service commands, never model or network operations.
  */
 internal class GenerationForegroundLeaseRegistry {
-    internal data class Snapshot(val kind: String, val ownerCount: Int)
+    internal data class Snapshot(
+        val kind: String,
+        val ownerCount: Int,
+        val agentStopAction: AgentStopAction? = null
+    )
+
+    private data class LeaseInfo(val kind: String, val agentStopAction: AgentStopAction?)
 
     private val lock = Any()
-    private val owners = linkedMapOf<GenerationForegroundLease, String>()
+    private val owners = linkedMapOf<GenerationForegroundLease, LeaseInfo>()
 
-    fun acquire(kind: String, start: () -> Unit): GenerationForegroundLease = synchronized(lock) {
+    fun acquire(
+        kind: String,
+        agentStopAction: AgentStopAction? = null,
+        start: () -> Unit
+    ): GenerationForegroundLease = synchronized(lock) {
         val lease = GenerationForegroundLease()
-        owners[lease] = kind
+        owners[lease] = LeaseInfo(kind, agentStopAction)
         try {
             start()
         } catch (failure: Throwable) {
@@ -34,7 +46,9 @@ internal class GenerationForegroundLeaseRegistry {
 
     /** A delayed onStartCommand must promote current work, not an already-released Intent. */
     fun <T> withCurrentTask(block: (Snapshot?) -> T): T = synchronized(lock) {
-        val snapshot = owners.values.lastOrNull()?.let { Snapshot(it, owners.size) }
+        val snapshot = owners.values.lastOrNull()?.let {
+            Snapshot(it.kind, owners.size, it.agentStopAction)
+        }
         block(snapshot)
     }
 }

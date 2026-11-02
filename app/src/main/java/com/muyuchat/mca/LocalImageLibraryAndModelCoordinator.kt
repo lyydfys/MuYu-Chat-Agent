@@ -2,7 +2,6 @@ package com.muyuchat.mca
 
 import android.app.Application
 import android.net.Uri
-import com.muyuchat.mca.composition.McaAppContainer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -26,10 +25,16 @@ private fun LocalImageModelRecord.isReadyForManagedSelection(
  * image and file asset insertion/clearing, LoRAs, Textual Inversions, upscalers, and image asset deletion.
  */
 internal class LocalImageLibraryAndModelCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ImageWorkspaceFields>,
+    private val attachmentStore: UiStateWriter<ChatAttachmentFields>,
+    private val modelSelectionStore: UiStateWriter<ImageModelSelectionFields>,
+    private val modelCatalogStore: UiStateWriter<ModelCatalogFields>,
+    private val adapterStore: UiStateWriter<LocalImageAdapterFields>,
+    private val localImageAdapterPort: LocalImageAdapterPort,
+    private val localImageUpscalerPort: LocalImageUpscalerPort,
     private val scope: CoroutineScope,
     private val application: Application,
-    private val container: McaAppContainer,
+    private val chatSessionStore: ChatSessionStore,
     private val localImageModelStore: LocalImageModelStore,
     private val localImageWorkerClient: LocalImageWorkerClient,
     private val localImageLoraStore: LocalImageLoraStore,
@@ -42,18 +47,8 @@ internal class LocalImageLibraryAndModelCoordinator(
     private val fail: (String) -> Unit,
     private val persistFiles: (List<FileAssetRecord>) -> Unit,
     private val activeImageGenerationModelId: () -> String?,
-    private val activeLocalApiImageModelId: () -> String?,
-    private val imageUpscaleOwnerProvider: () -> ImageUpscaleOwner
+    private val activeLocalApiImageModelId: () -> String?
 ) {
-    private val localImageAdapterPort: LocalImageAdapterPort =
-        container.createLocalImageAdapterPort(store)
-
-    private val localImageUpscalerPort: LocalImageUpscalerPort =
-        container.createLocalImageUpscalerPort(
-            store,
-            imageUpscaleOwnerProvider
-        )
-
     fun useImageAsset(imageId: String) {
         val image = store.state.value.images.firstOrNull { it.id == imageId } ?: return
         store.update { state ->
@@ -84,7 +79,7 @@ internal class LocalImageLibraryAndModelCoordinator(
 
     fun deleteFileAsset(fileId: String) {
         deleteFileAssetFor(
-            store = store,
+            store = attachmentStore,
             persistFiles = persistFiles,
             fileId = fileId
         )
@@ -92,11 +87,11 @@ internal class LocalImageLibraryAndModelCoordinator(
 
     fun clearFileLibrary(): Job? {
         return clearFileLibraryFor(
-            store = store,
+            store = attachmentStore,
             scope = scope,
             showStatus = showStatus,
             persistFiles = { files ->
-                persistFilesFor(container.chatSessionStore, store, scope, files).await()
+                persistFilesFor(chatSessionStore, store, scope, files).await()
             }
         )
     }
@@ -114,7 +109,7 @@ internal class LocalImageLibraryAndModelCoordinator(
         deleteLocalImageTextualInversionArtifact(localImageAdapterPort, scope, id)
 
     fun downloadOfficialViggleLora() =
-        downloadOfficialViggleLoraFor(store, scope, localImageLoraStore)
+        downloadOfficialViggleLoraFor(adapterStore, scope, localImageLoraStore)
 
     fun reportMissingLocalImageTextualInversionSelection() {
         store.update {
@@ -175,7 +170,7 @@ internal class LocalImageLibraryAndModelCoordinator(
 
     fun verifyLocalImageModel(modelId: String) {
         verifyLocalImageModelFor(
-            store = store,
+            store = modelCatalogStore,
             scope = scope,
             application = application,
             localImageModelStore = localImageModelStore,
@@ -198,7 +193,7 @@ internal class LocalImageLibraryAndModelCoordinator(
             val removed = store.state.value.localImageModels.firstOrNull { it.matchesCatalogId(modelId) }
             val success = localImageModelStore.removeModelRecord(modelId)
             settleAndApplyLocalImageModelCatalogUpdate(
-                store = store,
+                store = modelSelectionStore,
                 localImageModelStore = localImageModelStore,
                 context = application,
                 managedRuntimeReadinessRefreshGate = managedRuntimeReadinessRefreshGate,

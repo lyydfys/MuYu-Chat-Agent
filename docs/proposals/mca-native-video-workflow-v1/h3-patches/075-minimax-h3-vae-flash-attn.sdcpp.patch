@@ -1,0 +1,16 @@
+diff --git a/src/model/vae/minimax_h3_vae.hpp b/src/model/vae/minimax_h3_vae.hpp
+index 4a62f53..078edd9 100644
+--- a/src/model/vae/minimax_h3_vae.hpp
++++ b/src/model/vae/minimax_h3_vae.hpp
+@@ -570,6 +570,11 @@ namespace MiniMaxH3VAE {
+                            2.961095094680786f, 2.769419908523560f, 3.049618482589722f, 2.108805418014527f,
+                            3.276226282119751f, 3.162735700607300f, 2.281681299209595f, 2.612784385681153f}) {
+             scale_input = false;
++            // nightmare (dit/075): the decoder is a 36-layer transformer over ~1,800 tokens a chunk, and without flash
++            // attention QK^T and softmax(QK^T)V run as f32 matmuls: 13.4 s against 3.4 s a chunk on the S25 (with dit/074),
++            // eight chunks for 124 frames. The app sets flash attention for the DiT only (diffusion_flash_attn), which
++            // leaves the text encoder and audio VAE as they were; this runner always takes it.
++            flash_attn_enabled = true;
+             model.init(params_ctx, tensor_storage_map, prefix);
+         }
+ 

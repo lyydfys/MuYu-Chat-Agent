@@ -1,4 +1,7 @@
 package com.muyuchat.feature.chat
+import com.muyuchat.core.designsystem.McaButton
+import com.muyuchat.core.designsystem.McaButtonStyle
+import com.muyuchat.core.designsystem.McaIcons
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -20,16 +23,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Image
-import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
@@ -49,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import com.muyuchat.core.designsystem.McaIconSize
 
 // P9/S21：从 ImageWorkspaceScreens.kt 等值移出的引擎/模板簇。
 // 原样逐字迁移，未做行为改动；4 个跨区入口按协议提升 internal。
@@ -104,9 +104,9 @@ internal fun ImageEngineSwitcher(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(7.dp)
                 ) {
-                    Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipTextColor)
+                    Icon(McaIcons.Image, contentDescription = null, modifier = Modifier.size(McaIconSize.S), tint = chipTextColor)
                     Text(selectedSource.title, fontWeight = FontWeight.Bold, color = chipTextColor)
-                    Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipMutedColor)
+                    Icon(McaIcons.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(McaIconSize.S), tint = chipMutedColor)
                 }
             }
             DropdownMenu(
@@ -154,7 +154,7 @@ internal fun ImageEngineSwitcher(
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.weight(1f)
                         )
-                        Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp), tint = chipMutedColor)
+                        Icon(McaIcons.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(McaIconSize.S), tint = chipMutedColor)
                     }
                 }
                 DropdownMenu(
@@ -246,7 +246,7 @@ internal fun ImageGenerationTerminalCard(job: ImageGenerationUiJob, onRetry: () 
                     fontSize = 13.sp
                 )
             }
-            TextButton(onClick = onRetry) {
+            McaButton(style = McaButtonStyle.Text,onClick = onRetry) {
                 Text(if (cancelled) "按原参数再生成" else "重试")
             }
         }

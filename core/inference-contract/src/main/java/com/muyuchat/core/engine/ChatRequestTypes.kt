@@ -22,6 +22,11 @@ data class ChatRequest(
     val persistentSessionId: String? = null,
     /** Only structured-capable providers serialize this allowlisted tool schema. */
     val tools: List<ChatToolDefinition> = emptyList(),
+    /**
+     * Optional provider-side JSON output constraint (for example `{"type":"json_object"}`).
+     * Agent prompted turns set it so the model cannot answer with prose; chat turns leave it null.
+     */
+    val responseFormatJson: String? = null,
     /** Tool transcript appended to this request using the provider's native message format. */
     val toolExchanges: List<ChatToolExchange> = emptyList(),
     /** Changes when edits, summary changes or explicit invalidation replace native history. */
@@ -31,7 +36,13 @@ data class ChatRequest(
     /** Fingerprint of the role card snapshot used to render this request. */
     val persistentRoleCardVersion: String? = null,
     /** Fingerprint of the role memory and progress injected into this request. */
-    val persistentMemoryVersion: String? = null
+    val persistentMemoryVersion: String? = null,
+    /**
+     * Callers that own the exact system text (for example the DSH prompted-tool
+     * protocol) disable MCA's generic reasoning instruction so no app-authored
+     * sentence is appended after their protocol tail.
+     */
+    val appendReasoningInstruction: Boolean = true
 ) {
     /**
      * Returns only the stable configured persona prefix. Request-scoped system
@@ -41,7 +52,7 @@ data class ChatRequest(
     fun fixedSystemPromptForPrefixCache(): String {
         val stablePrompt = persistentPrefixSystemPrompt?.trim().orEmpty()
         if (stablePrompt.isBlank()) return ""
-        return listOf(stablePrompt, params.reasoningInstruction())
+        return listOf(stablePrompt, reasoningInstructionOrEmpty())
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
     }
@@ -125,7 +136,7 @@ data class ChatRequest(
             addSystemPart(params.effectiveSystemPrompt())
         } else {
             inputSystemMessages.forEach { addSystemPart(it.content) }
-            addSystemPart(params.reasoningInstruction())
+            addSystemPart(reasoningInstructionOrEmpty())
         }
         addSystemPart(runtimeSystemContext)
 
@@ -143,9 +154,12 @@ data class ChatRequest(
     }
 
     private fun GenerationParams.effectiveSystemPrompt(): String =
-        listOf(systemPrompt, reasoningInstruction())
+        listOf(systemPrompt, reasoningInstructionOrEmpty())
             .filter { it.isNotBlank() }
             .joinToString("\n\n")
+
+    private fun reasoningInstructionOrEmpty(): String =
+        if (appendReasoningInstruction) params.reasoningInstruction() else ""
 
     private fun GenerationParams.reasoningInstruction(): String = when (reasoningMode) {
         ReasoningMode.OFF -> "请直接回答，不展示思考过程。"

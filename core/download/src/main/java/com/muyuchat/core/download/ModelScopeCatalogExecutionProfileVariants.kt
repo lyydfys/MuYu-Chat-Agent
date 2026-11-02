@@ -289,7 +289,77 @@ internal fun recommendedImageExecutionProfile(
         size = 1024,
         defaultNegativePrompt = RecommendedImageDefaults.LONGCAT_IMAGE_NEGATIVE_PROMPT
     )
+    "anima_preview_q4" -> animaSdcppExecutionProfile()
     else -> error("Unknown catalog image execution profile: $recommendationId")
+}
+
+/**
+ * Anima is a 16-channel DiT with flow prediction but an Euler sampler. The
+ * generic stable-diffusion.cpp builder cannot express that combination and
+ * would publish a 4-channel VAE, so the topology is declared explicitly.
+ */
+internal fun animaSdcppExecutionProfile(): ImageEngineExecutionProfileSpec {
+    val base = stableDiffusionCppExecutionProfile(
+        profileId = "sdcpp.anima-preview",
+        family = ImageEngineModelFamily.ANIMA,
+        variant = ImageEngineModelVariant.ANIMA_PREVIEW,
+        steps = 8,
+        cfgScale = 6.0,
+        algorithm = ImageEngineSchedulerAlgorithm.EULER,
+        size = 512,
+        defaultNegativePrompt = "",
+        maxPromptTokens = 512
+    )
+    return base.copy(
+        profileRevision = 1,
+        tokenizer = base.tokenizer.copy(
+            bosId = null,
+            eosId = null,
+            padId = null,
+            clip1PadRule = ImageEngineClipPadRule.MODEL_DECLARED,
+            supportsPromptWeighting = false
+        ),
+        scheduler = imageScheduler(
+            algorithm = ImageEngineSchedulerAlgorithm.EULER,
+            predictionType = ImageEnginePredictionType.FLOW,
+            defaultSteps = 8,
+            minSteps = 1,
+            maxSteps = 100
+        ),
+        vae = ImageEngineVaeContractSpec(
+            scalingLocation = ImageEngineVaeScalingLocation.RUNTIME_NATIVE,
+            scalingFactor = 1.0,
+            inputShape = listOf(1, 16, 64, 64),
+            outputShape = listOf(1, 3, 512, 512),
+            inputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+            outputLayout = ImageEngineTensorLayout.RUNTIME_NATIVE,
+            outputRange = ImageEnginePixelRange.RUNTIME_NATIVE,
+            channelOrder = ImageEngineChannelOrder.RUNTIME_NATIVE
+        ),
+        graph = ImageEngineGraphContractSpec(
+            textEncoder = "qwen_3_06b_base.safetensors",
+            unet = "anima-preview-Q4_K_M.gguf",
+            vae = "qwen_image_vae.safetensors",
+            workerStrategy = ImageEngineWorkerStrategy.IN_PROCESS
+        ),
+        capabilities = ImageEngineGenerationCapabilitiesSpec(
+            supportedSchedulers = setOf(ImageEngineSchedulerAlgorithm.EULER),
+            minWidth = 256,
+            maxWidth = 1_024,
+            minHeight = 256,
+            maxHeight = 1_024,
+            widthMultiple = 64,
+            heightMultiple = 64,
+            supportsNegativePrompt = true,
+            supportsPromptWeighting = false,
+            supportsTextualInversion = false,
+            supportsVaeTiling = false,
+            supportsUltraFix = false,
+            supportsLivePreview = false,
+            supportsLora = false,
+            maxBatchCount = 1
+        )
+    )
 }
 
 internal fun qwenImage21GgufExecutionProfile(): ImageEngineExecutionProfileSpec {

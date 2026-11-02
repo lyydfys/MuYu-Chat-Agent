@@ -275,14 +275,22 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun clearChatInvokesLifecycleClosureAfterStopAndCancel() {
-        val body = functionBody(mainViewModelSource(), "fun clearChat()")
-        val cancel = body.indexOf("cancelGenerationJob()")
-        val stop = body.indexOf("runtimeAssembly.stopGenerationAndReadStats()")
-        val close = body.indexOf("afterClearChatGenerationStopped(stoppedStats)")
+        val entry = functionBody(mainViewModelSource(), "fun clearChat()")
+        assertTrue(entry.contains("clearConversationFor("))
+        assertTrue(entry.contains("cancelGeneration = { cancelGenerationJob() }"))
+        assertTrue(entry.contains("stopGenerationAndReadStats = runtimeAssembly::stopGenerationAndReadStats"))
+        // D02 moved the transaction to its field-limited owner; pin the same order at that owner.
+        val source = conversationReplayOperationsSource()
+        val body = functionBody(source, "internal suspend fun clearConversationFor(")
+        val cancel = body.indexOf("cancelGeneration()")
+        val stop = body.indexOf("stopGenerationAndReadStats()")
+        val close = body.indexOf("afterConversationGenerationStopped(stoppedStats)")
+        val persist = body.indexOf("persistChatSessions()")
 
         assertTrue(cancel >= 0)
         assertTrue(stop > cancel)
         assertTrue(close > stop)
+        assertTrue(persist > close)
     }
 
     @Test
@@ -291,13 +299,15 @@ class MainViewModelCompletionFallbackTest {
         // invariant is read where the orchestration now lives.
         val source = stopOperationsSource()
         val body = functionBody(source, "internal fun stopActiveGeneration(")
-        val stop = body.indexOf("port.requestRuntimeStop()")
+        val stop = body.indexOf("port.requestRuntimeStop(attempt)")
         val requestTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_REQUEST_TIMEOUT_MS)")
         val joinTimeout = body.indexOf("withTimeoutOrNull(STOP_GENERATION_JOIN_TIMEOUT_MS)")
 
         assertTrue(stop >= 0)
         assertTrue(requestTimeout >= 0)
         assertTrue(joinTimeout > requestTimeout)
+        assertTrue("the exact attempt must be frozen before the stop coroutine is launched",
+            body.indexOf("port.cancelCurrentGeneration()") in 0 until body.indexOf("port.stopScope().launch"))
         assertTrue(source.contains("internal const val STOP_GENERATION_REQUEST_TIMEOUT_MS = 750L"))
         assertTrue(body.contains("已请求停止，正在恢复本地推理进程"))
         assertTrue(body.contains("rejectWhileConversationMutationInProgress()"))
@@ -355,7 +365,12 @@ class MainViewModelCompletionFallbackTest {
         assertTrue(provider.contains(".onStart"))
         assertTrue(provider.contains("afterGenerationStarted"))
         assertTrue(provider.contains(".onCompletion"))
-        assertTrue(provider.contains("afterGenerationCompleted(engine.stats.value)"))
+        // The typed CAS reducer uses one frozen runtime snapshot across retries.
+        val completion = provider.substring(provider.indexOf(".onCompletion"))
+        val frozenStats = completion.indexOf("val completedStats = engine.stats.value")
+        assertTrue(frozenStats >= 0)
+        assertTrue(frozenStats < completion.indexOf("port.updateUiState {"))
+        assertTrue(completion.contains("afterGenerationCompleted(completedStats)"))
         assertTrue(
             source.contains("state.engineLifecycle == AgentEngineLifecycle.GENERATING") ||
                 controlPlane.contains("state.engineLifecycle == AgentEngineLifecycle.GENERATING")
@@ -432,9 +447,8 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun runtimeSessionClearerDropsUiAndNonUiOwners() {
-        // R3/C3-S19: the clearer moved verbatim to RuntimeReleaseOperations.kt; the seven facts are
-        // unchanged -- they are read where the clearer now lives, with the holder-qualified
-        // spellings the move introduced (`admission.` prefix, same fields, same nulls).
+        // D02 keeps the same non-UI cleanup and UI terminal publication, now through the
+        // RuntimeProfileFields transition so this owner cannot write unrelated state.
         val body = functionBody(
             runtimeReleaseOperationsSource(),
             "internal fun clearNativeRuntimeSessionStateFor("
@@ -447,10 +461,17 @@ class MainViewModelCompletionFallbackTest {
             "admission.pendingAdaptiveRecommendation = null",
             "admission.pendingProfileTransactionId = null",
             "admission.activeProfileTransactionId = null",
-            "afterNativeRuntimeReleased("
+            "afterRuntimeNativeReleased("
         ).forEach { required ->
             assertTrue("Missing cleanup: $required", body.contains(required))
         }
+        assertTrue(body.contains("store: UiStateWriter<RuntimeProfileFields>"))
+        val snapshot = body.indexOf("val releasedStats = engine.stats.value")
+        val publication = body.indexOf("store.update")
+        val terminal = body.indexOf("afterRuntimeNativeReleased(")
+        assertTrue("Native stats must be frozen before the retryable publication", snapshot >= 0 && snapshot < publication)
+        assertTrue("The typed terminal transition must be committed by the writer", terminal > publication)
+        assertTrue(body.contains("stats = releasedStats"))
     }
 
     @Test
@@ -488,46 +509,55 @@ class MainViewModelCompletionFallbackTest {
 
     @Test
     fun failedLoadReleasesCancelledGenerationBeforeReadingDiagnostics() {
-        // R3-S24: 读新落点；拼写随迁（cancelGeneration() 注入、store.update）。
         val body = functionBody(
             loadModelOperationsSource(),
             "internal suspend fun CoroutineScope.runLoadModelBody("
         )
-        val failStart = body.indexOf("fun failBeforeNativeReplacement")
-        val cancel = body.indexOf("cancelGeneration()", failStart)
-        val fail = body.substring(failStart, cancel)
-        val release = fail.indexOf("afterGenerationTerminated(")
-        // R3/S23: 写入侧全面迁经 UiStateStore；顺序锚点随迁。
+        // The preflight failure releases the same input lock through the field-limited terminal
+        // transition; native/Binder diagnostics must still run only after that commit.
+        val fail = functionBody(body, "fun failBeforeNativeReplacement(")
         val uiUpdate = fail.indexOf("store.update")
-        // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；顺序合同不变，锚点随迁。
+        val release = fail.indexOf("afterRuntimeGenerationTerminated(")
         val nativeStats = fail.indexOf("engine.nativeStatsJsonOrEmpty()")
+        val recentLogs = fail.indexOf("engine.recentEngineLogsOrEmpty()")
+        val diagnosticPublication = fail.indexOf("store.update", uiUpdate + 1)
 
-        assertTrue(failStart >= 0)
-        assertTrue(release >= 0)
         assertTrue(uiUpdate >= 0)
-        assertTrue(nativeStats > uiUpdate)
+        assertTrue(release > uiUpdate)
         assertTrue(nativeStats > release)
+        assertTrue(recentLogs > nativeStats)
+        assertTrue("Diagnostics must be read before their separate pure publication", diagnosticPublication > recentLogs)
+        assertTrue(fail.contains("nativeStatsJson = nativeStats"))
+        assertTrue(fail.contains("logs = recentLogs"))
+        val cancel = body.indexOf("cancelGeneration()")
+        val preflight = body.indexOf("val preflight = modelStore.validateForLoad(")
+        assertTrue("The superseded generation must be cancelled before preflight can refuse the load",
+            cancel >= 0 && preflight > cancel)
     }
 
     @Test
     fun failedLifecycleOperationsReleaseCancelledGeneration() {
-        // R3-S23: 两体迁至 RuntimeLifecycleOperations.kt（cancelGeneration 以函数参数注入，
-        // 传参 lambda 在 VM 委托上保留 cancelGenerationJob 调用）；顺序合同不变——读新落点。
+        // D02 narrows the writer and terminal transition without changing cancellation/failure
+        // order. Keep reading the real unload/delete owners rather than a VM delegate.
         val source = runtimeLifecycleOperationsSource()
         val unload = functionBody(source, "internal fun unloadModelFor(")
         val delete = functionBody(source, "internal fun deleteModelFor(")
 
         val unloadCancel = unload.indexOf("cancelGeneration()")
-        val unloadRelease = unload.indexOf("afterGenerationTerminated(")
+        val unloadRelease = unload.indexOf("afterRuntimeGenerationTerminated(")
         assertTrue(unloadCancel >= 0)
-        assertTrue(unloadRelease > unloadCancel)
+        val unloadFailure = unload.indexOf("nativeRelease.isFailure &&")
+        assertTrue(unloadFailure > unloadCancel)
+        assertTrue(unloadRelease > unloadFailure)
+        assertTrue(unload.contains("store: UiStateWriter<RuntimeProfileFields>"))
 
         val deleteCancel = delete.indexOf("cancelGeneration()")
         val deleteFailure = delete.indexOf("wasLoaded && !nativeReleased")
-        val deleteRelease = delete.indexOf("afterGenerationTerminated(", deleteFailure)
+        val deleteRelease = delete.indexOf("afterRuntimeGenerationTerminated(", deleteFailure)
         assertTrue(deleteCancel >= 0)
         assertTrue(deleteFailure > deleteCancel)
         assertTrue(deleteRelease > deleteFailure)
+        assertTrue(delete.contains("store: UiStateWriter<RuntimeProfileFields>"))
     }
 
     @Test
@@ -723,6 +753,20 @@ class MainViewModelCompletionFallbackTest {
             directory = root.parentFile
         }
         error("AgentTuningOperations.kt not found from ${System.getProperty("user.dir")}")
+    }
+
+    private fun conversationReplayOperationsSource(): String {
+        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
+        repeat(8) {
+            val root = directory ?: return@repeat
+            val candidates = listOf(
+                File(root, "src/main/java/com/muyuchat/mca/ConversationReplayOperations.kt"),
+                File(root, "app/src/main/java/com/muyuchat/mca/ConversationReplayOperations.kt")
+            )
+            candidates.firstOrNull(File::isFile)?.let { return it.readText(Charsets.UTF_8) }
+            directory = root.parentFile
+        }
+        error("Unable to locate ConversationReplayOperations.kt")
     }
 
     private fun functionBody(source: String, signature: String): String {

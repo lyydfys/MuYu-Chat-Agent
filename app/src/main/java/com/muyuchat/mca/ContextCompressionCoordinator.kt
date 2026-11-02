@@ -28,7 +28,7 @@ import org.json.JSONArray
 import java.util.UUID
 
 internal class ContextCompressionCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<ContextCompressionFields>,
     private val engine: McaInferenceService,
     private val cloudChatProvider: OpenAiCompatibleChatProvider,
     private val modelGenerationProfileStore: ModelGenerationProfileStore,
@@ -96,24 +96,23 @@ internal class ContextCompressionCoordinator(
         val owner = store.current
         val sessionId = owner.activeChatSessionId ?: return
         if (owner.isGenerating || !owner.canWriteToActiveAssistantSession()) return
-        var changed = false
-        store.update { state ->
+        val occurredAt = System.currentTimeMillis()
+        val changed = store.updateWithResult { state ->
             if (state.isGenerating || state.activeChatSessionId != sessionId ||
-                !state.canWriteToActiveAssistantSession() ||
+                !state.snapshot.canWriteToActiveAssistantSession() ||
                 state.messages.none { it.id == messageId }
-            ) return@update state
+            ) return@updateWithResult state to false
             val messages = state.messages.map { message ->
                 if (message.id == messageId) message.copy(pinned = !message.pinned) else message
             }
-            changed = true
             state.copy(
                 messages = messages,
-                chatSessions = state.chatSessions.upsertSessionFor(state, sessionId, messages).map { session ->
+                chatSessions = state.chatSessions.upsertSessionFor(state.snapshot, sessionId, messages, occurredAt = occurredAt).map { session ->
                     if (session.id != sessionId) session else session.copy(
                         contextSummaries = revokeContextSummaries(session.contextSummaries)
                     )
                 }
-            )
+            ) to true
         }
         if (changed) {
             markLocalConversationContextInvalid()

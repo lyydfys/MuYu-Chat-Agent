@@ -32,7 +32,7 @@ internal interface ChatImagePromptBridgePort {
 
     fun currentState(): MainUiState
 
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (ChatPromptDraftFields) -> ChatPromptDraftFields)
 
     fun currentBridgeGeneration(): Long
 

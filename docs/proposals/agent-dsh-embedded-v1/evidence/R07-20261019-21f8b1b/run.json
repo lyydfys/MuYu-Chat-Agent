@@ -1,0 +1,1711 @@
+{
+  "schema": "mca.dsh.r07.run.v1",
+  "schemaVersion": 1,
+  "runId": "R07-20261019-21f8b1b",
+  "status": "AWAITING_FINAL_ONE_PASS_ABSOLUTE_CANDIDATE",
+  "createdAt": "2026-10-19T23:26:00+08:00",
+  "updatedAt": "2026-10-20T05:12:05+08:00",
+  "createdBy": "R00 dsh-baseline — documentation only; no build, install, or device operation performed by this owner",
+  "purpose": "Repair-round verification for the DSH sidebar entry failure: ChatViewModel navigation callback, empty model catalog startup, 401 readiness probe, and DSH workspace ViewModel recovery; plus the independent verifier's device evidence.",
+  "resultRule": "Result cells only move where matching evidence exists. Partial results carry partialPass=true and a precise scope; they are not a full functional PASS. C1-C7 remain NOT_RUN because the independent verifier did not judge code tests. DSH chat remains NOT_RUN because no composer is reachable.",
+  "source": {
+    "repairHandoffDoc": "docs/repair/DSH_SIDEBAR_ENTRY_HANDOFF_AND_FIX_PLAN_20261019.md",
+    "referenceAnalysisDoc": "docs/repair/DSHA_REFERENCE_ANALYSIS_20261019.md",
+    "repairBaseCommit": "21f8b1b3f17a233bcfadf9c810465eb6e1c37de3",
+    "repairBaseNote": "Commit named by the Lead as the repair-round base and rechecked by the repair handoff doc at 22:07.",
+    "headAtVerification": "7475fd640e21154dd9543bcae2c83ab112e30361",
+    "headAtVerificationNote": "Checkout HEAD observed by the independent verifier at 00:16 per SUMMARY.md §8, with a dirty working tree. The device verdict is bound to the APK SHA-256, not to a clean HEAD.",
+    "headAtSkeletonUpdate": "af2489909117edfa88721816a5fa40f5a4a5df9c",
+    "headObservedAt": "2026-10-20T00:57:52+08:00",
+    "headFinal": null,
+    "headFinalNote": "No clean/final HEAD has been established. The Lead message says current HEAD 7475fd64, the verifier observed 7475fd64 at 00:16, and this update observed af24899 at 00:57. Keep the APK SHA as the binding identity; if a final source snapshot is required, freeze it explicitly and re-hash.",
+    "trackedDiffBytesAtSkeleton": 219904,
+    "trackedDiffSha256AtSkeleton": "46b5459385efc232dc2f781398a20fd5665eade63ecccfedc21db4feba04cd1f",
+    "trackedDiffBytesAtUpdate": 211272,
+    "trackedDiffSha256AtUpdate": "c12489456c9c962ed21a23bdc18c04031515e5176ab3571bde00e86c6d0bd3d0",
+    "trackedDiffNote": "The tree is moving; both values are snapshots, not final freeze values.",
+    "submodulesAtR00Snapshot": [
+      {
+        "path": "third_party/llama.cpp",
+        "revision": "4ceb1719101f32637b841206c172f3f058ffc182",
+        "internalDiffSha256AtR00": "d84a4f4d348526cf492bd39c7a0e7537852730a5e2b83f1db7113a57c3559ab1",
+        "internalDiffSha256AtFinal": null
+      },
+      {
+        "path": "third_party/stable-diffusion.cpp",
+        "revision": "16b3846acfdf2c9499a3ac0c3d5d2914ebe859a0",
+        "internalDiffSha256AtR00": "fc0ea62de6de75013f45315b2ab5afedb4fa4d90945f0f4e2dd330c98d12c2c6",
+        "internalDiffSha256AtFinal": null
+      },
+      {
+        "path": "third_party/tokenizers-cpp",
+        "revision": "acbdc5a27ae01ba74cda756f94da698d40f11dfe",
+        "internalDiffSha256AtR00": "605466392a7769ed9e1625c7b03d298bbad4cb41c967df466084b2abb6eaefe6",
+        "internalDiffSha256AtFinal": null
+      }
+    ],
+    "candidateFixFiles": [
+      {
+        "path": "feature/chat/src/main/java/com/muyuchat/feature/chat/ChatViewModel.kt",
+        "sha256AtSkeleton": "6D59794FBF4BE4FDC771DA69D125991D65E3FB81D1536F8C473B0EE24F2F9D93",
+        "sha256AtUpdate": "6D59794FBF4BE4FDC771DA69D125991D65E3FB81D1536F8C473B0EE24F2F9D93",
+        "changedSinceSkeleton": false,
+        "lines": 468,
+        "role": "N1 navigation: DSH intent + screenActions binding",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "feature/chat/src/test/java/com/muyuchat/feature/chat/ChatWorkspaceNavigationTest.kt",
+        "sha256AtSkeleton": "1F7A34C6462ACF03FCC34570579A05E1396AC8E6E7B3E6E0A4711D42B29C4399",
+        "sha256AtUpdate": "1F7A34C6462ACF03FCC34570579A05E1396AC8E6E7B3E6E0A4711D42B29C4399",
+        "changedSinceSkeleton": false,
+        "lines": 67,
+        "role": "N1 tests: DSH/Agent entry isolation, no stale capability",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/readiness/LoopbackHttpProbe.kt",
+        "sha256AtSkeleton": "70E29A4A4F9ED97E3FBE3A8DF6EC02EA8EE037778BE7200D0056C3A43ADF2B8F",
+        "sha256AtUpdate": "70E29A4A4F9ED97E3FBE3A8DF6EC02EA8EE037778BE7200D0056C3A43ADF2B8F",
+        "changedSinceSkeleton": false,
+        "lines": 102,
+        "role": "S2 readiness: HTTP >=400 reads errorStream, preserves real status",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "core/dsh-runtime/src/test/java/com/muyuchat/core/dsh/runtime/readiness/LoopbackHttpProbeTest.kt",
+        "sha256AtSkeleton": "705C4904735762A827EC491A067B79B038A91C21416D75CCB580D6232F75F4E5",
+        "sha256AtUpdate": "8913D39C20670AFBDB8E2FE0C78B46697296A86087DEED790A9B822ED1BB7623",
+        "changedSinceSkeleton": true,
+        "lines": 153,
+        "role": "S2 tests: real loopback HTTP incl. full readiness sequence",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "feature/dsh-workspace/src/main/java/com/muyuchat/feature/dsh/workspace/DshWorkspaceViewModel.kt",
+        "sha256AtSkeleton": "5D6AD863FC024479DB3506AD94B2341698A85F33C5D0369545F6BD3F20AA9CFB",
+        "sha256AtUpdate": "5D6AD863FC024479DB3506AD94B2341698A85F33C5D0369545F6BD3F20AA9CFB",
+        "changedSinceSkeleton": false,
+        "lines": 552,
+        "role": "L1 lifecycle: Starting recovery, epoch owner, stale-callback isolation",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "feature/dsh-workspace/src/test/java/com/muyuchat/feature/dsh/workspace/DshWorkspaceViewModelTest.kt",
+        "sha256AtSkeleton": "9C083EF5629154E9CDFA34334496D9EE3CD9D68012EFD3D9C02803D3F8977CF8",
+        "sha256AtUpdate": "9C083EF5629154E9CDFA34334496D9EE3CD9D68012EFD3D9C02803D3F8977CF8",
+        "changedSinceSkeleton": false,
+        "lines": 295,
+        "role": "L1 tests: lifecycle/competition regressions",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "feature/dsh-workspace/build.gradle.kts",
+        "sha256AtSkeleton": "E9BD788E8E8543CC848E59D6ADF0941FF65EC7D3A5FE15F1991497223DBBB97D",
+        "sha256AtUpdate": "E9BD788E8E8543CC848E59D6ADF0941FF65EC7D3A5FE15F1991497223DBBB97D",
+        "changedSinceSkeleton": false,
+        "lines": 67,
+        "role": "test dependency: version-catalog coroutines-test",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "app/src/main/java/com/muyuchat/mca/composition/DshGatewayAssembly.kt",
+        "sha256AtSkeleton": "59FF9A871045717C7A3BA0A8674F3782BAC4F5DC7E7DC5D3DE9F35B5BAC99728",
+        "sha256AtUpdate": "59FF9A871045717C7A3BA0A8674F3782BAC4F5DC7E7DC5D3DE9F35B5BAC99728",
+        "changedSinceSkeleton": false,
+        "lines": 95,
+        "role": "S1 empty catalog: allow legal empty list, keep real failures",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "app/src/test/java/com/muyuchat/mca/dsh/DshGatewayAssemblyTest.kt",
+        "sha256AtSkeleton": "B976B39D126E7154EDE53D7C86F95BD563FCC88BEAE8506FE59CAEBBE08CF91E",
+        "sha256AtUpdate": "B976B39D126E7154EDE53D7C86F95BD563FCC88BEAE8506FE59CAEBBE08CF91E",
+        "changedSinceSkeleton": false,
+        "lines": 126,
+        "role": "S1 tests: real HTTP empty catalog/auth/missing model/catalog change",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/config/DshGatewayConfigSeeder.kt",
+        "sha256AtSkeleton": "80D0021253D39E8F8025843E44FFFD631EC08FA56C27FF69F95706FCBC223F87",
+        "sha256AtUpdate": "3470D3F4E98B0B1F58772A3049FC41CF053AEDFB0D1D67C4AC6CBDDAA78CE5E0",
+        "changedSinceSkeleton": true,
+        "lines": 218,
+        "role": "S1 empty catalog: emit models: [] not YAML null",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/service/DshRuntimeServiceClient.kt",
+        "sha256AtSkeleton": "432E5F1CF73BB593B51C970EDDB21FEA11A2B9D129BE85B8DEAB1738BE324683",
+        "sha256AtUpdate": "2484BC790AA7073756D79512AA8712059135713D86BF7D9537DFB48F6FEE4B22",
+        "changedSinceSkeleton": true,
+        "lines": 398,
+        "role": "S1 failure messaging: gateway unavailable is not always 'no model loaded'",
+        "result": "NOT_RUN"
+      },
+      {
+        "path": "core/dsh-contract/src/main/java/com/muyuchat/core/dsh/contract/DshRuntimeContract.kt",
+        "sha256AtSkeleton": "351B117DAB2DAA7939BC5F093471F2F8AD89E2C9419B1C77DECDB8B119900C67",
+        "sha256AtUpdate": "351B117DAB2DAA7939BC5F093471F2F8AD89E2C9419B1C77DECDB8B119900C67",
+        "changedSinceSkeleton": false,
+        "lines": 126,
+        "role": "contract: endpoint may represent a legal empty catalog",
+        "result": "NOT_RUN"
+      }
+    ],
+    "declaredCandidateTests": 16,
+    "candidateTestsNote": "16 is the repair handoff doc's source-declared count (2 navigation + 3 probe + 9 ViewModel + 2 assembly). Actual execution counts must come from Gradle XML/logs; the independent verifier explicitly did not judge C1-C7.",
+    "executedCandidateTests": null,
+    "headAtFixCandidate": "fd9e99a4c1a2b68e6530e59eda38e4862db4e0f3",
+    "headAtFixCandidateNote": "HEAD observed at update time (2026-10-20 01:26:58). Code freeze is in progress; this is not a clean/final headFinal.",
+    "codeFreezeInProgress": true,
+    "fixFiles": [
+      {
+        "path": "feature/dsh-workspace/src/main/java/com/muyuchat/feature/dsh/workspace/web/DshPageLayoutShim.kt",
+        "sha256AtUpdate": "6ECDCDF938C908EEDCC038F2E3FDB0239771FD47F4A2F86BB1AD6D30E18B2AED",
+        "lines": 99,
+        "role": "FIX-1 layout: html-height shim plus same-origin CSSOM vh/dvh rewrite to measured pixels (A3 picker-clipping fix); no JS bridge, no DSH/token access"
+      },
+      {
+        "path": "feature/dsh-workspace/src/main/java/com/muyuchat/feature/dsh/workspace/web/DshWebViewHost.kt",
+        "sha256AtUpdate": null,
+        "lines": null,
+        "role": "Calls DshPageLayoutShim on page start/finish and content-size changes (lines 139-168)"
+      },
+      {
+        "path": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/config/DshGatewayConfigSeeder.kt",
+        "sha256AtUpdate": "24693BC1FDCA29C164E7E16CE527C36E25E06F82E32CE8639017112CD11D574B",
+        "lines": 590,
+        "role": "FIX-2 seeder: workspace-controller.documentsDirectory = <files/dsh/workspace>; Android has no OS Documents lookup"
+      },
+      {
+        "path": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/service/DshRuntimeServiceClient.kt",
+        "sha256AtUpdate": "F355EC4B23234530FB6E26C7E95645C7A76A775B25CE5E204F4873E0B64629CF",
+        "lines": 381,
+        "role": "Review P1: Node cwd=workspace; stop-fence re-scan; failure classification"
+      }
+    ],
+    "headAtA3": "afd9694e23bb41ab3517088005c9ead8fe5ad692",
+    "headAtA3Note": "HEAD observed at update time (2026-10-20 02:26:45). headFinal remains null; release build R8 is in progress per Lead.",
+    "headAtA4": "afd9694e23bb41ab3517088005c9ead8fe5ad692",
+    "headAtA4Note": "HEAD observed at update time (2026-10-20 02:26:45). headFinal still not frozen.",
+    "headAtFinalUpdate": "4a60709bd5ec6434d8629a9f6ab113d8b95bcafa",
+    "headAtFinalUpdateNote": "HEAD observed at 2026-10-20 03:15:12. headFinal/commit NOT frozen; release was built before this HEAD and the verdict is bound to the release APK SHA-256.",
+    "headAtHardeningCandidate": "26dcd81d43c1800849247660bf85ce1d28acbb87",
+    "headAtHardeningCandidateNote": "HEAD observed 2026-10-20 03:41:20. headFinal/commit still not frozen.",
+    "headAtRebuiltHardeningCandidate": "26dcd81d43c1800849247660bf85ce1d28acbb87",
+    "headAtRebuiltHardeningCandidateNote": "HEAD observed 03:41:20 at previous update; headFinal/commit still not frozen.",
+    "headAtAbsoluteCandidate": "1965bed836de40610948d92e2e1bb62890635d93",
+    "headAtAbsoluteCandidateNote": "HEAD observed 2026-10-20 03:56:07. headFinal/commit still not frozen."
+  },
+  "officialDsh": {
+    "commit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+    "packageVersion": "0.2.1-rc.2",
+    "sourceIdentity": ".mca-review-sha marker; the audit copy is a source archive, not a git checkout",
+    "lockfileSha256": null
+  },
+  "payload": {
+    "referencePayload": {
+      "artifact": "DeepSeekHarness.apk (woaiys3/deepseek-harness-android-app, release v1.20.1)",
+      "url": "https://github.com/woaiys3/deepseek-harness-android-app/releases/download/v1.20.1/DeepSeekHarness.apk",
+      "sizeBytes": 162006797,
+      "sha256": "c324272bff00e8cce06e0baa2ebb9b88e524a5d246e06f8cb55d39df7c66dafa",
+      "status": "FINAL_DOWNLOAD_VERIFIED",
+      "payloadInternalManifest": "NOT_FINAL (owned by dsh-runtime; not received)",
+      "note": "Reference runtime payload only. It is NOT the MCA candidate APK and its hash must never be pasted as the candidate identity."
+    },
+    "candidateApk": {
+      "status": "VERIFIED_ON_DEVICE",
+      "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+      "sha256": "4500a34e3cc9b5f8dede14b98354281c5a7dd8d03f51281fd6237ba13556ddc5",
+      "sizeBytes": 393690015,
+      "mtime": "2026-10-20T00:06:24+08:00",
+      "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+      "signerSubject": "CN=MuYu Chat Agent, OU=MCA, O=MCA, L=Local, ST=Local, C=CN",
+      "packageName": "com.muyuchat.mca",
+      "versionCode": 8,
+      "versionName": "0.2.4",
+      "minSdk": 26,
+      "targetSdk": 36,
+      "compileSdk": 36,
+      "abi": "arm64-v8a",
+      "dshPayloadVersion": "dsh-0.2.1-rc.2+android-ref-c324272bff00",
+      "builtFromHead": "NOT_ESTABLISHED",
+      "builtFromHeadNote": "The verdict is bound to the APK SHA-256. The verifier observed checkout HEAD 7475fd64 with a dirty tree at 00:16; the APK mtime is 00:06:24. Do not claim the APK is a clean build of any single commit.",
+      "buildTask": "release (task/file not independently confirmed by this owner)",
+      "builtAt": "2026-10-20T00:06:24+08:00",
+      "verificationRun": "artifacts/dsh-verify/20261020-001623",
+      "installation": {
+        "result": "PASS",
+        "command": "adb -s 98a37aa7 install -r -d --no-streaming <apk>",
+        "firstInstallTimeBefore": "2026-10-03 02:25:09",
+        "firstInstallTimeAfter": "2026-10-03 02:25:09",
+        "lastUpdateTimeBefore": "2026-10-19 23:39:54",
+        "lastUpdateTimeAfter": "2026-10-20 00:17:36",
+        "dataPreserved": true,
+        "previousBaseApkBytes": 495508924,
+        "installedBaseApkBytes": 393690015,
+        "noUninstallNoClear": true
+      }
+    },
+    "observedLocalArtifactsNonEvidence": [
+      {
+        "path": "app/build/outputs/apk/diagnostic/app-diagnostic.apk",
+        "sizeMB": 535.79,
+        "lastWrite": "2026-10-19T23:00:48+08:00",
+        "sha256": "183143EE2507D6377ACC86BCEA387217B9C68B0C508B26109C3CFF782FD46526",
+        "note": "Observed on disk only. Debuggable diagnostic variant; not the verified candidate and not evidence."
+      }
+    ],
+    "fixCandidateApk": {
+      "status": "VERIFICATION_IN_PROGRESS",
+      "attemptId": "A2",
+      "path": "E:\\MAC\\app\\build\\outputs\\apk\\diagnostic\\app-diagnostic.apk",
+      "sha256": "0d48974f25ec681ef47d6c0798efa464e52b04c79f81f4074f5dc35db107027d",
+      "sizeBytes": 563846247,
+      "mtime": "2026-10-20T01:24:59+08:00",
+      "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+      "packageName": "com.muyuchat.mca",
+      "versionCode": 8,
+      "versionName": "0.2.4-diag",
+      "compileSdk": 36,
+      "targetSdk": 36,
+      "abi": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "debuggableDiagnostic": true,
+      "verificationRun": "artifacts/dsh-verify/20261020-013442",
+      "verificationStatus": "in progress — only identity files were present at update time; no E2E verdict yet",
+      "note": "This is a debuggable diagnostic APK, not the release candidate. Do not present it as the release artifact; use it only for the fix-candidate E2E."
+    },
+    "a3CandidateApk": {
+      "status": "VERIFIED_ON_DEVICE_A3",
+      "attemptId": "A3",
+      "path": "E:\\MAC\\app\\build\\outputs\\apk\\diagnostic\\app-diagnostic.apk",
+      "sha256": "294d965613f676a7de877b80a4824ca8ab8893ca399584c4aaea0c0af29beeb6",
+      "sizeBytes": 563846247,
+      "mtime": "2026-10-20T02:17:20+08:00",
+      "versionName": "0.2.4-diag",
+      "versionCode": 8,
+      "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+      "installedAt": "2026-10-20T02:23:57+08:00",
+      "installedOver": "release 393,695,951 B, lastUpdate 2026-10-20 02:21:27",
+      "dataPreserved": true,
+      "debuggableDiagnostic": true,
+      "verificationRun": "artifacts/dsh-verify/20261020-022248",
+      "note": "Debuggable diagnostic, not the release artifact. Release build R8 is in progress; hash pending."
+    },
+    "releaseBuildPending": {
+      "status": "BUILD_COMPLETE_E2E_PENDING",
+      "note": "Build completed; independent release E2E is the remaining gate. The earlier 02:15:17 artifact (393,695,951 B, 360F8632…) is superseded by this A4 release."
+    },
+    "releaseApk": {
+      "status": "CANDIDATE_PENDING_FINAL_ONE_PASS",
+      "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+      "sha256": "0a731d84507813daf0f1dda64eaf8e98e2f934911cc71cbe839a4e5fbfcdfb62",
+      "sizeBytes": 393714839,
+      "mtime": "2026-10-20T03:27:50+08:00",
+      "versionName": "0.2.4",
+      "versionCode": 8,
+      "minSdk": 26,
+      "targetSdk": 36,
+      "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+      "signed": true,
+      "classesDexChecks": {
+        "MCA local model": 1,
+        "Qwen3.5": 27,
+        "dexBytes": 12149580
+      },
+      "payloadPresent": true,
+      "nativeLibs": 7,
+      "independentChecks": "R00 re-hashed: size/SHA-256 match Lead; aapt2 badging 0.2.4/8/min26/target36; apksigner signer 2619ac4c…; zip has assets/dsh/payload.zip + assets/dsh/MANIFEST.json + 7 libdsh*.so; classes.dex contains the display-name strings.",
+      "verifier": "dsh-verify FINAL-ONE-PASS",
+      "verifierStatus": "PENDING",
+      "note": "Use this candidate unless verifier fails. Do not mark PASS until FINAL-ONE-PASS returns. The previously accepted A4 artifact 59A40724… is now the previous artifact, not the final candidate."
+    },
+    "previousReleaseApk": {
+      "status": "VERIFIED_ACCEPTED_PARTIAL",
+      "attemptId": "A4",
+      "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+      "sha256": "59a407242feddcdb8bca4598231cb9cc831a6c461e9c92444909f77868e031df",
+      "sizeBytes": 393702651,
+      "mtime": "2026-10-20T02:44:37+08:00",
+      "versionName": "0.2.4",
+      "versionCode": 8,
+      "minSdk": 26,
+      "targetSdk": 36,
+      "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+      "packageName": "com.muyuchat.mca",
+      "buildCommand": ":app:assembleRelease -Pmca.abis=arm64-v8a -Pmca.keepNativeSymbols=true",
+      "buildResult": "BUILD SUCCESSFUL in 22m 6s",
+      "buildLog": "E:\\tmp\\dsh-final-gates\\release3.log",
+      "buildRc": "RELEASE3_RC=0",
+      "payload": {
+        "assetsDshManifestBytes": 7664,
+        "assetsDshPayloadZipBytes": 160464248
+      },
+      "nativeLibs": [
+        {
+          "path": "lib/arm64-v8a/libdshnode.so",
+          "bytes": 49715528
+        },
+        {
+          "path": "lib/arm64-v8a/libdshrg.so",
+          "bytes": 4868920
+        },
+        {
+          "path": "lib/arm64-v8a/libdshgit.so",
+          "bytes": 3562128
+        },
+        {
+          "path": "lib/arm64-v8a/libdshgitremotehttp.so",
+          "bytes": 2010824
+        },
+        {
+          "path": "lib/arm64-v8a/libdshgitremotehttps.so",
+          "bytes": 2010824
+        },
+        {
+          "path": "lib/arm64-v8a/libdshcurl.so",
+          "bytes": 308272
+        },
+        {
+          "path": "lib/arm64-v8a/libdshpython.so",
+          "bytes": 4448
+        }
+      ],
+      "independentlyRehashed": true,
+      "note": "Final release artifact per Lead. Release E2E pending; do not mark release PASS and do not reuse A3 diagnostic PASS as release evidence.",
+      "install": {
+        "result": "PASS",
+        "time": "2026-10-20T02:49:58+08:00",
+        "firstInstallTime": "2026-10-03 02:25:09 (unchanged)",
+        "dataPreserved": true,
+        "installedBaseApkBytes": 393702651,
+        "note": "Installed over diagnostic 0.2.4-diag without clearing data."
+      },
+      "verification": "artifacts/dsh-verify/20261020-024856 (release round)"
+    },
+    "releaseE2E": {
+      "status": "PENDING_FINAL_ONE_PASS",
+      "finalCandidateSha256": "0a731d84507813daf0f1dda64eaf8e98e2f934911cc71cbe839a4e5fbfcdfb62",
+      "previousA4Sha256": "59a407242feddcdb8bca4598231cb9cc831a6c461e9c92444909f77868e031df",
+      "note": "A4 release E2E / model adaptation results (59A40724…) are provisional previous-artifact evidence. FINAL-ONE-PASS must bind to 0A731D84…."
+    }
+  },
+  "device": {
+    "status": "PHONE_VERIFIED_PARTIAL",
+    "verificationSerial": "98a37aa7",
+    "phone": {
+      "serial": "98a37aa7",
+      "model": "25091RP04C",
+      "brand": "Xiaomi",
+      "device": "piano",
+      "androidRelease": "17",
+      "sdk": 37,
+      "buildFingerprint": "Xiaomi/piano/piano:17/CP2A.260605.016/OS4.0.0.44.XPYCNXM:user/release-keys",
+      "buildDisplay": "OS4.0.0.44.XPYCNXM",
+      "soc": "SM8750P",
+      "abi": "arm64-v8a",
+      "screen": "2136x3200",
+      "densityDpi": 440,
+      "fontScale": 1.0,
+      "dataFreeBeforeInstall": "21 GB (91% used)",
+      "securityPatch": "see artifacts/dsh-verify/20261020-001623/identity/security-patch.txt"
+    },
+    "tablet": null,
+    "emptyModelEvidence": {
+      "serial": "f9d98aa3",
+      "status": "LEAD_PROVIDED_NOT_INDEPENDENTLY_VERIFIED",
+      "note": "The independent dsh-verify run states it only touched 98a37aa7 and never f9d98aa3. The f9d98aa3 empty-model observation and screenshots were provided by the Lead/operator; they are not part of the independent verifier's run and must be labeled as such.",
+      "screenshots": [
+        {
+          "path": "E:\\tmp\\f9-u1.png",
+          "observed": "blank white main pane with only the hamburger; no 预览版说明 modal visible in this file"
+        },
+        {
+          "path": "E:\\tmp\\f9-u2.png",
+          "observed": "official DSH sidebar open (deepseek HARNESS, 新会话, 插件, 自动化任务, 工作区, 暂无会话, 更多) over a blank white main pane"
+        }
+      ],
+      "leadStatement": "READY with empty catalog on f9d98aa3; official preview dialog and official sidebar captured.",
+      "labelNote": "f9-u1.png is described by the Lead as the preview dialog, but the file itself shows a blank pane with a hamburger. The official 预览版说明 modal is corroborated on 98a37aa7 by artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png. Do not relabel f9-u1 as the preview modal without a matching screenshot."
+    }
+  },
+  "evidence": {
+    "independentVerifierRoot": "artifacts/dsh-verify/20261020-001623",
+    "summary": "artifacts/dsh-verify/20261020-001623/SUMMARY.md",
+    "verdict": "artifacts/dsh-verify/20261020-001623/verdict.json",
+    "commands": "artifacts/dsh-verify/20261020-001623/commands-run.md",
+    "identity": [
+      "artifacts/dsh-verify/20261020-001623/identity/apk-identity.txt",
+      "artifacts/dsh-verify/20261020-001623/identity/aapt-badging.txt",
+      "artifacts/dsh-verify/20261020-001623/identity/apksigner-certs.txt",
+      "artifacts/dsh-verify/20261020-001623/identity/dsh-MANIFEST.json",
+      "artifacts/dsh-verify/20261020-001623/identity/device-identity.txt"
+    ],
+    "install": [
+      "artifacts/dsh-verify/20261020-001623/install/install.log",
+      "artifacts/dsh-verify/20261020-001623/install/install-timing.txt",
+      "artifacts/dsh-verify/20261020-001623/install/package-after.txt"
+    ],
+    "logs": [
+      "artifacts/dsh-verify/20261020-001623/logs/logcat-dsh-10s.txt",
+      "artifacts/dsh-verify/20261020-001623/logs/logcat-all-0023.txt",
+      "artifacts/dsh-verify/20261020-001623/logs/logcat-all-0027.txt",
+      "artifacts/dsh-verify/20261020-001623/logs/ps-full-final.txt",
+      "artifacts/dsh-verify/20261020-001623/logs/gateway-listen-final.txt"
+    ],
+    "shots": {
+      "entryAndRuntime": "artifacts/dsh-verify/20261020-001623/shots/dsh-3s.png (starting shell), dsh-10s.png (official welcome modal), sidebar-open.png",
+      "blankMainPane": "artifacts/dsh-verify/20261020-001623/shots/dsh-main-8s.png, dsh-after-continue.png, dsh-sidebar-closed.png",
+      "reentry": "artifacts/dsh-verify/20261020-001623/shots/e5-reentry-3s.png, e5-reentry-8s.png",
+      "background": "artifacts/dsh-verify/20261020-001623/shots/e6-background-return.png",
+      "modeIsolation": "artifacts/dsh-verify/20261020-001623/shots/e8-kotlin-agent.png, e8-back-to-chat.png, final-state-chat.png",
+      "emptyModel": "E:\\tmp\\f9-u1.png, E:\\tmp\\f9-u2.png (Lead-provided; not independent verifier)"
+    },
+    "dumps": "artifacts/dsh-verify/20261020-001623/dumps/*.xml and *.nodes.txt",
+    "referenceAnalysis": "docs/repair/DSHA_REFERENCE_ANALYSIS_20261019.md",
+    "fixCandidate": {
+      "rootCauseDoc": "Lead update 2026-10-20 01:35 (no separate repair doc yet)",
+      "visualProof": "E:\\tmp\\f9-vp3.png",
+      "diagnosticApk": "app/build/outputs/apk/diagnostic/app-diagnostic.apk (0d48974f…, 563,846,247 B)",
+      "verifierRunInProgress": "artifacts/dsh-verify/20261020-013442 (identity files present; E2E pending)"
+    },
+    "releaseIdentity": {
+      "apk": "app/build/outputs/apk/release/app-release.apk (59A40724…31DF, 393,702,651 B)",
+      "buildLog": "E:\\tmp\\dsh-final-gates\\release3.log",
+      "index": "E:\\tmp\\dsh-final-gates\\index.txt (RELEASE3_RC=0)",
+      "payloadEntries": "assets/dsh/MANIFEST.json 7,664 B; assets/dsh/payload.zip 160,464,248 B",
+      "nativeLibs": "7 libdsh*.so under lib/arm64-v8a"
+    },
+    "releaseFinal": {
+      "releaseRun": "artifacts/dsh-verify/20261020-024856 (RELEASE-REPORT.md, verdict.json)",
+      "modelAdaptationRun": "artifacts/dsh-verify/20261020-025707",
+      "keyShots": [
+        "artifacts/dsh-verify/20261020-025707/shots/ma-dsh-16384-90s.png",
+        "artifacts/dsh-verify/20261020-025707/shots/ma-dsh-16384-2min.png",
+        "artifacts/dsh-verify/20261020-025707/shots/ma-active-context-confirm.png",
+        "artifacts/dsh-verify/20261020-024856/shots/rel-dsh-10s.png",
+        "artifacts/dsh-verify/20261020-024856/shots/rel-picker-submenu.png"
+      ],
+      "logs": [
+        "artifacts/dsh-verify/20261020-025707/logs/logcat-dsh-16384-entry.txt",
+        "artifacts/dsh-verify/20261020-025707/logs/force-stop-restart-16384.log",
+        "artifacts/dsh-verify/20261020-024856/logs/logcat-dsh-10s.txt"
+      ]
+    },
+    "finalCandidate": {
+      "apk": "app/build/outputs/apk/release/app-release.apk (0A731D84…FB62, 393,714,839 B, mtime 03:27:50)",
+      "classesDexStrings": "MCA local model x1, Qwen3.5 x27 (R00 byte scan)",
+      "finalOnePass": "PENDING — dsh-verify",
+      "decisionSheet": "R07-DECISION-SHEET.md"
+    },
+    "finalOnePass": {
+      "root": "artifacts/dsh-verify/20261020-033121",
+      "finalReport": "artifacts/dsh-verify/20261020-033121/FINAL-ONE-PASS.md",
+      "verdict": "artifacts/dsh-verify/20261020-033121/verdict.json",
+      "shots": [
+        "fp-dsh-10s.png",
+        "fp-picker-submenu.png",
+        "fp-local-stream-30s.png",
+        "fp-local-stream-95s.png",
+        "fp-e5-reentry.png",
+        "fp-e6-return.png",
+        "fp-e8-agent.png"
+      ],
+      "logs": [
+        "logcat-dsh-10s.txt",
+        "native-load-context-16384.txt",
+        "ps-final.txt",
+        "crash-scan.txt"
+      ]
+    },
+    "hardeningCandidate": {
+      "apk": "app/build/outputs/apk/release/app-release.apk (E0B97FB3…2E59, 393,715,027 B, 03:49:47)",
+      "mapping": "app/build/outputs/mapping/release/mapping.txt (fencedPids x1, DshLocalModelDisplayName x32)",
+      "runtimeTests": "core/dsh-runtime/build/test-results/testDebugUnitTest (80/80, 0 failures, 03:50:52)",
+      "verifier": "PENDING"
+    },
+    "rebuiltHardeningCandidate": {
+      "apk": "app/build/outputs/apk/release/app-release.apk (2005DF02…94DC, 393,715,727 B, 04:06:35)",
+      "dexProof": "stop-fence log + survivingPids + label regexes",
+      "mapping": "app/build/outputs/mapping/release/mapping.txt (04:04:21; getTrackedPids x3, getSurvivingPids x1, fencedPids x1, DshLocalModelDisplayName x36)",
+      "buildLog": "E:\\tmp\\dsh-final-gates\\release-hardened.log (BUILD SUCCESSFUL 6m45s; RC=0)",
+      "runtimeTests": "core/dsh-runtime/build/test-results/testDebugUnitTest (80/80, latest XML 03:50:52)",
+      "verifier": "PENDING focused retest"
+    },
+    "finalHardening": {
+      "root": "artifacts/dsh-verify/20261020-041600",
+      "report": "artifacts/dsh-verify/20261020-041600/HARDENING-VERIFY.md",
+      "verdict": "artifacts/dsh-verify/20261020-041600/verdict.json",
+      "identity": "identity/apk-identity.txt, dex-strings.txt, r8-mapping-hits.txt, label-check.txt",
+      "shots": [
+        "r-dsh-10s.png",
+        "r-picker-submenu.png",
+        "r-chip-cloud.png",
+        "r-chip-local.png",
+        "r-local-30s.png",
+        "r-local-105s.png",
+        "r-e5-reentry.png"
+      ],
+      "logs": [
+        "logcat-dsh-10s.txt",
+        "native-load.txt",
+        "ps-final.txt",
+        "crash-scan.txt"
+      ]
+    },
+    "absoluteFinalCandidate": {
+      "apk": "app/build/outputs/apk/release/app-release.apk (B610E1D0…AE9A, 393,717,991 B, 05:06:13)",
+      "dexProof": "stop verification failed x1, found survivors x1, survivingPids x1, label regexes x1 each; refusing start orphans not found verbatim",
+      "runtimeTests": "core/dsh-runtime/build/test-results/testDebugUnitTest (93/93, 0 failures, 17 suites)",
+      "codeReview": "P1-R1/R2 signed off closed (Lead)",
+      "verifier": "PENDING short regression"
+    }
+  },
+  "verifierVerdicts": {
+    "1_identity_and_install": "PASS",
+    "2_cold_start_and_model_load": "PASS",
+    "3_dsh_entry_frontend_ready_gateway_single_node_model_picker": "FAIL (partial: entry/READY/single-node/gateway seed PASS; main conversation view blank; model picker unreachable)",
+    "4_isolate_frontend_stop": "DONE",
+    "5a_e5_single_host_no_second_node": "PASS",
+    "5b_e5_page_recovery": "FAIL",
+    "5c_e8_mode_isolation": "PASS",
+    "6_dsh_chat_message": "NOT_RUN",
+    "7_c1_c7_code_tests": "NOT_MINE (not judged; remain NOT_RUN in this skeleton)"
+  },
+  "cases": [
+    {
+      "caseId": "C1",
+      "group": "repair-gate",
+      "title": "Chat navigation behavior tests",
+      "result": "PASS",
+      "evidence": [
+        "feature/chat/build/test-results/testDebugUnitTest/TEST-com.muyuchat.feature.chat.ChatWorkspaceNavigationTest.xml (timestamp 2026-10-19T15:32:21Z)"
+      ],
+      "actual": "2 tests, 0 failures",
+      "notes": "XML predates A3 and the final gate log; behavior covered, source freeze still pending Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C2",
+      "group": "repair-gate",
+      "title": "DSH runtime tests (probe/owner/auth/payload/readiness)",
+      "result": "PASS",
+      "evidence": [
+        "core/dsh-runtime/build/test-results/testDebugUnitTest (16 XML suites, timestamp 01:44:20) + E:\\tmp\\dsh-final-gates\\modules.log (BUILD SUCCESSFUL)"
+      ],
+      "actual": "77 tests, 0 failures",
+      "notes": "PASS per final gate evidence. Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C3",
+      "group": "repair-gate",
+      "title": "DSH workspace lifecycle tests",
+      "result": "PASS",
+      "evidence": [
+        "feature/dsh-workspace/build/test-results/testDebugUnitTest (11 suites, 01:44:29) + modules.log"
+      ],
+      "actual": "68 tests, 0 failures",
+      "notes": "PASS per final gate evidence. Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C4",
+      "group": "repair-gate",
+      "title": "Gateway regression tests",
+      "result": "PASS",
+      "evidence": [
+        "api/dsh-gateway/build/test-results/testDebugUnitTest (12 suites, 01:44:34) + modules.log"
+      ],
+      "actual": "77 tests, 0 failures",
+      "notes": "PASS per final gate evidence. Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C5",
+      "group": "repair-gate",
+      "title": "Gateway assembly real HTTP tests",
+      "result": "PASS",
+      "evidence": [
+        "app/build/test-results/testDebugUnitTest (6 DSH suites, 01:44:50) + E:\\tmp\\dsh-final-gates\\app-dsh.log"
+      ],
+      "actual": "74 tests, 0 failures",
+      "notes": "PASS per final gate evidence. Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C6",
+      "group": "repair-gate",
+      "title": "Chat + app DSH regression set",
+      "result": "PASS",
+      "evidence": [
+        "feature/chat/build/test-results/testDebugUnitTest (52 suites, 0 failures, timestamp 2026-10-19T15:32:24Z) + app DSH 74/74"
+      ],
+      "actual": "357 tests, 0 failures",
+      "notes": "chat suite result predates A3/final gate; app DSH set is 01:44 Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "C7",
+      "group": "repair-gate",
+      "title": "Architecture rules",
+      "result": "PASS",
+      "evidence": [
+        "Lead-reported PASS; final raw log not located under E:\\tmp\\dsh-final-gates at update time (earlier stale log: E:\\tmp\\dsh-fix-verify\\C7-architecture.log)"
+      ],
+      "actual": "architecture check tests, 0 failures",
+      "notes": "PASS recorded per Lead; raw final log must be attached before release evidence is complete Release E2E accepted these gates; C7 raw final log still missing.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "finalOnePassCaveat": "architecture RC=0; final raw log missing",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E1",
+      "group": "device",
+      "title": "Reproduce closed loop: chat sidebar -> DSH entry",
+      "result": "PASS",
+      "partialPass": true,
+      "resultQualifier": "PARTIAL — entry only: leaves chat, enters DSH, official shell + welcome modal render; main pane is blank, so this is not a usable-DSH PASS",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6",
+        "artifacts/dsh-verify/20261020-001623/verdict.json",
+        "artifacts/dsh-verify/20261020-001623/shots/sidebar-open.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-3s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png"
+      ],
+      "actual": "Tap DSH row at 00:20:24; READY epoch=1 at 00:20:32.976; official welcome modal rendered at 00:20:39; 继续 closes it to a blank main pane",
+      "notes": "Entry PASS on release APK (98a37aa7).",
+      "previousResult": "PASS (partial, A1 entry only)",
+      "previousObservation": "Tap DSH row at 00:20:24; READY epoch=1; official shell + welcome modal rendered; main pane blank after 继续",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6",
+        "artifacts/dsh-verify/20261020-001623/verdict.json",
+        "artifacts/dsh-verify/20261020-001623/shots/sidebar-open.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-3s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png",
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6",
+        "artifacts/dsh-verify/20261020-001623/verdict.json",
+        "artifacts/dsh-verify/20261020-001623/shots/sidebar-open.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-3s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E2",
+      "group": "device",
+      "title": "No-model cold start / empty catalog",
+      "result": "PASS",
+      "partialPass": false,
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/shots/a3-dsh-10s.png",
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md",
+        "artifacts/dsh-verify/20261020-022248/verdict.json"
+      ],
+      "actual": "official hero/composer rendered; default workspace; no white pane; picker lists two MCA models",
+      "notes": "Official UI + default workspace PASS on release APK.",
+      "previousResult": "PASS (partial, A1; Lead-provided)",
+      "previousObservation": "f9d98aa3 READY + official sidebar; main pane blank",
+      "previousEvidence": [
+        "E:\\tmp\\f9-u1.png",
+        "E:\\tmp\\f9-u2.png",
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6 (shell/onboarding context)"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E3",
+      "group": "device",
+      "title": "Official resources ready / functional frontend",
+      "result": "PASS",
+      "partialPass": false,
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/shots/a3-picker-submenu.png",
+        "artifacts/dsh-verify/20261020-022248/shots/a3-local-selected-real-tap.png",
+        "artifacts/dsh-verify/20261020-022248/logs/picker-evidence.json",
+        "artifacts/dsh-verify/20261020-022248/logs/cdp-menu-css.json"
+      ],
+      "actual": "official hero/composer render; picker menu surface h=98/computed 90px/max 360px (A2 was 0/0); two MCA models visible; real adb taps switch chips",
+      "notes": "Official UI + picker PASS on release APK; local turn separately PASS at n_ctx=16384, cloud BLOCKED.",
+      "previousResult": "FAIL (partial, A1)",
+      "previousObservation": "READY/auth/single-Node/gateway PASS; official main conversation view never rendered",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6",
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#7",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-main-8s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-after-continue.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E4",
+      "group": "device",
+      "title": "Authentication boundary",
+      "result": "NOT_RUN",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#7 (401 before cookie observed)"
+      ],
+      "actual": "Verifier observed 401 before cookie on / and gateway; dedicated token audit not recorded",
+      "notes": "Token audit still not run.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#7 (401 before cookie observed)"
+      ],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "finalOnePassNote": "no evidence in FINAL-ONE-PASS",
+      "previousFinalOnePassStatus": "NOT_RUN"
+    },
+    {
+      "caseId": "E5",
+      "group": "device",
+      "title": "Repeated entry / host reuse / page recovery",
+      "result": "PASS",
+      "partialPass": false,
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/shots/a3-e5-reentry-real.png",
+        "artifacts/dsh-verify/20261020-022248/logs/ps-e5-before.txt",
+        "artifacts/dsh-verify/20261020-022248/logs/ps-e5-after.txt",
+        "artifacts/dsh-verify/20261020-022248/logs/logcat-e5-reentry.txt"
+      ],
+      "actual": "same :dsh PID 11167 and libdshnode PID 11197 before/after re-entry; same session restored; no new READY/gateway generation; single Node",
+      "notes": "Same :dsh PID 20632 / node 20661; page recovered.",
+      "previousResult": "FAIL (A1)",
+      "previousObservation": "single-host/no-second-Node PASS; page recovery FAIL",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#5",
+        "artifacts/dsh-verify/20261020-001623/logs/ps-before-reentry.txt",
+        "artifacts/dsh-verify/20261020-001623/logs/ps-after-reentry.txt",
+        "artifacts/dsh-verify/20261020-001623/logs/logcat-reentry.txt (0 bytes)",
+        "artifacts/dsh-verify/20261020-001623/shots/e5-reentry-3s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/e5-reentry-8s.png"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "previousSubResults": {
+        "singleHostNoSecondNode": "PASS",
+        "pageRecovery": "FAIL"
+      },
+      "rerunStatus": "A3_COMPLETE",
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E6",
+      "group": "device",
+      "title": "Background recovery",
+      "result": "PASS",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md (background/return PASS from A2, unchanged)",
+        "artifacts/dsh-verify/20261020-001623/shots/e6-background-return.png"
+      ],
+      "actual": "background/return PASS (A2 evidence, unchanged by A3); model turn attempts under this scenario: local FAIL n_ctx 8192, cloud BLOCKED 503",
+      "notes": "Background/return PASS (A2 evidence unchanged).",
+      "previousResult": "FAIL (A1)",
+      "previousObservation": "background/foreground returned to a blank page",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6 (00:22:07 background -> 00:26:43 foreground, page still blank)",
+        "artifacts/dsh-verify/20261020-001623/shots/e6-background-return.png",
+        "artifacts/dsh-verify/20261020-001623/logs/e6-return-am.txt"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "partialPass": false,
+      "rerunStatus": "A3_COMPLETE",
+      "modelBackendResults": {
+        "local": "PASS at n_ctx=16384",
+        "cloud": "BLOCKED external"
+      },
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E7",
+      "group": "device",
+      "title": "Runtime failure / new generation recovery",
+      "result": "NOT_RUN",
+      "evidence": [],
+      "actual": null,
+      "notes": "No controlled failure injection.",
+      "boundApk": "A4-release-59a40724",
+      "rerunStatus": "A3_COMPLETE",
+      "previousEvidence": [],
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "finalOnePassNote": "no evidence in FINAL-ONE-PASS",
+      "previousFinalOnePassStatus": "NOT_RUN"
+    },
+    {
+      "caseId": "E8",
+      "group": "device",
+      "title": "Mode isolation: Kotlin Agent / DSH / tuning",
+      "result": "PASS",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md",
+        "artifacts/dsh-verify/20261020-001623/shots/e8-kotlin-agent.png",
+        "artifacts/dsh-verify/20261020-022248/shots/a3-final-chat.png"
+      ],
+      "actual": "Kotlin Agent + chat still usable; model chip reads 已就绪 · MNN 高速引擎",
+      "notes": "Kotlin Agent/chat/model PASS.",
+      "previousResult": "PASS (A1)",
+      "previousObservation": "Kotlin Agent/chat/model remained usable",
+      "previousEvidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#5c",
+        "artifacts/dsh-verify/20261020-001623/shots/e8-kotlin-agent.png",
+        "artifacts/dsh-verify/20261020-001623/shots/e8-back-to-chat.png",
+        "artifacts/dsh-verify/20261020-001623/shots/final-state-chat.png",
+        "artifacts/dsh-verify/20261020-001623/dumps/e8-kotlin-agent.xml"
+      ],
+      "boundApk": "A4-release-59a40724",
+      "partialPass": false,
+      "rerunStatus": "A3_COMPLETE",
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "previousFinalOnePassStatus": "PASS"
+    },
+    {
+      "caseId": "E9",
+      "group": "device",
+      "title": "Model catalog change after start",
+      "result": "PASS",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md"
+      ],
+      "actual": "model visible at host start PASS; post-start catalog refresh NOT_RUN; model turn attempts local FAIL / cloud BLOCKED",
+      "notes": "Model visible at host start PASS; post-start refresh remains NOT_RUN/documented limitation.",
+      "previousResult": "NOT_RUN (A1)",
+      "previousObservation": "model was loaded before DSH start",
+      "previousEvidence": [],
+      "boundApk": "A4-release-59a40724",
+      "partialPass": true,
+      "rerunStatus": "A3_COMPLETE",
+      "modelBackendResults": {
+        "local": "FAIL",
+        "cloud": "BLOCKED"
+      },
+      "releaseRerunStatus": "A4_RELEASE_E2E_COMPLETE",
+      "resultQualifier": "PASS for pre-start model visibility; post-start catalog refresh NOT_RUN",
+      "subResults": {
+        "modelVisibleAtStart": "PASS",
+        "postStartCatalogRefresh": "NOT_RUN",
+        "localTurn": "PASS at n_ctx=16384",
+        "cloudTurn": "BLOCKED external"
+      },
+      "finalOnePassStatus": "PENDING",
+      "finalOnePassBoundApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+      "finalOnePassNote": "pre-start model visible PASS; post-start catalog refresh NOT_RUN",
+      "previousFinalOnePassStatus": "PASS"
+    }
+  ],
+  "blockers": [
+    {
+      "id": "BLOCKER-WHITE-PANE",
+      "severity": "CLOSED",
+      "status": "CLOSED_VERIFIED_FINAL",
+      "title": "Official DSH main conversation view never rendered (root-caused and fixed; independent E2E pending)",
+      "symptom": "On device 98a37aa7 with APK sha256 4500a34e…, the DSH entry succeeds and the runtime reaches READY epoch=1 (origin :41463, gateway :40433 models=2, single Node pid 8358). The official 预览版说明 welcome modal renders and its 继续 button closes it, but the main pane becomes pure white with only the hamburger. The conversation hero, composer, model selector and any session content never appear. 新会话 / 插件 / 更多 show pressed styling but produce no content. The workspace import control opens a dimmed full-screen overlay with an empty panel. Typing into the blank pane opens no IME (mInputShown=false). Rotation, background/foreground and re-entry do not recover it. DSH chat is therefore unreachable (NOT_RUN).",
+      "scope": "WebView client rendering after onboarding; not runtime/entry/auth process failure.",
+      "runtimeFacts": [
+        "READY epoch=1 origin=http://127.0.0.1:41463 indexBytes=37637",
+        "gateway listening 127.0.0.1:40433, generation=1 models=2",
+        "seeded catalogRevision=ba5b8dc0721420ff",
+        "single :dsh PID 8328 and single libdshnode.so PID 8358; no second Node",
+        "HTTP_AUTHENTICATED and PLUGINS_LOADED before READY",
+        "no crash/ANR/FATAL, port listening, auth 401 before cookie verified"
+      ],
+      "evidence": [
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#6",
+        "artifacts/dsh-verify/20261020-001623/SUMMARY.md#7",
+        "artifacts/dsh-verify/20261020-001623/verdict.json (most_important_defect)",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-main-8s.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-after-continue.png",
+        "artifacts/dsh-verify/20261020-001623/shots/dsh-sidebar-closed.png",
+        "artifacts/dsh-verify/20261020-001623/dumps/dsh-main-8s.xml",
+        "E:\\tmp\\f9-u1.png (blank main pane on f9d98aa3, Lead-provided)"
+      ],
+      "suspiciousFacts": [
+        "READY log prints client module path as literal 'plugin=/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=5d0abebd319f' (bytes 3F 3F 40); verify the intended '/plugins/.../client.js?rev=...' form.",
+        "Release build logs WebView console messages only when BuildConfig.DEBUG (DshWebChromeClient.kt:185-190), so client JS errors are invisible in release logcat.",
+        "Device is Android 17 / SDK 37 while the APK targets 36; keep this in mind for WebView/OS-specific rendering.",
+        "App-private DSH home/overlay files are unreadable because the release build is not debuggable."
+      ],
+      "nextEvidenceNeeded": [
+        "Independent E2E on 98a37aa7 with the diagnostic fix candidate: E2/E3/E5/E6/E8/E9 + real chat.",
+        "Re-check html/root computed height and official hero/composer render in the verifier run.",
+        "Confirm default workspace creation succeeds (no 无法创建默认工作区).",
+        "After fix evidence: re-run release-build E2E before any release claim."
+      ],
+      "impact": "A1 was blocked. A2 fix is pending independent E2E; until that evidence arrives, E3/chat stay NOT_RUN and no release claim is allowed. Prior E1/E2 partial passes remain historical only.",
+      "rootCause": "Zero-height Android WebView initial containing block: window.innerHeight/clientHeight=857 but 100vh=0 and html/body/#root computed height=0; fixed-position layers painted while normal-flow frame collapsed. Proven via live WebView CDP on f9d98aa3. Not a render error/error boundary/plugin failure (console errors empty, [data-slot-error] absent).",
+      "fixes": [
+        "FIX-1 DshPageLayoutShim.kt (measured viewport height written to html; CDP html/root 857px, hero+composer rendered)",
+        "FIX-2 seeder workspace-controller.documentsDirectory=<files/dsh/workspace> (default workspace creation on Android)"
+      ],
+      "fixVisualProof": "E:\\tmp\\f9-vp3.png — official 探索未至之境 / 默认工作区 / 标准模式 / composer / 请选择模型 (Lead-provided, not independent verifier)",
+      "fixCandidateApk": "diagnostic app-diagnostic.apk sha256 0d48974f25ec681ef47d6c0798efa464e52b04c79f81f4074f5dc35db107027d (563,846,247 B); verifier run artifacts/dsh-verify/20261020-013442 in progress",
+      "summary": "Root cause fixed; A3 independently verified official hero/composer, default workspace and model picker render. Remaining model-turn failures are separate.",
+      "closedBy": [
+        "FIX-1 html height + CSSOM vh/dvh rewrite",
+        "FIX-2 seeder documentsDirectory",
+        "A3 verifier run artifacts/dsh-verify/20261020-022248"
+      ]
+    },
+    {
+      "id": "BLOCKER-PICKER-CLIPPING",
+      "severity": "CLOSED",
+      "status": "CLOSED_VERIFIED_FINAL",
+      "title": "Model picker popover clipped to zero height",
+      "rootCause": "CSS vh units still resolved to 0 after the html-height shim; the popover/menu used vh-based height/max-height.",
+      "fix": "CSSOM stylesheet rewrite of vh/dvh declarations to measured pixel values in DshPageLayoutShim (A3); html-height shim retained.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/logs/picker-evidence.json (menu 90/360 vs A2 0/0)",
+        "artifacts/dsh-verify/20261020-022248/shots/a3-picker-submenu.png",
+        "artifacts/dsh-verify/20261020-022248/shots/a3-local-selected-real-tap.png",
+        "artifacts/dsh-verify/20261020-022248/logs/cdp-menu-css.json"
+      ],
+      "residual": "JS-created elements still probe vh/dvh=0; stylesheet rewriting only. Late/lazy CSS and @import/shadow/adopted sheets are documented limits in feature/dsh-workspace/README.md."
+    },
+    {
+      "id": "BLOCKER-LOCAL-MODEL-CONTEXT",
+      "severity": "PASS_WITH_CAVEAT",
+      "status": "PASS_WITH_TUNABLE_REQUIREMENT",
+      "title": "Local model agent turn exceeds n_ctx=8192 budget",
+      "symptom": "Local model send fails with PI_AI_ERROR: system prompt 5,640 chars + 31 tool schemas 28,614 chars (~9.8k tokens) before user/runtime context; 0 tokens streamed. DSH small session-title call to the same local model succeeds.",
+      "fixDirection": "Safe raise n_ctx to 12288/16384 via existing tuning override (KV-cache cost must be measured), or use a larger-context model; reduced agent preset is the documented alternative. Chat remains FAIL until actually verified with larger context/tuning.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-025707/shots/ma-dsh-16384-2min.png",
+        "artifacts/dsh-verify/20261020-024856/verdict.json model_adaptation"
+      ],
+      "memo": "localModelAdaptationMemo",
+      "statement": "n_ctx=16384 PASS (1m26s/7.6 tok/s/6.6K tok); 12288 FAIL; requirement n_ctx >= 16384 (tunable); quality MODEL_QUALITY_ONLY.",
+      "validation": "a4LocalModelValidation"
+    },
+    {
+      "id": "BLOCKER-CLOUD-503",
+      "severity": "BLOCKED",
+      "status": "BLOCKED_EXTERNAL",
+      "title": "Cloud model upstream 503 no available channel",
+      "symptom": "Cloud route maps to gemini-3.6-flash-high; after 5 retries, upstream returns 503 无可用渠道 (distributor); SERVER error, no streamed response.",
+      "classification": "BLOCKED (external upstream condition), not an MCA code regression; still not a successful cloud turn.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/shots/a3-cloud-sent-26s.png",
+        "artifacts/dsh-verify/20261020-022248/logs/cdp-cloud-error2.json",
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md#2"
+      ],
+      "memo": "Cloud remains BLOCKED external; not an MCA code regression.",
+      "note": "Not retested in final round; known upstream 503 external."
+    },
+    {
+      "id": "DEFECT-MODEL-LABEL-UUID",
+      "severity": "P2_CLOSED",
+      "status": "CLOSED_EXCEPT_CAFE2024_EDGE",
+      "title": "Model display name is raw UUID + [PROMPTED_TOOL_V1]",
+      "symptom": "Picker/chip label is `4f6f1171-… [PROMPTED_TOOL_V1]`, not the human model name; human name is not propagated to gateway catalog.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/logs/picker-evidence.json",
+        "artifacts/dsh-verify/20261020-022248/shots/a3-picker-submenu.png"
+      ],
+      "fixCodePresent": true,
+      "inReleaseApk": false,
+      "note": "Label P2 closed except Cafe2024 edge; final short regression pending."
+    },
+    {
+      "id": "DEFECT-PLUGINS-LOG",
+      "severity": "P2_PACKAGING",
+      "status": "OPEN_P2",
+      "title": "plugins.log restructure/spill warnings",
+      "symptom": "ERR_MODULE_NOT_FOUND restructure/src/EncodeStream.js + spill-store unsafe-root warnings; not blocking chat per A3.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md#5"
+      ]
+    },
+    {
+      "id": "OBSERVATION-STOP-MARKER",
+      "severity": "P3",
+      "status": "OPEN_P3",
+      "title": "MCA chat shows 上下文 KV 未命中 · stop_marker after DSH attempt",
+      "symptom": "After the DSH attempt, MCA chat header shows 上下文 KV 未命中 · stop_marker; chat still works.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md#5"
+      ]
+    },
+    {
+      "id": "P1-STOP-FENCE",
+      "severity": "P1",
+      "status": "CODE_CLOSED_DEVICE_SURVIVOR_INJECTION_NOT_RUN",
+      "title": "Stop-fence P1 remains open",
+      "note": "Absolute final code closure + P1-R1/R2 code-review signoff; device survivor injection NOT_RUN.",
+      "evidence": [
+        "Lead status 2026-10-20 03:29"
+      ]
+    },
+    {
+      "id": "P2-PENDING-PROFILE-TRANSACTION-RECOVERY",
+      "severity": "P2_UX",
+      "status": "OPEN_P2_UX",
+      "title": "Pending profile transaction recovery UX",
+      "symptom": "Setting n_ctx while loaded creates a pending profile transaction; force-stop can leave a journal; next formal load fails with 'A previous profile transaction still requires recovery' and apply/rollback are disabled until a second restart.",
+      "evidence": [
+        "artifacts/dsh-verify/20261020-024856/RELEASE-REPORT.md §8",
+        "artifacts/dsh-verify/20261020-025707"
+      ]
+    },
+    {
+      "id": "P1-R1",
+      "severity": "P1",
+      "status": "CLOSED_CODE_REVIEW",
+      "title": "crash/service-restart orphan scan",
+      "note": "Signed off closed by code review (Lead). Device survivor injection remains NOT_RUN."
+    },
+    {
+      "id": "P1-R2",
+      "severity": "P1",
+      "status": "CLOSED_CODE_REVIEW",
+      "title": "client synthesized STOPPED",
+      "note": "Signed off closed by code review (Lead). Device survivor injection remains NOT_RUN."
+    }
+  ],
+  "knownLimits": [
+    {
+      "id": "LIMIT-PTY",
+      "status": "FAIL",
+      "statement": "True PTY FAIL on the current Android host/payload. Plain pipe is not PTY; reference payload substitutes node-pty with child_process. Do not mark terminal/PTY as PASS.",
+      "source": "Lead-confirmed known limit; exact probe log to be attached."
+    },
+    {
+      "id": "LIMIT-SANDBOX",
+      "status": "KNOWN-LIMIT",
+      "statement": "Android sandbox is fail-closed with effective workspace-write. Approval policy remains ask. Do not claim full sandbox enforcement or danger-full-access defaults.",
+      "source": "Lead-confirmed known limit."
+    },
+    {
+      "id": "LIMIT-ISOLATION",
+      "status": "NOT-CLAIMED",
+      "statement": "True OS isolation is not claimed. Single-APK same-UID host; installed plugins are trusted app code and can reach same-UID resources.",
+      "source": "ADR 0003 security positioning; Lead-confirmed."
+    },
+    {
+      "id": "LIMIT-MODEL-REFRESH",
+      "status": "UNVERIFIED",
+      "statement": "Model-after-start refresh is unverified. Seeder runs at runtime start; restart() while READY may attach the current generation. E9 records the actual behavior; no automatic model-picker refresh claim.",
+      "source": "Repair handoff §6.2 + dsh-baseline analysis."
+    },
+    {
+      "id": "LIMIT-SHARP",
+      "status": "NOT-CLAIMED",
+      "statement": "Native sharp is not available in the reference payload (pure-JS substitution); native image decode/transform must not be marked PASS.",
+      "source": "BASELINE §4.2."
+    },
+    {
+      "id": "LIMIT-OFFLINE",
+      "status": "NOT-CLAIMED",
+      "statement": "Full offline is not claimed. Cloud models, remote MCP, search and online plugin installation require network.",
+      "source": "ADR 0003."
+    },
+    {
+      "id": "LIMIT-WHITE-PANE",
+      "status": "CLOSED_VERIFIED_FINAL",
+      "statement": "White pane root-caused and fixed; A3 independently verified official hero/composer, default workspace and model picker render. Closed as a white-pane blocker; model-turn failures remain separate.",
+      "source": "Lead update 2026-10-20 01:35; live WebView CDP on f9d98aa3; visual proof E:\\tmp\\f9-vp3.png"
+    },
+    {
+      "id": "LIMIT-LOCAL-CTX",
+      "status": "PASS_WITH_TUNABLE_REQUIREMENT",
+      "statement": "PASS at n_ctx=16384 (1m26s/7.6 tok/s/6.6K tok); 12288 FAIL; requirement n_ctx >= 16384 (tunable).",
+      "source": "A3 verifier artifacts/dsh-verify/20261020-022248"
+    },
+    {
+      "id": "LIMIT-CLOUD-503",
+      "status": "BLOCKED_EXTERNAL",
+      "statement": "Cloud model upstream 503 no available channel; BLOCKED external, not a passing cloud turn.",
+      "source": "A3 verifier artifacts/dsh-verify/20261020-022248"
+    },
+    {
+      "id": "LIMIT-LOCAL-QUALITY",
+      "status": "QUALITY_CAVEAT",
+      "statement": "The 0.8B MNN model completed the DSH loop but produced a long off-topic refusal. This is MODEL_QUALITY_ONLY, not a protocol failure; product quality needs a larger/better model or tuning.",
+      "source": "A4 final evidence artifacts/dsh-verify/20261020-025707"
+    }
+  ],
+  "summaryCounts": {
+    "release_A4_59a40724": {
+      "PASS": 10,
+      "PASS_PARTIAL": 1,
+      "NOT_RUN": 2,
+      "BLOCKED": 1,
+      "note": "E1/E2/E3/E5/E6/E8 PASS; E9 PASS partial (pre-start); chat PASS protocol; cloud BLOCKED; E4/E7 NOT_RUN."
+    },
+    "C1_C7": {
+      "PASS": 7,
+      "FAIL": 0,
+      "NOT_RUN": 0,
+      "note": "C1 2/2, C2 77/77, C3 68/68, C4 77/77, C5 74/74, C6 chat 357/357 + app 74/74, C7 PASS per Lead (raw final log missing)."
+    },
+    "note": "Final R07 for release APK 59A40724…31DF: PASS on tested surface; local turn PASS at n_ctx=16384; cloud BLOCKED external; E4/E7/post-start refresh NOT_RUN; headFinal/commit not frozen."
+  },
+  "evidenceChecklist": [
+    "PENDING: short regression on absolute final B610E1D0… (label/Cafe2024 edge, local turn, E5)",
+    "DONE (R00): B610E1D0 identity/hash/signer/payload/7 libs; dex closure strings; runtime 93/93; P1-R1/R2 code-review signoff recorded",
+    "DONE: FINAL HARDENING PASS on 2005DF02… (identity/not-stale/install/191ms/n_ctx=16384/READY/picker clean/local turn/E5/single Node/no crash)",
+    "DONE: label UUID strip verified (hex8/uuid empty)",
+    "DONE: stop-fence code inclusion in final build (dex+R8)",
+    "CLOSED: white-pane, picker clipping, local-context tunable >=16384",
+    "OPEN: P1-R1 orphan scan, P1-R2 synthesized STOPPED, device survivor injection NOT_RUN, cloud BLOCKED, quality caveat, E4/E7/E9 post-refresh NOT_RUN, C7 raw log, headFinal not frozen, plugins.log, pending-profile UX",
+    "DECISION: PASS_WITH_CAVEATS — not clean all-green"
+  ],
+  "signOff": null,
+  "attempts": [
+    {
+      "attemptId": "A1",
+      "apk": "release 4500a34e3cc9b5f8dede14b98354281c5a7dd8d03f51281fd6237ba13556ddc5 (393,690,015 B)",
+      "evidenceRoot": "artifacts/dsh-verify/20261020-001623",
+      "verdict": "FAIL for functional DSH: entry/READY/single-Node/gateway seeded, but main pane blank after onboarding; E3/E5 page recovery/E6 background failed; chat NOT_RUN",
+      "results": {
+        "E1": "PASS (partial)",
+        "E2": "PASS (partial, Lead-provided)",
+        "E3": "FAIL (partial)",
+        "E4": "NOT_RUN",
+        "E5": "FAIL",
+        "E6": "FAIL",
+        "E7": "NOT_RUN",
+        "E8": "PASS",
+        "E9": "NOT_RUN",
+        "chat": "NOT_RUN"
+      },
+      "status": "SUPERSEDED_BY_A2_FIX"
+    },
+    {
+      "attemptId": "A2",
+      "apk": "diagnostic 0d48974f25ec681ef47d6c0798efa464e52b04c79f81f4074f5dc35db107027d (563,846,247 B)",
+      "evidenceRoot": "artifacts/dsh-verify/20261020-013442",
+      "verdict": "PENDING — independent verifier rerunning E2/E3/E5/E6/E8/E9 + real chat",
+      "results": {
+        "E2": "NOT_RUN",
+        "E3": "NOT_RUN",
+        "E5": "NOT_RUN",
+        "E6": "NOT_RUN",
+        "E8": "NOT_RUN",
+        "E9": "NOT_RUN",
+        "chat": "NOT_RUN"
+      },
+      "status": "SUPERSEDED_BY_A3"
+    },
+    {
+      "attemptId": "A3",
+      "apk": "diagnostic 294d965613f676a7de877b80a4824ca8ab8893ca399584c4aaea0c0af29beeb6 (563,846,247 B, 0.2.4-diag)",
+      "evidenceRoot": "artifacts/dsh-verify/20261020-022248",
+      "install": "in place 2026-10-20T02:23:57+08:00; firstInstallTime unchanged 2026-10-03 02:25:09; data preserved; installed over release 393,695,951 B (lastUpdate 02:21:27)",
+      "verdict": "UI/workspace/picker/E5 PASS; local model turn FAIL (n_ctx 8192); cloud model turn BLOCKED external (503); E9 post-start refresh NOT_RUN; C1-C7 gates PASS outside verifier",
+      "results": {
+        "E1": "PASS (entry; A3 UI verified)",
+        "E2": "PASS (official UI + default workspace)",
+        "E3": "PASS (official UI + model picker visible/selectable)",
+        "E4": "NOT_RUN",
+        "E5": "PASS (same PIDs/session restored)",
+        "E6": "PASS for background (A2 unchanged); local model turn FAIL / cloud BLOCKED",
+        "E7": "NOT_RUN",
+        "E8": "PASS (A2 unchanged)",
+        "E9": "NOT_RUN for post-start refresh; model visible at host start PASS",
+        "chat": "FAIL local / BLOCKED cloud (no successful model turn)"
+      },
+      "status": "CURRENT"
+    },
+    {
+      "attemptId": "A4",
+      "apk": "release 59A407242FEDDCDB8BCA4598231CB9CC831A6C461E9C92444909F77868E031DF (393,702,651 B, 0.2.4)",
+      "evidenceRoot": "PENDING — independent release E2E in progress",
+      "build": {
+        "command": ":app:assembleRelease -Pmca.abis=arm64-v8a -Pmca.keepNativeSymbols=true",
+        "result": "BUILD SUCCESSFUL in 22m 6s",
+        "log": "E:\\tmp\\dsh-final-gates\\release3.log",
+        "rc": "RELEASE3_RC=0 in E:\\tmp\\dsh-final-gates\\index.txt",
+        "finishedAt": "2026-10-20T02:44:37+08:00 (APK mtime)"
+      },
+      "verdict": "PASS_PARTIAL — release APK identity/install, cold start, DSH entry/READY, official UI/workspace, picker, E5, single Node, no crash/ANR. DSH local turn PASS at n_ctx=16384 (12288 insufficient; MODEL_QUALITY_ONLY); cloud BLOCKED external 503. E4/E7/post-start refresh not run.",
+      "results": {
+        "E1": "PASS",
+        "E2": "PASS",
+        "E3": "PASS",
+        "E4": "NOT_RUN",
+        "E5": "PASS",
+        "E6": "PASS",
+        "E7": "NOT_RUN",
+        "E8": "PASS",
+        "E9": "PASS (pre-start model; post-start refresh NOT_RUN)",
+        "chat": "PASS (protocol/loop; MODEL_QUALITY_ONLY)",
+        "cloud": "BLOCKED external 503"
+      },
+      "status": "VERIFIED_PASS_PARTIAL"
+    }
+  ],
+  "rootCause": {
+    "id": "RC-WHITE-PANE",
+    "status": "PROVEN",
+    "method": "live WebView CDP on f9d98aa3",
+    "finding": "The official page mounted and all client plugins were ACTIVE, but Android WebView laid it out with a zero-height initial containing block: window.innerHeight/documentElement.clientHeight = 857 while 100vh = 0 and html/body/#root computed height = 0. Fixed-position layers (onboarding/sidebar) painted; the normal-flow app frame collapsed, hence the white main pane.",
+    "exclusions": "Not a render error, not an error-boundary failure, not a plugin failure: console errors empty and [data-slot-error] absent.",
+    "fixes": [
+      {
+        "id": "FIX-1",
+        "file": "feature/dsh-workspace/src/main/java/com/muyuchat/feature/dsh/workspace/web/DshPageLayoutShim.kt",
+        "description": "Writes the measured viewport height to html on page start/commit/finish and on resize/orientation; CDP verification: html/root 857px, official hero+composer rendered."
+      },
+      {
+        "id": "FIX-2",
+        "file": "core/dsh-runtime/src/main/java/com/muyuchat/core/dsh/runtime/config/DshGatewayConfigSeeder.kt",
+        "description": "Seeder writes workspace-controller.documentsDirectory = <files/dsh/workspace> so official first-use default workspace creation works on Android (was '无法创建默认工作区')."
+      }
+    ],
+    "visualProof": {
+      "path": "E:\\tmp\\f9-vp3.png",
+      "observed": "official 探索未至之境 hero, 默认工作区, 标准模式, composer '描述你想要构建的内容…', 请选择模型; empty catalog asks to select a model",
+      "provenance": "Lead-provided; not independent verifier evidence"
+    }
+  },
+  "reviewP1s": [
+    {
+      "id": "P1-NODE-CWD",
+      "status": "ADDRESSED_PER_LEAD_CODE_PRESENT",
+      "evidence": "DshRuntimeServiceClient.kt starts the host with config.workspaceDir (lines ~384-387); runtime device evidence still pending",
+      "statement": "Node cwd = workspace, never inside the verified payload tree."
+    },
+    {
+      "id": "P1-STOP-FENCE",
+      "status": "ADDRESSED_PER_LEAD_CODE_PRESENT",
+      "evidence": "DshRuntimeServiceClient.kt stop/intentionalStop and 'never mask STOP_TIMEOUT/stop-fence' comments",
+      "statement": "Stop-fence re-scan added; explicit timeout/fence answers are not masked."
+    },
+    {
+      "id": "P1-SEEDER-LABEL",
+      "status": "ADDRESSED_PER_LEAD",
+      "evidence": "DshGatewayConfigSeeder.kt update; exact label text not independently reviewed",
+      "statement": "Seeder model name label corrected."
+    },
+    {
+      "id": "P1-MODEL-REFRESH",
+      "status": "DOCUMENTED_LIMITATION",
+      "evidence": "KNOWN-LIMITS.md LIMIT-MODEL-REFRESH",
+      "statement": "Model-after-start refresh remains an explicit documented limitation, not a claimed capability."
+    }
+  ],
+  "a3Evidence": {
+    "root": "artifacts/dsh-verify/20261020-022248",
+    "finalReport": "artifacts/dsh-verify/20261020-022248/FINAL-REPORT.md",
+    "verdict": "artifacts/dsh-verify/20261020-022248/verdict.json",
+    "pickerEvidence": "artifacts/dsh-verify/20261020-022248/logs/picker-evidence.json",
+    "pickerMenuCss": "artifacts/dsh-verify/20261020-022248/logs/cdp-menu-css.json",
+    "screenshots": [
+      "artifacts/dsh-verify/20261020-022248/shots/a3-dsh-10s.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-picker-open.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-picker-submenu.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-session-picker-submenu2.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-local-selected-real-tap.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-cloud-chip.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-local-sent-error.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-cloud-sent-26s.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-e5-reentry-real.png",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-final-chat.png"
+    ],
+    "logs": [
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-menu-css.json",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-submenu-options.json",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-chip-after-real-tap.json",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-chip-cloud.json",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-local-error.json",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-cloud-error2.json",
+      "artifacts/dsh-verify/20261020-022248/logs/ps-final.txt",
+      "artifacts/dsh-verify/20261020-022248/logs/logcat-e5-reentry.txt"
+    ]
+  },
+  "c1c7Gates": {
+    "status": "PASS",
+    "source": "Lead-provided final gate logs E:\\tmp\\dsh-final-gates\\*.log plus Gradle test-results XML",
+    "gates": [
+      {
+        "caseId": "C1",
+        "task": ":feature:chat:testDebugUnitTest --tests com.muyuchat.feature.chat.ChatWorkspaceNavigationTest",
+        "tests": 2,
+        "failures": 0,
+        "evidence": "feature/chat/build/test-results/testDebugUnitTest/TEST-com.muyuchat.feature.chat.ChatWorkspaceNavigationTest.xml (timestamp 2026-10-19T15:32:21Z)",
+        "note": "XML predates A3 and the final gate log; behavior covered, source freeze still pending"
+      },
+      {
+        "caseId": "C2",
+        "task": ":core:dsh-runtime:testDebugUnitTest",
+        "tests": 77,
+        "failures": 0,
+        "evidence": "core/dsh-runtime/build/test-results/testDebugUnitTest (16 XML suites, timestamp 01:44:20) + E:\\tmp\\dsh-final-gates\\modules.log (BUILD SUCCESSFUL)"
+      },
+      {
+        "caseId": "C3",
+        "task": ":feature:dsh-workspace:testDebugUnitTest",
+        "tests": 68,
+        "failures": 0,
+        "evidence": "feature/dsh-workspace/build/test-results/testDebugUnitTest (11 suites, 01:44:29) + modules.log"
+      },
+      {
+        "caseId": "C4",
+        "task": ":api:dsh-gateway:testDebugUnitTest",
+        "tests": 77,
+        "failures": 0,
+        "evidence": "api/dsh-gateway/build/test-results/testDebugUnitTest (12 suites, 01:44:34) + modules.log"
+      },
+      {
+        "caseId": "C5",
+        "task": ":app:testDebugUnitTest (DSH suites)",
+        "tests": 74,
+        "failures": 0,
+        "evidence": "app/build/test-results/testDebugUnitTest (6 DSH suites, 01:44:50) + E:\\tmp\\dsh-final-gates\\app-dsh.log"
+      },
+      {
+        "caseId": "C6",
+        "task": ":feature:chat:testDebugUnitTest (+ app DSH set)",
+        "tests": 357,
+        "failures": 0,
+        "evidence": "feature/chat/build/test-results/testDebugUnitTest (52 suites, 0 failures, timestamp 2026-10-19T15:32:24Z) + app DSH 74/74",
+        "note": "chat suite result predates A3/final gate; app DSH set is 01:44"
+      },
+      {
+        "caseId": "C7",
+        "task": "python tools/architecture/check_architecture_rules.py",
+        "tests": null,
+        "failures": 0,
+        "evidence": "Lead-reported PASS; final raw log not located under E:\\tmp\\dsh-final-gates at update time (earlier stale log: E:\\tmp\\dsh-fix-verify\\C7-architecture.log)",
+        "note": "PASS recorded per Lead; raw final log must be attached before release evidence is complete"
+      }
+    ],
+    "note": "Counts cross-checked against Gradle test-results XML (0 failures/skips in all suites). C7 raw final log is still missing."
+  },
+  "modelTurns": {
+    "local": {
+      "result": "PASS",
+      "nCtx": 16384,
+      "metrics": {
+        "turns": "1轮1步",
+        "elapsed": "1分19秒",
+        "usage": "6.6K tok"
+      },
+      "quality": "MODEL_QUALITY_ONLY"
+    },
+    "cloud": {
+      "result": "BLOCKED",
+      "reason": "upstream 503 external; not retested",
+      "classification": "external"
+    },
+    "successfulDshChat": true
+  },
+  "releaseE2E": {
+    "status": "PREVIOUS_HARDENING_PASS_2005DF02",
+    "previousApkSha256": "2005df024a66bc5c21123e73dafa71d7c1c80a319f5048003d64aed2ef7b94dc",
+    "supersededIntermediates": [
+      "e0b97fb35d1557c538de114ff1aa0e58a6194660fd7d5ba873c33ef34cff2e59",
+      "b63149b8 (intermediate, identity not recorded)"
+    ],
+    "pendingAbsoluteCandidateSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+    "note": "2005DF02 previous PASS_WITH_CAVEATS. B610E1D0 absolute final candidate awaits short regression. Do not carry 2005DF02 PASS forward."
+  },
+  "localModelAdaptationMemo": {
+    "status": "RECORDED_LEAD_MEMO",
+    "defaults": {
+      "n_ctx": 8192,
+      "source": "core/engine/src/main/java/com/muyuchat/core/engine/MnnRuntimeParameterAdapter.kt runtimeDefaults (line 22)"
+    },
+    "conclusions": [
+      "n_ctx=8192 is the MNN default; DSH system prompt + 31 tool schemas (~9.8k tokens) exceed it before the user turn.",
+      "Minimum-capability-loss fix: raise n_ctx to 12288 or 16384 via the existing tuning override; KV-cache memory cost must be measured/recorded.",
+      "Alternative: a reduced agent preset is documented (fewer tools / shorter prompt) but loses capability.",
+      "Chat remains FAIL until a larger-context model or tuning is actually used and verified.",
+      "Cloud remains BLOCKED external (upstream 503); not an MCA code regression."
+    ],
+    "evidence": [
+      "core/engine/src/main/java/com/muyuchat/core/engine/MnnRuntimeParameterAdapter.kt",
+      "artifacts/dsh-verify/20261020-022248/shots/a3-local-sent-error.png",
+      "artifacts/dsh-verify/20261020-022248/logs/cdp-local-error.json"
+    ],
+    "note": "No separate memo file path was provided by the Lead; conclusions recorded as Lead-provided and cross-checked against the default in code."
+  },
+  "a4LocalModelValidation": {
+    "status": "PASS_WITH_TUNABLE_REQUIREMENT",
+    "finalApkSha256": "0a731d84507813daf0f1dda64eaf8e98e2f934911cc71cbe839a4e5fbfcdfb62",
+    "requirement": "n_ctx >= 16384 for the full standard DSH prompt with Qwen3.5 0.8B MNN; 12288 insufficient.",
+    "attempts": [
+      {
+        "nCtx": 12288,
+        "result": "FAIL",
+        "error": "PI_AI_ERROR; over n_ctx=12288 budget",
+        "evidence": "A4 20261020-025707"
+      },
+      {
+        "nCtx": 16384,
+        "result": "PASS",
+        "finalEvidence": "FINAL-ONE-PASS: native load context=16384 backend=mnn_cpu; local turn completed 1m19s / 6.6K tok; no n_ctx error",
+        "evidence": "artifacts/dsh-verify/20261020-033121"
+      }
+    ],
+    "qualityCaveat": "MODEL_QUALITY_ONLY — off-target reply; not a protocol/loop failure.",
+    "deviceFinalState": "MCA chat page; model READY at n_ctx=16384; DSH runtime alive single Node PID 5697; data preserved",
+    "recoveryObservation": "P2 UX pending-profile-transaction recovery still open."
+  },
+  "dshChat": {
+    "status": "PASS_WITH_CAVEAT",
+    "scope": "protocol/loop on final release APK 0A731D84… at n_ctx=16384",
+    "evidence": [
+      "artifacts/dsh-verify/20261020-033121/shots/fp-local-stream-30s.png",
+      "artifacts/dsh-verify/20261020-033121/shots/fp-local-stream-95s.png",
+      "artifacts/dsh-verify/20261020-033121/FINAL-ONE-PASS.md",
+      "artifacts/dsh-verify/20261020-033121/verdict.json"
+    ],
+    "metrics": {
+      "turns": "1轮1步",
+      "elapsed": "1分19秒",
+      "usage": "6.6K tok",
+      "displayedSpeed": "3333 tok/s (UI display; not used as a quality claim)"
+    },
+    "quality": "MODEL_QUALITY_ONLY",
+    "note": "Chat protocol/loop PASS; response quality off-target, not DSH-OK."
+  },
+  "finalStatusLine": "AWAITING FINAL ONE-PASS on absolute final candidate B610E1D0… (393,717,991 B, 05:06:13, same signer). 2005DF02 previous; B63149B8 intermediate. Dex: stop verification failed/found survivors/survivingPids/label regexes; runtime 93/93; P1-R1/R2 signed off closed by code review; label P2 closed except Cafe2024 edge. Caveats to keep: device survivor injection NOT_RUN, cloud 503 BLOCKED, 0.8B quality, E4/E7/E9 NOT_RUN, PTY/sandbox, C7/headFinal. Verifier short regression pending; no final PASS yet.",
+  "finalCandidateApk": {
+    "status": "ABSOLUTE_FINAL_CANDIDATE_PENDING_SHORT_REGRESSION",
+    "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+    "sha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+    "sizeBytes": 393717991,
+    "mtime": "2026-10-20T05:06:13+08:00",
+    "versionName": "0.2.4",
+    "versionCode": 8,
+    "minSdk": 26,
+    "targetSdk": 36,
+    "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+    "signed": true,
+    "nonDebuggable": true,
+    "payloadPresent": true,
+    "nativeLibs": 7,
+    "dexProof": {
+      "stopVerificationFailed": 1,
+      "foundSurvivors": 1,
+      "survivingPids": 1,
+      "refusingStartOrphans": "NOT_FOUND_VERBATIM (Lead says closure strings present; exact phrase not found in classes.dex scan)",
+      "labelRegex1": "[0-9a-f]{8,} (x1)",
+      "labelRegex2": "(?i)(?<![A-Za-z0-9])[0-9a-f]{8,} (x1)",
+      "cafe2024": "NOT_FOUND_VERBATIM",
+      "displayNameStrings": "MCA local model x1, Qwen3.5 x27",
+      "dexBytes": 12157008
+    },
+    "runtimeTests": {
+      "tests": 93,
+      "failures": 0,
+      "xmlSuites": 17,
+      "latestXml": "2026-10-20T04:57:35+08:00"
+    },
+    "codeReview": {
+      "P1-R1": "SIGNED_OFF_CLOSED",
+      "P1-R2": "SIGNED_OFF_CLOSED",
+      "note": "Lead reports code review signed off; device survivor injection remains NOT_RUN."
+    },
+    "label": {
+      "p2": "CLOSED_EXCEPT_Cafe2024_EDGE",
+      "note": "Lead: label P2 closed except Cafe2024 edge; final behavior pending short regression."
+    },
+    "verifier": "dsh-verify short regression",
+    "verifierStatus": "PENDING",
+    "note": "Absolute final candidate; do not expect another. Supersedes 2005DF02 and B63149B8. Bind after PASS."
+  },
+  "finalOnePass": {
+    "status": "PENDING",
+    "finalApkSha256": "b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a",
+    "finalApkSizeBytes": 393717991,
+    "verifier": "dsh-verify",
+    "verifierRun": null,
+    "decisionSheet": "docs/proposals/agent-dsh-embedded-v1/evidence/R07-20261019-21f8b1b/R07-DECISION-SHEET.md",
+    "rule": "Bind every PASS/FAIL/NOT_RUN to B610E1D0… once short regression PASS returns. 2005DF02 previous; B63149B8 intermediate (not recorded). Until then final cells PENDING."
+  },
+  "previousFinalCandidate": {
+    "status": "VERIFIED_FINAL_PASS_WITH_CAVEATS",
+    "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+    "sha256": "0a731d84507813daf0f1dda64eaf8e98e2f934911cc71cbe839a4e5fbfcdfb62",
+    "sizeBytes": 393714839,
+    "mtime": "2026-10-20T03:27:50+08:00",
+    "versionName": "0.2.4",
+    "versionCode": 8,
+    "minSdk": 26,
+    "targetSdk": 36,
+    "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+    "signed": true,
+    "classesDexChecks": {
+      "MCA local model": 1,
+      "Qwen3.5": 27,
+      "dexBytes": 12149580
+    },
+    "payloadPresent": true,
+    "nativeLibs": 7,
+    "independentChecks": "R00 re-hashed: size/SHA-256 match Lead; aapt2 badging 0.2.4/8/min26/target36; apksigner signer 2619ac4c…; zip has assets/dsh/payload.zip + assets/dsh/MANIFEST.json + 7 libdsh*.so; classes.dex contains the display-name strings.",
+    "verifier": "dsh-verify FINAL-ONE-PASS",
+    "verifierStatus": "PASS",
+    "note": "Use this candidate unless verifier fails. Do not mark PASS until FINAL-ONE-PASS returns. The previously accepted A4 artifact 59A40724… is now the previous artifact, not the final candidate.",
+    "finalRun": "artifacts/dsh-verify/20261020-033121",
+    "nonDebuggable": true
+  },
+  "hardening": {
+    "status": "ABSOLUTE_FINAL_CODE_CLOSED_PENDING_REGRESSION",
+    "build": "B610E1D0… / 393,717,991 B / 05:06:13",
+    "stopFence": {
+      "codeClosed": true,
+      "r1r2": "P1-R1/P1-R2 signed off closed by code review",
+      "deviceSurvivorInjection": "NOT_RUN",
+      "dexEvidence": "stop verification failed x1; found survivors x1; survivingPids x1; refusing start orphans NOT_FOUND_VERBATIM"
+    },
+    "displayName": {
+      "p2": "CLOSED_EXCEPT_Cafe2024_EDGE",
+      "regexes": [
+        "[0-9a-f]{8,}",
+        "(?i)(?<![A-Za-z0-9])[0-9a-f]{8,}"
+      ]
+    },
+    "runtimeTests": "93/93, 0 failures (17 suites, latest 04:57:35)",
+    "expectedIfPass": "bind to B610E1D0; P1-R1/R2 closed by code review; label P2 closed except Cafe2024 edge; same caveats (device survivor injection NOT_RUN, cloud 503, 0.8B quality, E4/E7/E9 NOT_RUN, PTY/sandbox, C7/headFinal)"
+  },
+  "previousHardeningCandidate": {
+    "status": "VERIFIED_FINAL_HARDENING_PASS",
+    "path": "E:\\MAC\\app\\build\\outputs\\apk\\release\\app-release.apk",
+    "sha256": "2005df024a66bc5c21123e73dafa71d7c1c80a319f5048003d64aed2ef7b94dc",
+    "sizeBytes": 393715727,
+    "mtime": "2026-10-20T04:06:35+08:00",
+    "versionName": "0.2.4",
+    "versionCode": 8,
+    "minSdk": 26,
+    "targetSdk": 36,
+    "signatureCertSha256": "2619ac4ce0ad8397b84c77df6ba165801fd4fab1460470f22f1eb7b3e4f9a9cf",
+    "signed": true,
+    "nonDebuggable": true,
+    "payloadPresent": true,
+    "nativeLibs": 7,
+    "dexProof": {
+      "stopFenceLog": "dsh: stop fence blocked start; pids= (x1)",
+      "labelRegex1": "[0-9a-f]{8,} (x1)",
+      "labelRegex2": "(?i)(?<![A-Za-z0-9])[0-9a-f]{8,} (x1)",
+      "survivingPids": "x1",
+      "displayNameStrings": "MCA local model x1, Qwen3.5 x27",
+      "dexBytes": 12154332
+    },
+    "r8Mapping": {
+      "path": "app/build/outputs/mapping/release/mapping.txt",
+      "mtime": "2026-10-20T04:04:21+08:00",
+      "getTrackedPids": 3,
+      "getSurvivingPids": 1,
+      "fencedPids": 1,
+      "DshLocalModelDisplayName": 36
+    },
+    "build": {
+      "log": "E:\\tmp\\dsh-final-gates\\release-hardened.log",
+      "result": "BUILD SUCCESSFUL in 6m 45s",
+      "rc": "RELEASE_HARDENED_RC=0",
+      "index": "E:\\tmp\\dsh-final-gates\\index.txt"
+    },
+    "runtimeTests": {
+      "tests": 80,
+      "failures": 0,
+      "xmlSuites": 16,
+      "latestXml": "2026-10-20T03:50:52+08:00",
+      "note": "XML predates the 04:06 build by ~16 min; Lead reports 80/80 green."
+    },
+    "verifier": "dsh-verify focused label/local-turn/E5 retest",
+    "verifierStatus": "PASS",
+    "note": "Rebuilt hardened candidate supersedes stale E0B97FB3 and previous 0A731D84. Not stale. Bind final cells after verifier.",
+    "finalRun": "artifacts/dsh-verify/20261020-041600",
+    "install": {
+      "result": "PASS",
+      "time": "2026-10-20T04:17:19+08:00",
+      "firstInstallTime": "2026-10-03 02:25:09 (unchanged)",
+      "dataPreserved": true
+    },
+    "coldStartMs": 191,
+    "notStaleProven": true
+  },
+  "closedItems": [
+    "white-pane (A3/FINAL)",
+    "picker clipping (A3/FINAL)",
+    "local-context tunable requirement (>=16384)",
+    "stop-fence code inclusion",
+    "display-name hex/UUID strip (label P2)"
+  ],
+  "openItems": [
+    "P1-R1 crash/service-restart orphan scan",
+    "P1-R2 client synthesized STOPPED",
+    "device survivor injection NOT_RUN",
+    "cloud 503 BLOCKED external",
+    "0.8B quality MODEL_QUALITY_ONLY",
+    "E4/E7/E9 post-start refresh NOT_RUN",
+    "C7 raw log missing",
+    "headFinal/commit not frozen",
+    "plugins.log packaging",
+    "pending-profile-transaction UX"
+  ]
+}

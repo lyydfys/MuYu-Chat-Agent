@@ -115,7 +115,18 @@ def main() -> int:
         default=REPO_ROOT / "app/build/outputs/apk/release/app-release.apk",
         help="APK to audit (defaults to the release APK)",
     )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=REPORT_PATH,
+        help=(
+            "Report path (defaults to tools/release/16kb_page_size_report.json). "
+            "A build must pass a run-specific path so the audit report cannot become a "
+            "source input of the same build."
+        ),
+    )
     args = parser.parse_args()
+    report_path = args.output.resolve()
     apk = args.apk.resolve()
     if not apk.is_file():
         print(f"FAILED: APK does not exist: {apk}", file=sys.stderr)
@@ -176,8 +187,9 @@ def main() -> int:
         "exempt_hexagon_dsp_binaries": len(companions),
         "binaries": results,
     }
-    REPORT_PATH.write_bytes((json.dumps(report, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
-    print(f"Report: {REPORT_PATH}")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_bytes((json.dumps(report, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+    print(f"Report: {report_path}")
     print(f"Summary: {compliant_count}/{len(applicable)} Android ABI libraries compliant; " + f"{len(companions)} Hexagon DSP companions exempt")
     return 0 if compliant_count == len(applicable) else 1
 

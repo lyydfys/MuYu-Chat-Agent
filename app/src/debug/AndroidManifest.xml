@@ -1,8 +1,21 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <package android:name="com.muyuchat.mca.mediateknputest" />
+    </queries>
     <application>
         <activity
             android:name=".QwenImage21QnnSmokeActivity"
             android:exported="true"
             android:theme="@style/Theme.MuYuChatAgent" />
+        <activity
+            android:name=".debug.MediaTekChainSmokeActivity"
+            android:exported="true"
+            android:label="MCA MTK Chain Test"
+            android:theme="@style/Theme.MuYuChatAgent">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>

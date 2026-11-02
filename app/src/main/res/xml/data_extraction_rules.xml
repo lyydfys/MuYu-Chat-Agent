@@ -17,6 +17,12 @@
         <exclude domain="file" path="image_models" />
         <exclude domain="external" path="image_models" />
         <exclude domain="file" path="chat_sessions.json" />
+        <!-- Agent workspaces hold user-imported snapshots, payloads and artifacts; they move only
+             through the explicit Agent export format (architecture 10.2/10.6). -->
+        <exclude domain="file" path="agent" />
+        <!-- DSH official home/workspace/config/log tree; excluded from both cloud backup and
+             device transfer, same reasoning as the app-local backup rules. -->
+        <exclude domain="file" path="dsh" />
         <exclude domain="sharedpref" path="mca_api.xml" />
         <exclude domain="sharedpref" path="mca_cloud_api.xml" />
         <exclude domain="sharedpref" path="mca_web_search.xml" />
@@ -45,6 +51,12 @@
         <exclude domain="file" path="image_models" />
         <exclude domain="external" path="image_models" />
         <exclude domain="file" path="chat_sessions.json" />
+        <!-- Agent workspaces hold user-imported snapshots, payloads and artifacts; they move only
+             through the explicit Agent export format (architecture 10.2/10.6). -->
+        <exclude domain="file" path="agent" />
+        <!-- DSH official home/workspace/config/log tree; excluded from both cloud backup and
+             device transfer, same reasoning as the app-local backup rules. -->
+        <exclude domain="file" path="dsh" />
         <exclude domain="sharedpref" path="mca_api.xml" />
         <exclude domain="sharedpref" path="mca_cloud_api.xml" />
         <exclude domain="sharedpref" path="mca_web_search.xml" />

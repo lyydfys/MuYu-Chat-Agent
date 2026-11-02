@@ -22,7 +22,7 @@ internal const val LOCAL_IMAGE_UI_PREVIEW_DIRECTORY = "local_image_ui_previews"
 
 internal const val MAX_LOCAL_IMAGE_PREVIEW_BYTES = 16L * 1024L * 1024L
 
-internal fun startLocalImageGenerationWatchdogFor(store: UiStateStore, scope: CoroutineScope, jobId: String) {
+internal fun startLocalImageGenerationWatchdogFor(store: UiStateWriter<ImageJobCancellationFields>, scope: CoroutineScope, jobId: String) {
     scope.launch(Dispatchers.IO) {
         delay(LOCAL_IMAGE_GENERATION_WATCHDOG_MS)
         store.update { state ->
@@ -41,7 +41,7 @@ internal fun startLocalImageGenerationWatchdogFor(store: UiStateStore, scope: Co
 }
 
 internal fun canPublishLocalImagePreviewFor(
-    store: UiStateStore,
+    store: UiStateWriter<ImageJobCancellationFields>,
     admission: RuntimeAdmissionState,
     jobId: String
 ): Boolean =
@@ -50,7 +50,7 @@ internal fun canPublishLocalImagePreviewFor(
         ImageGenerationStatusRecord.GENERATING
 
 internal fun publishLocalImagePreviewTo(
-    store: UiStateStore,
+    store: UiStateWriter<ImageJobCancellationFields>,
     admission: RuntimeAdmissionState,
     application: Application,
     imageAssetWriteMutex: Mutex,

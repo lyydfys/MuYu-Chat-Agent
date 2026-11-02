@@ -1,16 +1,13 @@
 package com.muyuchat.mca
 
-import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MainViewModelLoadLifecycleContractTest {
     @Test
     fun successfulFormalLoadPublishesTheModelAndReadyLifecycleTogether() {
-        // R3/S24 + v4-①: the formal-load publication section lives wherever its marker lives;
-        // located by content, no path literals. Same anchors and ordering contract.
         val source = SourceTextFixtures.sourceOf("val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()")
-        // R3/S15: engine 读取换名（RuntimeEngineReads 缝）；发布区段锚点随迁。
         val publicationStart = source.indexOf("val nativeStatsAfterLoad = engine.nativeStatsJsonOrEmpty()")
         val publicationEnd = source.indexOf("persistChatSessions(sessionsToPersist)", publicationStart)
 
@@ -18,22 +15,41 @@ class MainViewModelLoadLifecycleContractTest {
         assertTrue("Missing formal-load publication end", publicationEnd > publicationStart)
 
         val publication = source.substring(publicationStart, publicationEnd)
-        val modelPublished = publication.indexOf("loadedModelId = model.id")
-        val statsPublished = publication.indexOf("stats = engine.stats.value")
-        val readyPublished = publication.indexOf("engineLifecycle = AgentEngineLifecycle.READY")
+        // D02 freezes native/engine reads before CAS. The successful CAS still publishes the model,
+        // its captured stats and READY lifecycle together, and supplies the exact sessions persisted.
+        val statsCaptured = publication.indexOf("val statsAfterLoad = engine.stats.value")
+        val commitStart = publication.indexOf("val sessionsToPersist = store.updateWithResult")
+        assertTrue("Loaded runtime stats must be captured before the retryable commit",
+            statsCaptured >= 0 && commitStart > statsCaptured)
+        val commit = bracedBlock(publication, commitStart)
+        val modelPublished = commit.indexOf("loadedModelId = model.id")
+        val statsPublished = commit.indexOf("stats = statsAfterLoad")
+        val readyPublished = commit.indexOf("engineLifecycle = AgentEngineLifecycle.READY")
 
         assertTrue("The loaded model id must be published", modelPublished >= 0)
         assertTrue("Loaded runtime stats must be published with the model", statsPublished > modelPublished)
         assertTrue("A successful formal load must publish READY", readyPublished > statsPublished)
+        assertTrue("The commit must return the session list from the same CAS attempt", commit.contains(") to sessions"))
+        assertEquals("Formal-load publication must remain a single atomic state commit", 1,
+            Regex("""store\.update(?:WithResult|AndGet)?\s*\{""").findAll(publication).count())
+        assertTrue("Native/engine reads must remain outside the retryable publication",
+            !commit.contains("engine.") && !commit.contains("modelStore.") && !commit.contains("cloudApiStore."))
     }
 
-    private fun sourceFile(relativePath: String): String {
-        var directory: File? = File(requireNotNull(System.getProperty("user.dir"))).absoluteFile
-        while (directory != null) {
-            val candidate = File(directory, relativePath)
-            if (candidate.isFile) return candidate.readText(Charsets.UTF_8)
-            directory = directory.parentFile
+    private fun bracedBlock(source: String, start: Int): String {
+        require(start >= 0) { "Missing publication anchor" }
+        val openingBrace = source.indexOf('{', start)
+        require(openingBrace >= 0) { "Missing publication body" }
+        var depth = 0
+        for (index in openingBrace until source.length) {
+            when (source[index]) {
+                '{' -> depth += 1
+                '}' -> {
+                    depth -= 1
+                    if (depth == 0) return source.substring(openingBrace, index + 1)
+                }
+            }
         }
-        error("Unable to locate source file: $relativePath")
+        error("Unterminated publication body")
     }
 }

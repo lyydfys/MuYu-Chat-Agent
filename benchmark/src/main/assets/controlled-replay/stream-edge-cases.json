@@ -1,0 +1,451 @@
+{
+    "schema":  "mca.controlled-replay.fixture/1",
+    "name":  "stream-edge-cases",
+    "description":  "Sanitized, fixed chat-stream event sequence used to replay the production publishing pipeline. No credentials, no user content, no model output from a real user session.",
+    "sanitized":  true,
+    "timing":  {
+                   "clock":  "System.nanoTime (monotonic)",
+                   "replay":  "real-time playback scheduled by event offsets; virtual time is allowed only in pure behavior tests, never for frame measurement",
+                   "noIdleFastForward":  true
+               },
+    "contentShapes":  [
+                          "chinese",
+                          "surrogate-zwj-emoji",
+                          "code-block",
+                          "markdown-table",
+                          "math",
+                          "link",
+                          "rich-text-100k"
+                      ],
+    "cases":  [
+                  {
+                      "id":  "normal-small-chunks",
+                      "purpose":  "Normal stream: small text chunks with reasoning, live stats and one tool result, then a terminal event.",
+                      "events":  [
+                                     {
+                                         "type":  "reasoning",
+                                         "text":  "先确认问题范围，再给出结论。"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "这是"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "一条"
+                                     },
+                                     {
+                                         "type":  "stats",
+                                         "decodeTps":  12.5,
+                                         "prefillTps":  41.0,
+                                         "tokens":  12,
+                                         "elapsedMs":  900
+                                     },
+                                     {
+                                         "type":  "tool",
+                                         "name":  "search",
+                                         "status":  "ok",
+                                         "detail":  "2 条结果"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "正常小块流式回答。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  1100
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  7,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "这是一条正常小块流式回答。",
+                                     "notes":  "Visible text is the concatenation of text events; reasoning and stats never enter the answer body.",
+                                     "finalTextLength":  13,
+                                     "finalTextSha256":  "9187befd8af03b9cf523f314e161e8bb5e739cc1db26d5206fb6fc6fbaf2c8e5"
+                                 }
+                  },
+                  {
+                      "id":  "burst-2048",
+                      "purpose":  "One 2048-character burst must be parsed as one chunk without splitting a surrogate pair or losing content.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "blocks":  [
+                                                        {
+                                                            "kind":  "repeat",
+                                                            "unit":  "切片",
+                                                            "count":  1024
+                                                        }
+                                                    ]
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  160
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  2,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "notes":  "Burst content is exactly 2048 UTF-16 units.",
+                                     "finalTextLength":  2048,
+                                     "finalTextSha256":  "4c9cde5f340273073c4d7955e51c64d51a681366bbe59f26d4d584f4b7096503"
+                                 }
+                  },
+                  {
+                      "id":  "early-finish",
+                      "purpose":  "The stream ends after two short chunks; the harness must still publish exactly one terminal state.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "短回答。"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "结束。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  120
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "短回答。结束。",
+                                     "notes":  "A very short generation is a valid sample; it must not be treated as a failed run.",
+                                     "finalTextLength":  7,
+                                     "finalTextSha256":  "5600b8c002152f40b17c4ce5b5679f7d4d22182c0a395e8315554102e6e6a5c4"
+                                 }
+                  },
+                  {
+                      "id":  "no-content-wait",
+                      "purpose":  "No answer text arrives before the terminal event; the UI must settle without an empty-content crash or a stuck generating state.",
+                      "events":  [
+                                     {
+                                         "type":  "reasoning",
+                                         "text":  "模型仅思考，未产生正文。"
+                                     },
+                                     {
+                                         "type":  "stats",
+                                         "decodeTps":  0.0,
+                                         "prefillTps":  18.0,
+                                         "tokens":  0,
+                                         "elapsedMs":  700
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  800
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "",
+                                     "notes":  "finalTextSha256 is the digest of the empty string.",
+                                     "finalTextLength":  0,
+                                     "finalTextSha256":  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                                 }
+                  },
+                  {
+                      "id":  "reasoning-only",
+                      "purpose":  "Reasoning-only response: reasoning blocks render, answer body stays empty, terminal still fires once.",
+                      "events":  [
+                                     {
+                                         "type":  "reasoning",
+                                         "text":  "第一步：收集条件。\n"
+                                     },
+                                     {
+                                         "type":  "reasoning",
+                                         "text":  "第二步：给出计划。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  640
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "",
+                                     "notes":  "Reasoning content must be preserved in its own block and must not leak into the answer body.",
+                                     "finalTextLength":  0,
+                                     "finalTextSha256":  "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                                 }
+                  },
+                  {
+                      "id":  "tail-flush",
+                      "purpose":  "The last text arrives without a trailing newline; the tail flush must not drop it or add a newline.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "尾部内容没有换行"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  90
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  2,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "尾部内容没有换行",
+                                     "tailFlush":  true,
+                                     "notes":  "Repeated final flush must be idempotent.",
+                                     "finalTextLength":  8,
+                                     "finalTextSha256":  "8f034452fdda79f6a6cadf4b6a146e7d5da576a8582d18c9aaad62bfb3511706"
+                                 }
+                  },
+                  {
+                      "id":  "cancel-then-new-run",
+                      "purpose":  "Run 1 is cancelled mid-stream; run 2 starts afterwards. Run 1 callbacks must not touch run 2 state.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "run":  1,
+                                         "text":  "第一轮先写一半"
+                                     },
+                                     {
+                                         "type":  "cancel",
+                                         "run":  1,
+                                         "elapsedMs":  300
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "run":  2,
+                                         "text":  "第二轮回答完整。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "run":  2,
+                                         "reason":  "completed",
+                                         "elapsedMs":  700
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  4,
+                                     "terminalCount":  1,
+                                     "cancelCount":  1,
+                                     "lateTextCount":  0,
+                                     "runs":  2,
+                                     "finalText":  "第二轮回答完整。",
+                                     "notes":  "finalText belongs to the newest run only; the cancelled run\u0027s text must not be appended to it.",
+                                     "finalTextLength":  8,
+                                     "finalTextSha256":  "32f3c703a60f77630c18903ff226dd0d9f17053e69f65a323c12c333171bc057"
+                                 }
+                  },
+                  {
+                      "id":  "duplicate-terminal",
+                      "purpose":  "The publisher emits the terminal event twice; settlement must be idempotent (one terminal state, no double metrics commit).",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "结束前的内容。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  400
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  401
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  2,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "结束前的内容。",
+                                     "idempotentTerminal":  true,
+                                     "notes":  "Two terminal events, but exactly one settlement is allowed.",
+                                     "finalTextLength":  7,
+                                     "finalTextSha256":  "8796a412e9ac6bd2201d57fba1714adb655bcc8120b4d5462bb279798b272bbb"
+                                 }
+                  },
+                  {
+                      "id":  "late-chunk-after-terminal",
+                      "purpose":  "A text chunk arrives after the terminal event; it must not append to the finished answer.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "已完成正文。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  350
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "late":  true,
+                                         "text":  "迟到分片不得追加"
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  1,
+                                     "finalText":  "已完成正文。",
+                                     "lateText":  "迟到分片不得追加",
+                                     "notes":  "Late text is recorded as an ignored event, not as answer content.",
+                                     "finalTextLength":  6,
+                                     "finalTextSha256":  "c4b6950fb7589c261a3d327d0fe6c7f7af20ba695bd51e5a1f4c9231a9d7aa1d"
+                                 }
+                  },
+                  {
+                      "id":  "content-unicode",
+                      "purpose":  "Chinese, a ZWJ emoji sequence, a surrogate pair and combining marks survive mapping and rendering intact.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "中文正文：家🏠与家庭👨‍👩‍👧‍👦表情。"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "音符 é 与𠮷野家。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  220
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  3,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "中文正文：家🏠与家庭👨‍👩‍👧‍👦表情。音符 é 与𠮷野家。",
+                                     "contentShapes":  [
+                                                           "chinese",
+                                                           "surrogate-zwj-emoji"
+                                                       ],
+                                     "notes":  "finalTextLength is counted in UTF-16 code units, so an astral character counts twice.",
+                                     "finalTextLength":  37,
+                                     "finalTextSha256":  "bfd874d08208830e4b6f18ff1adacfc2c44e69f301059e8a0be5782eaa93ef16"
+                                 }
+                  },
+                  {
+                      "id":  "content-code-table-math-link",
+                      "purpose":  "Markdown rich text: fenced code, table, inline math and a link must render through the production markdown mapping.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "text":  "代码：\n```kotlin\nval x = 1\n```\n\n"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "| 列 | 值 |\n|---|---|\n| A | 1 |\n\n"
+                                     },
+                                     {
+                                         "type":  "text",
+                                         "text":  "公式 $E=mc^2$ 与链接 [示例](https://example.invalid/doc)。"
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  300
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  4,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "finalText":  "代码：\n```kotlin\nval x = 1\n```\n\n| 列 | 值 |\n|---|---|\n| A | 1 |\n\n公式 $E=mc^2$ 与链接 [示例](https://example.invalid/doc)。",
+                                     "contentShapes":  [
+                                                           "code-block",
+                                                           "markdown-table",
+                                                           "math",
+                                                           "link"
+                                                       ],
+                                     "notes":  "URLs use the reserved invalid TLD so no external request can be implied.",
+                                     "finalTextLength":  110,
+                                     "finalTextSha256":  "90cc30a70434c6e203f805ba858f828574ebf6dda1995e1010b8376b97b02358"
+                                 }
+                  },
+                  {
+                      "id":  "content-100k",
+                      "purpose":  "100k rich-text stress fixture (not a production message-length limit): long body must stay scrollable and must not truncate the copy result.",
+                      "events":  [
+                                     {
+                                         "type":  "text",
+                                         "blocks":  [
+                                                        {
+                                                            "kind":  "repeat",
+                                                            "unit":  "富文本段 123 😀\n",
+                                                            "count":  8334
+                                                        }
+                                                    ]
+                                     },
+                                     {
+                                         "type":  "terminal",
+                                         "reason":  "completed",
+                                         "elapsedMs":  4200
+                                     }
+                                 ],
+                      "expect":  {
+                                     "eventCount":  2,
+                                     "terminalCount":  1,
+                                     "cancelCount":  0,
+                                     "lateTextCount":  0,
+                                     "contentShapes":  [
+                                                           "rich-text-100k"
+                                                       ],
+                                     "minChars":  100000,
+                                     "notes":  "Materialized from unit*count; the copy result must equal the full materialized text.",
+                                     "finalTextLength":  100008,
+                                     "finalTextSha256":  "02711659bfb2a56fbc511f4399ae3bc46d03203311ccbffd3d34f823b14c5a04"
+                                 }
+                  }
+              ],
+    "requiredCases":  [
+                          "normal-small-chunks",
+                          "burst-2048",
+                          "early-finish",
+                          "no-content-wait",
+                          "reasoning-only",
+                          "tail-flush",
+                          "cancel-then-new-run",
+                          "duplicate-terminal",
+                          "late-chunk-after-terminal",
+                          "content-unicode",
+                          "content-code-table-math-link",
+                          "content-100k"
+                      ],
+    "observationSchema":  {
+                              "plannedEventCount":  "number of fixture events the harness intended to deliver",
+                              "consumedEventCount":  "number of events the production pipeline actually consumed",
+                              "visibleTextChars":  "UTF-16 length of the rendered answer body",
+                              "finalTextSha256":  "SHA-256 of the rendered answer body",
+                              "terminalStates":  "observed terminal state count",
+                              "cancelObserved":  "whether the cancel reached the execution owner",
+                              "copyResultSha256":  "SHA-256 of the full copied answer (UI copy action)",
+                              "copyResultChars":  "UTF-16 length of the copied answer",
+                              "scrollOperations":  "number of scroll gestures and whether the content offset actually changed",
+                              "note":  "Actual values are only produced by an on-device driver; an absent driver means NOT_RUN, never PASS."
+                          },
+    "caseCount":  12
+}

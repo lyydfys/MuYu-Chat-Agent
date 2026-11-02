@@ -17,16 +17,18 @@ internal fun managedCatalogFingerprint(model: ModelScopeRecommendedModel): Strin
 internal data class ManagedDownloadRequest(
     val recommendationId: String? = null,
     val catalogFingerprint: String? = null,
+    val imageBundleVariantId: String? = null,
     val remote: RemoteModelFile? = null,
     val projectorTargetId: String? = null
 ) {
     val identity: String get() = downloadIdentity(
-        (recommendationId?.let { "$it:$catalogFingerprint" } ?: managedRemoteIdentity(requireNotNull(remote))) +
+        (recommendationId?.let { "$it:$catalogFingerprint:${imageBundleVariantId.orEmpty()}" } ?: managedRemoteIdentity(requireNotNull(remote))) +
             ":" + projectorTargetId.orEmpty())
 
     fun toJson(): String = JSONObject().apply {
         put("recommendationId", recommendationId)
         put("catalogFingerprint", catalogFingerprint)
+        put("imageBundleVariantId", imageBundleVariantId)
         put("projectorTargetId", projectorTargetId)
         remote?.let { file -> put("remote", JSONObject().apply {
             put("repoId", file.repoId); put("revision", file.revision); put("path", file.path)
@@ -38,8 +40,11 @@ internal data class ManagedDownloadRequest(
     }.toString()
 
     companion object {
-        fun recommended(model: ModelScopeRecommendedModel) = ManagedDownloadRequest(
-            recommendationId = model.id, catalogFingerprint = managedCatalogFingerprint(model))
+        fun recommended(model: ModelScopeRecommendedModel, imageBundleVariantId: String? = null) = ManagedDownloadRequest(
+            recommendationId = model.id,
+            catalogFingerprint = managedCatalogFingerprint(model),
+            imageBundleVariantId = imageBundleVariantId
+        )
 
         fun fromJson(raw: String): ManagedDownloadRequest {
             val json = JSONObject(raw)
@@ -54,8 +59,13 @@ internal data class ManagedDownloadRequest(
                 bundleRole = file.optional("imageRole")?.let(ImageEngineBundleComponentRole::valueOf),
                 visionBundleRole = file.optional("visionRole")?.let(VisionModelBundleComponentRole::valueOf),
                 relativePath = file.getString("relativePath")) }
-            return ManagedDownloadRequest(json.optional("recommendationId"), json.optional("catalogFingerprint"),
-                remote, json.optional("projectorTargetId")).also {
+            return ManagedDownloadRequest(
+                recommendationId = json.optional("recommendationId"),
+                catalogFingerprint = json.optional("catalogFingerprint"),
+                imageBundleVariantId = json.optional("imageBundleVariantId"),
+                remote = remote,
+                projectorTargetId = json.optional("projectorTargetId")
+            ).also {
                 require((it.recommendationId != null) != (it.remote != null)) { "下载任务缺少明确的模型来源。" }
             }
         }

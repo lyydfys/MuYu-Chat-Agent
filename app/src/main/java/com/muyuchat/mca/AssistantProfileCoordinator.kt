@@ -24,7 +24,8 @@ import java.util.concurrent.atomic.AtomicLong
  * assistant selection, card imports, world books, and assistant persistence.
  */
 internal class AssistantProfileCoordinator(
-    private val store: UiStateStore,
+    private val store: UiStateWriter<AssistantProfileFields>,
+    private val knowledgeStore: UiStateWriter<KnowledgeLibraryFields>,
     private val scope: CoroutineScope,
     private val application: Application,
     private val assistantStore: AssistantStore,
@@ -71,6 +72,7 @@ internal class AssistantProfileCoordinator(
     private val captureContentImportOwner: () -> ContentImportOwner,
     private val stageContentImportPreview: suspend (ContentImportPreview) -> Unit,
     private val readAttachmentText: (Uri, Int) -> Pair<String, Boolean>,
+    private val resolveWorldBookFallbackName: (Uri) -> String = { "" },
     private val currentModelGenerationProfileKey: () -> String?
 ) {
     private fun ContentImportOwner.isCurrent(state: MainUiState): Boolean =
@@ -81,6 +83,18 @@ internal class AssistantProfileCoordinator(
     private val getPendingProfileTransactionIdRef = getPendingProfileTransactionId
     private val setPendingProfileTransactionIdRef = setPendingProfileTransactionId
     private val assistantSaveMutex = Mutex()
+    // Memory operations receive only their two writable fields, even within this profile owner.
+    private val memoryStore = store.restrict(
+        project = { fields -> AssistantMemoryFields(
+            snapshot = fields.snapshot,
+            assistantMemories = fields.assistantMemories,
+            statusMessage = fields.statusMessage
+        ) },
+        merge = { fields, memory -> fields.copy(
+            assistantMemories = memory.assistantMemories,
+            statusMessage = memory.statusMessage
+        ) }
+    )
 
     fun persistAssistantsAsync() {
         scope.launch(Dispatchers.IO) {
@@ -241,7 +255,7 @@ internal class AssistantProfileCoordinator(
         cancelPendingWorldBookCleanupIn(chatSessionPersistenceState, scope, ownerIds)
 
     fun cleanupPendingWorldBooksAfterOwnerCommit(scope: WorldBookScope, retainedOwnerIds: Set<String>) =
-        cleanupPendingWorldBooksAfterOwnerCommitFor(chatSessionPersistenceState, worldBookStore, store, scope, retainedOwnerIds)
+        cleanupPendingWorldBooksAfterOwnerCommitFor(chatSessionPersistenceState, worldBookStore, knowledgeStore, scope, retainedOwnerIds)
 
     fun importWorldBook(rawJson: String, scope: WorldBookScope = WorldBookScope.ASSISTANT) {
         val owner = captureContentImportOwner()
@@ -252,10 +266,11 @@ internal class AssistantProfileCoordinator(
         rawJson: String,
         scope: WorldBookScope,
         owner: ContentImportOwner,
-        commitId: String? = null
+        commitId: String? = null,
+        fallbackName: String? = null
     ): Boolean = importWorldBookOwnedFor(
         knowledgeLibraryPort = knowledgeLibraryPort,
-        uiStateStore = store,
+        uiStateStore = knowledgeStore,
         currentState = { store.current },
         stageContentImportPreview = stageContentImportPreview,
         markLocalConversationContextInvalid = markLocalConversationContextInvalid,
@@ -263,7 +278,8 @@ internal class AssistantProfileCoordinator(
         rawJson = rawJson,
         scope = scope,
         owner = owner,
-        commitId = commitId
+        commitId = commitId,
+        fallbackName = fallbackName
     )
 
     fun importWorldBookFile(
@@ -275,8 +291,11 @@ internal class AssistantProfileCoordinator(
         isGenerating = { store.current.isGenerating },
         showStatus = showStatus,
         captureContentImportOwner = captureContentImportOwner,
-        importWorldBookOwned = ::importWorldBookOwned,
+        importWorldBookOwned = { rawJson, bookScope, owner, fallbackName ->
+            importWorldBookOwned(rawJson, bookScope, owner, null, fallbackName)
+        },
         readAttachmentText = readAttachmentText,
+        resolveFallbackName = resolveWorldBookFallbackName,
         uriString = uriString,
         scopeKind = scope,
         importOwner = importOwner
@@ -313,13 +332,25 @@ internal class AssistantProfileCoordinator(
         importAssistantCardFileFor(store, scope, application, showStatus, captureContentImportOwner, ::finishCharacterCardImport, uriString, importOwner)
 
     fun deleteWorldBook(worldBookId: String) =
-        deleteWorldBookFor(knowledgeLibraryPort, store, scope, { store.current.knowledgeLibrarySnapshot() }, worldBookId)
+        deleteWorldBookFor(knowledgeLibraryPort, knowledgeStore, scope, { store.current.knowledgeLibrarySnapshot() }, worldBookId)
+
+    fun setWorldBookEnabled(worldBookId: String, enabled: Boolean) =
+        setWorldBookEnabledFor(
+            knowledgeLibraryPort = knowledgeLibraryPort,
+            uiStateStore = knowledgeStore,
+            scope = scope,
+            currentSnapshot = { store.current.knowledgeLibrarySnapshot() },
+            currentState = { store.current },
+            markLocalConversationContextInvalid = markLocalConversationContextInvalid,
+            worldBookId = worldBookId,
+            enabled = enabled
+        )
 
     fun createKnowledgeBase(name: String, description: String = "") =
-        createKnowledgeBaseFor(knowledgeLibraryPort, store, scope, { store.current.knowledgeLibrarySnapshot() }, name, description)
+        createKnowledgeBaseFor(knowledgeLibraryPort, knowledgeStore, scope, { store.current.knowledgeLibrarySnapshot() }, name, description)
 
     fun deleteKnowledgeBase(knowledgeBaseId: String) =
-        deleteKnowledgeBaseFor(knowledgeLibraryPort, store, scope, { store.current.knowledgeLibrarySnapshot() }, knowledgeBaseId)
+        deleteKnowledgeBaseFor(knowledgeLibraryPort, knowledgeStore, scope, { store.current.knowledgeLibrarySnapshot() }, knowledgeBaseId)
 
     fun applyAssistantDefaultModel(assistant: AssistantRecord) =
         applyAssistantDefaultModelFor(store, showStatus, selectCloudChatModel, loadModel, assistant)
@@ -330,10 +361,10 @@ internal class AssistantProfileCoordinator(
         memoryScope: String,
         content: String
     ): Deferred<Boolean> =
-        upsertAssistantMemoryFor(store, scope, chatSessionStore, showStatus, markLocalConversationContextInvalid, assistantId, id, memoryScope, content)
+        upsertAssistantMemoryFor(memoryStore, scope, chatSessionStore, showStatus, markLocalConversationContextInvalid, assistantId, id, memoryScope, content)
 
     fun deleteAssistantMemory(assistantId: String, id: String) =
-        deleteAssistantMemoryFor(store, scope, chatSessionStore, showStatus, markLocalConversationContextInvalid, assistantId, id)
+        deleteAssistantMemoryFor(memoryStore, scope, chatSessionStore, showStatus, markLocalConversationContextInvalid, assistantId, id)
 
     fun recordCompletedCharacterMemoryTurn(
         assistantId: String,
@@ -372,7 +403,7 @@ internal class AssistantProfileCoordinator(
         cloudConfig: CloudApiConfig?,
         localIdentity: String?
     ) = summarizeCharacterMemoryFor(
-        store = store, chatSessionStore = chatSessionStore, cloudChatProvider = cloudChatProvider,
+        store = memoryStore, chatSessionStore = chatSessionStore, cloudChatProvider = cloudChatProvider,
         engine = engine, chatSessionPersistenceMutex = chatSessionPersistenceMutex,
         activeRuntimeIdentity = activeRuntimeIdentity,
         markLocalConversationContextInvalid = markLocalConversationContextInvalid,

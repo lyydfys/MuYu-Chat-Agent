@@ -33,7 +33,7 @@ internal interface ChatLocalApiProviderPort {
     val chatExecutionFacade: ChatExecutionFacade
     // R3/S26: 契约收敛——端口只暴露只读 StateFlow 与具名写入方法。
     val uiState: StateFlow<MainUiState>
-    fun updateUiState(transform: (MainUiState) -> MainUiState)
+    fun updateUiState(transform: (GenerationLifecycleFields) -> GenerationLifecycleFields)
 
     fun mergeExecutionProfile(generation: GenerationParams, profile: ModelExecutionProfile): GenerationParams
 
@@ -82,9 +82,10 @@ internal fun installChatLocalApiProviders(port: ChatLocalApiProviderPort) {
             }
             .onCompletion {
                 if (ownsUiLifecycle()) {
+                    val completedStats = engine.stats.value
                     port.updateUiState { state ->
                         if (ownsUiLifecycle()) {
-                            state.afterGenerationCompleted(engine.stats.value)
+                            state.afterGenerationCompleted(completedStats)
                         } else {
                             state
                         }

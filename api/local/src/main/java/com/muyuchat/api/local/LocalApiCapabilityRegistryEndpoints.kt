@@ -105,6 +105,37 @@ internal val mcaLocalApiCapabilityEntries: List<LocalApiEndpointCapability> = li
     ),
     LocalApiEndpointCapability(
         method = "POST",
+        path = "/v1/video",
+        support = LocalApiCapabilitySupport.PARTIAL,
+        authRequired = true,
+        streaming = false,
+        description = "Authenticated local video-generation subset (Wan2.2 TI2V-5B).",
+        acceptedFields = listOf(
+            "prompt", "width", "height", "frames", "fps", "steps", "seed", "engine", "backend",
+            "ditPath", "vaePath", "tePath", "loras"
+        ),
+        notes = listOf(
+            "Synchronous: the response is written after the run reaches a terminal state.",
+            "engine accepts \"\" (built-in MCA engine) or \"sdcpp_external\" (external stable-diffusion.cpp backend); any other value is rejected with unsupported_video_engine.",
+            "When engine is absent or empty the native request does not contain an engine field at all, so the built-in path is byte-identical to the pre-engine protocol.",
+            "backend selects the external engine transport: \"htp\" (default) or \"cpu\"; it is only valid together with engine=sdcpp_external and is rejected otherwise instead of being ignored.",
+            "ditPath/vaePath/tePath are optional confirmations and must name the manifest-resolved files this device loads; any other path is rejected with video_model_path_mismatch.",
+            "loras is an optional array of {path, weight} LoRA entries (at most 16, weight in (0, 8]); it is only accepted with engine=sdcpp_external and every path must be a staged regular file, otherwise the run is rejected with invalid_loras or loras_requires_external_engine.",
+            "Optionally identify the request with X-MCA-Request-Id; the response echoes it and a client disconnect cancels that run through the single video owner."
+        ),
+        errorCodes = listOf(
+            "invalid_json", "unsupported_parameter", "invalid_prompt", "prompt_too_long",
+            "invalid_size", "invalid_frames", "invalid_fps", "invalid_steps", "invalid_seed",
+            "unsupported_video_engine", "unsupported_video_backend",
+            "backend_requires_external_engine", "invalid_loras", "loras_requires_external_engine",
+            "video_runtime_busy", "video_control_plane_failed",
+            "video_runtime_unavailable", "video_generation_busy", "video_model_not_ready",
+            "video_model_path_mismatch", "video_generation_cancelled", "video_generation_timeout",
+            "video_generation_failed", "unauthorized"
+        )
+    ),
+    LocalApiEndpointCapability(
+        method = "POST",
         path = "/v1/generate/stop",
         support = LocalApiCapabilitySupport.SUPPORTED,
         authRequired = true,

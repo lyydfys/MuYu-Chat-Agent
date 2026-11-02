@@ -74,6 +74,7 @@ internal fun ImageExecutionProfile.hasCompleteNativeMultilingualPromptToEncoderT
         // the complete role-aware closure rather than only graph/.weight.
         LocalImageRuntime.MNN_DIFFUSION,
         LocalImageRuntime.STABLE_DIFFUSION_CPP,
+        LocalImageRuntime.MEDIATEK_NEURON,
         LocalImageRuntime.ONNX_RUNTIME,
         LocalImageRuntime.CUSTOM -> false
     }
@@ -222,6 +223,7 @@ internal fun ImageExecutionProfile.hasHostWritableClipTextualInversionTopology()
                 !conditioning.pooledOutput &&
                 conditioning.textEncoderOutputShapes == listOf(listOf(1, 77, 768))
         LocalImageRuntime.STABLE_DIFFUSION_CPP,
+        LocalImageRuntime.MEDIATEK_NEURON,
         LocalImageRuntime.ONNX_RUNTIME,
         LocalImageRuntime.CUSTOM -> false
     }
