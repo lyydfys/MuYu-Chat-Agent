@@ -36,6 +36,10 @@ import androidx.compose.material.icons.rounded.NetworkWifi
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Psychology
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.Feedback
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Remove
@@ -146,6 +150,10 @@ public object McaIcons {
     public val PhotoLibrary: ImageVector = Icons.Rounded.PhotoLibrary
     public val PlayArrow: ImageVector = Icons.Rounded.PlayArrow
     public val Psychology: ImageVector = Icons.Rounded.Psychology
+    public val Person: ImageVector = Icons.Rounded.Person
+    public val Code: ImageVector = Icons.Rounded.Code
+    public val Star: ImageVector = Icons.Rounded.Star
+    public val Feedback: ImageVector = Icons.Rounded.Feedback
     public val PushPin: ImageVector = Icons.Rounded.PushPin
     public val Refresh: ImageVector = Icons.Rounded.Refresh
     public val Remove: ImageVector = Icons.Rounded.Remove

@@ -190,7 +190,8 @@ private enum class SettingsSection(val title: String) {
     LOGS("日志/诊断"),
     PRIVACY("隐私与数据"),
     SEARCH("联网检索"),
-    EXPERIMENTS("实验功能")
+    EXPERIMENTS("实验功能"),
+    ABOUT("关于")
 }
 
 @Composable
@@ -262,7 +263,7 @@ fun SettingsHubScreen(
                     }
                     Column {
                         Text("系统设置", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                        Text("运行、日志、隐私与实验功能", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("运行、日志、隐私、检索与关于", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 Spacer(Modifier.width(8.dp))
@@ -343,6 +344,15 @@ fun SettingsHubScreen(
                 )
                 SettingsSection.EXPERIMENTS -> ExperimentsScreen(
                     state = state,
+                    modifier = Modifier.fillMaxSize()
+                )
+                SettingsSection.ABOUT -> SettingsAboutScreen(
+                    state = state,
+                    onCheckUpdate = onCheckUpdate,
+                    onDownloadUpdate = onDownloadUpdate,
+                    onInstallUpdate = onInstallUpdate,
+                    onOpenRelease = onOpenRelease,
+                    onOpenWebPage = onOpenWebPage,
                     modifier = Modifier.fillMaxSize()
                 )
             }

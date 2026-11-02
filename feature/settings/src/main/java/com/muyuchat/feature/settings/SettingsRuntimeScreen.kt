@@ -572,7 +572,7 @@ private fun releaseNoteText(value: String): String = value
 private const val RELEASE_NOTES_COLLAPSED_LINES = 6
 
 @Composable
-private fun ReleaseNotes(notes: String) {
+internal fun ReleaseNotes(notes: String) {
     val lines = remember(notes) { releaseNoteLines(notes) }
     if (lines.isEmpty()) return
     // A full changelog is long; rendering every line on the first frame is both a scan problem and

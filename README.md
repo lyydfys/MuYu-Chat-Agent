@@ -257,6 +257,21 @@ $env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
 
 反馈问题时建议附上 MCA 版本、手机型号、芯片、Android 版本、模型名称、运行后端和错误截图。请勿公开 API Key、访问令牌或包含个人隐私的日志。
 
+## 赞助支持
+
+如果 MCA 对你有帮助，欢迎扫码自愿赞助。赞助不影响任何功能。
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/alipay.jpg" alt="支付宝收款码" width="220"><br><sub>支付宝</sub></td>
+    <td align="center"><img src="docs/images/wechat.jpg" alt="微信支付收款码" width="220"><br><sub>微信支付</sub></td>
+  </tr>
+</table>
+
+也可以查看 [赞助说明](docs/DONATE.md)，或在 [GitHub](https://github.com/lyydfys/MuYu-Chat-Agent) 点一个 Star 支持项目。
+
+[![GitHub stars](https://img.shields.io/github/stars/lyydfys/MuYu-Chat-Agent?style=social)](https://github.com/lyydfys/MuYu-Chat-Agent)
+
 ## Repository Layout
 
 - `:app` - Android application, navigation, ViewModel, cloud/local providers.
