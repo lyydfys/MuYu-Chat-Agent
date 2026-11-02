@@ -343,7 +343,7 @@ the packaged native libraries after Gradle finishes.
 PowerShell:
 
 ```powershell
-$env:JAVA_HOME='<path-to-jdk-17>'
+$env:JAVA_HOME='<path-to-jdk-21>'
 $env:ANDROID_HOME='<path-to-android-sdk>'
 $env:MCA_QNN_SDK_ROOT='<path-to-qairt-sdk>'
 .\scripts\build.ps1
@@ -352,7 +352,7 @@ $env:MCA_QNN_SDK_ROOT='<path-to-qairt-sdk>'
 Bash:
 
 ```bash
-export JAVA_HOME=/path/to/jdk-17
+export JAVA_HOME=/path/to/jdk-21
 export ANDROID_HOME=/path/to/android-sdk
 export MCA_QNN_SDK_ROOT=/path/to/qairt-sdk
 ./gradlew :app:assembleDebug \
