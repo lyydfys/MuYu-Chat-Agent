@@ -303,6 +303,10 @@
 - 动态文本变体：`mca-mediatek-reference-v4-dynamic.zip`（3,292,929,429 B，SHA-256 `e4c020640fcf567ce743c364a36a67a85a4eb29d54a166025f6db132cd7070fe`），DYNAMIC_TEXT，18 组件。
 - ZIP 完整性校验通过：包内 `manifest.json`、`engine/aot.json` 与全部组件路径存在，尺寸/SHA 与 envelope pin 一致（fixed 17、dynamic 18）。生产解析器 readiness 宿主测试 **PASS 2/2**（`MediaTekReferenceBundleHostTest`，7.968 s）：两个 envelope、AOT manifest、4 variants 与全部资产 pin 均被生产导入器接受。测试期间发现并修复了两处真实契约问题：CONFIG 组件缺 size/SHA、route `dla` 未绑定且 AOT route pin 过期。
 - 该 bundle 仅限本地：资产再分发权仍 BLOCKED，不发布 ZIP 或其内容。
+  - **2026-11-02 更新**：后续核对 CircleStone NC v1.2 与 NVIDIA 通知后，v4
+    衍生包已按非商业许可发布到 ModelScope
+    `lyydfys/anima-npug-dla-mt6993-nc`；上面的“仅限本地”是 2026-10-31 的当时结论。
+    本仓库仍不包含权重或 bundle ZIP，下载由应用在用户确认许可后执行。
 
 ### 1.0.17 JIT 真机结果（2026-10-31，第二通道）
 

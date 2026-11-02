@@ -62,14 +62,20 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.2.4` (`versionCode 8`) is the current stability release. It improves
-  startup recovery, resumable model installation, character cards, world books,
-  knowledge retrieval, and image-model compatibility. See the
-  [v0.2.4 release notes](docs/releases/v0.2.4.md) for validation and limitations.
-  The signed arm64 installer is published on
+- `v0.3.0` (`versionCode 9`) is the current release line. It adds the local
+  Agent runtime/workspace, the embedded DSH workspace, the Wan 2.2 video
+  workspace, MediaTek NPU / Anima and Qwen-Image / GenieX routes, Room v35 with
+  migrations, and the pinned in-repo Wan engine archive. See the
+  [v0.3.0 release notes](docs/releases/v0.3.0.md) for verification and
+  limitations. The signed arm64 installer is built from this tree; GitHub
+  release publication is pending.
+- `v0.2.4` (`versionCode 8`) is the previous stability release and remains on
   [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.4).
 - The first public package target is `arm64-v8a` Android devices.
 - Local chat is the primary stable local path.
+- Agent and DSH workspaces are advanced surfaces with their own runtime
+  requirements; they are not required for chat or image generation.
+- Video generation is experimental and device/bundle dependent.
 - Web search is available after the user configures a search provider in
   Settings. MCA supports manual, smart-auto, and always-on trigger modes for
   SearxNG, Brave Search, Tavily, Jina Search, and custom JSON search endpoints.
@@ -144,12 +150,27 @@ Current release status:
   search paths during preflight and request execution.
 - **Image page**: MCA image workspace with local/cloud engine switching,
   prompt composer, generation states, template cards, and image library.
-- **Local image engines**: `stable-diffusion.cpp` bridge with progress/cancel
-  hooks and bundle-aware model registration. MCA can represent future
-  QNN/QAIRT Snapdragon NPU image bundles, but they remain unselectable until
-  QNN runtime detection and a real 1-step smoke test pass.
+- **Local image engines**: `stable-diffusion.cpp`, MNN-Diffusion, QNN/HTP,
+  LiteRT Qualcomm, and MediaTek NPUG/DLA bridges with progress/cancel hooks and
+  bundle-aware model registration. QNN, MediaTek, and experimental bundles stay
+  subject to real native load and graph smoke tests; device names only rank
+  recommendations and never hide a package. The Wan video engine ships as a
+  pinned, SHA-verified prebuilt archive inside this repository and is also
+  reproducible with `build-engine.sh`.
+- **Agent workspace**: a local Agent runtime with tool calling, MCP endpoints,
+  memory, approval gates, and workspace UI. It is separate from the chat
+  provider and uses the same local model/runtime ownership.
+- **DSH workspace**: an embedded DeepSeek Harness workspace with its own
+  gateway, browser, accessibility/virtual-screen actions, job lifecycle, and
+  recovery. It is a development-preview surface; provider credentials and
+  workspace setup remain user-controlled.
+- **Video workspace**: Wan 2.2 TI2V-5B text/image-to-video, external
+  `stable-diffusion.cpp` engine, model-asset download and verification,
+  Turbo LoRA, graph editing, and foreground generation. The app pins every
+  model asset and never bundles Wan weights in the APK.
 - **Model hub**: local/imported models, ModelScope recommendations, resumable
-  downloads, file classification, and engine grouping.
+  downloads, file classification, engine grouping, recommendation filters and
+  sorting, fixed/dynamic image-bundle variants, and license-gated downloads.
   Hugging Face-hosted recommendations open and download through
   `https://hf-mirror.com` first, with the official Hugging Face endpoint kept
   only as a fallback when the mirror cannot serve the asset.
@@ -158,11 +179,12 @@ Current release status:
   JSON role-card import/export. MCA exports its own `mca.assistant.card` schema
   and can import common nested character-card `data` fields into a usable
   system prompt.
-- **Agent diagnostics**: local device profiling, model recommendations,
+- **Diagnostics and tuning**: local device profiling, model recommendations,
   benchmark-based tuning, and explainable parameter plans.
-- **Local API**: OpenAI-compatible local server for trusted same-device and
-  same-LAN clients, including `/v1/models`, `/v1/chat/completions`, JSON
-  replies, and SSE streaming.
+- **Local API**: authenticated OpenAI-compatible local server for trusted
+  same-device and same-LAN clients, including `/v1/models`,
+  `/v1/chat/completions`, image and video generation endpoints, capability
+  discovery, JSON replies, and SSE streaming.
 
 ## Install
 
@@ -239,31 +261,54 @@ $env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
 
 - `:app` - Android application, navigation, ViewModel, cloud/local providers.
 - `:core:native` - `llama.cpp` C++/JNI bridge for GGUF-compatible local chat.
-- `:core:sd-native` - `stable-diffusion.cpp` C++/JNI bridge for local image generation.
+- `:core:sd-native` - `stable-diffusion.cpp` C++/JNI bridge for local image and
+  Wan video generation; `prebuilt/` holds the pinned external engine archive.
 - `:core:engine` - single-active-generation inference service.
+- `:core:inference-contract` - shared inference/runtime contracts.
 - `:core:modelstore` - MNN bundle and GGUF import, manifest, SHA-256, managed
-  model storage.
-- `:core:download` - ModelScope parsing, file listing, and resumable downloads.
-- `:core:telemetry` - runtime metrics, SoC detection, and JSONL logging.
-- `:core:deviceprofile` - device capability and thermal profiling.
-- `:core:tuning` - parameter plan generation.
-- `:core:benchmark` - short local benchmark runner.
-- `:core:advisor` - local recommendation engine and agent logs.
-- `:api:local` - AIDL service and loopback REST server skeleton.
-- `:feature:chat` - chat and image-generation UI.
-- `:feature:agent` - agent diagnostics UI.
+  model storage; Room v35 catalog.
+- `:core:download` - ModelScope parsing, file listing, resumable downloads, and
+  recommendation catalogs.
+- `:core:telemetry`, `:core:deviceprofile`, `:core:tuning`, `:core:benchmark`,
+  `:core:advisor` - metrics, device profiling, parameter plans, benchmarks, and
+  local recommendations.
+- `:core:agent-contract`, `:core:agent-runtime` - Agent tool/MCP/memory runtime.
+- `:core:dsh-contract`, `:core:dsh-runtime`, `:core:dsh-platform`,
+  `:core:dsh-android-actions`, `:core:dsh-a11y`, `:core:dsh-vscreen`,
+  `:core:dsh-browser`, `:core:dsh-maintenance` - embedded DSH runtime.
+- `:core:video-contract` - Wan video request/asset contracts.
+- `:core:mediatek-native` - MediaTek Neuron / NPUG / DLA adapter and Anima
+  pipeline contracts.
+- `:core:qwenimage21` - Qwen-Image 2.1 runtime bridge.
+- `:core:designsystem` - shared Compose buttons, dialogs, icons, motion, and
+  accessibility primitives.
+- `:api:local` - AIDL service, authenticated loopback REST server, capability
+  registry, and video generation API.
+- `:api:dsh-gateway` - DSH OpenAI-compatible gateway.
+- `:feature:chat` - chat, image generation, and media workspaces.
+- `:feature:agent`, `:feature:agent-workspace` - Agent diagnostics and workspace.
+- `:feature:dsh-workspace` - DSH workspace UI.
+- `:feature:video-workspace` - Wan video workspace and graph editor.
 - `:feature:modelhub` - model management UI.
 - `:feature:settings` - runtime, logs, and local API UI.
+- `:benchmark` - optional macrobenchmark module (`-Pmca.includeBenchmark=true`).
 
 ## Build Requirements
 
 - Android Studio or command-line Gradle.
-- JDK 17.
+- JDK 21 (the LiteRT-LM dependency ships Java 21 class files; JDK 17 fails
+  `:core:engine` tests with `UnsupportedClassVersionError`).
 - Android SDK with:
   - Android platform matching `compileSdk`.
   - Android build tools.
   - CMake 3.31.6 or compatible version configured by Gradle.
   - Android NDK matching `gradle/libs.versions.toml`.
+
+The external Wan engine is checked in as a 46.6 MB compressed archive under
+`core/sd-native/prebuilt/`. The `unpackWanEngine` Gradle task verifies its
+SHA-256 pins and extracts the libraries into `src/main/jniLibs` before
+packaging; no LFS or separate download step is required. Model weights are not
+in this repository and are downloaded by the user after installation.
 
 Create a local `local.properties` file or set `ANDROID_HOME`:
 
@@ -279,7 +324,7 @@ This repository uses submodules for native inference backends:
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd mym
+cd MuYu-Chat-Agent
 ```
 
 If you cloned without submodules:

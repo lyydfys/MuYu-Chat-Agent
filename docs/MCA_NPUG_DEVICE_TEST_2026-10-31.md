@@ -33,6 +33,7 @@ SHA-256  e4c020640fcf567ce743c364a36a67a85a4eb29d54a166025f6db132cd7070fe
 ```
 
 It declares DYNAMIC_TEXT with the pinned `text.bin`/`tok.bin` (18 components) and `recommendationId=mediatek_anima_npu_np9`. ZIP entries were verified against the envelope pins (paths, sizes and SHA-256). Readiness was verified by the production parser (`MediaTekReferenceBundleHostTest`, 2/2 PASS, 7.968 s): both envelopes, AOT manifests, 4 variants and all asset pins are accepted. The bundles are local-only: the assets' redistribution rights remain blocked, so do not publish the ZIP or its contents.
+**2026-11-02 update:** after reviewing CircleStone NC v1.2 and the NVIDIA notices, the v4 derivative bundles were published on ModelScope as `lyydfys/anima-npug-dla-mt6993-nc` under the non-commercial terms. The sentence above records the 2026-10-31 position; this repository still contains no weights or bundle ZIPs.
 
 ## One-tap harness APK (no adb scripts, 1.0.17-style)
 
