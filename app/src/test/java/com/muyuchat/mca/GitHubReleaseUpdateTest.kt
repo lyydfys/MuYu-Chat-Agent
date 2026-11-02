@@ -204,11 +204,38 @@ class GitHubReleaseUpdateTest {
         assertTrue(isTrustedGitHubDownloadUrl("https://objects.githubusercontent.com/a"))
         assertTrue(isTrustedGitHubDownloadUrl("https://release-assets.githubusercontent.com/a"))
         assertTrue(isTrustedGitHubDownloadUrl("https://github-releases.githubusercontent.com/a"))
+        assertTrue(isTrustedGitHubDownloadUrl(GITHUB_RELEASE_PAGE_DOMESTIC_URL))
+        assertTrue(
+            isTrustedGitHubDownloadUrl(
+                "https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/app.apk"
+            )
+        )
+        assertFalse(isTrustedGitHubDownloadUrl("https://gh-proxy.com/https://example.com/app.apk"))
+        assertFalse(
+            isTrustedGitHubDownloadUrl(
+                "https://gh-proxy.com/https://github.com/other/repo/releases/download/v1/app.apk"
+            )
+        )
         assertFalse(isTrustedGitHubDownloadUrl("https://foo.githubusercontent.com/a"))
         assertFalse(isTrustedGitHubDownloadUrl("http://github.com/owner/repo/app.apk"))
         assertFalse(isTrustedGitHubDownloadUrl("https://github.com.evil.example/app.apk"))
         assertFalse(isTrustedGitHubDownloadUrl("https://githubusercontent.com.evil.example/app.apk"))
         assertFalse(isTrustedGitHubDownloadUrl("not a url"))
+    }
+
+    @Test
+    fun domesticGithubUrlsOnlyRewriteThisRepositoryAndNeverDoublePrefix() {
+        val releasePage =
+            "https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.3.0"
+        assertEquals(GITHUB_DOMESTIC_PROXY + releasePage, domesticGitHubUrl(releasePage))
+        assertEquals(
+            GITHUB_DOMESTIC_PROXY + releasePage,
+            domesticGitHubUrl(GITHUB_DOMESTIC_PROXY + releasePage)
+        )
+        assertEquals("https://example.com/asset.apk", domesticGitHubUrl("https://example.com/asset.apk"))
+        assertTrue(isDomesticGitHubProxyUrl(GITHUB_RELEASE_API_DOMESTIC_URL))
+        assertFalse(isDomesticGitHubProxyUrl("https://gh-proxy.com/https://example.com/x"))
+        assertFalse(isDomesticGitHubProxyUrl(GITHUB_RELEASE_API_URL))
     }
 
     @Test
@@ -284,6 +311,44 @@ class GitHubReleaseUpdateTest {
             client.fetchText("https://example.com/checksum.sha256")
         }
         assertTrue(error.message.orEmpty().contains("受信任"))
+    }
+
+    @Test
+    fun githubClientFallsBackFromDomesticProxyToOfficialEndpoint() {
+        val body = """
+            {"tag_name":"v0.3.0","name":"MCA 0.3.0","assets":[]}
+        """.trimIndent()
+        val requested = mutableListOf<String>()
+        val client = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                requested += chain.request().url.toString()
+                if (requested.size == 1) {
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(503)
+                        .message("Unavailable")
+                        .body("busy".toResponseBody("text/plain".toMediaType()))
+                        .build()
+                } else {
+                    Response.Builder()
+                        .request(chain.request())
+                        .protocol(Protocol.HTTP_1_1)
+                        .code(200)
+                        .message("OK")
+                        .body(body.toResponseBody("application/json".toMediaType()))
+                        .build()
+                }
+            })
+            .build()
+
+        val result = GitHubReleaseClient(client).fetchLatest()
+
+        assertTrue(result is GitHubReleaseFetchResult.Fetched)
+        assertEquals(
+            listOf(GITHUB_RELEASE_API_DOMESTIC_URL, GITHUB_RELEASE_API_URL),
+            requested
+        )
     }
 
     @Test

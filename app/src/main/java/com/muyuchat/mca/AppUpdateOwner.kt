@@ -131,7 +131,7 @@ internal class AppUpdateOwner(
         }
         val releaseUrl = release.htmlUrl
             .takeIf(::isTrustedGitHubDownloadUrl)
-            ?: GITHUB_RELEASE_PAGE_URL
+            ?: GITHUB_RELEASE_PAGE_DOMESTIC_URL
         val apk = candidate?.apkAsset
         val canDownload = candidate?.let { value ->
             value.installable &&
@@ -397,7 +397,7 @@ internal class AppUpdateOwner(
 
     fun openAppUpdateRelease() {
         val raw = port.uiState().appUpdate.releaseUrl
-        val url = raw.takeIf(::isTrustedGitHubDownloadUrl) ?: GITHUB_RELEASE_PAGE_URL
+        val url = domesticGitHubUrl(raw.takeIf(::isTrustedGitHubDownloadUrl) ?: GITHUB_RELEASE_PAGE_DOMESTIC_URL)
         runCatching {
             port.context.startActivity(
                 Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

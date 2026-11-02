@@ -6,7 +6,11 @@
 
 应用内「设置 → 关于 → 赞助支持」和 GitHub README 展示的是同一组二维码；图片源文件为 `docs/images/alipay.jpg` 与 `docs/images/wechat.jpg`。
 
-如果国内网络无法稳定打开 GitHub，可直接在应用内「设置 → 关于 → 赞助支持 → 扫码赞助（国内可直连）」使用同一组离线赞赏码。
+如果国内网络无法稳定打开 GitHub，可直接在应用内「设置 → 关于 → 赞助支持 → 扫码赞助（国内可直连）」使用同一组离线赞赏码，或使用本页的国内加速链接：
+
+<https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/blob/master/docs/DONATE.md>
+
+应用内“去赞助”和“去点 Star”默认使用该加速镜像；更新检查也会在镜像不可用时自动回退 GitHub 官方地址。
 
 ---
 
@@ -27,3 +31,5 @@
 - 赞助完全自愿，不影响你使用本项目的任何功能。
 - 如有问题或建议，欢迎通过 [GitHub Issues](https://github.com/lyydfys/MuYu-Chat-Agent/issues) 反馈。
 - 也欢迎在仓库点一个 Star，让更多需要本地 AI 工作区的人看到这个项目。
+  国内加速入口：<https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent>
+  （打开后登录 GitHub，点击右上角 Star 即可；应用内“关于 → 怎么点 Star？”有三步教程）。

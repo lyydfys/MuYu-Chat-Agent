@@ -29,6 +29,32 @@ internal const val GITHUB_RELEASE_API_URL =
 internal const val GITHUB_RELEASE_PAGE_URL =
     "https://github.com/lyydfys/MuYu-Chat-Agent/releases/latest"
 internal const val GITHUB_RELEASE_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
+internal const val GITHUB_DOMESTIC_PROXY = "https://gh-proxy.com/"
+internal const val GITHUB_RELEASE_API_DOMESTIC_URL = GITHUB_DOMESTIC_PROXY + GITHUB_RELEASE_API_URL
+internal const val GITHUB_RELEASE_PAGE_DOMESTIC_URL = GITHUB_DOMESTIC_PROXY + GITHUB_RELEASE_PAGE_URL
+private const val GITHUB_REPOSITORY_WEB_PREFIX = "https://github.com/$GITHUB_RELEASE_REPOSITORY"
+private const val GITHUB_REPOSITORY_API_PREFIX = "https://api.github.com/repos/$GITHUB_RELEASE_REPOSITORY"
+private const val GITHUB_REPOSITORY_RAW_PREFIX = "https://raw.githubusercontent.com/$GITHUB_RELEASE_REPOSITORY"
+
+private fun isTrustedRepositoryTarget(target: String): Boolean =
+    target == GITHUB_REPOSITORY_WEB_PREFIX ||
+        target.startsWith("$GITHUB_REPOSITORY_WEB_PREFIX/") ||
+        target.startsWith("$GITHUB_REPOSITORY_API_PREFIX/") ||
+        target.startsWith("$GITHUB_REPOSITORY_RAW_PREFIX/")
+
+/** Routes only this repository's GitHub URLs through the domestic mirror; other URLs stay intact. */
+internal fun domesticGitHubUrl(raw: String): String {
+    val value = raw.trim()
+    if (value.startsWith(GITHUB_DOMESTIC_PROXY)) return value
+    return if (isTrustedRepositoryTarget(value)) GITHUB_DOMESTIC_PROXY + value else value
+}
+
+internal fun isDomesticGitHubProxyUrl(raw: String): Boolean =
+    raw.startsWith(GITHUB_DOMESTIC_PROXY) &&
+        isTrustedRepositoryTarget(raw.removePrefix(GITHUB_DOMESTIC_PROXY))
+
+private fun isSupportedReleaseEndpoint(value: String): Boolean =
+    value == GITHUB_RELEASE_API_URL || value == GITHUB_RELEASE_API_DOMESTIC_URL
 
 internal data class CurrentAppVersion(
     val versionName: String,
@@ -83,7 +109,7 @@ data class AppUpdateState(
     val latestVersionName: String? = null,
     val latestTitle: String? = null,
     val releaseNotes: String = "",
-    val releaseUrl: String = GITHUB_RELEASE_PAGE_URL,
+    val releaseUrl: String = GITHUB_RELEASE_PAGE_DOMESTIC_URL,
     val apkSizeBytes: Long = 0L,
     val apkSha256: String? = null,
     val canDownload: Boolean = false,
@@ -175,7 +201,7 @@ internal fun parseGitHubReleaseJson(raw: String): GitHubRelease {
             add(
                 GitHubReleaseAsset(
                     name = name,
-                    downloadUrl = url,
+                    downloadUrl = domesticGitHubUrl(url),
                     sizeBytes = asset.optLong("size", 0L).coerceAtLeast(0L),
                     digest = normalizeSha256OrNull(asset.optString("digest").takeIf { it.isNotBlank() })
                 )
@@ -185,7 +211,7 @@ internal fun parseGitHubReleaseJson(raw: String): GitHubRelease {
     return GitHubRelease(
         tagName = tagName,
         name = root.optString("name", tagName).trim().ifBlank { tagName },
-        htmlUrl = root.optString("html_url", GITHUB_RELEASE_PAGE_URL).trim(),
+        htmlUrl = domesticGitHubUrl(root.optString("html_url", GITHUB_RELEASE_PAGE_URL).trim()),
         body = root.optString("body", ""),
         publishedAt = root.optString("published_at", ""),
         draft = root.optBoolean("draft", false),
@@ -195,6 +221,7 @@ internal fun parseGitHubReleaseJson(raw: String): GitHubRelease {
 }
 
 internal fun isTrustedGitHubDownloadUrl(raw: String): Boolean {
+    if (isDomesticGitHubProxyUrl(raw)) return true
     val uri = runCatching { URI(raw) }.getOrNull() ?: return false
     if (!uri.scheme.equals("https", ignoreCase = true)) return false
     if (!uri.userInfo.isNullOrBlank() || (uri.port != -1 && uri.port != 443)) return false
@@ -205,12 +232,8 @@ internal fun isTrustedGitHubDownloadUrl(raw: String): Boolean {
         host == "github-releases.githubusercontent.com"
 }
 
-private fun isTrustedGitHubReleaseNetworkUrl(raw: String): Boolean {
-    if (isTrustedGitHubDownloadUrl(raw)) return true
-    val uri = runCatching { URI(raw) }.getOrNull() ?: return false
-    return uri.scheme.equals("https", ignoreCase = true) &&
-        uri.host.equals("api.github.com", ignoreCase = true)
-}
+private fun isTrustedGitHubReleaseNetworkUrl(raw: String): Boolean =
+    raw == GITHUB_RELEASE_API_URL || raw == GITHUB_RELEASE_API_DOMESTIC_URL
 
 private val SAFE_ASSET_NAME = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$")
 private val EXPLICIT_ABI_MARKER = Regex(
@@ -315,10 +338,30 @@ internal sealed interface GitHubReleaseFetchResult {
 
 internal class GitHubReleaseClient(
     private val client: OkHttpClient = defaultGitHubHttpClient(),
-    private val endpoint: String = GITHUB_RELEASE_API_URL
+    private val endpoint: String = GITHUB_RELEASE_API_DOMESTIC_URL,
+    private val fallbackEndpoint: String? = GITHUB_RELEASE_API_URL
 ) {
+    init {
+        require(
+            isSupportedReleaseEndpoint(endpoint) &&
+                (fallbackEndpoint == null || isSupportedReleaseEndpoint(fallbackEndpoint))
+        ) { "GitHub Release endpoint is fixed to the official repository." }
+    }
+
     fun fetchLatest(etag: String? = null): GitHubReleaseFetchResult {
-        require(endpoint == GITHUB_RELEASE_API_URL) { "GitHub Release endpoint is fixed to the official repository." }
+        val endpoints = listOfNotNull(endpoint, fallbackEndpoint).distinct()
+        var lastError: Exception? = null
+        for (target in endpoints) {
+            try {
+                return fetchLatestFrom(target, etag)
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+        throw lastError ?: IllegalArgumentException("GitHub Release endpoint is fixed to the official repository.")
+    }
+
+    private fun fetchLatestFrom(endpoint: String, etag: String?): GitHubReleaseFetchResult {
         val request = Request.Builder()
             .url(endpoint)
             .header("Accept", "application/vnd.github+json")

@@ -272,6 +272,8 @@ $env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
 
 应用内「设置 → 关于 → 赞助支持」也提供同一组离线赞赏码；国内网络无法打开 GitHub 时可直接扫码。
 
+国内访问可使用 [GitHub 加速镜像](https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent)。应用内更新检查、赞助页和 Star 入口默认走该镜像，更新 API 失败时自动回退 GitHub 官方地址；「设置 → 关于 → 怎么点 Star？」提供三步图文引导。
+
 [![GitHub stars](https://img.shields.io/github/stars/lyydfys/MuYu-Chat-Agent?style=social)](https://github.com/lyydfys/MuYu-Chat-Agent)
 
 ## Repository Layout

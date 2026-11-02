@@ -8,6 +8,7 @@ import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -53,9 +54,11 @@ import com.muyuchat.core.designsystem.McaIcons
 
 private const val ABOUT_AUTHOR = "lyydfys"
 private const val ABOUT_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
+private const val ABOUT_GITHUB_PROXY = "https://gh-proxy.com/"
 private const val ABOUT_AUTHOR_URL = "https://github.com/$ABOUT_AUTHOR"
-private const val ABOUT_REPOSITORY_URL = "https://github.com/$ABOUT_REPOSITORY"
-private const val ABOUT_ISSUES_URL = "$ABOUT_REPOSITORY_URL/issues"
+private const val ABOUT_REPOSITORY_OFFICIAL_URL = "https://github.com/$ABOUT_REPOSITORY"
+private const val ABOUT_REPOSITORY_URL = ABOUT_GITHUB_PROXY + ABOUT_REPOSITORY_OFFICIAL_URL
+private const val ABOUT_ISSUES_URL = "$ABOUT_REPOSITORY_OFFICIAL_URL/issues"
 private const val ABOUT_DONATE_URL = "$ABOUT_REPOSITORY_URL/blob/master/docs/DONATE.md"
 
 private const val ABOUT_PREFERENCES = "mca_about_ui"
@@ -89,6 +92,7 @@ internal fun SettingsAboutScreen(
     }
     var showSponsor by rememberSaveable { mutableStateOf(false) }
     var showReleaseNotes by rememberSaveable { mutableStateOf(false) }
+    var showStarGuide by rememberSaveable { mutableStateOf(false) }
 
     val update = state.appUpdate
     val currentVersion = update.currentVersionName.ifBlank { "未知" }
@@ -224,6 +228,7 @@ internal fun SettingsAboutScreen(
         if (!starDismissed) {
             AboutStarBanner(
                 onOpenGithub = { onOpenWebPage(ABOUT_REPOSITORY_URL) },
+                onShowGuide = { showStarGuide = true },
                 onDismiss = ::dismissStar
             )
         }
@@ -244,7 +249,21 @@ internal fun SettingsAboutScreen(
                 onOpenWebPage(ABOUT_DONATE_URL)
             },
             onOpenGithub = { onOpenWebPage(ABOUT_REPOSITORY_URL) },
+            onOpenStarGuide = {
+                showSponsor = false
+                showStarGuide = true
+            },
             onOpenIssues = { onOpenWebPage(ABOUT_ISSUES_URL) }
+        )
+    }
+
+    if (showStarGuide) {
+        AboutStarGuideDialog(
+            onOpenRepository = {
+                showStarGuide = false
+                onOpenWebPage(ABOUT_REPOSITORY_URL)
+            },
+            onDismiss = { showStarGuide = false }
         )
     }
 
@@ -472,6 +491,7 @@ private fun AboutLinkCard(
 @Composable
 private fun AboutStarBanner(
     onOpenGithub: () -> Unit,
+    onShowGuide: () -> Unit,
     onDismiss: () -> Unit
 ) {
     Surface(
@@ -479,36 +499,49 @@ private fun AboutStarBanner(
         color = MaterialTheme.colorScheme.secondaryContainer,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Row(
+        Column(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(
-                McaIcons.Star,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    "如果 MCA 帮到了你",
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-                Text(
-                    "请在 GitHub 点个 Star，这对我们意义重大",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
-            McaButton(style = McaButtonStyle.Outlined, onClick = onOpenGithub) {
-                Text("去点 Star")
-            }
-            McaIconButton(
-                contentDescription = "关闭 Star 提示",
-                onClick = onDismiss
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(McaIcons.Close, contentDescription = null)
+                Icon(
+                    McaIcons.Star,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "如果 MCA 帮到了你",
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Text(
+                        "请在 GitHub 点个 Star，这对我们意义重大",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+                McaIconButton(
+                    contentDescription = "关闭 Star 提示",
+                    onClick = onDismiss
+                ) {
+                    Icon(McaIcons.Close, contentDescription = null)
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                McaButton(style = McaButtonStyle.Text, onClick = onShowGuide) {
+                    Text("怎么点 Star？")
+                }
+                McaButton(style = McaButtonStyle.Outlined, onClick = onOpenGithub) {
+                    Text("去点 Star")
+                }
             }
         }
     }
@@ -563,6 +596,7 @@ private fun AboutSponsorDialog(
     onDismiss: () -> Unit,
     onOpenDonatePage: () -> Unit,
     onOpenGithub: () -> Unit,
+    onOpenStarGuide: () -> Unit,
     onOpenIssues: () -> Unit
 ) {
     val context = LocalContext.current
@@ -648,6 +682,9 @@ private fun AboutSponsorDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                McaButton(style = McaButtonStyle.Text, onClick = onOpenStarGuide) {
+                    Text("不知道怎么点 Star？查看教程")
+                }
                 McaButton(style = McaButtonStyle.Text, onClick = { showQr = !showQr }) {
                     Text(if (showQr) "收起离线赞赏码" else "扫码赞助（国内可直连）")
                 }
@@ -682,6 +719,118 @@ private fun AboutSponsorDialog(
             }
         }
     )
+}
+
+@Composable
+private fun AboutStarGuideDialog(
+    onOpenRepository: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+
+    fun copyRepositoryLink() {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("MCA GitHub", ABOUT_REPOSITORY_URL))
+        Toast.makeText(context, "仓库链接已复制", Toast.LENGTH_SHORT).show()
+    }
+
+    McaDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Icon(
+                    McaIcons.Star,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text("给 MCA 点个 Star", fontWeight = FontWeight.Bold)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .heightIn(max = 420.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    "Star 完全免费，只需要一个 GitHub 账号。三步即可完成：",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                AboutStarStep(
+                    index = 1,
+                    title = "打开项目主页",
+                    detail = "下方按钮已使用国内加速镜像，访问更稳定。"
+                )
+                AboutStarStep(
+                    index = 2,
+                    title = "登录或注册 GitHub",
+                    detail = "没有账号可以现场注册，只需一个邮箱。"
+                )
+                AboutStarStep(
+                    index = 3,
+                    title = "点击右上角的 Star",
+                    detail = "按钮变成 Starred 就表示点 Star 成功。"
+                )
+                Text(
+                    "如果加速镜像打不开，可在浏览器中直接访问原站：\n$ABOUT_REPOSITORY_OFFICIAL_URL",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                )
+            }
+        },
+        confirmButton = {
+            McaButton(style = McaButtonStyle.Primary, onClick = onOpenRepository) {
+                Icon(McaIcons.Star, contentDescription = null)
+                Text("打开仓库并点 Star", modifier = Modifier.padding(start = 6.dp))
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                McaButton(style = McaButtonStyle.Text, onClick = ::copyRepositoryLink) {
+                    Text("复制链接")
+                }
+                McaButton(style = McaButtonStyle.Text, onClick = onDismiss) {
+                    Text("关闭")
+                }
+            }
+        }
+    )
+}
+
+@Composable
+private fun AboutStarStep(index: Int, title: String, detail: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = MaterialTheme.colorScheme.primaryContainer,
+            modifier = Modifier.size(24.dp)
+        ) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "$index",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                detail,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
 }
 
 @Composable
