@@ -1,5 +1,11 @@
 pluginManagement {
     repositories {
+        // This host cannot reach dl.google.com / repo.maven.apache.org (the plugin marker's POM is
+        // fetched as 404 or times out), so the public mirror is consulted first. Listed before
+        // google() on purpose: appending leaves the unreachable host first and every artifact waits
+        // out its connection timeout before the mirror is ever tried.
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
         google()
         mavenCentral()
         gradlePluginPortal()
@@ -9,6 +15,10 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
+        // Same reason as pluginManagement above: the mirror is reachable from this host, the
+        // google()/mavenCentral() hosts are not.
+        maven { url = uri("https://maven.aliyun.com/repository/google") }
+        maven { url = uri("https://maven.aliyun.com/repository/public") }
         google()
         mavenCentral()
     }
