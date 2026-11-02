@@ -1,26 +1,39 @@
+// The developer host cannot reach dl.google.com / repo.maven.apache.org reliably, so it needs the
+// Aliyun mirrors first. GitHub Actions can reach the public repositories, and there a mirror-first
+// list made the KSP plugin marker resolve from the mirror while its implementation artifact did not,
+// which fails plugin resolution instead of falling back. Keep both environments explicit.
+val preferPublicRepositories = System.getenv("CI")?.equals("true", ignoreCase = true) == true
+
 pluginManagement {
     repositories {
-        // This host cannot reach dl.google.com / repo.maven.apache.org (the plugin marker's POM is
-        // fetched as 404 or times out), so the public mirror is consulted first. Listed before
-        // google() on purpose: appending leaves the unreachable host first and every artifact waits
-        // out its connection timeout before the mirror is ever tried.
+        if (preferPublicRepositories) {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
-        google()
-        mavenCentral()
-        gradlePluginPortal()
+        if (!preferPublicRepositories) {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
     }
 }
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        // Same reason as pluginManagement above: the mirror is reachable from this host, the
-        // google()/mavenCentral() hosts are not.
+        if (preferPublicRepositories) {
+            google()
+            mavenCentral()
+        }
         maven { url = uri("https://maven.aliyun.com/repository/google") }
         maven { url = uri("https://maven.aliyun.com/repository/public") }
-        google()
-        mavenCentral()
+        if (!preferPublicRepositories) {
+            google()
+            mavenCentral()
+        }
     }
 }
 
