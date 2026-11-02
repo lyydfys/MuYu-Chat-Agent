@@ -79,8 +79,8 @@ is exposed to: `java.lang.OutOfMemoryError: Java heap space` during
 
 | Serial | Product / model | Notes |
 | --- | --- | --- |
-| `98a37aa7` | `piano` / `25091RP04C` | Android SDK 37, MIUI/HyperOS `V816`; package `com.muyuchat.mca` versionName `0.2.4`, versionCode `8`, `lastUpdateTime=2026-10-19 23:39:54` (same-signature update of the 23:39:17 release APK) |
-| `f9d98aa3` | `ishtar` / `2304FPN6DC` | A second device is attached; **all adb commands must use `-s`** or they fail with “more than one device/emulator” |
+| `device-b` | `piano` / `25091RP04C` | Android SDK 37, MIUI/HyperOS `V816`; package `com.muyuchat.mca` versionName `0.2.4`, versionCode `8`, `lastUpdateTime=2026-10-19 23:39:54` (same-signature update of the 23:39:17 release APK) |
+| `device-a` | `ishtar` / `2304FPN6DC` | A second device is attached; **all adb commands must use `-s`** or they fail with “more than one device/emulator” |
 
 No install, uninstall, clear-data, or instrumentation command was run during this preflight.
 
@@ -311,7 +311,7 @@ tests, screenshots and the staged DSH payload are inputs**.
 
 ### B4 — Device install/validation limits
 
-- Two devices are attached; use `-s 98a37aa7` (primary) or `-s f9d98aa3`, never bare `adb`.
+- Two devices are attached; use `-s device-b` (primary) or `-s device-a`, never bare `adb`.
 - On the MIUI/HyperOS device, a new package install is blocked by
   `INSTALL_FAILED_USER_RESTRICTED`; only a same-signature **update** of the installed
   `com.muyuchat.mca` is known to work. Do not uninstall, clear data, or change applicationId to
@@ -387,7 +387,7 @@ frozen run. Allowed statuses: `PASS / FAIL / NOT_RUN / BLOCKED / NOT_APPLICABLE`
 | E11 | Aggregate / exit | `verify-code.ps1 -AgentTests -Rerun` | `VERIFY OK`, exit 0, tests > 0 | | NOT_RUN | | Save full transcript outside repo |
 | E12 | Input unchanged during run | `McaWorktreeFingerprint.ps1` before/after | Identical fingerprint | | NOT_RUN | | Any file edit ⇒ `input-changed-during-run` |
 | E13 | Release candidate APK | `:app:assembleRelease` on frozen tree | APK + manifest/hash bound to fingerprint | | NOT_RUN | | 23:39 APK is stale (DSH edit 23:39:34) |
-| E14 | Device install / upgrade | `adb -s 98a37aa7 …` | Same-signature update; no data loss | | BLOCKED | | MIUI `INSTALL_FAILED_USER_RESTRICTED` for new package |
+| E14 | Device install / upgrade | `adb -s device-b …` | Same-signature update; no data loss | | BLOCKED | | MIUI `INSTALL_FAILED_USER_RESTRICTED` for new package |
 | E15 | Instrumentation / real UI | connected tests | Actual run on device | | BLOCKED | | 4 new androidTest classes never run |
 | E16 | Local model / FGS / SAF / TalkBack | device runtime | Actual evidence | | NOT_RUN | | Out of scope of the JVM gate |
 | E17 | Stale-doc correction | review this file and proposal docs | No 14/14, 3245, or 98eb8e4 claims in current report | | NOT_RUN | | Historical evidence stays labeled historical |

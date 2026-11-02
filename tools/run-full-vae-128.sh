@@ -8,7 +8,7 @@
 set -uo pipefail
 CHECK=0
 if [ "${1:-}" = "--check" ]; then CHECK=1; shift; fi
-SERIAL=${1:-98a37aa7}
+SERIAL=${1:-device-b}
 ADB=${ADB:-/e/model/android-sdk/platform-tools/adb.exe}
 # The Local API key is per-install and shown in the app; never hardcode it in the repo.
 KEY=${MCA_API_KEY:?export MCA_API_KEY with the key shown in MCA -> Local API}

@@ -65,7 +65,7 @@
   .\scripts\baseline-profile.ps1 -AllowSyntheticProfile
 
 .EXAMPLE
-  .\scripts\baseline-profile.ps1 -DeviceSerial f9d98aa3 -BuildType benchmark -KeepProfileInSource
+  .\scripts\baseline-profile.ps1 -DeviceSerial device-a -BuildType benchmark -KeepProfileInSource
 #>
 [CmdletBinding()]
 param(

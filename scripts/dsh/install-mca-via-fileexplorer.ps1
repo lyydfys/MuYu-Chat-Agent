@@ -14,7 +14,7 @@
   It does not change any system policy and does not bypass user consent.
 
 .EXAMPLE
-  pwsh -NoProfile -File scripts/dsh/install-mca-via-fileexplorer.ps1 -Device f9d98aa3 -Apk app/build/outputs/apk/debug/app-debug.apk
+  pwsh -NoProfile -File scripts/dsh/install-mca-via-fileexplorer.ps1 -Device device-a -Apk app/build/outputs/apk/debug/app-debug.apk
 #>
 [CmdletBinding()]
 param(

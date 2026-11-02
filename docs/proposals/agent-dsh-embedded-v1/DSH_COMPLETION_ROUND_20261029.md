@@ -167,7 +167,7 @@ sh 对数组语法/`BASH_VERSION` 的实际拒绝。
 
 ## 8. 设备与账号
 
-- 设备在线：`98a37aa7`、`f9d98aa3`（arm64-v8a），`/data` 余量 6.4 GB。
+- 设备在线：`device-b`、`device-a`（arm64-v8a），`/data` 余量 6.4 GB。
 - 测试前已安装 APK：`/data/app/~~UFHwcG0nfFikZc-MQA8kDw==/com.muyuchat.mca-IIF9UPkVkSfIKOCxMrW9cg==/base.apk`，
   SHA-256 `22578fdd2ce68cc52dd106ab89ddebdf291958552e8c158f4d7a8997b103ccc3`，
   版本 `0.2.4-diag` (versionCode 8)。该 APK 不含本轮改动，不作为本轮证据。
@@ -352,7 +352,7 @@ XML 位于 `core/dsh-runtime/build/test-results/testDebugUnitTest/`）。
 
 ### 8.5 2026-10-29 21:09 设备重新上线（基线已变）
 
-- 设备重新连上：`f9d98aa3`，型号 `2304FPN6DC`（ishtar），ABI arm64-v8a。
+- 设备重新连上：`device-a`，型号 `2304FPN6DC`（ishtar），ABI arm64-v8a。
 - **安装基线不是 §8.2 的诊断构建**：当前 `app_path=/data/app/~~vFEKl3pyD-QnTLnIVvFwVg==/com.muyuchat.mca-WT9LfooC2iAUldCOgEhXKw==/base.apk`，
   SHA-256 `db542f6bc4c6f947199185fbf2563cad19eb235c0c736b63464d5c85bd3af5b1`，`versionName=0.2.4`、`versionCode=8`，
   **release 非 debuggable**（`run-as` 被拒，无法读取 `files/dsh/closure/`，无探针数据）。
@@ -495,7 +495,7 @@ XML 位于 `core/dsh-runtime/build/test-results/testDebugUnitTest/`）。
 
 ### 8.10 2026-10-30 01:42–01:46 本设备完成 v8 双版本升级（COMMITTED）与跨进程重启验证
 
-设备 `f9d98aa3`（安装包 `c52b2f0a…`，此前无闭包）。候选来自 §8.8 的生产 stager 产物 v8
+设备 `device-a`（安装包 `c52b2f0a…`，此前无闭包）。候选来自 §8.8 的生产 stager 产物 v8
 （`candidate.json` 设备 sha256 `067fc29a…`，31,021 文件，marker `bbe5dd3c…` ≠ 安装 payload `b07f71cb…`）。
 
 - 控制台识别 `候选版本 v8`；停止宿主（`运行阶段=已停止`，日志 `stopped (SIGTERM)` /
@@ -626,7 +626,7 @@ SAF 复测（新构建）：`request` 仍 `pending=true`、选择器弹出、按
 
 - 构建/安装：`:app:assembleDiagnostic`（arm64）+ debug keystore 重签 → `D:/mca-archive/mca-diag-1030c.apk`
   SHA-256 `99f8404d492e6b0f9b5304623e0fa7a86527d7e64ea60879d59b7740ee50498b`，
-  设备 `f9d98aa3` 安装后 `base.apk`（`/data/app/~~dC31yBFR-…/base.apk`）哈希一致；安装前基线 `cb50a92d…` / `fe76f540…`。
+  设备 `device-a` 安装后 `base.apk`（`/data/app/~~dC31yBFR-…/base.apk`）哈希一致；安装前基线 `cb50a92d…` / `fe76f540…`。
 - 控制台实测（本构建含 §8.14 三处修复 + §8.13 canonicalPath）：
   宿主运行中时停止-only 动作全部禁用；点「停止运行时」后 `ps -A|grep libdshnode` 归零；
   **「运行整闭包升级」首次在 v8 `COMMITTED` 之后变为可用**（截图 s19）→ 弹出「确认运行整闭包升级」→「确认执行」。
@@ -840,7 +840,7 @@ SAF 复测（新构建）：`request` 仍 `pending=true`、选择器弹出、按
 
 ### 8.28 启动恢复设备演练暴露并修复两处缺陷（core/dsh-maintenance + app 组装）
 
-- 演练方法（设备 `f9d98aa3`，APK `d4a85dc9…`）：停宿主 → `run-as chmod 000 files/dsh/maintenance/journal` → 启动应用进入 DSH。
+- 演练方法（设备 `device-a`，APK `d4a85dc9…`）：停宿主 → `run-as chmod 000 files/dsh/maintenance/journal` → 启动应用进入 DSH。
 - **缺陷 A（安全，已修）**：第一次演练时宿主**照常启动**。根因：`DshMaintenanceJournalStore.all()` 把
   `journalDir.listFiles()` 返回 `null`（目录不可读）当作 `emptyList()`，`recoverOnStart` 因此"无待决事务"并放行。
   修复：`readJournalStates(listFiles, directoryExists, readOne)` 纯函数——目录存在但不可列举时抛 `IOException`；
@@ -876,7 +876,7 @@ SAF 复测（新构建）：`request` 仍 `pending=true`、选择器弹出、按
 
 ### 8.30 MCP 真连通：`runtime/bin/node` 链接农场缺口（已修，设备绑定新 APK）
 
-- 设备 `f9d98aa3`；安装前 APK `b59b4231…`（`/data/app/~~6Kkbx89m…/base.apk`），安装后
+- 设备 `device-a`；安装前 APK `b59b4231…`（`/data/app/~~6Kkbx89m…/base.apk`），安装后
   `ede6d10034be8d72dc1976cee011df46103683c69ac5592455e144370aabce58`
   （`/data/app/~~xihcqTmz5x77sT4Bq4IKuQ==/com.muyuchat.mca-D1P9S1E5fVYomitaSwiDjg==/base.apk`，
   `0.2.4-diag` vc8，证书 `ad116923…` debug lineage，与既有安装同签名，`adb install -r` 保数据）。

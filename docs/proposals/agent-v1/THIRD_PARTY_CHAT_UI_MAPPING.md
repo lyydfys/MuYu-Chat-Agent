@@ -38,7 +38,7 @@
 | MCA | `core/designsystem/.../McaTheme.kt`、`McaButtons.kt`、`McaMotion.kt` | 唯一色彩/图标按钮/动效权威 |
 | MCA | `feature/agent-workspace/.../ui/*`、`AgentWorkspaceModels.kt`、`AgentWorkspaceRoute.kt`、`build.gradle.kts` | 现状、可复用件、模块边界 |
 
-`THIRD_PARTY` = `C:\Users\sy427\AppData\Local\Temp\thirdparty-src`（只读参照仓库，未构建、未修改）。
+`THIRD_PARTY` = `C:\Users\example\AppData\Local\Temp\thirdparty-src`（只读参照仓库，未构建、未修改）。
 
 ### 1.2 度量口径
 

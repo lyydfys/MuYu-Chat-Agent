@@ -6,7 +6,7 @@
 - **Absolute final APK**：`b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a`，393,717,991 B，mtime 2026-10-20 05:06:13，0.2.4 (8)，minSdk 26 / targetSdk 36，signer `2619ac4c…a9cf`，non-debuggable；payload + MANIFEST + 7 `libdsh*.so`（R00 预检）
 - Previous hardening：`2005df024a66bc5c21123e73dafa71d7c1c80a319f5048003d64aed2ef7b94dc`（393,715,727 B）——previous PASS_WITH_CAVEATS
 - Intermediate superseded：`B63149B8…`（identity 未记录）；stale `E0B97FB3…`
-- Device：98a37aa7（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
+- Device：device-b（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
 - **Verifier short regression：PENDING**
 - 规则：final 列在短回归 PASS 前一律 `PENDING`；返回后绑定 `B610E1D0…`，再发一屏裁决。
 
@@ -97,7 +97,7 @@
 
 ```text
 R07 FINAL VERDICT — B610E1D0…AE9A (393,717,991 B, 0.2.4/8)
-Device: 98a37aa7 / Android 17 SDK37 / arm64-v8a
+Device: device-b / Android 17 SDK37 / arm64-v8a
 Short regression: <PASS/FAIL/NOT_RUN/BLOCKED> (run <verifierRun>)
 C1–C7: <matrix> (C2 expected 93/93; C7 raw log missing)
 E1–E9: <E1/E2/E3/E5/E6/E8/E9 pre-start; E4/E7/E9 post-refresh NOT_RUN>
@@ -112,7 +112,7 @@ Decision: <PASS_WITH_CAVEATS / HOLD>
 
 ## 7. 填充规则
 
-1. 只接受绑定 **B610E1D0…AE9A**、设备 98a37aa7、采集时间的短回归证据；2005DF02 是 previous，B63149B8 是 intermediate，E0B 是 stale。
+1. 只接受绑定 **B610E1D0…AE9A**、设备 device-b、采集时间的短回归证据；2005DF02 是 previous，B63149B8 是 intermediate，E0B 是 stale。
 2. final 列只能写 `PASS/FAIL/NOT_RUN/BLOCKED`；无证据保持 `PENDING` 或最终 `NOT_RUN`。
 3. 不得把 2005DF02/0A 的 PASS 复制给 B610E1D0；不得把 12288 写成可用；不得把 MODEL_QUALITY_ONLY 写成协议失败。
 4. 若 Café2024 或其他模型名仍出现 hex token，label P2 不能写 fully closed。

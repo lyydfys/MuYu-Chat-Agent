@@ -12,7 +12,7 @@
         "E:\\MAC\\core\\native\\src\\main\\cpp\\mnn_native_engine.cpp:55:10: fatal error: 'diffusion/mtok_tokenizer.hpp' file not found"
       ],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_native_engine.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_native_engine.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -90,7 +90,7 @@
         "E:\\MAC\\core\\native\\src\\main\\cpp\\qnn_native_bridge.cpp:821:65: warning: parentheses were disambiguated as a function declaration [-Wvexing-parse]",
         "E:\\MAC\\core\\native\\src\\main\\cpp\\qnn_native_bridge.cpp:946:65: warning: parentheses were disambiguated as a function declaration [-Wvexing-parse]"
       ],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_native_bridge.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_native_bridge.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -132,7 +132,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_capability_probe.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_capability_probe.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -170,7 +170,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_diffusion_pipeline.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_diffusion_pipeline.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -231,7 +231,7 @@
         "E:\\MAC\\core\\native\\src\\main\\cpp\\mca\\mnn\\mnn_session_manager.cpp:190:21: error: use of undeclared identifier 'normalize_mnn_contract_enum'"
       ],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_session_manager.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_session_manager.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -291,7 +291,7 @@
         "E:\\MAC\\core\\native\\src\\main\\cpp\\mca\\mnn\\mnn_sdxl_pipeline.cpp:7:10: fatal error: 'prompt_language_rules.hpp' file not found"
       ],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_sdxl_pipeline.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_mnn_sdxl_pipeline.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",

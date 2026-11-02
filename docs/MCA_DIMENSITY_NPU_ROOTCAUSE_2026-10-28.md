@@ -58,8 +58,8 @@ __android_log_set_logger(my_sink);                        // 进程级，跨 DSO
 再加上 `kLiteRtEnvOptionTagMinLoggerSeverity = 25`（VERBOSE）把插件自己的静态 logger 级别降下来，
 **测试者不需要 adb 就能拿到 `Int8 is not supported.` / `Unsupported SoC model` / 分区统计 / `Failed to add NEURON_*`**。
 
-已在真机上验证（`98a37aa7` / Android 37 / arm64，4/4 marker 全中，含 `__android_log_vprint` 路径，
-且 logcat 未被破坏）：`dist-probe/_selftest/liblog-hook-selftest-98a37aa7.log`。
+已在真机上验证（`device-b` / Android 37 / arm64，4/4 marker 全中，含 `__android_log_vprint` 路径，
+且 logcat 未被破坏）：`dist-probe/_selftest/liblog-hook-selftest-device-b.log`。
 
 ## 6. 单次决定性实验：1.0.4 探针包
 

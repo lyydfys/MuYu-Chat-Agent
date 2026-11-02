@@ -28,8 +28,8 @@ never read again; a same-length replacement with a restored mtime still invalida
 
 | device | P50 | P90 | P95 | P99 | janky |
 |---|---|---|---|---|---|
-| 98a37aa7 | 5 → 5 ms | 5 → 5 | 5 → 5 | 9 → 8 | 0.12 % → 0.12 % |
-| f9d98aa3 | 7 → 5 ms | 9 → 8 | 10 → 9 | 14 → 13 | 0.10 % → 0.19 % (1→2 frames) |
+| device-b | 5 → 5 ms | 5 → 5 | 5 → 5 | 9 → 8 | 0.12 % → 0.12 % |
+| device-a | 7 → 5 ms | 9 → 8 | 10 → 9 | 14 → 13 | 0.10 % → 0.19 % (1→2 frames) |
 
 ### Package size
 
@@ -75,7 +75,7 @@ the conflated-channel swipe-back and the zero-animation-scale behaviour.
   cards keep their switch on the title row (`r14/settings-font20-final.png`,
   `r14/settings-update-card-fixed.png`, `r14/settings-privacy-fixed.png`). The logs/diagnostics tab now has a centred empty state (icon,
   title, one-line hint) instead of a blank page (`r13/logs-empty-state.png`).
-- Dark mode / large font evidence: `r2/after-98a37aa7-dark-main.png`, `r5/r5-dark-chat.png`,
+- Dark mode / large font evidence: `r2/after-device-b-dark-main.png`, `r5/r5-dark-chat.png`,
   `r5/r5-dark-drawer.png`, `r5/r5-font20-chat.png`, `r11/agent-light.png`,
   `r11/agent-dark.png`, `r11/agent-font20-dark.png`.
 

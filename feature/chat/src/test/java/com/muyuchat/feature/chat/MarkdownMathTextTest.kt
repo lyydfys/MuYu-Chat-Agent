@@ -10,7 +10,7 @@ import org.junit.Test
 /**
  * `renderLatexMath` / `looksLikeMath` 的行为契约。
  *
- * **realWorldTableCells 用例来自真机实测**：设备 `98a37aa7` 上由真实 GGUF 模型
+ * **realWorldTableCells 用例来自真机实测**：设备 `device-b` 上由真实 GGUF 模型
  * （`gemma-4-E4B-it-uncensored-Q4_K_M`）输出的 Markdown 表格，其单元格在修复前
  * **原样显示** `Short ($\approx 400 \text{ nm}$)`（含 `$` 定界符与反斜杠命令），
  * 且因原始串过长而换行、把行高从 50px 撑到 100px。

@@ -198,7 +198,7 @@ tools/device/t08-npug-acceptance.ps1 -ModelId <id> -Runs 2 [-Serial <sn>] [-OutD
 1. 核对 §4 的四个 SHA-256（App APK、固定/动态 bundle、链测 APK）与磁盘一致。
 2. 跑 `python tools/mediatek/validate_chain_report.py` 对 r3 两个目录，确认历史证据仍自洽（`chain-1793510702554`、`chain-1793510795116`）。
 3. 跑 `:core:mediatek-native` + `:core:download` + `:feature:modelhub` 测试；注意 Gradle 构建锁可能与另一会话争用（共享 `McaBuildLock.psm1`、`E:/gradle-tmp`、必要时 `--no-build-cache`、日志是 UTF-16、KSP 失败先重试）。
-4. 若要用设备：先确认设备在线且未被他人会话占用（共享设备 `f9d98aa3` 上他人的 `mca.devicetest` + SLEEP 会使 run 失效），做 preflight 并保持屏幕常亮。
+4. 若要用设备：先确认设备在线且未被他人会话占用（共享设备 `device-a` 上他人的 `mca.devicetest` + SLEEP 会使 run 失效），做 preflight 并保持屏幕常亮。
 
 ---
 

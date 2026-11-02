@@ -272,7 +272,7 @@ MainActivity / Local API
 
 - **口径修正：** 旧字段 `cProbeNpuCpuMaxAbsDiff=223` / `cProbeNpuCpuMismatchBytes=20/40` 是逐字节比较 IEEE-754 原始表示，**不是 float 数值误差**；且旧探针对 float32 输入全部填 0。两者都不足以判定数值风险，也不能据此宣称“误差很大”或“数值正确”。
 - **已完成：** 0.4.4 单 APK 与独立 C 探针加入确定性 xorshift32 float 输入、每加速器 3 次重复、逐次输出 SHA、真实 float 误差（`maxAbsErr`/`meanAbsErr`/`rmsErr`/`maxRelErr`）、以及设备 Neuron runtime 信息采集。`Run all` 一次即可产出全部证据，并合并成一个 `runall-*.txt` 供 Share 一次发回。
-- **已验证：** 同一 C 探针在 Qualcomm `98a37aa7`（SM8750P，API 37，非 MediaTek）上完成 seeded CPU 验证：seed 1 连续两次输出 FNV 均为 `3705034104993990690`，seed 2 为 `11076504071473363812`，seed 3 为 `6272502320593339382`，输出 10 个有限 float32、40 B。说明输入填充可复现且随 seed 变化。
+- **已验证：** 同一 C 探针在 Qualcomm `device-b`（SM8750P，API 37，非 MediaTek）上完成 seeded CPU 验证：seed 1 连续两次输出 FNV 均为 `3705034104993990690`，seed 2 为 `11076504071473363812`，seed 3 为 `6272502320593339382`，输出 10 个有限 float32、40 B。说明输入填充可复现且随 seed 变化。
 - **仍未取得：** Dimensity 上的 NPU vs CPU float 误差、NPU 重复稳定性、设备 Neuron runtime 版本。MT6899 测试机不在本机，§4 的数值风险状态为 **OPEN（工具就绪，结果待回传）**。
 - **Phase 3–8 不变：** 无授权 NeuroPilot/Neuron 转换 SDK、无 Anima 权重/图，全部 BLOCKED。未新增生产 owner、队列、worker、状态 writer、runtime 枚举或图库链。
 
@@ -343,7 +343,7 @@ partitionCount=UNKNOWN provesNpuExecution=false
     `temb[1,6144]`；输出 `[1,1024,2048]`；
   - 277,927,568 B，SHA-256 `3d2b345de83cf15bd60685acc48b134744bb6511495c0aed0c757174aa10500f`；
   - 63.142 G MACs / 126.283 G ops 每次前向。
-- **Android LiteRT CPU 实测通过：** Qualcomm `98a37aa7` 上 `result=OK`，
+- **Android LiteRT CPU 实测通过：** Qualcomm `device-b` 上 `result=OK`，
   compile 91 ms、run 1,517 ms、`fullyAccelerated=1`、输出 8,388,608 B。
 - **数值对拍通过：** 同一输入下与 PyTorch 参考相比 `max_abs=1.602e-4`、
   `mean_abs=2.001e-6`、`rms=4.322e-6`（参考输出 std 2.888，`p99_rel=4.507e-5`；

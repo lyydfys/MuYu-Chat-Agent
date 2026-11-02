@@ -10,7 +10,7 @@
 
 ## 设备与渲染条件
 
-- 设备：Xiaomi `25091RP04C`，serial `98a37aa7`，Android API 37，arm64-v8a。
+- 设备：Xiaomi `25091RP04C`，serial `device-b`，Android API 37，arm64-v8a。
 - 物理分辨率：`2136x3200`；density `440`；fontScale `1.0`；浅色模式。
 - 当前显示模式：`50Hz`，支持 30/48/50/60/90/120/144Hz；性能对比必须绑定真实刷新率，不能把 60Hz 目标当 120Hz 结论。
 - Before 截图/无障碍树：`artifacts/ui-v9/before/main.png`、`main.xml`、`drawer.png`、`drawer2.xml`。

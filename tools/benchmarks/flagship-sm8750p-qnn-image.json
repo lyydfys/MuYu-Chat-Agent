@@ -4,7 +4,7 @@
   "suite": {
     "id": "mca-sm8750p-qnn-image-flagship-v1",
     "track": "qnn_image",
-    "targetSerial": "98a37aa7",
+    "targetSerial": "device-b",
     "targetSoc": "SM8750P",
     "model": "CyberRealistic SD1.5 QNN 2.28 / 8 Elite",
     "bundleRoot": "/storage/emulated/0/Android/data/com.muyuchat.mca/files/qnn-bundles/cyberrealistic-sd15-qnn228-8gen2",

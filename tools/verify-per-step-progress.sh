@@ -12,7 +12,7 @@ set -uo pipefail
 export MSYS_NO_PATHCONV=1
 
 ADB=${ADB:-/e/model/android-sdk/platform-tools/adb.exe}
-SERIAL=${1:-98a37aa7}
+SERIAL=${1:-device-b}
 STEPS=${2:-4}
 DIR=${DIR:-/data/local/tmp/hy98}
 PROBE=${PROBE:-mca_wan_probe}

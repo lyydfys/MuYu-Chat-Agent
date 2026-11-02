@@ -26,7 +26,7 @@
 | Submodules | `third_party/llama.cpp` `4ceb1719…`; `third_party/stable-diffusion.cpp` `16b3846a…`; `third_party/tokenizers-cpp` `acbdc5a2…`. **`tokenizers-cpp` is dirty** (5 files: `CMakeLists.txt`, `include/tokenizers_c.h`, `include/tokenizers_cpp.h`, `rust/src/lib.rs`, `src/huggingface_tokenizer.cc`). This dirt is part of the gate fingerprint (hard-lock D08). |
 | Local-only guards | `AGENTS.md` and `app/src/test/java/com/muyuchat/mca/UniversalDeviceAdmissionPolicyTest.kt` are still in `.git/info/exclude`. Not re-checked by the architecture script in this preflight. |
 | Release APK on disk | `app/build/outputs/apk/release/app-release.apk`, **495,516,800 bytes**, mtime **01:01:44**, SHA-256 `e420e9e1f103c6d8123a7553be4b0dba74a7b292d847c2861330a387b4f4d080`. It predates the 01:11–01:15 DSH/Agent edits, so it is **not bound to the current tree**. |
-| Devices | `98a37aa7` (piano / 25091RP04C) and `f9d98aa3` (ishtar / 2304FPN6DC) attached. No install, uninstall, clear-data, instrumentation or UI action was run. |
+| Devices | `device-b` (piano / 25091RP04C) and `device-a` (ishtar / 2304FPN6DC) attached. No install, uninstall, clear-data, instrumentation or UI action was run. |
 
 ### 1.2 Host resources
 

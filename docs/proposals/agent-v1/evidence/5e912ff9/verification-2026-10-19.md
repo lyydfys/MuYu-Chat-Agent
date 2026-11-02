@@ -74,7 +74,7 @@ This gate is code-layer only. Device/model/cloud/visual evidence is still NOT_RU
 
 ## Device evidence
 
-- Connected: `f9d98aa3`, model 2304FPN6DC, arm64-v8a, API 36.
+- Connected: `device-a`, model 2304FPN6DC, arm64-v8a, API 36.
 - Current debug candidate: `app-debug.apk` 372 MB, SHA-256
   `aece2f07f46d078792561005142d42ffcf34bb80ba87248f3fb42b377b12c21e` (built 2026-10-19 16:17,
   includes run-scoped MCP wiring, DSH-style Agent home/detail and the FGS stop action).

@@ -20,6 +20,6 @@
 
 ## 真机验证
 
-- 设备：`98a37aa7`，浅/深色，fontScale 1.0；搜索键盘开启/关闭。
+- 设备：`device-b`，浅/深色，fontScale 1.0；搜索键盘开启/关闭。
 - before：`artifacts/ui-v9/before/*`。
 - after：实现后固定同设备、同分辨率、同 density/fontScale 重新截图。

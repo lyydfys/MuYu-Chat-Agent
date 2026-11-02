@@ -67,7 +67,7 @@ the user/assistant bubble contracts. All changes live inside existing roles and 
 | item | status | evidence |
 |---|---|---|
 | mixed interaction frame sample | PASS | 714 frames, 0.98 % janky, P50 7 / P90 11 / P95 13 / P99 22 ms (`r16/gfxinfo.txt`) |
-| chat scrolling percentiles | PASS | earlier rounds (98a37aa7 / f9d98aa3) |
+| chat scrolling percentiles | PASS | earlier rounds (device-b / device-a) |
 | Macrobenchmark lane | BLOCKED | OEM ROM rejects first-install of a new package |
 
 ## 7. Tests
@@ -170,7 +170,7 @@ readiness path.
 | images (preview, editor, gallery, UltraFix dialog) | PASS (code) | preview uses shared Loading/Ready/Failed with retry, zIndex above siblings while closing, dimmed actions on exit, scrollable confirm at 2.0x |
 | module gate | PASS | chat/settings/modelhub testDebugUnitTest green; release build 03:49 |
 
-a11y on the final build (device 98a37aa7): a fresh chat surface passes (25 nodes / 4 interactive / 0
+a11y on the final build (device device-b): a fresh chat surface passes (25 nodes / 4 interactive / 0
 violations). With a scrolled conversation the probe reports 6 findings that are viewport-clipping
 artifacts (the top message action row is partially under the header, nodes report 34.9dp) plus two
 unnamed action-row parents; with the drawer open it reports the parallel session's new 38dp rail

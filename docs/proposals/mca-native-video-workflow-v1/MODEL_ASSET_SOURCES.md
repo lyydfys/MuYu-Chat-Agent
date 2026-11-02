@@ -1,6 +1,6 @@
 # Wan2.2 TI2V-5B 基线资产来源清单（P0-A / V1-01）
 
-固定日期：2026-10-25；2026-10-26 修正哈希字段；2026-10-28 复核下载来源形式（固定 commit，非 `main`）、传输主机策略与下载 owner 行为。本清单是 [主方案 §5](EXECUTION_PLAN.md) 与任务卡 V1-01 的资产事实记录。文件大小来自 HTTP `Content-Length`；`sha256` 来自 Hugging Face 仓库文件元数据的 **LFS oid**（文件字节的 SHA-256，安装/加载时由 `VideoModelAssetVerifier` 复算）；`xetHash` 是 HF Xet CAS 标识，**不是文件 sha256**。2026-10-25 版曾把 `xetHash` 误记成 sha256，导致正确官方文件会被校验器判为不符；2026-10-26 已通过 HF tree API 重新取 LFS oid，并用 ModelScope 同仓库下载的真实字节复核（VAE/DiT/UMT5 三个角色已在 f9d 设备侧复算一致，见 IMPLEMENTATION_LOG 的 2026-10-26 交接轮 §2 与 §5.1）。本表是来源声明而非最终判据。
+固定日期：2026-10-25；2026-10-26 修正哈希字段；2026-10-28 复核下载来源形式（固定 commit，非 `main`）、传输主机策略与下载 owner 行为。本清单是 [主方案 §5](EXECUTION_PLAN.md) 与任务卡 V1-01 的资产事实记录。文件大小来自 HTTP `Content-Length`；`sha256` 来自 Hugging Face 仓库文件元数据的 **LFS oid**（文件字节的 SHA-256，安装/加载时由 `VideoModelAssetVerifier` 复算）；`xetHash` 是 HF Xet CAS 标识，**不是文件 sha256**。2026-10-25 版曾把 `xetHash` 误记成 sha256，导致正确官方文件会被校验器判为不符；2026-10-26 已通过 HF tree API 重新取 LFS oid，并用 ModelScope 同仓库下载的真实字节复核（VAE/DiT/UMT5 三个角色已在 device-a 设备侧复算一致，见 IMPLEMENTATION_LOG 的 2026-10-26 交接轮 §2 与 §5.1）。本表是来源声明而非最终判据。
 
 ## 1. 角色链（基础 TI2V-5B，非 Turbo）
 
@@ -54,21 +54,21 @@
 ### 5.1 已复核（2026-10-26 本轮，真实字节与 HF API）
 
 - **HF LFS oid 字段修正**：HF tree API 的 `lfs.oid` 才是文件 sha256；原表/原 profile 中的 `f68930ef…`、`6048e11f…`、`53b5f294…`、`9fc99dd5…` 是 `xetHash`。`Wan22Ti2v5bProfiles` 的 DiT Q4_0/VAE/UMT5 Q8_0 及两条备选 Q4_K_M 已修正为 LFS oid。
-- **设备侧真实字节复核（f9d98aa3，2026-10-26 19:52:56 落盘）**：`run-as com.muyuchat.mca.devicetest sha256sum` 对 `files/video_models/wan2.2-ti2v-5b/` 三个角色文件实算，结果与 pin 完全一致：
+- **设备侧真实字节复核（device-a，2026-10-26 19:52:56 落盘）**：`run-as com.muyuchat.mca.devicetest sha256sum` 对 `files/video_models/wan2.2-ti2v-5b/` 三个角色文件实算，结果与 pin 完全一致：
   - DiT Q4_0 3,029,086,560B → `fcf40dd62cb5e15556eef5f975700ab0b071aacd1939607689276e88f81ba463`
   - UMT5 Q8_0 6,043,068,256B → `2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc`
   - VAE 1,409,400,960B → `e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156`
-  - 原始输出：`build/evidence/v1-06/model-hash-f9d-20261026.txt`。
+  - 原始输出：`build/evidence/v1-06/model-hash-device-a-20261026.txt`。
 - **备选/参考资产 HF API 复核（2026-10-26）**：DiT Q4_K_M `95b19697…`、DiT Q8_0 `57bece98…`、UMT5 Q4_K_M `17cf97a5…` 的 `size`/`lfs.oid` 与表中值一致；Comfy-Org/Wan-2.2 的 `wan2.2_vae.safetensors` LFS oid 亦为 `e40321bd…`（与主 VAE 同字节）。
 - **Comfy-Org fp16 参考资产**：已取到 sha256 `456f9013…`、大小 9,999,658,848B、仓库标签 Apache-2.0、仓库 revision `ee6f4a40…`；仓库已由 `Wan_2.2_ComfyUI_Repackaged` 重命名为 `Wan-2.2`。仍**不进入本基线可执行清单**（本基线用 GGUF Q4_0+Q8_0，不下载 fp16）。
 - **固定 commit 复核（2026-10-28，HF API `?recursive=true&expand=true`）**：QuantStack `57437632…` 树上 DiT Q4_0 3,029,086,560B → `fcf40dd6…`、Q4_K_M 3,433,116,000B → `95b19697…`、Q8_0 5,400,179,040B → `57bece98…`、VAE 1,409,400,960B → `e40321bd…`；city96 `b535255b…` 树上 UMT5 Q8_0 6,043,068,256B → `2521d4de…`、Q4_K_M 3,655,145,312B → `17cf97a5…`。两个仓库当时的 `main` 也等于这两个 commit，即固定 revision 与 2026-10-26 记录的字节完全同一份。
-- **下载链路（2026-10-28 真机）**：f9d 直连 `huggingface.co`/`cdn-lfs` 全部超时（DNS 174.37.243.85，TCP connect 超时、ICMP 100% 丢包），而设备直连 `hf-mirror.com` 实测 ~10 MB/s（Range 206），因此生产代码按上文的“只换前端主机”策略下载；真实下载结果与证据见 IMPLEMENTATION_LOG 的 v1-07 分节。
+- **下载链路（2026-10-28 真机）**：device-a 直连 `huggingface.co`/`cdn-lfs` 全部超时（DNS 174.37.243.85，TCP connect 超时、ICMP 100% 丢包），而设备直连 `hf-mirror.com` 实测 ~10 MB/s（Range 206），因此生产代码按上文的“只换前端主机”策略下载；真实下载结果与证据见 IMPLEMENTATION_LOG 的 v1-07 分节。
 
 ### 5.2 仍未验证 / 未接入
 
 - 备选 Q4_K_M/Q8_0 权重**未下载运行**；上表 pin 只代表来源元数据与哈希字段正确，不代表真机可跑。
 - 模型实际可运行性、内存峰值、耗时：P0-C（V1-03）真机测量；本轮已有 64×64×9×1 最小规格真实出片记录（见 IMPLEMENTATION_LOG），产品规格仍未完成。
-- 模型下载链路（**2026-10-28 真机 PASS**）：经生产视频页驱动，f9d 真实下载三件套 10,481,555,776B（19m25s，≈12–13 MB/s，峰值 15.7 MB/s）；暂停→`CANCELLED` 保留 `.part`（1,155,031,720B）→续传从断点继续（未从 0 重来）；断网→`DOWNLOAD_FAILED`（保留 2.08GB 分片）→恢复后续传；最终设备侧三文件 SHA-256 全等 pin，页面进入 `三件套已就绪`，随后真实 T2V 245.2s 出片并发布。证据：`build/evidence/v1-07/device-b-*`、`device-c2-*`，逐项结论见 IMPLEMENTATION_LOG v1-07 §5。
+- 模型下载链路（**2026-10-28 真机 PASS**）：经生产视频页驱动，device-a 真实下载三件套 10,481,555,776B（19m25s，≈12–13 MB/s，峰值 15.7 MB/s）；暂停→`CANCELLED` 保留 `.part`（1,155,031,720B）→续传从断点继续（未从 0 重来）；断网→`DOWNLOAD_FAILED`（保留 2.08GB 分片）→恢复后续传；最终设备侧三文件 SHA-256 全等 pin，页面进入 `三件套已就绪`，随后真实 T2V 245.2s 出片并发布。证据：`build/evidence/v1-07/device-b-*`、`device-c2-*`，逐项结论见 IMPLEMENTATION_LOG v1-07 §5。
 - 传输主机证据边界：设备无 root / 无 tcpdump / 无 MITM，无法抓取 app 自身 TLS；已直接证明 app 自己完成传输（UI 进度 + 磁盘 `.part` + 设备侧哈希）、app 解析并尝试 `hf-mirror.com`（其自身错误串）、`huggingface.co` 在该设备不可达。302→`cas-bridge.xethub.hf.co` 链是同一 URL 的设备侧复现，**不是** app 报文抓包。
 
 ## 6. 4-step 蒸馏 LoRA（2026-10-29，v1-16 侦察）
@@ -84,7 +84,7 @@
   - `lightx2v/Wan2.2-Lightning`：仅 A14B 的 T2V/I2V LoRA，无 TI2V-5B
   - `quanhaol/Wan2.2-TI2V-5B-Turbo`：只有 `model.pt` 19,999,421,147 B（全量 checkpoint，>3GB，未下载）
   - `inference-sh/Wan2.2-TI2V-5B-LightX2V-Diffusers`：仓库只有 `.gitattributes` + README，无权重
-- 设备侧安装（2026-10-29 11:17/11:18）：98a 与 f9d 的 `files/video_models/wan2.2-ti2v-5b/loras/` 下均有该文件，
+- 设备侧安装（2026-10-29 11:17/11:18）：device-b 与 device-a 的 `files/video_models/wan2.2-ti2v-5b/loras/` 下均有该文件，
   `run-as … sha256sum` 均返回 `0ace5244…`（两台一致，332,348,584 B）
 - **运行时验证待补**：两台设备当时均锁屏，尚未跑带 LoRA 的探针；解锁后需在 128×128×9×4 上确认 `lora=` 回显与
   sd.cpp `apply_loras` 的实际命中（`applied tensor count`），若为 0 则说明 `diffusion_model.` 前缀与模型内部命名不匹配，需要做名称映射。
@@ -141,7 +141,7 @@
 许可证：`LICENSE-APACHE-2.0`（Wan/编码器/VAE/LoRA）+ `LICENSE`（TAEHV MIT），README 记录逐文件来源与哈希。
 TAE 额外说明：GitHub raw 在目标设备上不可达（SSL 000）；Kijai 的 ModelScope `taew2_2` 是
 22,848,080 B / `885f6766…`、128 个张量内容都不同，不能当作同一文件，故采用 upstream MIT 文件的逐字节镜像。
-七个下载 URL 已在 f9d98aa3 上逐个验证 HTTP 206（Range）。
+七个下载 URL 已在 device-a 上逐个验证 HTTP 206（Range）。
 
 落地：
 - `Wan22Ti2v5bProfiles` 新增 `TURBO_LORA_FILE`（`loras/turbo.safetensors`，必需）与 `TAE_FILE`

@@ -65,7 +65,7 @@
 
 修复的真实缺陷（均有测试/编译复验）：Room 迁移正则需字面量 `Migration(27, 28)`；approval decision 需持久化（`ConsumeApprovalTransition.decision`，DENY→DENIED）；MCP 404 刷新需清 session；frontmatter block scalar 不能 trim 末尾换行；Skills 树 fixture 不得把 `docs/new.md` 当 leaf；`McaAgentLocalModelAdapter` 超时分支必须先 cancel acquire child，否则 `coroutineScope` 永不返回；`AgentSkillToolPattern` 两个 erase 同签名需改名；启动恢复 fake 的 `failCommitForRunId=null` 误匹配 NULL runId。
 
-设备执行（`app/src/androidTest/.../agent/data/AgentRoomMigrationTest`、`AgentRoomJournalTest`）当前 **BLOCKED**：连接的 `f9d98aa3`（2304FPN6DC / API 36 / arm64）已安装 `com.muyuchat.mca`，但与本次 debug APK 签名不一致；`adb install -r` 被 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` 拒绝，只能卸载重装。卸载会清空设备上既有 MCA 数据，故本轮不做破坏性操作，保持 NOT_RUN/BLOCKED，待用户授权或提供匹配签名/独立测试设备。
+设备执行（`app/src/androidTest/.../agent/data/AgentRoomMigrationTest`、`AgentRoomJournalTest`）当前 **BLOCKED**：连接的 `device-a`（2304FPN6DC / API 36 / arm64）已安装 `com.muyuchat.mca`，但与本次 debug APK 签名不一致；`adb install -r` 被 `INSTALL_FAILED_UPDATE_INCOMPATIBLE` 拒绝，只能卸载重装。卸载会清空设备上既有 MCA 数据，故本轮不做破坏性操作，保持 NOT_RUN/BLOCKED，待用户授权或提供匹配签名/独立测试设备。
 
 ## 工程环境事件
 

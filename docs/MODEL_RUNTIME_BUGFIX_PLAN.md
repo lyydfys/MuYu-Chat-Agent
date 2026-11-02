@@ -35,7 +35,7 @@
 
 正式产品入口 Qwen3.6 35B-A3B 稀疏 MoE 验收：
 
-- 设备：同一台 Elite `98a37aa7` / Xiaomi `25091RP04C` / `SM8750P`，`MemTotal=11,617,264 kB`；只使用正式 `MainActivity` 与认证 Local API，最终 PID `23089`。
+- 设备：同一台 Elite `device-b` / Xiaomi `25091RP04C` / `SM8750P`，`MemTotal=11,617,264 kB`；只使用正式 `MainActivity` 与认证 Local API，最终 PID `23089`。
 - 模型：modelId `879398d3-1ad2-47e0-8006-f20fecb2e54d`，GGUF architecture `qwen35moe`，文件 `11,686,646,144` bytes，精确 SHA-256 `1FB8A998362EBB5F7F3C8ECE6D4803A74BA32211C751DE2E76B81E3379FBF050`。
 - profile：`balanced-14e7004f7a978df6` revision 1，`committed / safe`，`reloadRequired=false`，`RuntimeOverride=NONE`；规则 v3 没有复用此前错误的 v2 `spec_type=none` LKG。
 - effective：`backend=llama.cpp-cpu`，`mmap=true`，`mlock=false`，`mmapFallbackAllowed=false`，`mmapPrefetchEnabled=false`，`nCtx=4096`，`nBatch=2048`，`nUbatch=256`，`nParallel=1`，K/V=`q4_0`，Flash Attention=`on`，`specType=draft-mtp`，`specDraftNMax=2`。

@@ -14,7 +14,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Action,
     [string]$Value = '',
     [string]$Out = 'E:\MAC_QA_EVIDENCE\chat',
-    [string]$Device = 'f9d98aa3',
+    [string]$Device = 'device-a',
     [int]$Index = 0
 )
 

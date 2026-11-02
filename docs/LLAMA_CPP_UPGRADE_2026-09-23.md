@@ -38,7 +38,7 @@ Android 编译链，但在完成真实 arm64 真机加载 Hy-MT2 1.25-bit、短�
 完整 Debug 验证包使用：
 
 ```powershell
-$env:JAVA_HOME='C:\Users\sy427\.jdks\ms-17.0.15'
+$env:JAVA_HOME='C:\Users\example\.jdks\ms-17.0.15'
 $env:GRADLE_USER_HOME='E:\model\MAC\.gradle-user-final-20260831'
 .\gradlew.bat -Pmca.abis=arm64-v8a,x86_64 :app:assembleDebug --no-daemon --console=plain
 ```

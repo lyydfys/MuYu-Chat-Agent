@@ -5,7 +5,7 @@
 - 更新时间：2026-10-20 05:12 +08:00，由 R00 dsh-baseline 更新；仅文档，未构建、未安装、未做设备操作
 - **Absolute final APK**：`b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a`，393,717,991 B，mtime 05:06:13，0.2.4 (8)，minSdk 26 / targetSdk 36，signer `2619ac4c…a9cf`，non-debuggable；payload + MANIFEST + 7 `libdsh*.so`（R00 预检）
 - Previous hardening：`2005df02…`（previous PASS_WITH_CAVEATS）；intermediate：`B63149B8…`；stale：`e0b97fb3…`
-- 设备：98a37aa7（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
+- 设备：device-b（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
 - Absolute final 预检：dex 含 `stop verification failed`/`found survivors`/`survivingPids`/label regexes；runtime 93/93；P1-R1/R2 code-review 关闭；label P2 closed except Cafe2024 edge；device survivor injection NOT_RUN
 - `headFinal`：**未冻结**（观察 HEAD `1965bed836de40610948d92e2e1bb62890635d93`，03:56:07）
 - 一屏裁决：[R07-DECISION-SHEET.md](R07-DECISION-SHEET.md)（final 列 PENDING）
@@ -86,7 +86,7 @@
 
 ```text
 R07 FINAL VERDICT — 0A731D84…FB62 (393,714,839 B, 0.2.4/8, min 26/target 36)
-Device: 98a37aa7 / Android 17 SDK37 / arm64-v8a
+Device: device-b / Android 17 SDK37 / arm64-v8a
 Release E2E: PASS WITH CAVEATS (run 20261020-033121; install data preserved; 198 ms cold start)
 C1–C7: PASS — 2/2, 77/77, 68/68, 77/77, 74/74, 357/357+74/74, architecture RC=0 (C7 raw log missing)
 E1–E9: E1 PASS, E2 PASS, E3 PASS, E4 NOT_RUN, E5 PASS, E6 PASS, E7 NOT_RUN, E8 PASS,

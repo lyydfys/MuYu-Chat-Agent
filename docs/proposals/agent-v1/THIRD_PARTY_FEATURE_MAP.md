@@ -2,7 +2,7 @@
 
 - 文档类型：**只读源码能力盘点**。它是 MCA Agent 后续能力的参照材料，**不是实现计划、不是验收报告、不宣称 parity**。
 - 分析日期：2026-10-19（Asia/Shanghai）。
-- third-party 参照：只读克隆 `C:\Users\sy427\AppData\Local\Temp\thirdparty-src`，HEAD `dbf71916fae9750cfdc9f9a774f5a0fee56633fb`（2026-09-18T10:30:36+08:00，`chore(release): sync dev to main for 1.12.2`），工作区干净、**未构建、未安装、未修改**。仓库 `LICENSE` 为 GNU LGPL-3.0（`LICENSE:1-3`），因此只作为**参考实现**，不复制代码、不引入其模块。
+- third-party 参照：只读克隆 `C:\Users\example\AppData\Local\Temp\thirdparty-src`，HEAD `dbf71916fae9750cfdc9f9a774f5a0fee56633fb`（2026-09-18T10:30:36+08:00，`chore(release): sync dev to main for 1.12.2`），工作区干净、**未构建、未安装、未修改**。仓库 `LICENSE` 为 GNU LGPL-3.0（`LICENSE:1-3`），因此只作为**参考实现**，不复制代码、不引入其模块。
 - MCA 基线：`E:\MAC`，HEAD `98eb8e4`（2026-10-19T19:03:19+08:00），工作区含未提交改动与未跟踪目录（数量随并行任务变化；本次**未触碰、未回滚、未 stash**）；`docs/proposals/agent-v1/` 整体为未跟踪目录。
 - 本次执行：仅静态阅读源码/文档 + 只读列目录；**未**运行 Gradle、`verify-code.ps1`、`agent-verify.ps1`、`adb`、任何测试、APK、模拟器、真机、模型推理、MCP server 或 third-party 构建。
 - 阅读范围：third-party `app/src/main/java/com/ai/assistance/thirdparty/{api,core,data,plugins,services,integrations,ui}` 中与 Agent/工具/记忆/工作流/MCP/权限/会话/插件直接相关的文件，以及 `app/build.gradle.kts`、`settings.gradle.kts`、`quickjs/`、`docs/doc-src/**`、`examples/**`。**不是** 1,300+ Kotlin 文件的逐行 100% 覆盖；结论以本文引用的 `path:line` 为界。
@@ -626,8 +626,8 @@ MCA parity 优先级（本文件唯一排序口径）：
 
 ```powershell
 # third-party 基线
-git -C C:\Users\sy427\AppData\Local\Temp\thirdparty-src rev-parse HEAD
-git -C C:\Users\sy427\AppData\Local\Temp\thirdparty-src status --porcelain
+git -C C:\Users\example\AppData\Local\Temp\thirdparty-src rev-parse HEAD
+git -C C:\Users\example\AppData\Local\Temp\thirdparty-src status --porcelain
 
 # MCA 基线
 git -C E:\MAC rev-parse HEAD

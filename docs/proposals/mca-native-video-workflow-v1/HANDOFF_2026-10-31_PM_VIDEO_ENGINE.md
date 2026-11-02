@@ -113,8 +113,8 @@ Turbo LoRA 有效：480²×5、4 步、76.49 s 采样（20 步需 586.77 s），
 | 设备探针源码 | `core/sd-native/src/main/cpp/mca/wan/mca_wan_probe_v2.c` | 支持尺寸参数与 3 种取消模式 |
 | 构建脚本 | `build/evidence/v1-27/build-shim.sh` | adapter 重建入口 |
 | ABI 门禁 | `tools/verify-engine-abi.sh` | PASS |
-| 设备侧目录 | `98a37aa7:/data/local/tmp/hy98` | 引擎/skeleton/adapter/探针/输出 |
-| 模型资产 | `98a37aa7:/data/local/tmp/wan98` | Q4_0 DiT、umt5 Q4_K_M、TAEHV、VAE |
+| 设备侧目录 | `device-b:/data/local/tmp/hy98` | 引擎/skeleton/adapter/探针/输出 |
+| 模型资产 | `device-b:/data/local/tmp/wan98` | Q4_0 DiT、umt5 Q4_K_M、TAEHV、VAE |
 
 探针用法：
 
@@ -225,11 +225,11 @@ NDKBIN=/e/model/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/windows-x
   -L build/evidence/v1-27 -lmca_wan -o build/evidence/v1-27/mca_wan_probe
 
 # 推送（必须 MSYS_NO_PATHCONV=1，否则 Git Bash 改写 /data 路径）
-MSYS_NO_PATHCONV=1 adb -s 98a37aa7 push build/evidence/v1-27/libmca_wan.so /data/local/tmp/hy98/libmca_wan.so
-MSYS_NO_PATHCONV=1 adb -s 98a37aa7 push build/evidence/v1-27/mca_wan_probe /data/local/tmp/hy98/mca_wan_probe
+MSYS_NO_PATHCONV=1 adb -s device-b push build/evidence/v1-27/libmca_wan.so /data/local/tmp/hy98/libmca_wan.so
+MSYS_NO_PATHCONV=1 adb -s device-b push build/evidence/v1-27/mca_wan_probe /data/local/tmp/hy98/mca_wan_probe
 
 # 运行
-adb -s 98a37aa7 shell 'cd /data/local/tmp/hy98 && LD_LIBRARY_PATH=. ./mca_wan_probe out 1 5 tae 4 1 2 plain 128 128'
+adb -s device-b shell 'cd /data/local/tmp/hy98 && LD_LIBRARY_PATH=. ./mca_wan_probe out 1 5 tae 4 1 2 plain 128 128'
 
 # 构建与 ABI 门禁（Gradle 需先拿 build/.mca-exclusive-build.lock）
 MCA_QNN_SDK_ROOT=E:/model/qairt-sdk/qairt/2.45.0.260326 \
@@ -281,7 +281,7 @@ T=1 时广播退化为 row 形式，所以单帧一直正常；T≥2 时第 0 �
 拒绝非 same-shape、非 row-broadcast 的 `src1`，让这些节点走 CPU。MUL_MAT / FLASH_ATTN / NORM /
 CONV_3D 等仍全部在 HTP。HTP 128²×5 1 步 62.0 s → 62.1 s；480²×5 77.9 s → 80.8 s（噪声内）。
 
-### 8.4 验收结果（`98a37aa7`，1 步，TAE，seed 42）
+### 8.4 验收结果（`device-b`，1 步，TAE，seed 42）
 
 | 用例 | 修复前 | 修复后 |
 |---|---|---|

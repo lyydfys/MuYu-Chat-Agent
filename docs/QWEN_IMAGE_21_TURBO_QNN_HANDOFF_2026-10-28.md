@@ -280,7 +280,7 @@ scratch APK 的当前存在性和大小未在本次文档阶段重查；这是�
 
 原始工具记录在本机会话目录：
 
-`C:\Users\sy427\.qoder\tmp\E--MAC\tool-outputs\session-75a9d5df-4c4e-40fd-a6a1-3a0f1bd9c56c\`
+`C:\Users\example\.qoder\tmp\E--MAC\tool-outputs\session-75a9d5df-4c4e-40fd-a6a1-3a0f1bd9c56c\`
 
 其中：
 

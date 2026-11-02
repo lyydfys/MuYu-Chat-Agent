@@ -96,7 +96,7 @@ class LocalChatReadinessTest {
 
     // ── isLocalChatEngineReady：真机故障注入后新增的契约 ──────────────────────
     //
-    // 背景（设备 f9d98aa3 实测）：生成中杀掉 :local_chat 隔离工作进程后，
+    // 背景（设备 device-a 实测）：生成中杀掉 :local_chat 隔离工作进程后，
     // loadedModelId 仍保留（作为恢复目标），stats.loaded 变为 false，顶栏显示"需要重载"。
     // 但"本地"页只比较 id，因此仍显示"已加载"，而重新加载入口又以同一标记为条件 ⇒ 恢复路径不可达。
 

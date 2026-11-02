@@ -3,7 +3,7 @@ $prompt = "masterpiece, best quality, anime illustration, beautiful adult woman,
 
 & powershell.exe -ExecutionPolicy Bypass -File "tools\device\run-mnn-diffusion-smoke.ps1" `
     -Adb $adb `
-    -Serial "98a37aa7" `
+    -Serial "device-b" `
     -Package "com.muyuchat.mca" `
     -BundleRoot "/sdcard/Android/data/com.muyuchat.mca/files/models/sd15_mnn_opencl" `
     -Mode "generate" `

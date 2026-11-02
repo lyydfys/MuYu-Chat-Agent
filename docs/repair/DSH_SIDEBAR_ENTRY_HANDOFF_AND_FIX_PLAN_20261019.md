@@ -56,8 +56,8 @@
 
 本轮修复前截图保存在工作区忽略产物目录：
 
-- `artifacts/dsh-sidebar-fix/f9d98aa3-before.png`
-- `artifacts/dsh-sidebar-fix/98a37aa7-before.png`
+- `artifacts/dsh-sidebar-fix/device-a-before.png`
+- `artifacts/dsh-sidebar-fix/device-b-before.png`
 
 这些截图只证明修复前状态，不能充当修复后证据。平板尚未完成本轮 DSH 点击回归。
 

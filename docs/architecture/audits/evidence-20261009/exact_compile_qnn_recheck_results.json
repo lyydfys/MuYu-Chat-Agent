@@ -10,7 +10,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_native_bridge.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_qnn_native_bridge.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",

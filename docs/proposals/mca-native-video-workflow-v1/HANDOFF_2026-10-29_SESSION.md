@@ -13,7 +13,7 @@
 | 婧愮爜瀹炵幇 | **PASS** | 7 椤逛慨澶?+ 5D 鍫嗗彔 + VAE tiling 寮€鍏?+ Turbo LoRA 閫氶亾锛屽潎鏈夌湡鏈烘棩蹇楀洖鏄?|
 | JVM | **PASS** | 褰撳墠鍏变韩鏍戯細18 濂椾欢 / 162 鐢ㄤ緥 / 0 澶辫触 / 0 璺宠繃锛堝彟 contract 45銆亀orkspace 36銆乬ate 73銆乧hat 491銆佽縼绉?71锛?|
 | 杩佺Щ | **PASS** | JVM 29鈫?5 閾?+ 璁惧 `MigrationTestHelper` **OK (3 tests)** |
-| 璁惧鐢熶骇閾?| **PASS** | f9d锛圫M8550/Android16锛? 98a锛圫M8750P/Android17锛夛細T2V/I2V銆乬ate 鎸侀攣 BUSY鈫扐CQUIRED銆侀攣绛夊緟涓彇娑?131ms銆侀噸璇曘€佽繘绋嬫浜?INTERRUPTED銆佹挱鏀?鍒嗕韩/鍙﹀瓨/鍒犻櫎 |
+| 璁惧鐢熶骇閾?| **PASS** | device-a锛圫M8550/Android16锛? device-b锛圫M8750P/Android17锛夛細T2V/I2V銆乬ate 鎸侀攣 BUSY鈫扐CQUIRED銆侀攣绛夊緟涓彇娑?131ms銆侀噸璇曘€佽繘绋嬫浜?INTERRUPTED銆佹挱鏀?鍒嗕韩/鍙﹀瓨/鍒犻櫎 |
 | 璧勪骇涓嬭浇锛堜笁浠跺锛?| **PASS** | 10,481,555,776 B锛涘弻璁惧锛涗笁 sha 鍏ㄧ瓑 pin锛涘惈鏆傚仠/缁紶/鏂綉鎭㈠瀹炴祴 |
 | 鐢昏川 | **FAIL / NOT_MET** | 64脳64脳9脳4銆?28脳128脳9脳4銆?28脳128脳9脳20銆?56脳256脳9脳4銆佸惈/涓嶅惈 Turbo LoRA 鈥斺€?**鍏ㄩ儴鏃犲彲杈ㄨ瘑涓讳綋**锛?80脳832 鏈彇寰楁湁鏁堟暟鎹?|
 | 鎬ц兘棰勭畻 | **FAIL / NOT_MET** | 128虏脳9脳20 = 19.3 min锛?28虏脳9脳4+LoRA = 10.4 min锛?28虏脳9脳4 鏃?LoRA 鈮?10.4 min锛?80p 鍦?CPU 涓婅 LMKD/鐪嬮棬鐙楁尅浣?|
@@ -50,7 +50,7 @@
 | 鏂囨湰缂栫爜鍣?| `umt5-xxl-encoder-Q8_0.gguf`锛坈ity96 @ `b535255b鈥锛?| 6,043,068,256 | `2521d4de鈥 |
 | VAE | `wan2.2_vae.safetensors` | 1,409,400,960 | `e40321bd鈥 |
 
-鍚堣 **10,481,555,776 B**锛沠9d 涓?98a 鍚勪竴浠斤紝鍧?sha 鍏ㄧ瓑銆?
+鍚堣 **10,481,555,776 B**锛沠9d 涓?device-b 鍚勪竴浠斤紝鍧?sha 鍏ㄧ瓑銆?
 ### 3.2 Turbo 4-step 钂搁 LoRA锛堟湰浼氳瘽鏂板锛屽凡 pin锛?
 | 椤?| 鍊?|
 |---|---|
@@ -59,7 +59,7 @@
 | 鏂囦欢 | `Wan22_TI2V_5B_Turbo_lora_rank_64_fp16.safetensors` |
 | 澶у皬 | **332,348,584 B** |
 | LFS SHA-256 | **`0ace5244e3d1256f884662c261b017249796cf5b95f05d5ed93cc02a478967b8`** |
-| 鏍￠獙 | 涓绘満涓嬭浇鍚庝竴鑷达紱`sha256sum` 鍦?f9d/98a 鍧囦竴鑷?|
+| 鏍￠獙 | 涓绘満涓嬭浇鍚庝竴鑷达紱`sha256sum` 鍦?device-a/device-b 鍧囦竴鑷?|
 | 鏀剧疆 | 涓绘満 `E:\MAC\.tmp-models\`锛涜澶?`/data/local/tmp/wan_lora/`锛堝凡 `chmod 644`锛?|
 | 璁稿彲 | apache-2.0锛坆ase_model `quanhaol/Wan2.2-TI2V-5B-Turbo`锛?|
 
@@ -89,7 +89,7 @@ std::string load_umt5_tokenizer_json() {
 ```
 
 涓?`umt5.hpp` 鐨?include 涔熷湪 `#if !defined(__ANDROID__)` 閲屻€備簬鏄?`InitializePieces("")` 鐨?`json::parse("")` 鎶涢敊 鈫?`status_=INVLIAD_JSON(5)` 鈫?璇嶈〃绌?鈫?`EncodeOptimized` 杩斿洖 `{}` 鈫?**姣忎釜 prompt 閮借鍒囨垚 0 token**锛屾潯浠朵笌 prompt 鏃犲叧銆?
-**淇鍚庣湡鏈鸿瘉鎹紙f9d锛?*锛?```
+**淇鍚庣湡鏈鸿瘉鎹紙device-a锛?*锛?```
 MCA t5 tokenizer init: is_umt5=1 pieces=256300 status=0 trie_results=13 pairs=256300
 split prompt "red ball on blue table" to tokens ["鈻乺ed","鈻乥all","鈻乷n","鈻乥lue","鈻乼able",]
 ```
@@ -111,17 +111,17 @@ context model=Wan 2.2 TI2V supports_video=true distilled_guidance=false
 ## 5. 瀹炴祴鏁版嵁锛堝彲鐩存帴寮曠敤锛?
 | 閰嶇疆 | 鏉′欢 | 閲囨牱 | 瑙ｇ爜 | 鎬昏 | 澶囨敞 |
 |---|---|---|---|---|---|
-| 64脳64脳9脳1锛堝熀绾匡級 | 147.29 s | 33.57 s | 44.18 s | 225.04 s | f9d |
+| 64脳64脳9脳1锛堝熀绾匡級 | 147.29 s | 33.57 s | 44.18 s | 225.04 s | device-a |
 | 64脳64脳9脳1锛坱iling 32脳32@0.5锛?| 191.37 s | 38.66 s | **50.20 s** | 280.22 s | tiling **鎱?13.6%**锛屽抚 PSNR=鈭烇紙鏃犳帴缂濓級 |
 | 128脳128脳9脳4 鏃?LoRA | 鈥?| ~170 s | ~185 s | 鈮?25 s | 鈥?|
-| **128脳128脳9脳4 + Turbo LoRA@1.0** | 145.67 s | **236.39 s** | 198.71 s | **625.92 s** | f9d锛沗lora=鈥1.000000` 宸茬‘璁ょ敓鏁?|
+| **128脳128脳9脳4 + Turbo LoRA@1.0** | 145.67 s | **236.39 s** | 198.71 s | **625.92 s** | device-a锛沗lora=鈥1.000000` 宸茬‘璁ょ敓鏁?|
 | **128脳128脳9脳20**锛堝悎瑙勬鏁帮級 | 132.16 s | **842.89 s** | 184.76 s | **1159.81 s** | 甯?`probe-frame-0.png` 浠嶄负鎶借薄鑹插甫 |
-| 256脳256脳9脳4 | 123.20 s | 301.58 s | **602.34 s** | **1056 s** | 98a锛涘嘲鍊?PSS 6,748,616 KB锛涙贩娌屽僵鑹叉ā绯?|
+| 256脳256脳9脳4 | 123.20 s | 301.58 s | **602.34 s** | **1056 s** | device-b锛涘嘲鍊?PSS 6,748,616 KB锛涙贩娌屽僵鑹叉ā绯?|
 | 480脳832脳9脳1 鍩虹嚎 | 89.76 s | 619.93 s | 鏈畬鎴?| INTERRUPTED | 22 鍒嗛挓涓婇檺涓 |
 | 480脳832脳9脳1 tiling 512脳288 | 93.28 s | 290.89 s | 杩涜涓?| **LMKD killed** | `lowmemorykiller: thrashing`銆丷SS鈮?GB |
 | 480脳832脳9脳4 + LoRA锛?8a锛?| 鈥?| 鈥?| 鈥?| **NOT_RUN** | 棰勬闃舵鎸?35 鍒嗛挓鍚?`Process crashed`锛屾棤 native 鏃ュ織 |
 
-**璇箟鍒ゅ畾锛堝叏閮ㄤ负"鏃犲彲杈ㄨ瘑涓讳綋"锛?*锛?4虏脳4銆?4虏脳20銆?28虏脳4锛堟棤/鏈?LoRA锛夈€?28虏脳20銆?56虏脳4銆?**甯ц瘉鎹?*锛歚build/evidence/v1-10/`锛圓/B 甯э級銆乣v1-16/f9d-128x128-20steps-probe-frame-0.png`銆乣v1-17/f9d-128x128-4steps-LORA-frame0.png`銆?
+**璇箟鍒ゅ畾锛堝叏閮ㄤ负"鏃犲彲杈ㄨ瘑涓讳綋"锛?*锛?4虏脳4銆?4虏脳20銆?28虏脳4锛堟棤/鏈?LoRA锛夈€?28虏脳20銆?56虏脳4銆?**甯ц瘉鎹?*锛歚build/evidence/v1-10/`锛圓/B 甯э級銆乣v1-16/device-a-128x128-20steps-probe-frame-0.png`銆乣v1-17/device-a-128x128-4steps-LORA-frame0.png`銆?
 **棰勭畻澶栨帹锛堣瘹瀹烇級**锛?80脳832脳33脳20 鐨勯噰鏍烽噺绾︿负 128虏脳9脳20 鐨?**36脳**锛堝儚绱?9.9脳 脳 甯?3.67脳锛夆噿 CPU 閲囨牱绾?**8.5 灏忔椂**锛岃В鐮佹洿澶氥€備笌鍙傝€冮」鐩?NPU+4-step 鐨?**832脳480/5s < 3 鍒嗛挓**鐩稿樊绾︿袱涓暟閲忕骇銆?
 ---
 
@@ -139,7 +139,7 @@ hf-mirror 鐨勮繛鎺ユ瘡 1鈥? GB 閲嶇疆銆備笁娆″皾璇曞潎澶辫
 ### P1 鈥斺€?NPU 杞崲閾撅紙鐜宸查獙璇侊紝浠ｇ爜鏈啓锛?```
 WSL: PYTHONPATH=/mnt/e/tools/qairt-sdk/2.45.0.260326/lib/python \
      python3 /mnt/e/tools/qairt-sdk/2.45.0.260326/bin/x86_64-linux-clang/qairt-converter --help   # 宸插疄娴嬪彲鐢?```
-鍚庣画锛歴afetensors 鈫?ONNX锛堥渶 torch/diffusers锛?*涓绘満涓?WSL 鍧囨湭瀹夎**锛夆啋 `qairt-converter` 鈫?`qnn-context-binary-generator`锛圚TP V73=f9d / V79=98a锛夆啋 `qairt-accuracy-debugger` 鏍￠獙 鈫?鎺ョ嚎 `:local_video`锛堣皟鐢ㄧ偣涓嶅彉锛屽彧鎹㈡墽琛屽悗绔級銆?
+鍚庣画锛歴afetensors 鈫?ONNX锛堥渶 torch/diffusers锛?*涓绘満涓?WSL 鍧囨湭瀹夎**锛夆啋 `qairt-converter` 鈫?`qnn-context-binary-generator`锛圚TP V73=device-a / V79=device-b锛夆啋 `qairt-accuracy-debugger` 鏍￠獙 鈫?鎺ョ嚎 `:local_video`锛堣皟鐢ㄧ偣涓嶅彉锛屽彧鎹㈡墽琛屽悗绔級銆?
 ### P2 鈥斺€?涓?NPU 鏃犲叧銆佸彲骞惰鐨勬敹灏鹃」
 - **TalkBack 鍙惉鏈楄**锛堜换鍔?6锛岀幇 NOT_RUN锛夛細adb 闅句互绋冲畾椹卞姩 MIUI TalkBack 鐒︾偣锛岄渶瑕佺湡瀹炰汉宸ユ垨鏀圭敤 `AccessibilityService` 鏂█ + 褰曢煶鍙栬瘉銆?- **image脳video 鐪熷疄绔炰簤**锛堜换鍔?4 鍓╀綑锛夛細涓ゆ満鍧囨棤鍙敤鐢熷浘浠诲姟锛圔LOCKED锛夛紱鍙厛鐢ㄦ祴璇曟々璇佹槑 gate 涓茶/鎺掗槦璇箟銆?- **瑙ｇ爜鍐呭瓨绛栫暐**锛氳 480p 涓嶈 LMKD 鏉€锛堟寜鏃堕棿鐗囨祦寮忚В鐮併€佷笉鎸佸叏鍒嗚鲸鐜囦腑闂撮噺锛夈€傛敞鎰忥細鍗充娇瑙ｅ喅锛孋PU 480p 浠嶄笉鍙敤浜庝骇鍝併€?
 ### P3 鈥斺€?鏂囨。鍚屾
@@ -154,8 +154,8 @@ WSL: PYTHONPATH=/mnt/e/tools/qairt-sdk/2.45.0.260326/lib/python \
 
 | 璁惧 | 鍨嬪彿/SoC | 鐘舵€?|
 |---|---|---|
-| `f9d98aa3` | 2304FPN6DC / SM8550 / Android 16 / HTP V73 / 54GB 鍙敤 | 涓変欢濂?+ LoRA 宸插氨浣嶏紱娴嬭瘯 APK 宸茶锛涢粯璁ら攣灞忥紙闇€浜哄伐瑙ｉ攣锛夛紱娓╁害 ~31鈥?0 掳C |
-| `98a37aa7` | 25091RP04C / SM8750P / Android 17 / HTP V79 / ~6GB 鍙敤 | 涓変欢濂?+ LoRA 宸插氨浣嶏紱鏂?base APK 宸茶锛沗/data/local/tmp` 鏇炬竻鐞嗚吘绌洪棿锛涢粯璁ら攣灞?|
+| `device-a` | 2304FPN6DC / SM8550 / Android 16 / HTP V73 / 54GB 鍙敤 | 涓変欢濂?+ LoRA 宸插氨浣嶏紱娴嬭瘯 APK 宸茶锛涢粯璁ら攣灞忥紙闇€浜哄伐瑙ｉ攣锛夛紱娓╁害 ~31鈥?0 掳C |
+| `device-b` | 25091RP04C / SM8750P / Android 17 / HTP V79 / ~6GB 鍙敤 | 涓変欢濂?+ LoRA 宸插氨浣嶏紱鏂?base APK 宸茶锛沗/data/local/tmp` 鏇炬竻鐞嗚吘绌洪棿锛涢粯璁ら攣灞?|
 
 涓ゆ満鍧囦负**瀹夊叏閿佸睆锛圥IN/鎸囩汗锛?*锛岃嚜鍔ㄥ寲**涓嶅緱灏濊瘯缁曡繃**锛涙瘡娆″疄鏈哄墠闇€浜哄伐瑙ｉ攣骞朵繚鎸佷寒灞忋€?
 ---
@@ -203,7 +203,7 @@ cmd /c "adb -s <serial> exec-out run-as com.muyuchat.mca.devicetest cat files/vi
 --params-backend disk --offload-to-cpu --max-vram 2 \
 --steps 4 --width 832 --height 480 --video-frames 1 --seed 42 -p "..."
 `
-- --backend 蹇呴』**鏄惧紡鎸囧畾**锛屽惁鍒?ackend_fit 闈欓粯鍥為€€ CPU锛?- --params-backend disk 鏄?98a锛?1.6 GB锛変笉 OOM 閲嶅惎鐨?*蹇呰鏉′欢**锛?- --offload-to-cpu --max-vram 2 鐢ㄤ簬缁曞紑澶у潡 fastrpc 鏄犲皠澶辫触銆?
+- --backend 蹇呴』**鏄惧紡鎸囧畾**锛屽惁鍒?ackend_fit 闈欓粯鍥為€€ CPU锛?- --params-backend disk 鏄?device-b锛?1.6 GB锛変笉 OOM 閲嶅惎鐨?*蹇呰鏉′欢**锛?- --offload-to-cpu --max-vram 2 鐢ㄤ簬缁曞紑澶у潡 fastrpc 鏄犲皠澶辫触銆?
 ## 瀹炴祴锛?8a / SM8750P / HTP v79锛?| 閰嶇疆 | 閲囨牱 | 瑙ｇ爜 | 缁撴灉 |
 |---|---|---|---|
 | 832脳480脳1锛寁ae=HTP0 | 128.58 s | **8.26 s** | **绾㈢悆+钃濆簳锛屼富浣撲笌鎻愮ず璇嶄竴鑷?* |
@@ -224,7 +224,7 @@ cmd /c "adb -s <serial> exec-out run-as com.muyuchat.mca.devicetest cat files/vi
 1. VAE 澶氬抚瑙ｇ爜鏀归€狅紙閫愬抚/閫愬潡/TAEHV锛夆€?3鈥? 浜烘棩锛?2. G4 480p 1 s / 5 s 楠屾敹 鈥?0.5鈥? 浜烘棩锛?3. 鎺ュ洖 :local_video worker锛堟部鐢?VideoGenerationOwner + NativeMediaExecutionGate锛夆€?2鈥? 浜烘棩锛?4. G6 鐢熶骇閾撅紙UI + Local API + 鍙戝竷/鍙栨秷/鎭㈠锛夆€?2鈥? 浜烘棩銆?
 ## 璇佹嵁
 uild/evidence/v1-23/锛歅HASE_SUMMARY.md銆乨ecode-envelope.md銆丗IRST_VALID_480P_FRAME.md銆?un98-{2..12}.log銆?79-480p-f0.png銆?79-480p-htpvae.png銆?79-256.png銆?79-5f0.png銆?79-128f0.png銆佸悇 AVI銆?## 琛ュ厖锛氬喅瀹氭€у垽瀹氾紙2026-10-30 10:41锛?
-宸蹭笅杞藉苟鏍￠獙 **UMT5 Q4_K_M**锛坲mt5-xxl-encoder-Q4_K_M.gguf锛?,655,145,312 B锛屾瘮 Q8_0 鐪?2.39 GB锛夛紝鎺ㄥ埌 98a 鍚庝互瀛楄妭鏍￠獙閫氳繃銆傜敤瀹冧笌 ae=HTP0 閲嶈窇 **832脳480脳5**锛?
+宸蹭笅杞藉苟鏍￠獙 **UMT5 Q4_K_M**锛坲mt5-xxl-encoder-Q4_K_M.gguf锛?,655,145,312 B锛屾瘮 Q8_0 鐪?2.39 GB锛夛紝鎺ㄥ埌 device-b 鍚庝互瀛楄妭鏍￠獙閫氳繃銆傜敤瀹冧笌 ae=HTP0 閲嶈窇 **832脳480脳5**锛?
 `
 [ERROR] wan_vae segment 1/1 (graph) failed during weight preparation
 [ERROR] decode_first_stage failed for video     (exit=1)

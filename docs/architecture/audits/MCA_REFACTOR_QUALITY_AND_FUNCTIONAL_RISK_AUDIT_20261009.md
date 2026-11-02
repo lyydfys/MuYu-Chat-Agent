@@ -34,7 +34,7 @@
 - `critical_source_excerpts.json`：关键源码片段、对应 HEAD 片段及源码哈希。
 - `historical_kotlin_warnings.json`：历史编译告警的原文，明确标记为历史而非本次重新编译数量。
 
-原始关键源码快照另保存在 `C:/Users/sy427/AppData/Local/Temp/mca-deep-audit-20261009-74og48n5/`。工作区有其他并行改动，后续验收必须重新绑定提交、源码和 APK 哈希。
+原始关键源码快照另保存在 `C:/Users/example/AppData/Local/Temp/mca-deep-audit-20261009-74og48n5/`。工作区有其他并行改动，后续验收必须重新绑定提交、源码和 APK 哈希。
 
 ## 2. 重构进度与质量判断
 

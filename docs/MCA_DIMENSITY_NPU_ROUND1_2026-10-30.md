@@ -26,7 +26,7 @@
 - `artifacts/architecture/2026-10-26-dimensity-anima/2026-10-30-mtk_opts_probe.cpp`
   —— 纯 `dlopen/dlsym` 的探针源码（不依赖 LiteRT 头文件、不依赖 NPU），可复跑。
 - `artifacts/architecture/2026-10-26-dimensity-anima/2026-10-30-mtkpaint-plugin-options-probe.txt`
-  —— 真机（98a37aa7 / Qualcomm / Android 37）逐变体输出。
+  —— 真机（device-b / Qualcomm / Android 37）逐变体输出。
 - 提取的参考二进制（本地，`D:\anima-spike\tmp\mtkpaint\assets\litert\`）：
   `libLiteRt.so`（5,508,376）、`libLiteRtCompilerPlugin_MediaTek.so`（**9,813,072**，源码构建、含调试路径 `litert-v2.2.0/litert/vendors/mediatek/...`）、`libLiteRtDispatch_MediaTek.so`（3,782,064）。
 
@@ -34,7 +34,7 @@
 
 ```powershell
 $adb = "D:\model\android-sdk\platform-tools\adb.exe"
-& $adb -s 98a37aa7 shell "cd /data/local/tmp/mtkpaint && timeout 40 env LD_LIBRARY_PATH=/data/local/tmp/mtkpaint ./mtk_opts_probe /data/local/tmp/mtkpaint"
+& $adb -s device-b shell "cd /data/local/tmp/mtkpaint && timeout 40 env LD_LIBRARY_PATH=/data/local/tmp/mtkpaint ./mtk_opts_probe /data/local/tmp/mtkpaint"
 ```
 
 ## 4. 下一步（下一轮执行）

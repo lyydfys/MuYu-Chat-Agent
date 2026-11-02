@@ -2,7 +2,7 @@
 
 Scope: this document fixes the inputs the MCA native video path is built from, the exact patch
 queue that turns the pinned HappyYzy baseline into the working tree, and the hashes/ABI of every
-artifact that was actually shipped or is on device 98a37aa7. Every number below came from a command
+artifact that was actually shipped or is on device device-b. Every number below came from a command
 in this session; anything that could not be demonstrated is listed in
 [§10 Reproducibility gaps](#10-reproducibility-gaps) and [§12 Not verified](#12-not-verified).
 
@@ -309,7 +309,7 @@ Corroborating source-level evidence inside the packaged `libstable-diffusion.so`
 
 ---
 
-## 6. Model assets (device 98a37aa7)
+## 6. Model assets (device device-b)
 
 Full-file hashes, no sampling: the five files in `/data/local/tmp/wan98` (13,841,300 KiB per `ls`)
 hashed in 12.10 s on device, and the LoRA (332 MB) in 0.31 s, so partial hashing was unnecessary.

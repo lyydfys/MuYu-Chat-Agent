@@ -10,7 +10,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_native_engine.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_native_engine.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -64,7 +64,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_stable_diffusion_bridge.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_stable_diffusion_bridge.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -113,7 +113,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_evidence_verifier.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_evidence_verifier.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -162,7 +162,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_contract_parser.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_contract_parser.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",
@@ -211,7 +211,7 @@
       "exit_code": 0,
       "error_lines": [],
       "warning_lines": [],
-      "log": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_response_builder.log",
+      "log": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\compile_sd_response_builder.log",
       "command_arguments": [
         "D:\\model\\android-sdk\\ndk\\29.0.13113456\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe",
         "--target=aarch64-none-linux-android26",

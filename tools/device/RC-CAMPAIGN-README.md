@@ -62,7 +62,7 @@ UI 自动化只使用每次重新抓取的 `uiautomator` bounds，不使用硬�
 
 ```powershell
 pwsh -NoProfile -File tools/device/rc-campaign.ps1 `
-  -Serial f9d98aa3 `
+  -Serial device-a `
   -ApkPath E:\MAC\app\build\outputs\apk\release\app-release.apk `
   -OutDir E:\MCA_RC_EVIDENCE\20261017-final `
   -Hours 24 `

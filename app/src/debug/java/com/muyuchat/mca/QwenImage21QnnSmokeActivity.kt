@@ -32,7 +32,7 @@ class QwenImage21QnnSmokeActivity : Activity() {
             )
             // The device fixture is installed as a managed download container;
             // its audited MNN bundle is the nested mnn-bundle-* directory.
-            val bundle = File(bundleContainer, "mnn-bundle-f9d98aa3").takeIf { it.isDirectory }
+            val bundle = File(bundleContainer, "mnn-bundle-device-a").takeIf { it.isDirectory }
                 ?: bundleContainer
             val requestedBackend = getIntent().getStringExtra("backend").orEmpty()
                 .trim().lowercase().let { if (it == "opencl") QwenImage21Backend.OPENCL else QwenImage21Backend.QNN }

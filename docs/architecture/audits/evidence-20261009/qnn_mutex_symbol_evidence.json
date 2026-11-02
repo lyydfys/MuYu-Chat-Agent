@@ -41,11 +41,11 @@
         "-c",
         "E:\\MAC\\core\\native\\src\\main\\cpp\\qnn_native_bridge.cpp",
         "-o",
-        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_native_bridge.audit.o"
+        "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_native_bridge.audit.o"
       ]
     },
     {
-      "source": "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
+      "source": "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
       "sha256": "085d91b6584d6da1e638e169a2d421deb24caa6995c32fca5f05cce2d0f95c86",
       "compile_exit_code": 0,
       "symbols": [
@@ -81,9 +81,9 @@
         "-std=gnu++17",
         "-O0",
         "-c",
-        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
+        "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.cpp",
         "-o",
-        "C:\\Users\\sy427\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.audit.o"
+        "C:\\Users\\example\\AppData\\Local\\Temp\\mca-deep-audit-20261009-74og48n5\\qnn_mutex_definition_probe.audit.o"
       ]
     }
   ]

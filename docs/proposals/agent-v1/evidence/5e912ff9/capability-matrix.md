@@ -4,7 +4,7 @@
 - Method: read-only static source inspection on 2026-10-19. No Gradle, adb, native build, or git write was run; no production file was modified. Only file written: this one (`risk-register.md` beside it was not touched).
 - Source-line evidence is pinned to this HEAD. Paths are repo-relative; `:N` = line at this HEAD.
 - Status legend: `VERIFIED(source)` = proven by the cited line(s) at this HEAD; `NOT_RUN` = needs build/device/runtime and was not executed here; `UNKNOWN` = source is inconclusive or depends on external platform/provider behavior.
-- Lead-provided context used only as context, not re-proven here: device `f9d98aa3` connected; JDK 21 required for full verification ([MCA_PROJECT_HARD_LOCK.md §11](../../../../architecture/MCA_PROJECT_HARD_LOCK.md), "当前完整验证需 JDK 21", :252).
+- Lead-provided context used only as context, not re-proven here: device `device-a` connected; JDK 21 required for full verification ([MCA_PROJECT_HARD_LOCK.md §11](../../../../architecture/MCA_PROJECT_HARD_LOCK.md), "当前完整验证需 JDK 21", :252).
 
 ## 1. Room: database, schema, migrations, migration test
 

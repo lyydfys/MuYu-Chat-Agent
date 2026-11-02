@@ -9700,7 +9700,7 @@
       "unverifiedCondition": "NOT_APPLICABLE to MCA's targetSdk 36 unless a new mechanism is proven; the reference is not official Android support.",
       "evidence": [],
       "staticEvidence": [
-        "C:/Users/sy427/AppData/Local/Temp/dsh-android (tag v1.20.1, commit 98162a2)"
+        "C:/Users/example/AppData/Local/Temp/dsh-android (tag v1.20.1, commit 98162a2)"
       ],
       "option": "Reference project host",
       "decision": "REJECTED_AS_IS",

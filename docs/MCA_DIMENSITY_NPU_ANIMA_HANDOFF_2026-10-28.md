@@ -17,7 +17,7 @@
 - `AGENTS.md` 与 `UniversalDeviceAdmissionPolicyTest.kt` 仍是本地排除项，禁止提交/发布。
 - 唯一 owner/state writer 不变；没有新增第二套 ImageGenerationOwner、队列、worker、图库链。
 - 设备型号只做推荐/记录，不做准入名单。
-- 本机无天玑设备（只有 Qualcomm 98a37aa7 / f9d98aa3），所有天玑验证只能远程交给测试者；测试者无电脑，只能装 APK + 分享文件。
+- 本机无天玑设备（只有 Qualcomm device-b / device-a），所有天玑验证只能远程交给测试者；测试者无电脑，只能装 APK + 分享文件。
 
 ## 3. 外置工作目录（不在仓库内）
 

@@ -122,7 +122,7 @@ pwsh -NoProfile -File scripts/dsh/device-dsh-acceptance.ps1 -Device 'no-such-ser
 
 ## Device states observed in round 3 (2026-10-21)
 
-- On `f9d98aa3` (Xiaomi 2304FPN6DC, HyperOS OS3.0/Android 16) the first `adb install` was refused
+- On `device-a` (Xiaomi 2304FPN6DC, HyperOS OS3.0/Android 16) the first `adb install` was refused
   with `INSTALL_FAILED_USER_RESTRICTED`. Installing the same APK through the on-device Files
   installer succeeded; after that, `adb install` also succeeds on this device.
 - `scripts/dsh/install-mca-via-fileexplorer.ps1` automates that Files-UI path (push, open

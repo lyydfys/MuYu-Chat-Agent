@@ -96,7 +96,7 @@ productPassed         正式 UI 与认证 Local API 均完成独立请求
 
 ```powershell
 Set-Location E:\model\MAC
-$env:JAVA_HOME = 'C:\Users\sy427\.jdks\ms-17.0.15'
+$env:JAVA_HOME = 'C:\Users\example\.jdks\ms-17.0.15'
 $adb = 'D:\model\android-sdk\platform-tools\adb.exe'
 
 git status --short
@@ -118,10 +118,10 @@ git rev-parse HEAD
 Get-Item app\build\outputs\apk\debug\app-debug.apk |
     Select-Object FullName,Length,LastWriteTime
 Get-FileHash app\build\outputs\apk\debug\app-debug.apk -Algorithm SHA256
-& $adb -s 98a37aa7 shell getprop ro.product.model
-& $adb -s 98a37aa7 shell getprop ro.soc.model
-& $adb -s 98a37aa7 shell getprop ro.build.version.release
-& $adb -s 98a37aa7 shell getprop ro.product.cpu.abi
+& $adb -s device-b shell getprop ro.product.model
+& $adb -s device-b shell getprop ro.soc.model
+& $adb -s device-b shell getprop ro.build.version.release
+& $adb -s device-b shell getprop ro.product.cpu.abi
 ```
 
 证据写到唯一且本地排除的目录，例如：
@@ -293,7 +293,7 @@ tokenizer.mtok 或当前 runtime 明确支持的完整 tokenizer 资源
 新包每个组件必须有 immutable revision、size、SHA-256 和许可证来源。CPU 包标 `CPU`，旧 fused 包标 `OPENCL_GPU`。不得按芯片决定下载或运行；op 审计必须阻止 fused 图再次被标为 CPU-compatible。
 
 ```powershell
-$env:JAVA_HOME = 'C:\Users\sy427\.jdks\ms-17.0.15'
+$env:JAVA_HOME = 'C:\Users\example\.jdks\ms-17.0.15'
 
 .\gradlew.bat :app:testDebugUnitTest `
   --tests com.muyuchat.mca.MnnDiffusionBackendPolicyTest `
@@ -312,24 +312,24 @@ $env:JAVA_HOME = 'C:\Users\sy427\.jdks\ms-17.0.15'
 $bundle = '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/sd15-mnn-cpu'
 
 .\tools\device\run-mnn-diffusion-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 -BundleRoot $bundle `
+  -Adb $adb -Serial device-b -BundleRoot $bundle `
   -Mode preflight -BackendMode cpu -Steps 1 -TimeoutSeconds 240 `
   -SessionId p1-cpu-preflight
 
 .\tools\device\run-mnn-diffusion-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 -BundleRoot $bundle `
+  -Adb $adb -Serial device-b -BundleRoot $bundle `
   -Mode generate -BackendMode cpu -Runner direct `
   -Width 512 -Height 512 -Steps 1 -Seed 42 -TimeoutSeconds 900 `
   -SessionId p1-cpu-one-step
 
 .\tools\device\run-mnn-diffusion-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 -BundleRoot $bundle `
+  -Adb $adb -Serial device-b -BundleRoot $bundle `
   -Mode generate -BackendMode cpu -Runner direct `
   -Width 512 -Height 512 -Steps 20 -Seed 42 -TimeoutSeconds 1800 `
   -SessionId p1-cpu-20-step
 
 .\tools\device\run-mnn-diffusion-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 -BundleRoot $bundle `
+  -Adb $adb -Serial device-b -BundleRoot $bundle `
   -Mode generate -BackendMode cpu -Runner direct -WorkerProductPath `
   -Width 512 -Height 512 -Steps 20 -Seed 42 -TimeoutSeconds 1800 `
   -SessionId p1-cpu-worker-product
@@ -377,7 +377,7 @@ $advanced = '{"mca_debug_trace":true,"enable_thinking":false,"thinking_budget":0
 $model = '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/<complete-mnn-bundle>/config.json'
 
 .\tools\device\run-mnn-chat-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 -ModelPath $model `
+  -Adb $adb -Serial device-b -ModelPath $model `
   -MnnBackendType opencl -AdvancedJson $advanced `
   -Prompt 'Reply with the exact words: MNN smoke passed.' `
   -Temperature 0 -TopK 1 -TopP 1 -MaxTokens 32 `
@@ -440,7 +440,7 @@ docs/experiments/device-smoke/mnn-chat/qwen35-08b-vision-sm8550-20260713/inputs/
 
 ```powershell
 .\tools\device\run-mnn-chat-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 `
+  -Adb $adb -Serial device-b `
   -ModelPath '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/<vlm-bundle>/config.json' `
   -MnnBackendType cpu -SmokeMode text_then_image `
   -ImagePath '/storage/emulated/0/Android/data/com.muyuchat.mca/files/chat_smoke/inputs/shape-448.png' `
@@ -449,7 +449,7 @@ docs/experiments/device-smoke/mnn-chat/qwen35-08b-vision-sm8550-20260713/inputs/
   -MaxTokens 128 -SessionId p3-text-then-image
 
 .\tools\device\run-mnn-chat-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 `
+  -Adb $adb -Serial device-b `
   -ModelPath '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/<vlm-bundle>/config.json' `
   -MnnBackendType cpu -SmokeMode direct_counterfactual `
   -ImagePath '/storage/emulated/0/Android/data/com.muyuchat.mca/files/chat_smoke/inputs/shape-448.png' `
@@ -502,7 +502,7 @@ MNN 示例：
 
 ```powershell
 .\tools\device\run-mnn-diffusion-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 `
+  -Adb $adb -Serial device-b `
   -BundleRoot '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/<mnn-bundle>' `
   -Mode generate -BackendMode opencl -Runner direct `
   -Prompt 'A bright blue sports car on a snowy mountain road, no text.' `
@@ -514,7 +514,7 @@ QNN 示例：
 
 ```powershell
 .\tools\device\run-qnn-image-smoke.ps1 `
-  -Adb $adb -Serial 98a37aa7 `
+  -Adb $adb -Serial device-b `
   -BundleRoot '/storage/emulated/0/Android/data/com.muyuchat.mca/files/models/<qnn-bundle>' `
   -Mode semantic -Prompt 'A bright blue sports car on a snowy mountain road, no text.' `
   -NegativePrompt '' -Width 512 -Height 512 -Steps 20 -Seed 42 -CfgScale 7 `
@@ -633,11 +633,11 @@ runtime 目录由包声明和真实加载结果决定；HTP arch 只用于 trans
 每项测试前记录时间边界；测试后保存：
 
 ```powershell
-& $adb -s 98a37aa7 logcat -d -b main -b system -b crash
-& $adb -s 98a37aa7 shell dumpsys activity exit-info com.muyuchat.mca
-& $adb -s 98a37aa7 shell pidof com.muyuchat.mca
-& $adb -s 98a37aa7 shell pidof com.muyuchat.mca:local_chat
-& $adb -s 98a37aa7 shell pidof com.muyuchat.mca:local_image
+& $adb -s device-b logcat -d -b main -b system -b crash
+& $adb -s device-b shell dumpsys activity exit-info com.muyuchat.mca
+& $adb -s device-b shell pidof com.muyuchat.mca
+& $adb -s device-b shell pidof com.muyuchat.mca:local_chat
+& $adb -s device-b shell pidof com.muyuchat.mca:local_image
 ```
 
 只统计 MCA 自身的 `FATAL EXCEPTION`、ANR、SIGSEGV/SIGABRT、OOM、LMKD、DeadObjectException 和 worker timeout；不能把其他应用日志算到 MCA。
@@ -667,7 +667,7 @@ git -C third_party/stable-diffusion.cpp apply --reverse --check `
 ### 12.3 自动化和构建门
 
 ```powershell
-$env:JAVA_HOME = 'C:\Users\sy427\.jdks\ms-17.0.15'
+$env:JAVA_HOME = 'C:\Users\example\.jdks\ms-17.0.15'
 
 .\gradlew.bat :app:testDebugUnitTest --no-parallel
 .\tools\tests\run-native-image-contract-host-tests.ps1
@@ -692,8 +692,8 @@ QAIRT SDK 路径不存在时停止并报告，不要用假库绕过。
 $apk = 'E:\model\MAC\app\build\outputs\apk\debug\app-debug.apk'
 Get-Item $apk | Select-Object FullName,Length,LastWriteTime
 Get-FileHash $apk -Algorithm SHA256
-& $adb -s 98a37aa7 install -r $apk
-& $adb -s 98a37aa7 shell pm path com.muyuchat.mca
+& $adb -s device-b install -r $apk
+& $adb -s device-b shell pm path com.muyuchat.mca
 ```
 
 拉取安装后的 `base.apk` 到唯一证据目录并核对 SHA。公开发布按 `docs/RELEASE.md` 构建签名 release APK；debug APK 不能公开发布。

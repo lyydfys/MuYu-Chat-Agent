@@ -465,14 +465,14 @@ evidence/R07-20261025-98eb8e4/V12__cancel-four-stage__1.md
 
 ### 10.7 2026-10-20 验证状态更新（部分证据）
 
-独立验证者 `dsh-verify` 在设备 `98a37aa7` 上完成一轮检查（run `20261020-001623`，APK SHA-256 `4500a34e3cc9b5f8dede14b98354281c5a7dd8d03f51281fd6237ba13556ddc5`，393,690,015 B）：
+独立验证者 `dsh-verify` 在设备 `device-b` 上完成一轮检查（run `20261020-001623`，APK SHA-256 `4500a34e3cc9b5f8dede14b98354281c5a7dd8d03f51281fd6237ba13556ddc5`，393,690,015 B）：
 
 | 项 | 结果 | 说明 |
 | --- | --- | --- |
 | APK 身份/签名/原位安装 | **PASS** | firstInstallTime 未变；既有聊天/模型可见；无卸载/清数据 |
 | 冷启动 + 真实模型加载 | **PASS** | COLD 191 ms；Qwen3.5 0.8B MNN CPU `已就绪` |
 | E1 入口 | **PASS（partial，entry only）** | 进入 DSH、官方 shell + `预览版说明` 弹窗渲染；主区随后空白 |
-| E2 空模型启动 | **PASS（partial；Lead 提供）** | f9d98aa3 READY + 官方 sidebar；主区空白；非独立验证 |
+| E2 空模型启动 | **PASS（partial；Lead 提供）** | device-a READY + 官方 sidebar；主区空白；非独立验证 |
 | E3 官方功能前端 | **FAIL（partial）** | READY/认证/单 Node/网关 PASS；官方主对话视图不渲染 |
 | E5 单宿主/页面恢复 | **FAIL** | 单 `:dsh`/Node PID 不变 PASS；重进页面仍空白 FAIL |
 | E6 后台恢复 | **FAIL** | 前后台切换后仍空白 |
@@ -487,18 +487,18 @@ evidence/R07-20261025-98eb8e4/V12__cancel-four-stage__1.md
 
 ### 10.8 2026-10-20 01:35 修复候选更新（白屏根因已证明并修复）
 
-- **根因（live WebView CDP on f9d98aa3）**：官方页面已挂载、client plugins ACTIVE，但 Android WebView 的 initial containing block 为零高：`window.innerHeight`/`documentElement.clientHeight` = 857，`100vh` = 0，`html/body/#root` computed height = 0；fixed 层（onboarding/sidebar）能画，正常流 app frame 塌陷 → 主区白屏。排除 render error/error boundary/plugin failure（console errors 空、`[data-slot-error]` 不存在）。
+- **根因（live WebView CDP on device-a）**：官方页面已挂载、client plugins ACTIVE，但 Android WebView 的 initial containing block 为零高：`window.innerHeight`/`documentElement.clientHeight` = 857，`100vh` = 0，`html/body/#root` computed height = 0；fixed 层（onboarding/sidebar）能画，正常流 app frame 塌陷 → 主区白屏。排除 render error/error boundary/plugin failure（console errors 空、`[data-slot-error]` 不存在）。
 - **FIX-1**：`DshPageLayoutShim.kt` 把测量到的 viewport 高度写成 html 的显式 px，page start/commit/finish + resize/orientation 同步；CDP 验证 html/root 857px、官方 hero+composer 渲染。
 - **FIX-2**：seeder 写 `workspace-controller.documentsDirectory = <files/dsh/workspace>`，修复 Android 首用默认工作区创建失败。
 - **修复候选 APK**：`app/build/outputs/apk/diagnostic/app-diagnostic.apk`，SHA-256 `0d48974f25ec681ef47d6c0798efa464e52b04c79f81f4074f5dc35db107027d`，563,846,247 B，versionName `0.2.4-diag`（debuggable，非 release 产物）。
 - **视觉证明**：`E:\tmp\f9-vp3.png` 显示官方 `探索未至之境` / `默认工作区` / `标准模式` / composer / `请选择模型`（Lead 提供，非独立 verifier）。
-- **当前状态**：`BLOCKER-WHITE-PANE = FIXED_PENDING_INDEPENDENT_E2E`；verifier run `20261020-013442`（98a37aa7）正在重跑 E2/E3/E5/E6/E8/E9 + real chat。**在 A2 证据到达前，E3/chat 保持 `NOT_RUN`，不得写 PASS 或发布“DSH 可用”。**
+- **当前状态**：`BLOCKER-WHITE-PANE = FIXED_PENDING_INDEPENDENT_E2E`；verifier run `20261020-013442`（device-b）正在重跑 E2/E3/E5/E6/E8/E9 + real chat。**在 A2 证据到达前，E3/chat 保持 `NOT_RUN`，不得写 PASS 或发布“DSH 可用”。**
 - **Review P1s（Lead 报告）**：Node cwd=workspace、stop-fence re-scan、seeder name label 已处理（代码存在/Lead 报告，设备证据待补）；模型启动后刷新仍是 [KNOWN-LIMITS.md](evidence/R07-20261019-21f8b1b/KNOWN-LIMITS.md) 中的 documented limitation。
 - **A1 历史 vs A2 当前**：A1 release `4500a34e…` 的 E3/E5/E6 FAIL、E1/E2 partial PASS、E8 PASS、chat NOT_RUN 只作历史；A2 除 E1 entry 外全部 `NOT_RUN`。diagnostic 通过后仍需 release-build E2E 与 C1–C7。
 
 ### 10.9 2026-10-20 02:38 A3 结果（UI/Picker PASS，模型后端 FAIL/BLOCKED）
 
-- **A3 APK**：diagnostic `294d965613f676a7de877b80a4824ca8ab8893ca399584c4aaea0c0af29beeb6`，563,846,247 B，mtime 02:17:20，02:23:57 在 98a37aa7 原位安装（数据保留）；verifier run `artifacts/dsh-verify/20261020-022248`。
+- **A3 APK**：diagnostic `294d965613f676a7de877b80a4824ca8ab8893ca399584c4aaea0c0af29beeb6`，563,846,247 B，mtime 02:17:20，02:23:57 在 device-b 原位安装（数据保留）；verifier run `artifacts/dsh-verify/20261020-022248`。
 - **已关闭**：白屏 `BLOCKER-WHITE-PANE`（A3 hero/composer/workspace 渲染）；picker 裁剪 `BLOCKER-PICKER-CLIPPING`（A2 menu 0/0 → A3 90/360px，两模型可见，真实 adb tap 切换 chip；根因是 html height shim 后 CSS `vh` 仍为 0，CSSOM vh/dvh rewrite 修复）。
 - **PASS**：E1 入口、E2 官方 UI/默认工作区、E3 官方前端 + picker、E5 重复进入/会话恢复/单 Node（同 PID 11167/11197）、E6 后台恢复（A2 证据）、E8 模式隔离。
 - **FAIL / BLOCKED（仍诚实保留）**：本地模型 agent turn **FAIL** — `n_ctx=8192` 预算（system 5,640 chars + 31 tool schemas 28,614 chars ≈9.8k tokens），`PI_AI_ERROR`、0 tokens；云端模型回合 **BLOCKED external** — 上游 503 无可用渠道（gemini-3.6-flash-high，5 次重试）；成功 DSH chat = NONE。

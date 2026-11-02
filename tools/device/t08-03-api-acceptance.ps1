@@ -13,7 +13,7 @@ auto-recovers the persisted `api_enabled` preference in startAfterConstruction.
 [CmdletBinding()]
 param(
     [string]$Adb = 'D:\model\android-sdk\platform-tools\adb.exe',
-    [string]$Serial = 'f9d98aa3',
+    [string]$Serial = 'device-a',
     [string]$Package = 'com.muyuchat.mca',
     [int]$Port = 11435,
     [int]$ReadyTimeoutSeconds = 60,

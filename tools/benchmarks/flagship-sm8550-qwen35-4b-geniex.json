@@ -4,7 +4,7 @@
   "suite": {
     "id": "mca-sm8550-qwen35-4b-geniex-flagship-v1",
     "track": "qnn_chat_experimental",
-    "targetSerial": "f9d98aa3",
+    "targetSerial": "device-a",
     "targetSoc": "SM8550",
     "model": "Qwen3.5-4B Q4_0 GGUF",
     "modelSource": "https://modelscope.cn/models/unsloth/Qwen3.5-4B-GGUF/resolve/master/Qwen3.5-4B-Q4_0.gguf",

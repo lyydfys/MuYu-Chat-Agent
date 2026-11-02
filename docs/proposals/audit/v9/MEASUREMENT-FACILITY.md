@@ -234,16 +234,16 @@ adb screenrecord → pull mp4 → ffmpeg -vf fps=10 → PIL 相邻帧平均绝�
 
 ```powershell
 # 默认：在 chat 界面录 drawer 开/关，动画缩放为 0 时直接 NOT_RUN
-.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage chat-drawer -Actions drawer
+.\scripts\verify-ui-motion.ps1 -DeviceSerial device-a -Stage chat-drawer -Actions drawer
 
 # 临时把动画缩放置 1（必须在 finally 恢复原值；脚本会二次校验）
-.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage chat-menu -Actions menu -EnableAnimationScale
+.\scripts\verify-ui-motion.ps1 -DeviceSerial device-a -Stage chat-menu -Actions menu -EnableAnimationScale
 
 # 多个动作：逗号分隔（powershell -File 也支持）或 PowerShell 数组
-.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -Stage menu-model -Actions menu,model -EnableAnimationScale
+.\scripts\verify-ui-motion.ps1 -DeviceSerial device-a -Stage menu-model -Actions menu,model -EnableAnimationScale
 
 # 显式证据目录（默认在 artifacts/ui-motion/，该目录已在本地 git exclude 中）
-.\scripts\verify-ui-motion.ps1 -DeviceSerial f9d98aa3 -OutDir artifacts/ui-motion/manual-pass -Actions drawer -EnableAnimationScale
+.\scripts\verify-ui-motion.ps1 -DeviceSerial device-a -OutDir artifacts/ui-motion/manual-pass -Actions drawer -EnableAnimationScale
 ```
 
 `-Actions` 支持 `drawer`、`menu`、`model`、`newchat`、`send`；未知动作退出码 2。`send` 总会被移到最后一个：录制前先确认模型就绪，再点输入框、输入探测文本、确认发送按钮存在；如果模型未就绪（头部出现 `待加载`/`选择模型`/`加载中`/`需要重载`/`加载失败` 等），直接 **BLOCKED**，不录制、不污染输入框。`-Actions @()` 会录一段静止画面，这是有意的“无动效应判 FAIL”诊断，不是生产场景。
@@ -277,7 +277,7 @@ adb screenrecord → pull mp4 → ffmpeg -vf fps=10 → PIL 相邻帧平均绝�
 
 `motion.json` 中 `motion.timeline` 每项包含 `frame/timeMs/meanDiff/changedRatio/motion`；`motionRanges` 是连续运动帧的合并区间。`frames.count`、`motion.motionFrameCount`、`recording.sha256` 是复核的最小证据集。
 
-### 7.5 自测结果（2026-10-19，真机 f9d98aa3 / API 36 / 1440x3200）
+### 7.5 自测结果（2026-10-19，真机 device-a / API 36 / 1440x3200）
 
 | 用例 | 命令要点 | 结果 |
 |---|---|---|

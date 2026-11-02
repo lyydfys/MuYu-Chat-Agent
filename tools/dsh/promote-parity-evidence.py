@@ -52,7 +52,7 @@ EXPECTED_KIND_COUNTS = {
 PROMOTIONS = {
     "mobile.tool.android_a11y_status": (
         "CFF571C52321DDFC0221C047B99E25E91F0490C4450E0399C9C4752BEF7F0F97",
-        "Device evidence 2026-10-26 (final candidate CFF571C5, device 98a37aa7): the production a11y "
+        "Device evidence 2026-10-26 (final candidate CFF571C5, device device-b): the production a11y "
         "service answered /status with {ok:true,running:true,package:com.muyuchat.mca.devicetest,"
         "nodeCount:22,apiLevel:37,canScreenshot:true,windowId:48551}. The call was repeated after the "
         "service rebind and before the swipe run (raw/a11y-scroll-cff571c5/swipe-log.txt and the dumps "
@@ -60,7 +60,7 @@ PROMOTIONS = {
     ),
     "mobile.tool.android_see": (
         "CFF571C52321DDFC0221C047B99E25E91F0490C4450E0399C9C4752BEF7F0F97",
-        "Device evidence 2026-10-26 (final candidate CFF571C5, device 98a37aa7): /dump returned a "
+        "Device evidence 2026-10-26 (final candidate CFF571C5, device device-b): /dump returned a "
         "bounded accessibility tree (count 47-51, package/cls/text/desc/bounds/scrollable/ref) for the "
         "Settings app list; five dumps were saved during the swipe proof "
         "(raw/a11y-scroll-cff571c5/dump-sw1..3.json, dump-after-up.json). Scope: the dump route; "
@@ -68,7 +68,7 @@ PROMOTIONS = {
     ),
     "mobile.tool.android_swipe": (
         "CFF571C52321DDFC0221C047B99E25E91F0490C4450E0399C9C4752BEF7F0F97",
-        "Device evidence 2026-10-26 (installed APK 52926FEA, device 98a37aa7; the final frozen candidate CFF571C5, built under the lock at 15:43 and installed at 15:48:19): the production a11y "
+        "Device evidence 2026-10-26 (installed APK 52926FEA, device device-b; the final frozen candidate CFF571C5, built under the lock at 15:43 and installed at 15:48:19): the production a11y "
         "HTTP service (DshA11yService, apiLevel 37) was bound and served /swipe. On "
         "com.android.settings '所有应用' (~100 apps) four vertical swipes at fx=0.5, fy 0.85->0.15, "
         "300 ms returned {ok:true} and advanced the list MNN Chat -> 小米创作 -> 小红书/迅雷 (end); "

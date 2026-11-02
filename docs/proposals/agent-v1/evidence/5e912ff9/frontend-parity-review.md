@@ -20,8 +20,8 @@ needs separate authorisation.
 | Reviewed source | `feature/agent-workspace/src/main/java/com/muyuchat/feature/agent/workspace/ui/**` (16 files, ≈5,475 physical lines) |
 | Supporting reads | `AgentWorkspaceRoute.kt`, `AgentWorkspaceProjection.kt`, `AgentWorkspaceModels.kt`, `AgentWorkspaceViewModel.kt` (read-only, to confirm what state exists and who owns it) |
 | Host context | `MainActivity.kt:369-388` (AGENT_WORKSPACE `CrossfadeTabPage` overlay, `onBack = closePage`), `SwipeBackPage.kt:157-164`, `McaTheme.kt` |
-| Reference 1 (conversation) | `C:\Users\sy427\.dsh\attachments\v1\objects\c5\c5171e6394f01dd3391c4df195ca50ec546b7bb0f2099556ddad07e3592544f0` (JPEG 1200×2608) |
-| Reference 2 (drawer + home behind it) | `C:\Users\sy427\.dsh\attachments\v1\objects\50\502c18ad4c647a67af7545e2230934230d50eb0cd9f876b313590acd1f4892d8` (JPEG 1200×2608) |
+| Reference 1 (conversation) | `C:\Users\example\.dsh\attachments\v1\objects\c5\c5171e6394f01dd3391c4df195ca50ec546b7bb0f2099556ddad07e3592544f0` (JPEG 1200×2608) |
+| Reference 2 (drawer + home behind it) | `C:\Users\example\.dsh\attachments\v1\objects\50\502c18ad4c647a67af7545e2230934230d50eb0cd9f876b313590acd1f4892d8` (JPEG 1200×2608) |
 | Verification run | NONE. No Gradle, no `verify-code.ps1`, no device, no Compose preview render. |
 | Only file written by this task | this document |
 

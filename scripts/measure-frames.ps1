@@ -91,16 +91,16 @@
     2 = usage or output-directory error
 
 .EXAMPLE
-    .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3
+    .\scripts\measure-frames.ps1 -DeviceSerial device-a
 
 .EXAMPLE
-    .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3 -Actions scroll -ScrollCount 10 -MaxP95Ms 16 -MaxJankyPercent 5
+    .\scripts\measure-frames.ps1 -DeviceSerial device-a -Actions scroll -ScrollCount 10 -MaxP95Ms 16 -MaxJankyPercent 5
 
 .EXAMPLE
-    .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3 -Package com.muyuchat.mca -OutDir artifacts/frames/manual-drawer -Actions drawer
+    .\scripts\measure-frames.ps1 -DeviceSerial device-a -Package com.muyuchat.mca -OutDir artifacts/frames/manual-drawer -Actions drawer
 
 .EXAMPLE
-    .\scripts\measure-frames.ps1 -DeviceSerial f9d98aa3 -Actions settings -ScrollCount 6
+    .\scripts\measure-frames.ps1 -DeviceSerial device-a -Actions settings -ScrollCount 6
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(

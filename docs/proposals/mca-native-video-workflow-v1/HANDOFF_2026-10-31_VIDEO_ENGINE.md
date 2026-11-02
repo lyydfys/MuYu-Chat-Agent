@@ -112,10 +112,10 @@
 
 ## 6. 复现命令
 
-### 6.1 App 内端到端（98a）
+### 6.1 App 内端到端（device-b）
 
 ```bash
-adb -s 98a37aa7 forward tcp:11435 tcp:11435
+adb -s device-b forward tcp:11435 tcp:11435
 curl -X POST http://127.0.0.1:11435/v1/video \
   -H "X-API-Key: <见设备 shared_prefs/mca_api.xml>" \
   -H 'Content-Type: application/json' \
@@ -153,7 +153,7 @@ adb install -r -d app/build/outputs/apk/diagnostic/app-diagnostic.apk
 1. **（进行中）基线参数复测**：480×832×5 + `--cfg-scale 6.0 --flow-shift 3.0 --diffusion-fa -n "…" --sampling-method euler`，判定多帧噪声是否由缺参导致。
 2. 若仍不合格：按 `docs/wan.md` 继续逐项对齐（`--video-frames 33` 默认值、UMT5 **Q8_0** 而非 Q4_K_M）。
 3. **Turbo 权重**：获取 Self-Forcing Turbo DiT（或等价的 4-step 方案）用于画质对齐——这是 4 步出好片的必要条件。
-4. **App 内 NPU**：需要具备 FastRPC/签名 PD 权限的环境（root / 系统签名 / QNN 签名 PD）。当前 98a 无法绕过。
+4. **App 内 NPU**：需要具备 FastRPC/签名 PD 权限的环境（root / 系统签名 / QNN 签名 PD）。当前 device-b 无法绕过。
 5. **二进制入库决策**：`jniLibs` 下的三个 `.so` 是否允许提交，需仓库所有者确认。
 
 ---
@@ -162,7 +162,7 @@ adb install -r -d app/build/outputs/apk/diagnostic/app-diagnostic.apk
 
 | 项 | 值 |
 |---|---|
-| 设备 | `98a37aa7`（SM8750P, 11.6 GB）、`f9d98aa3`（SM8550, 15.5 GB，当前离线） |
+| 设备 | `device-b`（SM8750P, 11.6 GB）、`device-a`（SM8550, 15.5 GB，当前离线） |
 | 模型 | DiT `Wan2.2-TI2V-5B-Q4_0.gguf` 3,029,086,560 B；VAE `Wan2.2_VAE.safetensors` 1,409,400,960 B；UMT5 Q4_K_M 3,655,145,312 B / Q8_0 6,043,068,256 B；TAEHV `taew2_2.safetensors` 22,848,048 B |
 | 模型落位 | `/data/local/tmp/wan98/`；App 侧经 `files/video_models/wan2.2-ti2v-5b/{dit,vae,text_encoder}/` **符号链接**指向（未复制 10 GB） |
 | Local API | `127.0.0.1:11435`，key 在设备 `shared_prefs/mca_api.xml` |

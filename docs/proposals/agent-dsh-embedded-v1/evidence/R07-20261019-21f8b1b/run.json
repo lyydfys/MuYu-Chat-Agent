@@ -238,7 +238,7 @@
       "verificationRun": "artifacts/dsh-verify/20261020-001623",
       "installation": {
         "result": "PASS",
-        "command": "adb -s 98a37aa7 install -r -d --no-streaming <apk>",
+        "command": "adb -s device-b install -r -d --no-streaming <apk>",
         "firstInstallTimeBefore": "2026-10-03 02:25:09",
         "firstInstallTimeAfter": "2026-10-03 02:25:09",
         "lastUpdateTimeBefore": "2026-10-19 23:39:54",
@@ -397,9 +397,9 @@
   },
   "device": {
     "status": "PHONE_VERIFIED_PARTIAL",
-    "verificationSerial": "98a37aa7",
+    "verificationSerial": "device-b",
     "phone": {
-      "serial": "98a37aa7",
+      "serial": "device-b",
       "model": "25091RP04C",
       "brand": "Xiaomi",
       "device": "piano",
@@ -417,9 +417,9 @@
     },
     "tablet": null,
     "emptyModelEvidence": {
-      "serial": "f9d98aa3",
+      "serial": "device-a",
       "status": "LEAD_PROVIDED_NOT_INDEPENDENTLY_VERIFIED",
-      "note": "The independent dsh-verify run states it only touched 98a37aa7 and never f9d98aa3. The f9d98aa3 empty-model observation and screenshots were provided by the Lead/operator; they are not part of the independent verifier's run and must be labeled as such.",
+      "note": "The independent dsh-verify run states it only touched device-b and never device-a. The device-a empty-model observation and screenshots were provided by the Lead/operator; they are not part of the independent verifier's run and must be labeled as such.",
       "screenshots": [
         {
           "path": "E:\\tmp\\f9-u1.png",
@@ -430,8 +430,8 @@
           "observed": "official DSH sidebar open (deepseek HARNESS, 新会话, 插件, 自动化任务, 工作区, 暂无会话, 更多) over a blank white main pane"
         }
       ],
-      "leadStatement": "READY with empty catalog on f9d98aa3; official preview dialog and official sidebar captured.",
-      "labelNote": "f9-u1.png is described by the Lead as the preview dialog, but the file itself shows a blank pane with a hamburger. The official 预览版说明 modal is corroborated on 98a37aa7 by artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png. Do not relabel f9-u1 as the preview modal without a matching screenshot."
+      "leadStatement": "READY with empty catalog on device-a; official preview dialog and official sidebar captured.",
+      "labelNote": "f9-u1.png is described by the Lead as the preview dialog, but the file itself shows a blank pane with a hamburger. The official 预览版说明 modal is corroborated on device-b by artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png. Do not relabel f9-u1 as the preview modal without a matching screenshot."
     }
   },
   "evidence": {
@@ -720,7 +720,7 @@
         "artifacts/dsh-verify/20261020-001623/shots/dsh-10s.png"
       ],
       "actual": "Tap DSH row at 00:20:24; READY epoch=1 at 00:20:32.976; official welcome modal rendered at 00:20:39; 继续 closes it to a blank main pane",
-      "notes": "Entry PASS on release APK (98a37aa7).",
+      "notes": "Entry PASS on release APK (device-b).",
       "previousResult": "PASS (partial, A1 entry only)",
       "previousObservation": "Tap DSH row at 00:20:24; READY epoch=1; official shell + welcome modal rendered; main pane blank after 继续",
       "previousEvidence": [
@@ -756,7 +756,7 @@
       "actual": "official hero/composer rendered; default workspace; no white pane; picker lists two MCA models",
       "notes": "Official UI + default workspace PASS on release APK.",
       "previousResult": "PASS (partial, A1; Lead-provided)",
-      "previousObservation": "f9d98aa3 READY + official sidebar; main pane blank",
+      "previousObservation": "device-a READY + official sidebar; main pane blank",
       "previousEvidence": [
         "E:\\tmp\\f9-u1.png",
         "E:\\tmp\\f9-u2.png",
@@ -971,7 +971,7 @@
       "severity": "CLOSED",
       "status": "CLOSED_VERIFIED_FINAL",
       "title": "Official DSH main conversation view never rendered (root-caused and fixed; independent E2E pending)",
-      "symptom": "On device 98a37aa7 with APK sha256 4500a34e…, the DSH entry succeeds and the runtime reaches READY epoch=1 (origin :41463, gateway :40433 models=2, single Node pid 8358). The official 预览版说明 welcome modal renders and its 继续 button closes it, but the main pane becomes pure white with only the hamburger. The conversation hero, composer, model selector and any session content never appear. 新会话 / 插件 / 更多 show pressed styling but produce no content. The workspace import control opens a dimmed full-screen overlay with an empty panel. Typing into the blank pane opens no IME (mInputShown=false). Rotation, background/foreground and re-entry do not recover it. DSH chat is therefore unreachable (NOT_RUN).",
+      "symptom": "On device device-b with APK sha256 4500a34e…, the DSH entry succeeds and the runtime reaches READY epoch=1 (origin :41463, gateway :40433 models=2, single Node pid 8358). The official 预览版说明 welcome modal renders and its 继续 button closes it, but the main pane becomes pure white with only the hamburger. The conversation hero, composer, model selector and any session content never appear. 新会话 / 插件 / 更多 show pressed styling but produce no content. The workspace import control opens a dimmed full-screen overlay with an empty panel. Typing into the blank pane opens no IME (mInputShown=false). Rotation, background/foreground and re-entry do not recover it. DSH chat is therefore unreachable (NOT_RUN).",
       "scope": "WebView client rendering after onboarding; not runtime/entry/auth process failure.",
       "runtimeFacts": [
         "READY epoch=1 origin=http://127.0.0.1:41463 indexBytes=37637",
@@ -989,7 +989,7 @@
         "artifacts/dsh-verify/20261020-001623/shots/dsh-after-continue.png",
         "artifacts/dsh-verify/20261020-001623/shots/dsh-sidebar-closed.png",
         "artifacts/dsh-verify/20261020-001623/dumps/dsh-main-8s.xml",
-        "E:\\tmp\\f9-u1.png (blank main pane on f9d98aa3, Lead-provided)"
+        "E:\\tmp\\f9-u1.png (blank main pane on device-a, Lead-provided)"
       ],
       "suspiciousFacts": [
         "READY log prints client module path as literal 'plugin=/plugins/??@deepseek-ai/dsh-client-modules/client.js&rev=5d0abebd319f' (bytes 3F 3F 40); verify the intended '/plugins/.../client.js?rev=...' form.",
@@ -998,13 +998,13 @@
         "App-private DSH home/overlay files are unreadable because the release build is not debuggable."
       ],
       "nextEvidenceNeeded": [
-        "Independent E2E on 98a37aa7 with the diagnostic fix candidate: E2/E3/E5/E6/E8/E9 + real chat.",
+        "Independent E2E on device-b with the diagnostic fix candidate: E2/E3/E5/E6/E8/E9 + real chat.",
         "Re-check html/root computed height and official hero/composer render in the verifier run.",
         "Confirm default workspace creation succeeds (no 无法创建默认工作区).",
         "After fix evidence: re-run release-build E2E before any release claim."
       ],
       "impact": "A1 was blocked. A2 fix is pending independent E2E; until that evidence arrives, E3/chat stay NOT_RUN and no release claim is allowed. Prior E1/E2 partial passes remain historical only.",
-      "rootCause": "Zero-height Android WebView initial containing block: window.innerHeight/clientHeight=857 but 100vh=0 and html/body/#root computed height=0; fixed-position layers painted while normal-flow frame collapsed. Proven via live WebView CDP on f9d98aa3. Not a render error/error boundary/plugin failure (console errors empty, [data-slot-error] absent).",
+      "rootCause": "Zero-height Android WebView initial containing block: window.innerHeight/clientHeight=857 but 100vh=0 and html/body/#root computed height=0; fixed-position layers painted while normal-flow frame collapsed. Proven via live WebView CDP on device-a. Not a render error/error boundary/plugin failure (console errors empty, [data-slot-error] absent).",
       "fixes": [
         "FIX-1 DshPageLayoutShim.kt (measured viewport height written to html; CDP html/root 857px, hero+composer rendered)",
         "FIX-2 seeder workspace-controller.documentsDirectory=<files/dsh/workspace> (default workspace creation on Android)"
@@ -1174,7 +1174,7 @@
       "id": "LIMIT-WHITE-PANE",
       "status": "CLOSED_VERIFIED_FINAL",
       "statement": "White pane root-caused and fixed; A3 independently verified official hero/composer, default workspace and model picker render. Closed as a white-pane blocker; model-turn failures remain separate.",
-      "source": "Lead update 2026-10-20 01:35; live WebView CDP on f9d98aa3; visual proof E:\\tmp\\f9-vp3.png"
+      "source": "Lead update 2026-10-20 01:35; live WebView CDP on device-a; visual proof E:\\tmp\\f9-vp3.png"
     },
     {
       "id": "LIMIT-LOCAL-CTX",
@@ -1309,7 +1309,7 @@
   "rootCause": {
     "id": "RC-WHITE-PANE",
     "status": "PROVEN",
-    "method": "live WebView CDP on f9d98aa3",
+    "method": "live WebView CDP on device-a",
     "finding": "The official page mounted and all client plugins were ACTIVE, but Android WebView laid it out with a zero-height initial containing block: window.innerHeight/documentElement.clientHeight = 857 while 100vh = 0 and html/body/#root computed height = 0. Fixed-position layers (onboarding/sidebar) painted; the normal-flow app frame collapsed, hence the white main pane.",
     "exclusions": "Not a render error, not an error-boundary failure, not a plugin failure: console errors empty and [data-slot-error] absent.",
     "fixes": [

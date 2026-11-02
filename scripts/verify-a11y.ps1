@@ -76,13 +76,13 @@
     2 = usage or output-directory error
 
 .EXAMPLE
-    .\scripts\verify-a11y.ps1 -DeviceSerial f9d98aa3
+    .\scripts\verify-a11y.ps1 -DeviceSerial device-a
 
 .EXAMPLE
-    .\scripts\verify-a11y.ps1 -DeviceSerial f9d98aa3 -NoLaunch -MaxViolations 2
+    .\scripts\verify-a11y.ps1 -DeviceSerial device-a -NoLaunch -MaxViolations 2
 
 .EXAMPLE
-    .\scripts\verify-a11y.ps1 -DeviceSerial f9d98aa3 -MinTargetDp 44 -OutDir artifacts/a11y/manual
+    .\scripts\verify-a11y.ps1 -DeviceSerial device-a -MinTargetDp 44 -OutDir artifacts/a11y/manual
 #>
 [CmdletBinding(PositionalBinding = $false)]
 param(

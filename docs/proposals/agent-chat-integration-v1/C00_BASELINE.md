@@ -47,7 +47,7 @@
 - **并行会话**：仍在写 `feature/chat`、Agent/DSH 测试与 evidence；本文写作期间
   `feature/agent-workspace/.../AgentHomeHeaderTest.kt` 于 **01:06:37** 新增，说明
   workspace 的 118 测试结果已不是最新套件。本轮不得回退、覆盖或 stage 其改动。
-- **设备**：`98a37aa7`（MIUI/HyperOS）与 `f9d98aa3` 在线；新包安装仍
+- **设备**：`device-b`（MIUI/HyperOS）与 `device-a` 在线；新包安装仍
   `INSTALL_FAILED_USER_RESTRICTED`，只允许同签名更新，不允许清数据/卸载。
 - **唯一构建入口**：`scripts/verify-code.ps1`（全量 gate）与 `scripts/agent-verify.ps1`
   （单 lane）；构建锁不得手工绕过。本 V1.1 批次仍定义为“全部代码完成后一次性验证”，
@@ -161,7 +161,7 @@
    `:feature:agent-workspace:testDebugUnitTest`、`:app:testDebugUnitTest`（全量）。
 3. `scripts/verify-code.ps1 -AgentTests -Rerun`（唯一 full gate）。
 4. 架构 `check_architecture_rules.py` **16/16**。
-5. 设备：用同签名 release 更新安装 `98a37aa7`；只跑已有 instrumentation 与手工 smoke，
+5. 设备：用同签名 release 更新安装 `device-b`；只跑已有 instrumentation 与手工 smoke，
    MIUI 新包安装/清数据仍 BLOCKED。
 6. 所有未执行项写 NOT_RUN/BLOCKED，不允许把编译或单测写成 runtime/device PASS。
 

@@ -25,7 +25,7 @@
 | RISK11 | Agent 与现有 engine 作用域不一致（新增） | engine 由 `MainRuntimeAssembly` 以 `MainViewModel.viewModelScope` 创建；`onCleared()` 关闭 isolated runners。Agent 方案要求应用作用域常驻 owner | K04, K08, K11 | 只允许“同一 engine + 同一 facade”的窄注入；出现第二 engine/第二 runtime 即阻断 |
 | RISK12 | 本地生图会卸载 LLM，Agent 自动续跑不成立（新增） | `ImageGenerationOwnerExecution` 通过同一 exclusive lifecycle lease 做内存交接并 unload；没有已证明的 Agent 自动 reload | V1 范围 | V1 不开放“本地 LLM→本地生图→自动续跑”；必须显式暂停/恢复模型 |
 | RISK13 | 备份/迁移排除遗漏导致私人 Agent 数据进云备份（新增） | 现有 `backup_rules.xml`/`data_extraction_rules.xml` 只覆盖既有目录；Agent 新文件根未存在 | K06, K14 | Agent 文件根未加入 backup/device-transfer 排除前，不得开放写入 |
-| RISK14 | 设备/模型资产不足被误报成产品缺陷或“已验证”（新增） | 当前仅一台 ARM64 设备（f9d98aa3）；代表 MNN/GGUF 模型资产与配置未在 K00 锁定 | K04, K11, K16 | 缺设备/模型只标 BLOCKED/NOT_RUN；不以云替代本地，不用 fake 代替 |
+| RISK14 | 设备/模型资产不足被误报成产品缺陷或“已验证”（新增） | 当前仅一台 ARM64 设备（device-a）；代表 MNN/GGUF 模型资产与配置未在 K00 锁定 | K04, K11, K16 | 缺设备/模型只标 BLOCKED/NOT_RUN；不以云替代本地，不用 fake 代替 |
 | RISK15 | 数据库版本被盲改或 destructive fallback 清理用户数据（新增） | 基线 `@Database(version = 27)`；方案允许 N→N+1 | K05 | 迁移必须来自 KSP 真实导出；禁止 fallbackToDestructiveMigration 与清库 |
 | RISK16 | 现有会话/模型状态被 Agent 侧写污染（新增） | `MainUiState` 是 UI 权威；`UiStateStore` 有过渡写口 | K08, K09, K10 | 新增 Agent 业务字段或第二 writer 即阻断 |
 
@@ -75,7 +75,7 @@
 - 证据：S16 XML 检查 + 导出包扫描。
 
 ### RISK14 设备/模型
-- 事实：`adb devices` 当前有一台 ARM64 设备（序列 f9d98aa3，model 2304FPN6DC）。MNN/GGUF 代表模型资产、加载配置与云端可用凭据未在 K00 锁定。K00 不允许把“设备在线”写成“模型路径已验证”。
+- 事实：`adb devices` 当前有一台 ARM64 设备（序列 device-a，model 2304FPN6DC）。MNN/GGUF 代表模型资产、加载配置与云端可用凭据未在 K00 锁定。K00 不允许把“设备在线”写成“模型路径已验证”。
 - 缓解：K04 先固定模型资产 fingerprint/后端/量化/有效参数；MNN 与 GGUF 分开记录；云端单列。
 - 证据：Q01/Q02/Q03 的逐后端样本；缺证据保留 BLOCKED。
 

@@ -8,7 +8,7 @@
 # Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\dsh-verify-once.ps1
 #   powershell ... -File tools\dsh-verify-once.ps1 -SkipAssemble
-#   powershell ... -File tools\dsh-verify-once.ps1 -Device f9d98aa3
+#   powershell ... -File tools\dsh-verify-once.ps1 -Device device-a
 #
 # Env: MCA_QNN_SDK_ROOT must point at the complete QAIRT/QNN SDK (product build contract).
 [CmdletBinding()]

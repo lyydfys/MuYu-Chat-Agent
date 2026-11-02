@@ -7,7 +7,7 @@
 ## 已有条件
 
 - QNN SDK 2.45.0.260326 完整：`qairt-converter`、`qnn-onnx-converter`、`qnn-context-binary-generator`、`qnn-net-run`；HTP V68/V69/V73/V75/V79/V81 stub。
-- 设备：f9d `kalama`/SM8550（HTP V73）；98a `sun`/SM8750P（vendor `libQnnHtpV79Stub.so`）。
+- 设备：device-a `kalama`/SM8550（HTP V73）；device-b `sun`/SM8750P（vendor `libQnnHtpV79Stub.so`）。
 - 现有 QNN 图像链路：`core/native` 的 `qnn_native_bridge`/`qnn_controlnet_execution`、`QnnRuntimeProfileSelector`（exact-arch 匹配）、SD1.5 QNN smoke 规格（VAE encoder context ~58MB 量级）。
 - 设备 QNN HTP runtime 可由现有图像路径/探针验证；本审计不重复图像验证。
 
@@ -34,7 +34,7 @@
 
 1. 提供 Wan2.2 原始权重（safetensors）或固定 revision 的 ONNX 导出（DiT/T5/VAE，含动态 shape 导出脚本）。
 2. 用固定 QNN SDK/AIMET 版本转换/量化出 DiT、T5、VAE 的 QNN context binaries，并记录转换 revision、量化配置与 sha256。
-3. 在 f9d（HTP V73）与 98a（HTP V79）上做最小 op/context/内存 spike：单 graph 加载、上下文大小、权重共享、峰值内存、单步耗时；不支持 op 必须显式失败，不能静默回 CPU 宣称加速。
+3. 在 device-a（HTP V73）与 device-b（HTP V79）上做最小 op/context/内存 spike：单 graph 加载、上下文大小、权重共享、峰值内存、单步耗时；不支持 op 必须显式失败，不能静默回 CPU 宣称加速。
 4. 通过后再按现有 `VideoExecutionAdapter` 边界接入 QNN，保持唯一 owner、worker、Room、媒体发布与取消契约不变；QNN 仅作为后端选择，失败回 CPU 并明确记录。
 
 ## 证据
@@ -42,7 +42,7 @@
 - SDK：`/e/tools/qairt-sdk/2.45.0.260326/{bin/x86_64-windows-msvc,lib/aarch64-android}`。
 - 现有 QNN 图像规格：`core/download/src/main/java/com/muyuchat/core/download/ModelScopeCatalogQnnSpecs.kt`（SD1.5）。
 - Wan 资产：只有 `MODEL_ASSET_SOURCES.md` 所列 GGUF；无 Wan ONNX/QNN。
-- 设备：`getprop ro.board.platform` = kalama/sun；98a vendor `libQnnHtpV79Stub.so`。
-- 当前 CPU 稳定 APK：`614db669…`，f9d 9/9；JVM 690/0、架构 19/19（2026-10-26 16:45）。
+- 设备：`getprop ro.board.platform` = kalama/sun；device-b vendor `libQnnHtpV79Stub.so`。
+- 当前 CPU 稳定 APK：`614db669…`，device-a 9/9；JVM 690/0、架构 19/19（2026-10-26 16:45）。
 
 **在恢复条件 1–3 完成前，QNN 状态保持 BLOCKED/NOT_RUN；不得用 SD1.5 QNN 或 CPU 结果替代 Wan2.2 视频 NPU 证据。**

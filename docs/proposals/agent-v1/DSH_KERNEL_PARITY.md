@@ -4,7 +4,7 @@
 - 分析日期：2026-10-19（Asia/Shanghai）。
 - MCA 工作区：`E:\MAC`，HEAD `2368c72`，工作区含未提交改动（本次未触碰、未回滚、未 stash）。
 - MCA Agent 设计/证据基线：`docs/proposals/agent-v1/MCA_AGENT_V1_ARCHITECTURE.md`、`docs/proposals/agent-v1/evidence/5e912ff9/*`（证据基线 `5e912ff9`，当前源码已推进到 Room v28 / K15）。
-- DSH 参照：只读克隆 `C:\Users\sy427\AppData\Local\Temp\dsh-android`，HEAD `98162a2`（App v1.20.1，内核 `0.2.1-rc.2`；`README.md:11`、`CHANGES.md:38-44`）。未构建、未安装、未修改。
+- DSH 参照：只读克隆 `C:\Users\example\AppData\Local\Temp\dsh-android`，HEAD `98162a2`（App v1.20.1，内核 `0.2.1-rc.2`；`README.md:11`、`CHANGES.md:38-44`）。未构建、未安装、未修改。
 - 本次执行：仅静态阅读源码/文档；**未**运行 Gradle、`verify-code.ps1`、`adb`、任何测试或设备操作；**未**创建/修改除本文件外的任何文件。
 - 阅读范围：MCA 的 `core/agent-contract`、`core/agent-runtime`、`app/.../agent/**`（约 22.7k 行）、`feature/agent-workspace/**`（约 10.1k 行）中与 owner/loop/context/tools/approval/egress/MCP/Skills/platform/composition/route/VM 相关的文件；**不是逐行 100% 覆盖**，结论以本文引用的行号为准。DSH 克隆只含 Android 壳、内核补丁 overlay、插件、配置与文档；内核主体以 `@deepseek-ai/dsh` npm 包随 payload 分发，不在克隆源码树内。
 

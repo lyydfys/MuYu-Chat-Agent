@@ -14,7 +14,7 @@ case "${1:-}" in
     --check) CHECK=1; shift ;;
     --print-request) PRINT_REQ=1; shift ;;
 esac
-SERIAL=${1:-98a37aa7}
+SERIAL=${1:-device-b}
 ADB=${ADB:-/e/model/android-sdk/platform-tools/adb.exe}
 # The Local API key is per-install and shown in the app; never hardcode it in the repo.
 KEY=${MCA_API_KEY:?export MCA_API_KEY with the key shown in MCA -> Local API}

@@ -321,7 +321,7 @@
 
 | 项 | 状态 |
 |---|---|
-| 真机 Neuron 装载/恢复/执行 | **NOT_RUN** —— 本机只有高通设备（2026-10-31 复核：`98a37aa7` SM8750P / 25091RP04C、`f9d98aa3` SM8550 / 2304FPN6DC），无 MediaTek 硬件 |
+| 真机 Neuron 装载/恢复/执行 | **NOT_RUN** —— 本机只有高通设备（2026-10-31 复核：`device-b` SM8750P / 25091RP04C、`device-a` SM8550 / 2304FPN6DC），无 MediaTek 硬件 |
 | 分辨率与 AMOD 选择规则 | **ESTABLISHED**（32×32 grid ⇒ 512×512 + `vaedec_64`；AMOD 按 N 选、与分辨率无关，4032 例外）；仅 UI stepChoices 集合未取到 |
 | 分块结构 | **结构性 ESTABLISHED**（4 chunk × 7 block + final，计数 254=28×9+2）；真机未验证 |
 | `restoreFromCompiledNetwork` 的具体版本与合法 ABI 声明 | **UNRESOLVED**（已见 V1/V2 与 probe 调用，未确定目标机走哪条） |

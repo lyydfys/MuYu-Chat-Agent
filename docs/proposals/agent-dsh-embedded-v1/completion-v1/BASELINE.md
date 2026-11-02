@@ -19,7 +19,7 @@
 | Payload | `975146516216ced02299676689c1731c7f390962389dbef56821cd59a3bf69ab`（160,464,248 B，独立复算一致） | 已实测 |
 | 最近真机验证 APK | `b610e1d0…73ae9a`，393,717,991 B，2026-10-20 05:06:13 | 历史证据，**非当前产物** |
 | 当前 `app-release.apk` | `70746C4C…5EFF9C`，393,718,763 B，12:15:48 | **未验证** |
-| 当前设备 | `98a37aa7` 在线（product:piano, model:25091RP04C） | 仅 `adb devices -l` |
+| 当前设备 | `device-b` 在线（product:piano, model:25091RP04C） | 仅 `adb devices -l` |
 | 关键冲突 | C02c 正在改 `DshGatewayConfigSeeder.kt`（14:23:43），工作树 overlay 已含平台 patch 行；`DSH_COMPLETION_ACCEPTANCE_V1.md:7` 仍写“seeder 只生成三部分” | 文档漂移，见 §6 |
 
 ## 1. 采集命令与原始事实
@@ -181,7 +181,7 @@ payload.zip size=160464248 sha256=975146516216ced02299676689c1731c7f390962389dbe
 | 项 | 值 |
 | --- | --- |
 | 运行窗口 | 2026-10-20 05:12–05:18 +0800 |
-| 设备 | **98a37aa7**（`product:piano`, `model:25091RP04C`） |
+| 设备 | **device-b**（`product:piano`, `model:25091RP04C`） |
 | APK 路径 | `app/build/outputs/apk/release/app-release.apk` |
 | APK sha256 | **`b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a`** |
 | APK size / mtime | 393,717,991 B / 2026-10-20 05:06:13 |
@@ -199,7 +199,7 @@ payload.zip size=160464248 sha256=975146516216ced02299676689c1731c7f390962389dbe
 
 ```text
 List of devices attached
-98a37aa7               device product:piano model:25091RP04C device:piano transport_id:2
+device-b               device product:piano model:25091RP04C device:piano transport_id:2
 ```
 
 - `adb` 不在 PATH；使用 `D:\model\android-sdk\platform-tools\adb.exe`。

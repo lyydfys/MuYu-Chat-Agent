@@ -22,7 +22,7 @@ Exit codes: 0 = no FAIL, 1 = at least one FAIL, 2 = aborted precondition.
 [CmdletBinding()]
 param(
     [string]$Adb = 'D:\model\android-sdk\platform-tools\adb.exe',
-    [string]$Serial = 'f9d98aa3',
+    [string]$Serial = 'device-a',
     [string]$Package = 'com.muyuchat.mca',
     [int]$Port = 11435,
     [string]$ApkSha256 = '',

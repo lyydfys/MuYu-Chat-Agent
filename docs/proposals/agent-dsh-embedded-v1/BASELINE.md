@@ -170,7 +170,7 @@ tools/architecture/generate_architecture_manifest.py
 
 | 项 | 值 |
 | --- | --- |
-| 只读副本 | `C:\Users\sy427\AppData\Local\Temp\mca-dsh-audit-687f282e8625` |
+| 只读副本 | `C:\Users\example\AppData\Local\Temp\mca-dsh-audit-687f282e8625` |
 | 仓库 | `deepseek-ai/deepseek-harness` |
 | commit | **`687f282e8625c6b8d11ff58211a90524be2e4317`** |
 | SHA 证据 | 副本根 `.mca-review-sha` 内容即该 SHA（**该副本是源码归档，不是 git checkout**，无法用 `git rev-parse` 重新推导；R01 应重新从固定 commit 取源码并核对 `.mca-review-sha`） |
@@ -229,7 +229,7 @@ tools/architecture/generate_architecture_manifest.py
 | 项 | 值 |
 | --- | --- |
 | 仓库 | `woaiys3/deepseek-harness-android-app` |
-| 本地只读副本 | `C:\Users\sy427\AppData\Local\Temp\dsh-android` |
+| 本地只读副本 | `C:\Users\example\AppData\Local\Temp\dsh-android` |
 | tag / commit | `v1.20.1` / `98162a23b39eeeb75b8d4608b3e773bbb13be43d` |
 | 工作区 | clean（`git status --porcelain` 为空） |
 | AndroidManifest | package `com.deepseek.harness`，versionName `1.20.0`，versionCode `57`，minSdk 24，**targetSdk 28** |
@@ -305,9 +305,9 @@ git -C E:\MAC\third_party\tokenizers-cpp status --porcelain
 git -C E:\MAC\third_party\tokenizers-cpp diff --binary | <hash>
 
 # 官方 DSH（只读）
-Get-Content C:\Users\sy427\AppData\Local\Temp\mca-dsh-audit-687f282e8625\.mca-review-sha
-Get-Content C:\Users\sy427\AppData\Local\Temp\mca-dsh-audit-687f282e8625\package.json
-Get-Content C:\Users\sy427\AppData\Local\Temp\mca-dsh-audit-687f282e8625\pnpm-lock.yaml -TotalCount 20
+Get-Content C:\Users\example\AppData\Local\Temp\mca-dsh-audit-687f282e8625\.mca-review-sha
+Get-Content C:\Users\example\AppData\Local\Temp\mca-dsh-audit-687f282e8625\package.json
+Get-Content C:\Users\example\AppData\Local\Temp\mca-dsh-audit-687f282e8625\pnpm-lock.yaml -TotalCount 20
 
 # 工具链
 & E:\model\toolchains\jdk-21\jdk-21.0.12.1+1\bin\java.exe -version

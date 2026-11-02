@@ -37,7 +37,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][ValidateSet('llama','litert')][string]$Engine,
-    [string]$Device = 'f9d98aa3',
+    [string]$Device = 'device-a',
     [string]$Out = 'E:\MAC_QA_EVIDENCE\chat',
     [int]$ObserveSeconds = 90,
     [string]$Prompt = 'Reply with exactly: COVERAGE1',

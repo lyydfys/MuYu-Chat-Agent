@@ -11,7 +11,7 @@ Outputs under artifacts/repair/20261009-parity/device/<stamp>-preflight/.
 [CmdletBinding()]
 param(
     [string]$Adb = 'D:\model\android-sdk\platform-tools\adb.exe',
-    [string]$Serial = 'f9d98aa3',
+    [string]$Serial = 'device-a',
     [string]$Package = 'com.muyuchat.mca',
     [string]$RepoRoot = ''
 )

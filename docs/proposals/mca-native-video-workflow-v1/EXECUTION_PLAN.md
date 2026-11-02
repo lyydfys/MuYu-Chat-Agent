@@ -819,7 +819,7 @@ V3-02a→02b→02c→02d 是同一扩展任务的建议切分，每卡单独定�
 
 ### 13.2 Room 和文件
 
-- v29 → 新版本迁移保留旧 chat/image/file/Agent 行、索引和 foreign key。（2026-10-28：设备用例 `VideoRoomMigrationTest.migration29To35KeepsChatImageFileRowsAndAddsAgentTables` 已 seed 并以导出 `35.json` 校验 chat/image/file 旧行保留，f9d `OK (3 tests)`。）
+- v29 → 新版本迁移保留旧 chat/image/file/Agent 行、索引和 foreign key。（2026-10-28：设备用例 `VideoRoomMigrationTest.migration29To35KeepsChatImageFileRowsAndAddsAgentTables` 已 seed 并以导出 `35.json` 校验 chat/image/file 旧行保留，device-a `OK (3 tests)`。）
 - Room transaction 失败、journal 写失败、fsync/rename 失败、空间不足、进程死、DB 有行但文件不存在。
 - symlink/path escape/unsafe leaf/duplicate destination/checksum mismatch。
 - startup reconcile 幂等，第二次运行不会重复发布或删除有效文件。

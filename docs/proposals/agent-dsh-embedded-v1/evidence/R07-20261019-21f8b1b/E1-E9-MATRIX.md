@@ -3,7 +3,7 @@
 - Run ID：`R07-20261019-21f8b1b`
 - Absolute final APK：`b610e1d0d29195e966e705a4a5113f46d8601a16349f45bedb98954ace73ae9a`，393,717,991 B，05:06:13，0.2.4 (8)，signer `2619ac4c…a9cf`；**short regression PENDING**
 - Previous hardening：`2005df02…`（previous PASS_WITH_CAVEATS）；intermediate `B63149B8…`；stale `e0b97fb3…`
-- 设备：98a37aa7（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
+- 设备：device-b（Xiaomi 25091RP04C / Android 17 SDK37 / arm64-v8a）
 - Absolute final 预检：dex closure strings（stop verification failed/found survivors/survivingPids/label regexes）；runtime 93/93；P1-R1/R2 code-review closed；label P2 closed except Cafe2024 edge
 - `headFinal`：未冻结（观察 HEAD `1965bed836de40610948d92e2e1bb62890635d93`）
 - `headFinal`：未冻结（观察 HEAD `26dcd81d43c1800849247660bf85ce1d28acbb87`，03:41:20）
@@ -84,7 +84,7 @@
 ## 6. 一屏
 
 ```text
-R07 FINAL: PASS_WITH_CAVEATS — 0A731D84…FB62 / 98a37aa7
+R07 FINAL: PASS_WITH_CAVEATS — 0A731D84…FB62 / device-b
 E1/E2/E3/E5/E6/E8/E9(pre-start) PASS; E4/E7/E9 post-start refresh NOT_RUN
 DSH chat PASS (protocol/loop) at n_ctx=16384 — 1m19s/6.6K tok; MODEL_QUALITY_ONLY
 C1-C7 PASS (C7 raw log missing); cloud BLOCKED external 503; 12288 FAIL
