@@ -19,6 +19,17 @@ and Gradle dependencies.
 
 MCA keeps Android-specific integration patches under `third_party/patches`.
 
+### Prebuilt Wan engine
+
+- Path: `core/sd-native/prebuilt/wan-engine-arm64-v8a.zip`
+- Source: HappyYzy `stable-diffusion.cpp` at `a63954d`, plus the MCA Wan patch
+  queue `0001..0008` (see `docs/proposals/mca-native-video-workflow-v1/build-engine.sh`)
+- License: MIT (`stable-diffusion.cpp` and `ggml`); the archive contains only
+  compiled libraries, no model weights
+- Pins: `core/sd-native/prebuilt/WAN_ENGINE_BASELINE.properties`
+- The `unpackWanEngine` Gradle task verifies the archive and every extracted
+  library against these pins before packaging.
+
 ### tokenizers-cpp
 
 - Path: `third_party/tokenizers-cpp`
