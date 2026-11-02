@@ -6,6 +6,8 @@
 
 应用内「设置 → 关于 → 赞助支持」和 GitHub README 展示的是同一组二维码；图片源文件为 `docs/images/alipay.jpg` 与 `docs/images/wechat.jpg`。
 
+如果国内网络无法稳定打开 GitHub，可直接在应用内「设置 → 关于 → 赞助支持 → 扫码赞助（国内可直连）」使用同一组离线赞赏码。
+
 ---
 
 ## 赞助方式

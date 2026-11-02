@@ -270,6 +270,8 @@ $env:MCA_LIVE_CUSTOM_JSON_ENDPOINT='https://hn.algolia.com/api/v1/search'
 
 也可以查看 [赞助说明](docs/DONATE.md)，或在 [GitHub](https://github.com/lyydfys/MuYu-Chat-Agent) 点一个 Star 支持项目。
 
+应用内「设置 → 关于 → 赞助支持」也提供同一组离线赞赏码；国内网络无法打开 GitHub 时可直接扫码。
+
 [![GitHub stars](https://img.shields.io/github/stars/lyydfys/MuYu-Chat-Agent?style=social)](https://github.com/lyydfys/MuYu-Chat-Agent)
 
 ## Repository Layout

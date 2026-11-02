@@ -1,10 +1,15 @@
 package com.muyuchat.feature.settings
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -237,7 +242,9 @@ internal fun SettingsAboutScreen(
             onOpenDonatePage = {
                 showSponsor = false
                 onOpenWebPage(ABOUT_DONATE_URL)
-            }
+            },
+            onOpenGithub = { onOpenWebPage(ABOUT_REPOSITORY_URL) },
+            onOpenIssues = { onOpenWebPage(ABOUT_ISSUES_URL) }
         )
     }
 
@@ -554,52 +561,123 @@ private fun AboutInfoRow(label: String, value: String) {
 @Composable
 private fun AboutSponsorDialog(
     onDismiss: () -> Unit,
-    onOpenDonatePage: () -> Unit
+    onOpenDonatePage: () -> Unit,
+    onOpenGithub: () -> Unit,
+    onOpenIssues: () -> Unit
 ) {
+    val context = LocalContext.current
+    var showQr by rememberSaveable { mutableStateOf(false) }
+
+    fun shareProject() {
+        val url = ABOUT_REPOSITORY_URL
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, "MCA — MuYu Chat Agent\n$url")
+        }
+        val chooser = Intent.createChooser(send, "分享 MCA").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { context.startActivity(chooser) }.onFailure {
+            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText("MCA", url))
+            Toast.makeText(context, "链接已复制", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     McaDialog(
         onDismissRequest = onDismiss,
-        title = { Text("赞助支持", fontWeight = FontWeight.Bold) },
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Image(
+                    painter = painterResource(R.drawable.about_logo),
+                    contentDescription = null,
+                    modifier = Modifier.size(40.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("赞助支持", fontWeight = FontWeight.Bold)
+                    Text(
+                        "如果 MCA 帮到了你",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                McaIconButton(contentDescription = "关闭赞助支持", onClick = onDismiss) {
+                    Icon(McaIcons.Close, contentDescription = null)
+                }
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
-                    .heightIn(max = 380.dp)
+                    .heightIn(max = 420.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
-                    "扫码赞助，或前往 GitHub 赞助页。赞助完全自愿，不影响任何功能。",
+                    "开源项目的持续维护离不开每一份支持。可以点 Star、分享项目，或前往 GitHub 赞助页支持持续开发。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    AboutQrCode(
-                        drawable = R.drawable.about_alipay_qr,
-                        label = "支付宝",
-                        modifier = Modifier.weight(1f)
-                    )
-                    AboutQrCode(
-                        drawable = R.drawable.about_wechat_qr,
-                        label = "微信支付",
-                        modifier = Modifier.weight(1f)
-                    )
+                    McaButton(style = McaButtonStyle.Primary, onClick = onOpenDonatePage) {
+                        Icon(McaIcons.Favorite, contentDescription = null)
+                        Text("去赞助", modifier = Modifier.padding(start = 6.dp))
+                    }
+                    McaButton(style = McaButtonStyle.Outlined, onClick = onOpenGithub) {
+                        Icon(McaIcons.Star, contentDescription = null)
+                        Text("去点 Star", modifier = Modifier.padding(start = 6.dp))
+                    }
+                    McaButton(style = McaButtonStyle.Outlined, onClick = ::shareProject) {
+                        Icon(McaIcons.Share, contentDescription = null)
+                        Text("分享项目", modifier = Modifier.padding(start = 6.dp))
+                    }
+                    McaButton(style = McaButtonStyle.Outlined, onClick = onOpenIssues) {
+                        Icon(McaIcons.Feedback, contentDescription = null)
+                        Text("意见反馈", modifier = Modifier.padding(start = 6.dp))
+                    }
                 }
                 Text(
-                    "也可以查看 GitHub 上的 docs/DONATE.md，或给项目点一个 Star。",
+                    "赞助完全自愿，不影响任何功能。感谢每一份支持！",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                McaButton(style = McaButtonStyle.Text, onClick = { showQr = !showQr }) {
+                    Text(if (showQr) "收起离线赞赏码" else "扫码赞助（国内可直连）")
+                }
+                if (showQr) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        AboutQrCode(
+                            drawable = R.drawable.about_alipay_qr,
+                            label = "支付宝",
+                            modifier = Modifier.weight(1f)
+                        )
+                        AboutQrCode(
+                            drawable = R.drawable.about_wechat_qr,
+                            label = "微信支付",
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Text(
+                        "GitHub 访问不稳定时，可直接使用上方离线赞赏码。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         },
-        confirmButton = {
-            McaButton(style = McaButtonStyle.Text, onClick = onOpenDonatePage) {
-                Text("打开赞助页")
-            }
-        },
+        confirmButton = {},
         dismissButton = {
-            McaButton(style = McaButtonStyle.Text, onClick = onDismiss) {
+            McaButton(style = McaButtonStyle.Outlined, onClick = onDismiss) {
                 Text("关闭")
             }
         }
