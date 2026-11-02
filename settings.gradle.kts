@@ -2,9 +2,8 @@
 // Aliyun mirrors first. GitHub Actions can reach the public repositories, and there a mirror-first
 // list made the KSP plugin marker resolve from the mirror while its implementation artifact did not,
 // which fails plugin resolution instead of falling back. Keep both environments explicit.
-val preferPublicRepositories = System.getenv("CI")?.equals("true", ignoreCase = true) == true
-
 pluginManagement {
+    val preferPublicRepositories = System.getenv("CI")?.equals("true", ignoreCase = true) == true
     repositories {
         if (preferPublicRepositories) {
             google()
@@ -22,6 +21,7 @@ pluginManagement {
 }
 
 dependencyResolutionManagement {
+    val preferPublicRepositories = System.getenv("CI")?.equals("true", ignoreCase = true) == true
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         if (preferPublicRepositories) {
