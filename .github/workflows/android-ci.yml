@@ -51,6 +51,10 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # The runner image's cmdline-tools no longer contain the legacy
+          # `tools` package; the next step installs the real components.
+          packages: 'platform-tools'
 
       - name: Install Android SDK components
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.13113456" "cmake;3.31.6"
