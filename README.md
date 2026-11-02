@@ -6,7 +6,7 @@ user control.
 
 [![Android CI](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml/badge.svg)](https://github.com/lyydfys/MCA/actions/workflows/android-ci.yml)
 [![Release](https://img.shields.io/github/v/release/lyydfys/MuYu-Chat-Agent?include_prereleases&label=release)](https://github.com/lyydfys/MuYu-Chat-Agent/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 MCA is an Android-native, local-first AI workspace for people who want direct
 control over models, inference backends, and cloud API connections.
@@ -62,13 +62,17 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.3.0` (`versionCode 9`) is the current release line. It adds the local
-  Agent runtime/workspace, the embedded DSH workspace, the Wan 2.2 video
-  workspace, MediaTek NPU / Anima and Qwen-Image / GenieX routes, Room v35 with
-  migrations, and the pinned in-repo Wan engine archive. See the
-  [v0.3.0 release notes](docs/releases/v0.3.0.md) for verification and
-  limitations. The signed arm64 installer is built from this tree; GitHub
-  release publication is pending.
+- `v0.3.1` (`versionCode 10`) is the current release line. It fixes Tavern
+  preset import and the chat-history deletion boundary, moves generation
+  presets to model ownership with role-card field overrides, and switches the
+  project license to Apache-2.0. See the
+  [v0.3.1 release notes](docs/releases/v0.3.1.md) for verification and
+  limitations.
+- `v0.3.0` (`versionCode 9`) is the previous release. It added the local Agent
+  runtime/workspace, the embedded DSH workspace, the Wan 2.2 video workspace,
+  MediaTek NPU / Anima and Qwen-Image / GenieX routes, Room v35 with migrations,
+  and the pinned in-repo Wan engine archive. It remains under the MIT License.
+  See the [v0.3.0 release notes](docs/releases/v0.3.0.md).
 - `v0.2.4` (`versionCode 8`) is the previous stability release and remains on
   [GitHub Releases](https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.2.4).
 - The first public package target is `arm64-v8a` Android devices.
@@ -528,4 +532,4 @@ MCA is early-stage and changes quickly. Please read
 
 ## License
 
-MCA is licensed under the MIT License. See [LICENSE](LICENSE).
+MCA is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE). Versions `0.3.0` and earlier remain under the MIT License; third-party components retain their own licenses and notices.

@@ -567,7 +567,7 @@ private fun AboutBuildInfo(
             AboutInfoRow("最新版本", latestVersion?.let { "v$it" } ?: "尚未检查")
             AboutInfoRow("上次检查", lastCheckedText.ifBlank { "—" })
             AboutInfoRow("自动检查", if (autoCheckEnabled) "已开启" else "已关闭")
-            AboutInfoRow("开源许可", "MIT")
+            AboutInfoRow("开源许可", "Apache-2.0")
         }
     }
 }
