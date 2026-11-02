@@ -40,6 +40,7 @@ internal fun ChatAssistantRoleSubpage(
             selectedModelName = state.selectedModelName,
             selectedModelId = state.selectedModelId,
             selectedModelIsCloud = state.selectedModelIsCloud,
+            modelGenerationPreset = state.modelGenerationPreset,
             modelChoices = state.localModels,
             onSaveAssistant = onSaveAssistant,
             assistantMemories = assistantMemories,

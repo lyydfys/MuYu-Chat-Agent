@@ -41,16 +41,16 @@ internal fun String.normalizedAssistantModelMode(): String =
     }
 
 internal fun AssistantRecord.toGenerationParams(defaults: GenerationParams): GenerationParams =
-    assistantGenerationParamsFromJson(paramsJson, defaults, systemPrompt)
+    assistantGenerationParamsResolved(paramsJson, defaults, systemPrompt)
 
 internal fun saveAssistantProfileFor(
     store: UiStateWriter<AssistantProfileFields>,
     assistantStore: AssistantStore,
     application: Application,
+    modelGenerationProfileStore: ModelGenerationProfileStore,
     rejectWhileConversationMutationInProgress: () -> Boolean,
     hasActiveAssistantImageExecution: (String?) -> Boolean,
     showStatus: (String) -> Unit,
-    persistModelGenerationParams: (MainUiState, GenerationParams) -> Unit,
     persistAssistantsAsync: () -> Unit,
     persistChatSessions: (List<ChatSessionRecord>?) -> Unit,
     markLocalConversationContextInvalid: () -> Unit,
@@ -76,7 +76,8 @@ internal fun saveAssistantProfileFor(
     memoryEnabled: Boolean,
     memorySummaryInterval: Int,
     webSearchEnabled: Boolean,
-    fileContextEnabled: Boolean
+    fileContextEnabled: Boolean,
+    generationOverrideFields: Set<String> = emptySet()
 ): Boolean {
     val cleanName = name.trim().take(36).ifBlank { "未命名助手" }
     val cleanAvatar = avatar.trim().take(4)
@@ -92,6 +93,13 @@ internal fun saveAssistantProfileFor(
         showStatus("请先结束当前角色请求，再保存角色卡。")
         return false
     }
+    val currentModelKey = GenerationPreferences.modelGenerationProfileKey(
+        state.selectedChatBackend,
+        state.currentChatModelId()
+    )
+    val modelPreset = currentModelKey
+        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, state.params) }
+        ?: state.params
     val now = System.currentTimeMillis()
     val existing = id?.let { assistantId -> state.assistants.firstOrNull { it.id == assistantId } }
     val assistant = (existing ?: AssistantRecord(name = cleanName, createdAt = now)).copy(
@@ -102,7 +110,7 @@ internal fun saveAssistantProfileFor(
         defaultModelMode = cleanDefaultModelMode,
         defaultModelId = cleanDefaultModelId,
         characterCardJson = existing?.characterCardJson,
-        paramsJson = state.params.copy(
+        paramsJson = modelPreset.copy(
             systemPrompt = cleanPrompt,
             temperature = temperature.coerceIn(0f, 2f),
             topP = topP.coerceIn(0f, 1f),
@@ -120,7 +128,7 @@ internal fun saveAssistantProfileFor(
                 .toList(),
             reasoningMode = reasoningMode,
             hideReasoning = reasoningMode == ReasoningMode.OFF
-        ).toAssistantGenerationJson()
+        ).toAssistantGenerationJsonWithOverrides(generationOverrideFields)
             .withAssistantPromptProvenance(AssistantPromptProvenance.USER_AUTHORED),
         memoryEnabled = memoryEnabled,
         memorySummaryInterval = memorySummaryInterval.coerceIn(2, 100),
@@ -135,12 +143,9 @@ internal fun saveAssistantProfileFor(
     }
     val shouldSelectAssistant = existing == null || existing.id == state.selectedAssistantId
     if (shouldSelectAssistant && existing != null) assistantStore.saveSelectedAssistantId(assistant.id)
-    val updatedParams = assistant.toGenerationParams(state.params)
+    val updatedParams = assistant.toGenerationParams(modelPreset)
     if (shouldSelectAssistant && existing != null) {
         GenerationPreferences.persistGenerationParams(application, updatedParams)
-        // Editing the active assistant is an explicit user change for the
-        // currently selected model; retain it in that model's profile.
-        persistModelGenerationParams(state, updatedParams)
     }
     // An explicit edit applies to this role's active conversation only. Other
     // conversations keep the prompt version they captured when created.
@@ -242,10 +247,14 @@ internal fun deleteAssistantFor(
     }
     val deletingSelectedAssistant = state.selectedAssistantId == assistantId
     if (deletingSelectedAssistant) assistantStore.saveSelectedAssistantId(next.id)
-    val nextAssistantParams = next.toGenerationParams(state.params)
-    val updatedParams = if (deletingSelectedAssistant) currentModelGenerationProfileKey()
-        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, nextAssistantParams) }
-        ?: nextAssistantParams else state.params
+    val nextModelPreset = currentModelGenerationProfileKey()
+        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, state.params) }
+        ?: state.params
+    val updatedParams = if (deletingSelectedAssistant) {
+        next.toGenerationParams(nextModelPreset)
+    } else {
+        state.params
+    }
     if (deletingSelectedAssistant) GenerationPreferences.persistGenerationParams(application, updatedParams)
     val updatedSessions = state.chatSessions
     store.update {

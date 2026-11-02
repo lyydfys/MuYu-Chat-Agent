@@ -75,7 +75,6 @@ internal object MainUiBootstrapFactory {
             ?.takeIf { assistantId -> initialAssistants.any { it.id == assistantId } }
             ?: initialStoredSelectedAssistantId
         val initialSelectedAssistant = initialAssistants.firstOrNull { it.id == initialSelectedAssistantId }
-        val initialEffectiveParams = initialSelectedAssistant?.toGenerationParams(initialParams) ?: initialParams
         val initialLocalImageModels = if (skipInitialModelDiscovery) emptyList() else localImageModelStore.loadModels(discover = false)
         val initialLocalImageLoras = localImageLoraStore.load()
         val initialLocalImageUpscalers = localImageUpscalerStore.load()
@@ -169,8 +168,10 @@ internal object MainUiBootstrapFactory {
                 } else {
                     initialStartupSession?.modelId
                 },
-                defaults = initialEffectiveParams
-            ),
+                defaults = initialParams
+            ).let { modelPreset ->
+                initialSelectedAssistant?.toGenerationParams(modelPreset) ?: modelPreset
+            },
             agentLogs = agentLogger.recent(),
             benchmarkHistory = benchmarkHistoryLogger.recent(),
             deviceProfile = initialDeviceProfile,

@@ -20,7 +20,7 @@ data class AssistantRecord(
     val systemPrompt: String = GenerationParams().systemPrompt,
     val defaultModelMode: String = "follow_current",
     val defaultModelId: String? = null,
-    val paramsJson: String = GenerationParams().toAssistantGenerationJson(),
+    val paramsJson: String = GenerationParams().toAssistantGenerationJsonWithOverrides(emptySet()),
     /** Original imported character-card JSON, retained as inert data for lossless re-export. */
     val characterCardJson: String? = null,
     val memoryEnabled: Boolean = false,
@@ -75,7 +75,7 @@ data class AssistantRecord(
                 paramsJson = params.copy(
                     systemPrompt = systemPrompt.ifBlank { GenerationParams().systemPrompt }
                         .take(MAX_SYSTEM_PROMPT_CHARS)
-                ).toAssistantGenerationJson(),
+                ).toAssistantGenerationJsonWithOverrides(emptySet()),
                 createdAt = 0L,
                 updatedAt = 0L
             )

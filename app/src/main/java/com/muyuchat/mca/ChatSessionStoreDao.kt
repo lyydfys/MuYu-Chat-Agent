@@ -1,5 +1,6 @@
 package com.muyuchat.mca
 
+import android.util.Log
 import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
@@ -43,6 +44,9 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
 
     @Query("DELETE FROM chat_messages WHERE sessionId = :sessionId")
     suspend fun deleteMessagesForSession(sessionId: String)
+
+    @Query("DELETE FROM chat_sessions WHERE id = :sessionId")
+    suspend fun deleteSession(sessionId: String)
 
     @Query("DELETE FROM chat_messages WHERE sessionId NOT IN (:sessionIds)")
     suspend fun pruneMessages(sessionIds: List<String>)
@@ -97,25 +101,31 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
 
     @Transaction
     suspend fun loadRecords(): List<ChatSessionRecord> =
-        sessions().map { session ->
-            ChatSessionRecord(
-                id = session.id,
-                title = session.title,
-                messages = messages(session.id).map { it.toChatMessage() },
-                pinned = session.pinned,
-                manualTitle = session.manualTitle,
-                updatedAt = session.updatedAt,
-                projectId = session.projectId,
-                assistantId = session.assistantId,
-                assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
-                    session.assistantSnapshotJson
-                ),
-                mixedAssistantHistory = session.mixedAssistantHistory,
-                modelMode = session.modelMode,
-                modelId = session.modelId,
-                appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson),
-                contextSummaries = contextSummariesFromJson(session.contextSummariesJson)
-            )
+        sessions().mapNotNull { session ->
+            runCatching {
+                ChatSessionRecord(
+                    id = session.id,
+                    title = session.title,
+                    messages = messages(session.id).map { it.toChatMessage() },
+                    pinned = session.pinned,
+                    manualTitle = session.manualTitle,
+                    updatedAt = session.updatedAt,
+                    projectId = session.projectId,
+                    assistantId = session.assistantId,
+                    assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
+                        session.assistantSnapshotJson
+                    ),
+                    mixedAssistantHistory = session.mixedAssistantHistory,
+                    modelMode = session.modelMode,
+                    modelId = session.modelId,
+                    appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson),
+                    contextSummaries = contextSummariesFromJson(session.contextSummariesJson)
+                )
+            }.onFailure { error ->
+                // One malformed row must not hide every readable conversation. The row remains
+                // in Room for a later repair/export instead of being silently rewritten away.
+                Log.e("MCA-ChatHistory", "session_load_failed id=${session.id}", error)
+            }.getOrNull()
         }
 
     @Transaction
@@ -159,19 +169,35 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
 
     /** Reconciles a full UI snapshot without deleting and recreating unchanged rows. */
     @Transaction
-    suspend fun reconcileSnapshot(records: List<ChatSessionRecord>) {
+    suspend fun reconcileSnapshot(
+        records: List<ChatSessionRecord>,
+        explicitlyDeletedSessionIds: Set<String> = emptySet()
+    ) {
+        val persistedSessions = sessions()
+        val persistedIds = persistedSessions.mapTo(hashSetOf()) { it.id }
+        val requestedIds = records.mapTo(hashSetOf()) { it.id }
+        val removedIds = sessionsEligibleForDeletion(
+            persistedIds = persistedIds,
+            requestedIds = requestedIds,
+            explicitlyDeletedSessionIds = explicitlyDeletedSessionIds
+        )
         if (records.isEmpty()) {
-            clearMessages()
-            clearKnowledgeBindings()
-            clearSessions()
+            // An empty UI snapshot is not proof that the user deleted history.  Only an
+            // explicit delete may clear rows; a transient load failure must not wipe them.
+            if (removedIds.isEmpty()) return
+            removedIds.forEach { sessionId ->
+                deleteMessagesForSession(sessionId)
+                deleteKnowledgeBindingsForChat(sessionId)
+                deleteSession(sessionId)
+            }
+            deleteMemoryTurnsForSessions(removedIds.toList())
             deleteStalePendingMemoryTurns()
             return
         }
 
         val requestedEntities = records.map { it.toEntity() }
-        val liveSessionIds = requestedEntities.map { it.id }
-        val persistedSessionsById = sessions().associateBy { it.id }
-        val persistedMessagesBySession = messagesForSessions(liveSessionIds).groupBy { it.sessionId }
+        val persistedSessionsById = persistedSessions.associateBy { it.id }
+        val persistedMessagesBySession = messagesForSessions(requestedIds.toList()).groupBy { it.sessionId }
         val decisions = records.mapIndexed { index, record ->
             AssistantSessionProvenance.resolve(
                 persisted = persistedSessionsById[record.id],
@@ -206,10 +232,15 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
                 }
             }
         }
-        // Chat messages predate Room foreign keys, so prune them explicitly.
-        pruneMessages(liveSessionIds)
-        pruneKnowledgeBindings(liveSessionIds)
-        pruneSessions(liveSessionIds)
+        // Missing-from-snapshot rows are preserved unless the deletion was explicit. This
+        // protects history from a transient empty/partial UI projection while still honouring
+        // user deletions through the destructive mutation path.
+        removedIds.forEach { sessionId ->
+            deleteMessagesForSession(sessionId)
+            deleteKnowledgeBindingsForChat(sessionId)
+            deleteSession(sessionId)
+        }
+        deleteMemoryTurnsForSessions(removedIds.toList())
         deleteStalePendingMemoryTurns()
     }
 
@@ -232,10 +263,8 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
         deletedSessionIds: List<String> = emptyList()
     ) {
         val boundedRecords = ChatHistoryPersistenceBounds.bound(records)
-        reconcileSnapshot(boundedRecords)
+        reconcileSnapshot(boundedRecords, deletedSessionIds.toSet())
         val liveSessionIds = boundedRecords.mapTo(hashSetOf()) { it.id }
-        val removedIds = deletedSessionIds.distinct().filter { it !in liveSessionIds }
-        if (removedIds.isNotEmpty()) deleteMemoryTurnsForSessions(removedIds)
         if (boundedRecords.isEmpty() || bindingSessionIds.isEmpty()) return
 
         val bindingsBySession = bindings.groupBy { it.chatSessionId }

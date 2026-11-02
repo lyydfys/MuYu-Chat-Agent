@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.Dao
 import androidx.room.Database
@@ -100,6 +101,7 @@ class ChatSessionStore(context: Context) {
             }
             normalizePersistedHistory(loaded)
         }.getOrElse {
+            Log.e("MCA-ChatHistory", "room_load_failed; trying legacy snapshot", it)
             runCatching { normalizePersistedHistory(migrateLegacyJsonIfNeeded()) }
                 .getOrElse { emptyList() }
         }

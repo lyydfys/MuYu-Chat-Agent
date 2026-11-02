@@ -112,6 +112,18 @@ internal fun sanitizeAssistantParamsJsonPreservingLegacyExecution(
             assistantPromptProvenanceFromParamsJson(rawJson).name
         )
     }
+    if (raw.has(ASSISTANT_GENERATION_OVERRIDE_FIELDS_KEY)) {
+        val values = raw.optJSONArray(ASSISTANT_GENERATION_OVERRIDE_FIELDS_KEY)
+        val fields = if (values == null) {
+            emptyList()
+        } else {
+            (0 until values.length()).mapNotNull { index ->
+                values.optString(index)
+                    .takeIf { it in com.muyuchat.core.engine.GenerationParamOverrideFields.semanticFields }
+            }
+        }
+        sanitized.put(ASSISTANT_GENERATION_OVERRIDE_FIELDS_KEY, JSONArray(fields.distinct().sorted()))
+    }
     LEGACY_EXECUTION_INT_FIELDS.forEach { (canonical, aliases) ->
         val value = aliases.firstNotNullOfOrNull { key ->
             if (raw.has(key) && !raw.isNull(key)) {

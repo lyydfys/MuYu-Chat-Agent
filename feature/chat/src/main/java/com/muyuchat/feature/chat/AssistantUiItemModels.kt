@@ -35,7 +35,9 @@ data class AssistantUiItem(
     val frequencyPenalty: Float = 0.2f,
     val stopWords: List<String> = emptyList(),
     val memorySummaryInterval: Int = 12,
-    val characterCardImported: Boolean = false
+    val characterCardImported: Boolean = false,
+    /** Empty means every semantic generation field follows the active model preset. */
+    val generationOverrideFields: Set<String> = emptySet()
 )
 
 @Immutable

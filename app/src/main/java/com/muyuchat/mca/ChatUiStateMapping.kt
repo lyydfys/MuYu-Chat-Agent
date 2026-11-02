@@ -184,6 +184,7 @@ internal fun buildChatUiState(
     assistantImageToolPermission: ChatImageToolPermissionUiState,
     preparedImageUi: Map<String, PreparedLocalImageUi>,
     generationParamsForChatModel: (String) -> GenerationParams,
+    modelGenerationPreset: () -> GenerationParams = { GenerationParams() },
     /**
      * P02d/e/f/g：低频目录投影的单条复用缓存。默认使用进程级实例；测试注入独立实例，
      * 以便断言"未变输入复用同一实例、每个依赖字段变化都失效"。缓存只复用纯映射结果，
@@ -413,6 +414,7 @@ internal fun buildChatUiState(
                     apiEnabled = state.apiEnabled,
                     restEnabled = state.restEnabled,
                     generationParams = state.params,
+                    modelGenerationPreset = modelGenerationPreset(),
                     reasoningMode = state.params.reasoningMode,
                     webSearchEnabled = state.webSearchConfig.enabled,
                     webSearchConfigured = state.webSearchConfig.realSearchConfigured,

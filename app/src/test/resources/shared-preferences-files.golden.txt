@@ -9,6 +9,7 @@ image_loras_v1
 image_upscaler_product_selection_v1
 image_upscalers_v1
 mca.dsh.account.attempt
+mca_about_ui
 mca_api
 mca_app_updates_v1
 mca_assistants

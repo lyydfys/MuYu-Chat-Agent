@@ -582,16 +582,25 @@ internal fun updateReasoningModeFor(
     ).let { params ->
         params.copy(nPredict = params.effectiveNPredict())
     }
-    GenerationPreferences.persistGenerationParams(application, updatedParams)
+    val modelPreset = GenerationPreferences.loadModelGenerationParams(
+        profileStore = modelGenerationProfileStore,
+        backend = state.selectedChatBackend,
+        modelId = state.currentChatModelId(),
+        defaults = state.params
+    )
+    val updatedModelPreset = modelPreset.withChangedFieldsFrom(state.params, updatedParams)
     GenerationPreferences.persistModelGenerationParams(
         profileStore = modelGenerationProfileStore,
         backend = state.selectedChatBackend,
         modelId = state.currentChatModelId(),
-        params = updatedParams
+        params = updatedModelPreset
     )
+    val effectiveParams = state.selectedAssistant()?.toGenerationParams(updatedModelPreset)
+        ?: updatedModelPreset
+    GenerationPreferences.persistGenerationParams(application, effectiveParams)
     uiStateStore.update {
         it.copy(
-            params = updatedParams,
+            params = effectiveParams,
             statusMessage = "思考模式已切换为：${mode.label}"
         )
     }

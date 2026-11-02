@@ -293,7 +293,7 @@ internal class SelectChatSessionPortAdapter(
     override fun toGenerationParams(
         assistant: AssistantRecord,
         defaults: GenerationParams
-    ): GenerationParams = assistantGenerationParamsFromJson(
+    ): GenerationParams = assistantGenerationParamsResolved(
         assistant.paramsJson,
         defaults,
         assistant.systemPrompt

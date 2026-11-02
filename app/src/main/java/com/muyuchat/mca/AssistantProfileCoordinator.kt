@@ -58,7 +58,6 @@ internal class AssistantProfileCoordinator(
     setPendingProfileTransactionId: (String?) -> Unit,
     private val rejectWhileConversationMutationInProgress: () -> Boolean,
     private val showStatus: (String) -> Unit,
-    private val persistModelGenerationParams: (MainUiState, GenerationParams) -> Unit,
     private val persistChatSessions: (List<ChatSessionRecord>?) -> Unit,
     private val markLocalConversationContextInvalid: () -> Unit,
     private val onLocalConversationContextNeedsInvalidation: () -> Unit,
@@ -149,15 +148,16 @@ internal class AssistantProfileCoordinator(
         memoryEnabled: Boolean,
         memorySummaryInterval: Int,
         webSearchEnabled: Boolean,
-        fileContextEnabled: Boolean
+        fileContextEnabled: Boolean,
+        generationOverrideFields: Set<String> = emptySet()
     ): Boolean = saveAssistantProfileFor(
         store = store,
         assistantStore = assistantStore,
         application = application,
+        modelGenerationProfileStore = modelGenerationProfileStore,
         rejectWhileConversationMutationInProgress = rejectWhileConversationMutationInProgress,
         hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(store.current, it) },
         showStatus = showStatus,
-        persistModelGenerationParams = persistModelGenerationParams,
         persistAssistantsAsync = ::persistAssistantsAsync,
         persistChatSessions = persistChatSessions,
         markLocalConversationContextInvalid = markLocalConversationContextInvalid,
@@ -170,7 +170,8 @@ internal class AssistantProfileCoordinator(
         frequencyPenalty = frequencyPenalty, stopWords = stopWords,
         reasoningMode = reasoningMode, memoryEnabled = memoryEnabled,
         memorySummaryInterval = memorySummaryInterval, webSearchEnabled = webSearchEnabled,
-        fileContextEnabled = fileContextEnabled
+        fileContextEnabled = fileContextEnabled,
+        generationOverrideFields = generationOverrideFields
     )
 
     fun selectAssistant(assistantId: String) {

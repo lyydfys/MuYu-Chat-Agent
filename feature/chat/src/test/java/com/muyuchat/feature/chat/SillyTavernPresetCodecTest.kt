@@ -102,6 +102,20 @@ class SillyTavernPresetCodecTest {
     }
 
     @Test
+    fun promptMacrosAreRemovedAndCrLfIsNormalizedWithoutRegexFailure() {
+        val preset = SillyTavernPresetCodec.parse(
+            """{"prompts":[{"content":"第一行\r\n{{char}} 对 {{user}} 说\r\n第二行"}]}"""
+        )
+
+        val appendix = requireNotNull(preset.promptAppendix)        assertTrue(appendix.contains("第一行"))
+        assertTrue(appendix.contains("第二行"))
+        assertTrue(!appendix.contains("{{char}}"))
+        assertTrue(!appendix.contains("{{user}}"))
+        assertTrue(!appendix.contains("\\r"))
+        assertTrue(!appendix.contains("\\n"))
+    }
+
+    @Test
     fun presetsAboveOneMiBAreAcceptedBecauseRealTavernPresetFilesExceedIt() {
         // 1.5 MiB of prompt filler: rejected by the old 1 MiB ceiling, accepted by the current one.
         val filler = "x".repeat(1_572_864)

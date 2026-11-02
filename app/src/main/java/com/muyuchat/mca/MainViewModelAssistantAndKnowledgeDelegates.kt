@@ -12,12 +12,13 @@ fun MainViewModel.saveAssistantProfile(
     defaultModelMode: String, defaultModelId: String?, temperature: Float, topP: Float,
     nPredict: Int, topK: Int, minP: Float, repeatPenalty: Float, presencePenalty: Float,
     frequencyPenalty: Float, stopWords: List<String>, reasoningMode: ReasoningMode,
-    memoryEnabled: Boolean, memorySummaryInterval: Int, webSearchEnabled: Boolean, fileContextEnabled: Boolean
+    memoryEnabled: Boolean, memorySummaryInterval: Int, webSearchEnabled: Boolean, fileContextEnabled: Boolean,
+    generationOverrideFields: Set<String> = emptySet()
 ): Boolean = assistantProfileCoordinator.saveAssistantProfile(
     id, name, avatar, tag, systemPrompt, defaultModelMode, defaultModelId,
     temperature, topP, nPredict, topK, minP, repeatPenalty, presencePenalty,
     frequencyPenalty, stopWords, reasoningMode, memoryEnabled, memorySummaryInterval,
-    webSearchEnabled, fileContextEnabled
+    webSearchEnabled, fileContextEnabled, generationOverrideFields
 )
 
 fun MainViewModel.upsertAssistantMemory(

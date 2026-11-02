@@ -358,7 +358,8 @@ private fun McaApp(
                 state = buildChatUiState(
                     state = state, sessionPresentations = sessionPresentations, timestampLocale = timestampLocale,
                     imageGenerationHistoryById = imageGenerationHistoryById, assistantImageToolPermission = assistantImageToolPermission,
-                    preparedImageUi = preparedImageUi, generationParamsForChatModel = viewModel::generationParamsForChatModel
+                    preparedImageUi = preparedImageUi, generationParamsForChatModel = viewModel::generationParamsForChatModel,
+                    modelGenerationPreset = viewModel::currentModelGenerationPreset
                 ),
                 inputs = ChatRouteInputs(
                     chatBackground = effectiveChatAppearance.toUiState(), globalChatBackground = state.globalChatAppearance.toUiState(),

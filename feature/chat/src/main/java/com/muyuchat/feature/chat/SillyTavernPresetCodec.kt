@@ -106,6 +106,8 @@ object SillyTavernPresetCodec {
         "jailbreak_prompt",
         "max_context_length"
     )
+    private val CRLF_PATTERN = Regex("\\r\\n?")
+    private val PROMPT_MACRO_PATTERN = Regex("\\{\\{[^}]{1,160}\\}\\}")
 
     fun parse(rawJson: String, fallbackName: String = "Tavern 预设"): SillyTavernGenerationPreset {
         require(rawJson.toByteArray(Charsets.UTF_8).size <= MAX_JSON_BYTES) {
@@ -300,9 +302,9 @@ object SillyTavernPresetCodec {
 
     private fun sanitizePromptText(raw: String): String? {
         val normalized = raw
-            .replace("\\u0000", "")
-            .replace(Regex("\\r\\n?"), "\\n")
-            .replace(Regex("\\{\\{[^}]{1,160}}"), "")
+            .replace("\u0000", "")
+            .replace(CRLF_PATTERN, "\n")
+            .replace(PROMPT_MACRO_PATTERN, "")
             .trim()
         return normalized.takeIf { it.isNotBlank() && it.length <= MAX_PROMPT_ENTRY_CHARS }
     }

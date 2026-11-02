@@ -177,7 +177,9 @@ internal fun buildAssistantUiItems(state: MainUiState): List<AssistantUiItem> =
             repeatPenalty = assistantParams.repeatPenalty,
             presencePenalty = assistantParams.presencePenalty,
             frequencyPenalty = assistantParams.frequencyPenalty,
-            stopWords = assistantParams.stopWords
+            stopWords = assistantParams.stopWords,
+            generationOverrideFields = assistantGenerationOverrideFieldsOrNull(assistant.paramsJson)
+                ?: com.muyuchat.core.engine.GenerationParamOverrideFields.legacyFields
         )
     }
 

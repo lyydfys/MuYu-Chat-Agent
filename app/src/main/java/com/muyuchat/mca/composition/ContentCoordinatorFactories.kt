@@ -23,7 +23,6 @@ internal fun assembleAssistantProfileCoordinator(
     showStatus: (String?) -> Unit,
     loadModel: (ModelManifest) -> Unit,
     persistChatSessions: (List<ChatSessionRecord>?, Pair<String, Set<String>>?, Long?) -> Job?,
-    persistStateModelGenerationParams: (MainUiState, GenerationParams) -> Unit,
     markLocalConversationContextInvalid: () -> Unit,
     selectChatSession: (String) -> Unit,
     newChatForAssistant: (AssistantRecord, Boolean) -> Boolean,
@@ -60,7 +59,6 @@ internal fun assembleAssistantProfileCoordinator(
     setPendingProfileTransactionId = { container.runtimeAdmission.pendingProfileTransactionId = it },
     rejectWhileConversationMutationInProgress = { rejectWhileConversationMutationInProgressInto(store, container.runtimeAdmission) },
     showStatus = showStatus,
-    persistModelGenerationParams = { state, params -> persistStateModelGenerationParams(state, params) },
     persistChatSessions = { sessions -> persistChatSessions(sessions, null, null) },
     markLocalConversationContextInvalid = markLocalConversationContextInvalid,
     onLocalConversationContextNeedsInvalidation = {

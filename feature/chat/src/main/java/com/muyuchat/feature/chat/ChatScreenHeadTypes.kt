@@ -82,6 +82,8 @@ data class ChatUiState(
     val restEnabled: Boolean = false,
     /** Sampling/reasoning values for the currently selected model. */
     val generationParams: GenerationParams = GenerationParams(),
+    /** The selected model's stored preset before any role-card overrides. */
+    val modelGenerationPreset: GenerationParams = GenerationParams(),
     val reasoningMode: ReasoningMode = ReasoningMode.OFF,
     val webSearchEnabled: Boolean = false,
     val webSearchConfigured: Boolean = false,

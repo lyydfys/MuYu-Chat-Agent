@@ -110,8 +110,6 @@ internal fun selectChatSession(port: SelectChatSessionPort, sessionId: String) {
         val assistant = (session.assistantSnapshot?.assistantId ?: session.assistantId)
             ?.let { id -> state.assistants.firstOrNull { it.id == id } }
             ?: state.assistants.firstOrNull { it.id == state.selectedAssistantId }
-        val assistantParams = assistant?.let { record -> port.toGenerationParams(record, state.params) }
-            ?: state.params
         val sessionBackend = session.modelMode.toChatBackendOrNull()
         val sessionCloudModel = if (sessionBackend == ChatBackend.CLOUD) {
             state.cloudModels.firstOrNull { it.id == session.modelId && it.kind == CloudModelKind.CHAT && it.configured }
@@ -131,11 +129,13 @@ internal fun selectChatSession(port: SelectChatSessionPort, sessionId: String) {
             restoredBackend == ChatBackend.LOCAL -> session.modelId ?: state.loadedModelId
             else -> state.selectedCloudChatModelId
         }
-        val updatedParams = port.loadModelGenerationParams(
+        val modelPreset = port.loadModelGenerationParams(
             backend = restoredBackend,
             modelId = restoredModelId,
-            defaults = assistantParams
+            defaults = state.params
         )
+        val updatedParams = assistant?.let { record -> port.toGenerationParams(record, modelPreset) }
+            ?: modelPreset
         if (assistant != null && assistant.id != state.selectedAssistantId) {
             port.saveSelectedAssistantId(assistant.id)
             port.persistGenerationParams(updatedParams)

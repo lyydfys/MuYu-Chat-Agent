@@ -5,21 +5,6 @@ import com.muyuchat.core.modelstore.ModelManifest
 import com.muyuchat.core.engine.GenerationParams
 import java.util.concurrent.atomic.AtomicLong
 
-internal fun updatedAssistantsWithParams(
-    assistants: List<AssistantRecord>,
-    selectedAssistantId: String?,
-    params: GenerationParams
-): List<AssistantRecord> = assistants.map { assistant ->
-    if (assistant.id == selectedAssistantId) {
-        assistant.copy(
-            paramsJson = params.toAssistantGenerationJson()
-                .withAssistantPromptProvenance(assistant.systemPromptProvenance),
-            updatedAt = System.currentTimeMillis()
-        )
-    } else {
-        assistant
-    }
-}
 
 internal fun applyAssistantDefaultModelFor(
     store: UiStateReadPort,
@@ -76,10 +61,10 @@ internal fun finishSelectingNewAssistantFor(
     contentImportSelectionRevision.incrementAndGet()
     assistantStore.saveSelectedAssistantId(assistant.id)
     val current = store.state.value
-    val assistantParams = assistant.toGenerationParams(current.params)
-    val updatedParams = currentModelGenerationProfileKey()
-        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, assistantParams) }
-        ?: assistantParams
+    val modelPreset = currentModelGenerationProfileKey()
+        ?.let { key -> modelGenerationProfileStore.loadOrCreate(key, current.params) }
+        ?: current.params
+    val updatedParams = assistant.toGenerationParams(modelPreset)
     GenerationPreferences.persistGenerationParams(application, updatedParams)
     store.update {
         it.copy(

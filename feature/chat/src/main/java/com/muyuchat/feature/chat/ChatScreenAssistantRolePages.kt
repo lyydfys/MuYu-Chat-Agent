@@ -2,6 +2,7 @@ package com.muyuchat.feature.chat
 import com.muyuchat.core.designsystem.McaButton
 import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.engine.GenerationParams
 
 import android.content.ClipData
 import androidx.compose.foundation.background
@@ -67,6 +68,7 @@ internal fun AssistantRoleScreen(
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
+    modelGenerationPreset: GenerationParams,
     modelChoices: List<ChatModelChoice> = emptyList(),
     onSaveAssistant: (AssistantEditorDraft) -> Boolean,
     onUpsertAssistantMemory: (assistantId: String, id: String?, scope: String, content: String) -> Deferred<Boolean>,
@@ -242,6 +244,7 @@ internal fun AssistantRoleScreen(
                     selectedModelName = selectedModelName,
                     selectedModelId = selectedModelId,
                     selectedModelIsCloud = selectedModelIsCloud,
+                    modelGenerationPreset = modelGenerationPreset,
                     modelChoices = modelChoices,
                     onDelete = onDeleteAssistant,
                     onSave = onSaveAssistant,
@@ -254,6 +257,7 @@ internal fun AssistantRoleScreen(
                     selectedModelName = selectedModelName,
                     selectedModelId = selectedModelId,
                     selectedModelIsCloud = selectedModelIsCloud,
+                    modelGenerationPreset = modelGenerationPreset,
                     modelChoices = modelChoices,
                     onDelete = { id ->
                         onDeleteAssistant(id)

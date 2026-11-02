@@ -38,8 +38,21 @@ internal data class ChatHistoryPersistenceLimits(
  * Bounds the Room representation before a write. Inline image bytes are not
  * counted because [ChatMessage.toEntity] deliberately never persists them.
  */
-internal object ChatHistoryPersistenceBounds {
-    fun bound(
+/**
+ * A persisted session may disappear only when the caller explicitly deleted it. Missing rows
+ * from a UI snapshot are not enough: a transient load failure produces a partial projection,
+ * and pruning against it would erase readable history.
+ */
+internal fun sessionsEligibleForDeletion(
+    persistedIds: Set<String>,
+    requestedIds: Set<String>,
+    explicitlyDeletedSessionIds: Set<String>
+): Set<String> = explicitlyDeletedSessionIds
+    .asSequence()
+    .filter { it in persistedIds && it !in requestedIds }
+    .toSet()
+
+internal object ChatHistoryPersistenceBounds {    fun bound(
         records: List<ChatSessionRecord>,
         limits: ChatHistoryPersistenceLimits = ChatHistoryPersistenceLimits()
     ): List<ChatSessionRecord> {

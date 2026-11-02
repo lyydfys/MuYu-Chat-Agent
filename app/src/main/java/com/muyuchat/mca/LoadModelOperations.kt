@@ -125,12 +125,13 @@ internal suspend fun CoroutineScope.runLoadModelBody(
     // switch must never probe the new native runtime with the previous model's sampling
     // budget or model-specific overrides; the formal publish below resolves it again
     // after the committed execution profile is known.
-    val params = loadModelGenerationParamsFor(
+    val modelParams = loadModelGenerationParamsFor(
         modelGenerationProfileStore,
         backend = ChatBackend.LOCAL,
         modelId = requestedModel.id,
         defaults = store.current.params
     )
+    val params = store.current.selectedAssistant()?.toGenerationParams(modelParams) ?: modelParams
     var persistedModels = validatedCatalog.models
     store.update { it.copy(modelLoadStage = "正在准备运行环境") }
     var model = persistedModels.firstOrNull { it.id == requestedModel.id } ?: requestedModel

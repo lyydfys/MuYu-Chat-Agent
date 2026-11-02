@@ -162,7 +162,9 @@ internal fun selectCloudChatModelFor(
             modelId = model.id,
             defaults = store.current.params
         )
-        GenerationPreferences.persistGenerationParams(application, modelParams)
+        val effectiveParams = store.current.selectedAssistant()?.toGenerationParams(modelParams)
+            ?: modelParams
+        GenerationPreferences.persistGenerationParams(application, effectiveParams)
         scope.launch(Dispatchers.IO) {
             engine.stopGeneration()
         }
@@ -177,7 +179,7 @@ internal fun selectCloudChatModelFor(
                 cloudApiConfig = config,
                 selectedCloudChatModelId = model.id,
                 selectedChatBackend = ChatBackend.CLOUD,
-                params = modelParams,
+                params = effectiveParams,
                 chatSessions = sessions,
                 busy = false,
                 statusMessage = "已切换到云端模型：${config.safeDisplayName()}",

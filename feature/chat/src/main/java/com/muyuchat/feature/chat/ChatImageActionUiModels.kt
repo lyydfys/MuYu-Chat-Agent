@@ -40,5 +40,7 @@ data class AssistantEditorDraft(
     val presencePenalty: Float = 0f,
     val frequencyPenalty: Float = 0.2f,
     val stopWords: List<String> = emptyList(),
-    val memorySummaryInterval: Int = 12
+    val memorySummaryInterval: Int = 12,
+    /** Semantic fields explicitly overridden over the active model preset. */
+    val generationOverrideFields: Set<String> = emptySet()
 )

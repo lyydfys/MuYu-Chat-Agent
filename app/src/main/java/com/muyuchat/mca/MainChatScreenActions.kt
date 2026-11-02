@@ -171,7 +171,8 @@ internal fun mainChatScreenActions(
                         memoryEnabled = draft.memoryEnabled,
                         memorySummaryInterval = draft.memorySummaryInterval,
                         webSearchEnabled = draft.webSearchEnabled,
-                        fileContextEnabled = draft.fileContextEnabled
+                        fileContextEnabled = draft.fileContextEnabled,
+                        generationOverrideFields = draft.generationOverrideFields
                     )
                 },
             onSelectAssistant = viewModel::selectAssistant,

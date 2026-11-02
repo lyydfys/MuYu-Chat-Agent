@@ -53,6 +53,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.designsystem.McaIconButton
+import com.muyuchat.core.engine.GenerationParamOverrideFields
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.ReasoningMode
 import kotlinx.coroutines.CompletableDeferred
@@ -75,6 +76,7 @@ internal fun AssistantEditorPage(
     selectedModelName: String?,
     selectedModelId: String?,
     selectedModelIsCloud: Boolean,
+    modelGenerationPreset: GenerationParams = GenerationParams(),
     modelChoices: List<ChatModelChoice> = emptyList(),
     onDelete: (String) -> Unit,
     onSave: (AssistantEditorDraft) -> Boolean,
@@ -83,6 +85,29 @@ internal fun AssistantEditorPage(
     onDeleteMemory: (assistantId: String, id: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier
 ) {
+    val storedGenerationParams = assistant?.let { item ->
+        modelGenerationPreset.copy(
+            nPredict = item.nPredict,
+            temperature = item.temperature,
+            topK = item.topK,
+            topP = item.topP,
+            minP = item.minP,
+            repeatPenalty = item.repeatPenalty,
+            presencePenalty = item.presencePenalty,
+            frequencyPenalty = item.frequencyPenalty,
+            stopWords = item.stopWords,
+            systemPrompt = item.systemPrompt,
+            reasoningMode = item.reasoningMode,
+            hideReasoning = item.reasoningMode == ReasoningMode.OFF
+        )
+    } ?: modelGenerationPreset
+    val effectiveGenerationParams = assistant?.let { item ->
+        GenerationParamOverrideFields.apply(
+            modelGenerationPreset,
+            storedGenerationParams,
+            item.generationOverrideFields
+        ).copy(systemPrompt = item.systemPrompt)
+    } ?: modelGenerationPreset
     var name by remember(assistant?.id) { mutableStateOf(assistant?.name ?: "") }
     var avatar by remember(assistant?.id) { mutableStateOf(assistant?.avatar ?: "") }
     var tag by remember(assistant?.id) { mutableStateOf(assistant?.tag ?: "") }
@@ -94,16 +119,16 @@ internal fun AssistantEditorPage(
     }
     var defaultModelMode by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelMode ?: "follow_current") }
     var defaultModelId by remember(assistant?.id) { mutableStateOf(assistant?.defaultModelId) }
-    var temperatureText by remember(assistant?.id) { mutableStateOf((assistant?.temperature ?: GenerationParams().temperature).cleanParamText()) }
-    var topPText by remember(assistant?.id) { mutableStateOf((assistant?.topP ?: GenerationParams().topP).cleanParamText()) }
-    var topKText by remember(assistant?.id) { mutableStateOf((assistant?.topK ?: GenerationParams().topK).toString()) }
-    var minPText by remember(assistant?.id) { mutableStateOf((assistant?.minP ?: GenerationParams().minP).cleanParamText()) }
-    var repeatPenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.repeatPenalty ?: GenerationParams().repeatPenalty).cleanParamText()) }
-    var presencePenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.presencePenalty ?: GenerationParams().presencePenalty).cleanParamText()) }
-    var frequencyPenaltyText by remember(assistant?.id) { mutableStateOf((assistant?.frequencyPenalty ?: GenerationParams().frequencyPenalty).cleanParamText()) }
-    var nPredictText by remember(assistant?.id) { mutableStateOf((assistant?.nPredict ?: GenerationParams().nPredict).toString()) }
-    var stopWordsText by remember(assistant?.id) { mutableStateOf(JSONArray(assistant?.stopWords.orEmpty()).toString()) }
-    var reasoningMode by remember(assistant?.id) { mutableStateOf(assistant?.reasoningMode ?: GenerationParams().reasoningMode) }
+    var temperatureText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.temperature.cleanParamText()) }
+    var topPText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.topP.cleanParamText()) }
+    var topKText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.topK.toString()) }
+    var minPText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.minP.cleanParamText()) }
+    var repeatPenaltyText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.repeatPenalty.cleanParamText()) }
+    var presencePenaltyText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.presencePenalty.cleanParamText()) }
+    var frequencyPenaltyText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.frequencyPenalty.cleanParamText()) }
+    var nPredictText by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.nPredict.toString()) }
+    var stopWordsText by remember(assistant?.id) { mutableStateOf(JSONArray(effectiveGenerationParams.stopWords).toString()) }
+    var reasoningMode by remember(assistant?.id) { mutableStateOf(effectiveGenerationParams.reasoningMode) }
     var memoryEnabled by remember(assistant?.id) { mutableStateOf(assistant?.memoryEnabled ?: false) }
     var memorySummaryIntervalText by remember(assistant?.id) {
         mutableStateOf((assistant?.memorySummaryInterval ?: 12).coerceIn(2, 100).toString())
@@ -164,8 +189,29 @@ internal fun AssistantEditorPage(
             }
         }
     }
-    fun buildDraft(id: String?, draftName: String = name): AssistantEditorDraft =
-        AssistantEditorDraft(
+    fun buildDraft(id: String?, draftName: String = name): AssistantEditorDraft {
+        val parsedTemperature = temperatureText.toAssistantFloat(effectiveGenerationParams.temperature, 0f, 2f)
+        val parsedTopP = topPText.toAssistantFloat(effectiveGenerationParams.topP, 0f, 1f)
+        val parsedNPredict = nPredictText.toAssistantInt(effectiveGenerationParams.nPredict, 16, 65_536)
+        val parsedTopK = topKText.toAssistantInt(effectiveGenerationParams.topK, 0, 1000)
+        val parsedMinP = minPText.toAssistantFloat(effectiveGenerationParams.minP, 0f, 1f)
+        val parsedRepeatPenalty = repeatPenaltyText.toAssistantFloat(effectiveGenerationParams.repeatPenalty, 0.5f, 2f)
+        val parsedPresencePenalty = presencePenaltyText.toAssistantFloat(effectiveGenerationParams.presencePenalty, -2f, 2f)
+        val parsedFrequencyPenalty = frequencyPenaltyText.toAssistantFloat(effectiveGenerationParams.frequencyPenalty, -2f, 2f)
+        val parsedStopWords = stopWordsText.toAssistantStopWords(effectiveGenerationParams.stopWords)
+        val draftParams = modelGenerationPreset.copy(
+            temperature = parsedTemperature,
+            topP = parsedTopP,
+            nPredict = parsedNPredict,
+            topK = parsedTopK,
+            minP = parsedMinP,
+            repeatPenalty = parsedRepeatPenalty,
+            presencePenalty = parsedPresencePenalty,
+            frequencyPenalty = parsedFrequencyPenalty,
+            stopWords = parsedStopWords,
+            reasoningMode = reasoningMode
+        )
+        return AssistantEditorDraft(
             id = id,
             name = draftName,
             avatar = avatar,
@@ -173,21 +219,39 @@ internal fun AssistantEditorPage(
             systemPrompt = prompt,
             defaultModelMode = defaultModelMode,
             defaultModelId = defaultModelId,
-            temperature = temperatureText.toAssistantFloat(assistant?.temperature ?: GenerationParams().temperature, 0f, 2f),
-            topP = topPText.toAssistantFloat(assistant?.topP ?: GenerationParams().topP, 0f, 1f),
-            nPredict = nPredictText.toAssistantInt(assistant?.nPredict ?: GenerationParams().nPredict, 16, 65_536),
+            temperature = parsedTemperature,
+            topP = parsedTopP,
+            nPredict = parsedNPredict,
             reasoningMode = reasoningMode,
             memoryEnabled = memoryEnabled,
             memorySummaryInterval = memorySummaryIntervalText.toAssistantInt(assistant?.memorySummaryInterval ?: 12, 2, 100),
             webSearchEnabled = webSearchEnabled,
             fileContextEnabled = fileContextEnabled,
-            topK = topKText.toAssistantInt(assistant?.topK ?: GenerationParams().topK, 0, 1000),
-            minP = minPText.toAssistantFloat(assistant?.minP ?: GenerationParams().minP, 0f, 1f),
-            repeatPenalty = repeatPenaltyText.toAssistantFloat(assistant?.repeatPenalty ?: GenerationParams().repeatPenalty, 0.5f, 2f),
-            presencePenalty = presencePenaltyText.toAssistantFloat(assistant?.presencePenalty ?: GenerationParams().presencePenalty, -2f, 2f),
-            frequencyPenalty = frequencyPenaltyText.toAssistantFloat(assistant?.frequencyPenalty ?: GenerationParams().frequencyPenalty, -2f, 2f),
-            stopWords = stopWordsText.toAssistantStopWords(assistant?.stopWords.orEmpty())
+            topK = parsedTopK,
+            minP = parsedMinP,
+            repeatPenalty = parsedRepeatPenalty,
+            presencePenalty = parsedPresencePenalty,
+            frequencyPenalty = parsedFrequencyPenalty,
+            stopWords = parsedStopWords,
+            generationOverrideFields = GenerationParamOverrideFields.changedSemanticFields(
+                modelGenerationPreset,
+                draftParams
+            )
         )
+    }
+
+    fun useModelPresetGenerationParams() {
+        temperatureText = modelGenerationPreset.temperature.cleanParamText()
+        topPText = modelGenerationPreset.topP.cleanParamText()
+        topKText = modelGenerationPreset.topK.toString()
+        minPText = modelGenerationPreset.minP.cleanParamText()
+        repeatPenaltyText = modelGenerationPreset.repeatPenalty.cleanParamText()
+        presencePenaltyText = modelGenerationPreset.presencePenalty.cleanParamText()
+        frequencyPenaltyText = modelGenerationPreset.frequencyPenalty.cleanParamText()
+        nPredictText = modelGenerationPreset.nPredict.toString()
+        stopWordsText = JSONArray(modelGenerationPreset.stopWords).toString()
+        reasoningMode = modelGenerationPreset.reasoningMode
+    }
 
     fun submitDraft(draft: AssistantEditorDraft, closeOnSuccess: Boolean) {
         saveError = null
@@ -422,6 +486,14 @@ internal fun AssistantEditorPage(
                             }
                             Text(if (presetImporting) "读取中" else "导入酒馆预设")
                         }
+                    }
+                    Text(
+                        "未修改的字段跟随当前模型预设；修改的字段会作为角色卡覆盖。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    McaButton(style = McaButtonStyle.Text, onClick = ::useModelPresetGenerationParams) {
+                        Text("使用模型预设")
                     }
                     presetImportMessage?.let { message ->
                         Text(

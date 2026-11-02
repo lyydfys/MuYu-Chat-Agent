@@ -482,7 +482,6 @@ class MainViewModel @JvmOverloads internal constructor(
             showStatus = ::showStatus,
             loadModel = ::loadModel,
             persistChatSessions = ::persistChatSessions,
-            persistStateModelGenerationParams = { state, params -> persistModelGenerationParams(state, params) },
             markLocalConversationContextInvalid = ::markLocalConversationContextInvalid,
             selectChatSession = ::selectChatSession,
             newChatForAssistant = ::newChatForAssistant,

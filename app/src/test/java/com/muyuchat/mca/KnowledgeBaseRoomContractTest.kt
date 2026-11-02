@@ -46,18 +46,16 @@ class KnowledgeBaseRoomContractTest {
 
         val reconcileBody = functionBody(source, "reconcileSnapshot")
         assertTrue(reconcileBody.contains("if (records.isEmpty())"))
+        assertTrue(reconcileBody.contains("sessionsEligibleForDeletion("))
         assertCallsInOrder(
             reconcileBody,
-            "clearMessages()",
-            "clearKnowledgeBindings()",
-            "clearSessions()"
+            "deleteMessagesForSession(sessionId)",
+            "deleteKnowledgeBindingsForChat(sessionId)",
+            "deleteSession(sessionId)"
         )
-        assertCallsInOrder(
-            reconcileBody,
-            "upsertSessions(changedSessions)",
-            "pruneKnowledgeBindings(liveSessionIds)",
-            "pruneSessions(liveSessionIds)"
-        )
+        assertFalse(reconcileBody.contains("pruneKnowledgeBindings("))
+        assertFalse(reconcileBody.contains("pruneSessions("))
+        assertFalse(reconcileBody.contains("pruneMessages("))
 
         val clearQuery = queryForFunction(source, "clearKnowledgeBindings")
         assertTrue(clearQuery.contains("DELETE FROM chat_knowledge_base_bindings"))
@@ -182,7 +180,7 @@ class KnowledgeBaseRoomContractTest {
         val transactionBody = transactionalFunctionBody(roomSource, "replaceAllWithKnowledgeBindings")
         assertCallsInOrder(
             transactionBody,
-            "reconcileSnapshot(boundedRecords)",
+            "reconcileSnapshot(boundedRecords, deletedSessionIds.toSet())",
             "replaceKnowledgeBindings("
         )
 
