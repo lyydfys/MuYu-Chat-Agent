@@ -206,15 +206,38 @@ internal fun ChatSessionRecord.toEntity(): ChatSessionEntity =
         updatedAt = updatedAt,
         projectId = projectId,
         assistantId = assistantId,
-        // Oversized JSON is offloaded to an app-private file so one big character card can never
-        // push a `chat_sessions` row past the 2 MB CursorWindow and break every session read.
-        assistantSnapshotJson = SessionJsonOffload.offload(id, assistantSnapshot?.toJsonString()),
+        assistantSnapshotJson = assistantSnapshot?.toJsonString(),
         modelMode = modelMode,
         modelId = modelId,
-        appearanceJson = SessionJsonOffload.offload(id, appearanceOverride?.toJsonString()),
-        contextSummariesJson = SessionJsonOffload.offload(id, contextSummariesToJson(contextSummaries)),
+        appearanceJson = appearanceOverride?.toJsonString(),
+        contextSummariesJson = contextSummariesToJson(contextSummaries),
         mixedAssistantHistory = mixedAssistantHistory
+    ).withOversizedJsonOffloaded()
+
+/**
+ * The single funnel that keeps one persisted session row below the SQLite `CursorWindow` ceiling.
+ *
+ * A large character card (SillyTavern cards can embed a whole lorebook) used to push this row past
+ * ~2 MB, after which *every* `SELECT * FROM chat_sessions` failed — including the chat send path.
+ * Funnelling here means no other write site can reintroduce an oversized row.
+ */
+internal fun ChatSessionEntity.withOversizedJsonOffloaded(): ChatSessionEntity {
+    if (!SessionJsonOffload.isConfigured()) return this
+    val offloadedSnapshot = SessionJsonOffload.offload(id, assistantSnapshotJson)
+    val offloadedAppearance = SessionJsonOffload.offload(id, appearanceJson)
+    val offloadedSummaries = SessionJsonOffload.offload(id, contextSummariesJson)
+    if (offloadedSnapshot == assistantSnapshotJson &&
+        offloadedAppearance == appearanceJson &&
+        offloadedSummaries == contextSummariesJson
+    ) {
+        return this
+    }
+    return copy(
+        assistantSnapshotJson = offloadedSnapshot,
+        appearanceJson = offloadedAppearance,
+        contextSummariesJson = offloadedSummaries
     )
+}
 
 internal fun ImageAssetRecord.toEntity(): ImageAssetEntity =
     ImageAssetEntity(
