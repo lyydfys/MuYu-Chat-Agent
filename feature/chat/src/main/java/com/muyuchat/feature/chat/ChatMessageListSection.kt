@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -113,6 +114,11 @@ internal fun ChatMessageListSection(
     onBrowserTaskEvent: (BrowserTaskEvent) -> Unit,
     nestedScrollConnection: NestedScrollConnection,
     onScrollToBottom: () -> Unit = {},
+    /**
+     * MEDIUM/EXPANDED reading ceiling for the bubble column (`mcaContentMaxWidthFor`). Null on a
+     * phone: the list keeps its edge-to-edge measure, its padding and its scroll geometry.
+     */
+    readingMaxWidth: Dp? = null,
     modifier: Modifier = Modifier
 ) {
     val haptics = rememberMcaHaptics()
@@ -147,10 +153,21 @@ internal fun ChatMessageListSection(
         derivedStateOf { state.messages.isNotEmpty() && listState.canScrollForward }
     }
 
-    Box(modifier = modifier.nestedScroll(nestedScrollConnection)) {
+    // Empty on COMPACT, so `readingWidthModifier.fillMaxSize()` is the exact pre-adaptive chain.
+    val readingWidthModifier = if (readingMaxWidth == null) {
+        Modifier
+    } else {
+        Modifier.widthIn(max = readingMaxWidth)
+    }
+
+    Box(
+        modifier = modifier.nestedScroll(nestedScrollConnection),
+        // A capped list is centred; the uncapped phone list keeps Box's TopStart placement.
+        contentAlignment = if (readingMaxWidth == null) Alignment.TopStart else Alignment.TopCenter
+    ) {
         LazyColumn(
             state = listState,
-            modifier = Modifier
+            modifier = readingWidthModifier
                 .fillMaxSize()
                 .graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)
                 .drawWithContent {

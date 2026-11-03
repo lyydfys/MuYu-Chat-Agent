@@ -55,7 +55,6 @@ import com.muyuchat.feature.chat.ImeAwareAlertDialog as AlertDialog
 import androidx.compose.material3.Icon
 import com.muyuchat.core.designsystem.McaIconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -133,6 +132,8 @@ private val historyRowRemoveSpec: FiniteAnimationSpec<Float> = tween(durationMil
 
 // P9/S11：从 ChatChromeScreens.kt 等值移出的历史抽屉（会话列表）簇。
 // 原样逐字迁移，未做行为改动；无新增提升（ChatHistoryDrawer 原即 internal）。
+// 折叠屏/大屏：rail = true 时同一面板被 ChatWideRailHost 当作常驻左栏复用（不套模态 sheet、
+// 不装滑动关闭手势、不参与开合动画）；rail = false 时容器、手势与视觉与迁移前逐字一致。
 @OptIn(ExperimentalLayoutApi::class, ExperimentalAnimationApi::class)
 @Composable
 internal fun ChatHistoryDrawer(
@@ -153,7 +154,14 @@ internal fun ChatHistoryDrawer(
     onClearHistory: () -> Unit,
     onRenameConversation: (String, String) -> Unit,
     onTogglePinConversation: (String) -> Unit,
-    onExportConversation: (String) -> Unit
+    onExportConversation: (String) -> Unit,
+    /**
+     * True on MEDIUM/EXPANDED, where this same panel is the permanent left column of
+     * `ChatWideRailHost`: it is not wrapped in a modal sheet and the swipe-to-dismiss gesture is
+     * not installed (there is nothing to dismiss). The default keeps the phone drawer, its sheet
+     * geometry and its gestures exactly as they are.
+     */
+    rail: Boolean = false
 ) {
     var query by remember { mutableStateOf("") }
     var searchActive by remember { mutableStateOf(false) }
@@ -230,21 +238,28 @@ internal fun ChatHistoryDrawer(
         }
     }
 
-    ModalDrawerSheet(
+    ChatHistorySurface(
+        rail = rail,
         // Track the sheet surface itself (full-screen width, existing Modifier.fillMaxSize()):
         // closed it sits exactly one width off screen and open it reaches x == 0, so the visible
-        // fraction below is direction-agnostic and needs no hard-coded drawer width.
+        // fraction below is direction-agnostic and needs no hard-coded drawer width. The permanent
+        // rail is never off screen, so it never arms the reveal and the tracker is simply unread.
         modifier = Modifier
             .fillMaxSize()
-            .onGloballyPositioned(revealTracker),
-        drawerContainerColor = MaterialTheme.colorScheme.background
+            .onGloballyPositioned(revealTracker)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .edgeSwipeBack {
-                    if (searchActive) closeSearch() else onClose()
-                }
+                .then(
+                    if (rail) {
+                        Modifier
+                    } else {
+                        Modifier.edgeSwipeBack {
+                            if (searchActive) closeSearch() else onClose()
+                        }
+                    }
+                )
                 .background(MaterialTheme.colorScheme.background)
                 .navigationBarsPadding()
         ) {

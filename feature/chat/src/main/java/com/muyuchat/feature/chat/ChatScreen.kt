@@ -174,6 +174,9 @@ fun ChatScreen(
     val onCancelOfflineTranslationDownload = actions.shell.onCancelOfflineTranslationDownload
     val listState = rememberLazyListState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
+    // One decision for the whole shell: rail vs drawer and the reading ceilings. COMPACT returns a
+    // layout with no rail and no ceilings, so everything below takes its existing phone path.
+    val adaptiveLayout = chatAdaptiveLayout()
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val haptics = rememberMcaHaptics()
@@ -326,57 +329,64 @@ fun ChatScreen(
         animationSpec = McaMotion.sizeChange,
         label = "chatMainCanvasDepthScale"
     )
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ChatHistoryDrawer(
-                state = state,
-                onClose = { scope.launch { drawerState.close() } },
-                onNewConversation = {
-                    requestNewConversation()
-                    scope.launch { drawerState.close() }
-                },
-                onOpenAppMenu = {
-                    onAppMenuOpenChange(true)
-                    scope.launch { drawerState.close() }
-                },
-                onOpenImages = {
-                    showImages = true
-                    scope.launch { drawerState.close() }
-                },
-                onOpenAgentWorkspace = {
-                    // Navigate first, then close the drawer. Closing first can suspend forever
-                    // when the drawer was already dismissed by the same gesture, which left the
-                    // Agent/DSH entries silently doing nothing on a real device.
-                    onOpenAgentWorkspace()
-                    scope.launch { drawerState.close() }
-                },
-                onOpenDshWorkspace = {
-                    onOpenDshWorkspace()
-                    scope.launch { drawerState.close() }
-                },
-                onOpenVideoWorkspace = {
-                    // Same navigate-then-close order as the Agent/DSH entries: closing the
-                    // drawer first can suspend forever when the same gesture already dismissed it.
-                    onOpenVideoWorkspace()
-                    scope.launch { drawerState.close() }
-                },
-                onSelectConversation = { id ->
-                    onSelectConversation(id)
-                    scope.launch { drawerState.close() }
-                },
-                onBranchMixedConversation = { id, assistantId ->
-                    onBranchMixedConversation(id, assistantId)
-                    scope.launch { drawerState.close() }
-                },
-                onDeleteConversation = onDeleteConversation,
-                onClearHistory = onClearHistory,
-                onRenameConversation = onRenameConversation,
-                onTogglePinConversation = onTogglePinConversation,
-                onExportConversation = onExportConversation
-            )
-        }
-    ) {
+    // The history pane has exactly one definition. COMPACT composes it inside the existing modal
+    // drawer (rail = false); MEDIUM/EXPANDED compose the same panel as the permanent left column.
+    // The navigate-then-close ordering below is unchanged: beside the rail `drawerState` is
+    // already Closed and closing it again is an idempotent no-op, so a session switch leaves the
+    // column visible instead of dismissing anything.
+    val historyPane: @Composable (Boolean) -> Unit = { rail ->
+        ChatHistoryDrawer(
+            state = state,
+            onClose = { scope.launch { drawerState.close() } },
+            onNewConversation = {
+                requestNewConversation()
+                scope.launch { drawerState.close() }
+            },
+            onOpenAppMenu = {
+                onAppMenuOpenChange(true)
+                scope.launch { drawerState.close() }
+            },
+            onOpenImages = {
+                showImages = true
+                scope.launch { drawerState.close() }
+            },
+            onOpenAgentWorkspace = {
+                // Navigate first, then close the drawer. Closing first can suspend forever
+                // when the drawer was already dismissed by the same gesture, which left the
+                // Agent/DSH entries silently doing nothing on a real device.
+                onOpenAgentWorkspace()
+                scope.launch { drawerState.close() }
+            },
+            onOpenDshWorkspace = {
+                onOpenDshWorkspace()
+                scope.launch { drawerState.close() }
+            },
+            onOpenVideoWorkspace = {
+                // Same navigate-then-close order as the Agent/DSH entries: closing the
+                // drawer first can suspend forever when the same gesture already dismissed it.
+                onOpenVideoWorkspace()
+                scope.launch { drawerState.close() }
+            },
+            onSelectConversation = { id ->
+                onSelectConversation(id)
+                scope.launch { drawerState.close() }
+            },
+            onBranchMixedConversation = { id, assistantId ->
+                onBranchMixedConversation(id, assistantId)
+                scope.launch { drawerState.close() }
+            },
+            onDeleteConversation = onDeleteConversation,
+            onClearHistory = onClearHistory,
+            onRenameConversation = onRenameConversation,
+            onTogglePinConversation = onTogglePinConversation,
+            onExportConversation = onExportConversation,
+            rail = rail
+        )
+    }
+    // The conversation is one definition as well: it is the modal drawer's content on a phone and
+    // the column beside the rail on MEDIUM/EXPANDED. COMPACT therefore composes the same nodes it
+    // did before, one lambda deeper but with no extra layout wrapper.
+    val conversationPane: @Composable () -> Unit = {
         Box(
             modifier = Modifier
                 .then(modifier)
@@ -410,7 +420,9 @@ fun ChatScreen(
                     onOpenModels = onOpenModels,
                     onReasoningModeChange = onReasoningModeChange,
                     onCloudReasoningModeLocked = onCloudReasoningModeLocked,
-                    onOpenAppMenu = { onAppMenuOpenChange(true) }
+                    onOpenAppMenu = { onAppMenuOpenChange(true) },
+                    // Beside the permanent rail a drawer button would open nothing; the phone keeps it.
+                    showHistoryButton = !adaptiveLayout.twoPane
                 )
 
                 state.promptContextUsage?.let { usage ->
@@ -441,6 +453,8 @@ fun ChatScreen(
                     onBrowserTaskEvent = onBrowserTaskEvent,
                     nestedScrollConnection = scrollNestedScrollConnection,
                     onScrollToBottom = { scrollCoordinator.scrollToBottomNow() },
+                    // Null on a phone: the list keeps its existing edge-to-edge measure.
+                    readingMaxWidth = adaptiveLayout.readingMaxWidth,
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
@@ -512,6 +526,8 @@ fun ChatScreen(
                 onSelectWebSearchResearchMode = onSelectWebSearchResearchMode,
                 onOpenWebSearchSettings = onOpenWebSearchSettings,
                 onMeasuredHeight = { bottomChromeHeightPx = it },
+                // Same ceiling as the message column; null on a phone keeps the shell full width.
+                shellMaxWidth = adaptiveLayout.readingMaxWidth,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
 
@@ -618,6 +634,23 @@ fun ChatScreen(
                 onSetContextCompressionThreshold = onSetContextCompressionThreshold,
                 onSetContextSummaryModel = onSetContextSummaryModel
             )
+        }
+    }
+
+    if (adaptiveLayout.twoPane) {
+        // MEDIUM/EXPANDED: permanent history column plus the conversation column beside it.
+        ChatWideRailHost(
+            layout = adaptiveLayout,
+            rail = { historyPane(true) },
+            content = conversationPane
+        )
+    } else {
+        // COMPACT: the existing modal drawer, using the same history pane it has always used.
+        ModalNavigationDrawer(
+            drawerState = drawerState,
+            drawerContent = { historyPane(false) }
+        ) {
+            conversationPane()
         }
     }
 
