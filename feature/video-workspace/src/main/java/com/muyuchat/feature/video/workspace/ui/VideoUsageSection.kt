@@ -50,8 +50,15 @@ import com.muyuchat.core.designsystem.McaShape
  */
 
 @Composable
-internal fun VideoUsageGuideCard(modifier: Modifier = Modifier) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
+internal fun VideoUsageGuideCard(
+    modifier: Modifier = Modifier,
+    /**
+     * First-composition default only; a later fold/unfold keeps the user's own expansion state.
+     * The phone passes nothing, so it keeps the collapsed first screen documented above.
+     */
+    initiallyExpanded: Boolean = false
+) {
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
     UsageCard(modifier = modifier.testTag("video.usage_guide")) {
         Column(Modifier.animateContentSize(McaMotion.sizeChangePx)) {
             Row(
@@ -119,11 +126,16 @@ internal fun VideoUsageGuideCard(modifier: Modifier = Modifier) {
 internal fun VideoPromptExamplesCard(
     onUsePrompt: (String) -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * First-composition default only. A wide window passes true for the same reason as the guide;
+     * the phone keeps the collapsed default, so its first screen still ends at the model card.
+     */
+    initiallyExpanded: Boolean = false,
 ) {
     // Collapsed by default for the same reason as the guide: the page stays on the engine state
     // and the model card until the user asks for examples. The header names the count, so the
     // content is discoverable without opening it first.
-    var expanded by rememberSaveable { mutableStateOf(false) }
+    var expanded by rememberSaveable { mutableStateOf(initiallyExpanded) }
     UsageCard(modifier = modifier.testTag("video.prompt_examples")) {
         Column(Modifier.animateContentSize(McaMotion.sizeChangePx)) {
             Row(

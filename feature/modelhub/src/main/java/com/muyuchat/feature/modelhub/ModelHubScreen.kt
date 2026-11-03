@@ -24,8 +24,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LinearProgressIndicator
@@ -45,6 +47,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.muyuchat.core.download.DownloadStatus
@@ -215,6 +218,108 @@ fun ModelHubScreen(
         mutableStateOf(if (startInRecommended) ModelHubSection.RECOMMENDED else ModelHubSection.LOCAL)
     }
     var cloudEditorKind by rememberSaveable { mutableStateOf<String?>(null) }
+    // Foldable/tablet decision only; the phone answer is "no adaptation" (ModelHubAdaptiveLayout).
+    val adaptiveLayout = modelHubAdaptiveLayoutFor(mcaWindowWidth())
+
+    /** The same haptic tick and the same state write the phone strip always had; the rail reuses it. */
+    val selectSection: (ModelHubSection) -> Unit = { target ->
+        if (section != target) haptics.tick()
+        section = target
+    }
+
+    /**
+     * The current section body. The caller owns the outer modifier, so the phone keeps the exact
+     * `Modifier.weight(1f)` it always used and the rail layout hands it a bounded content pane
+     * instead of nesting the phone layout inside an extra container.
+     */
+    val sectionBody: @Composable (Modifier) -> Unit = { sectionModifier ->
+        AnimatedContent(
+            targetState = section,
+            transitionSpec = {
+                fadeIn(McaMotion.fade(150)) togetherWith fadeOut(McaMotion.fade(100))
+            },
+            label = "modelHubSectionContent",
+            modifier = sectionModifier
+        ) { targetSection ->
+            when (targetSection) {
+                ModelHubSection.LOCAL -> LocalModelsSection(
+                    state = state,
+                    onImportClick = onImportClick,
+                    onPauseImport = onPauseImport,
+                    onResumeImport = onResumeImport,
+                    onLoad = onLoad,
+                    onUnload = onUnload,
+                    onVerify = onVerify,
+                    onDelete = onDelete,
+                    onAttachVisionProjector = onAttachVisionProjector,
+                    onImportLocalImageModel = onImportLocalImageModel,
+                    onSelectLocalImageModel = onSelectLocalImageModel,
+                    onVerifyLocalImageModel = onVerifyLocalImageModel,
+                    onDeleteLocalImageModel = onDeleteLocalImageModel,
+                    onRemoveLocalImageModelRecord = onRemoveLocalImageModelRecord,
+                    modifier = Modifier.fillMaxSize()
+                )
+                ModelHubSection.CLOUD -> CloudModelsSection(
+                    state = state,
+                    onBeginAddCloudModel = { kind ->
+                        onBeginAddCloudModel(kind)
+                        cloudEditorKind = kind
+                    },
+                    onEditCloudModel = { modelId ->
+                        onEditCloudModel(modelId)
+                        cloudEditorKind = state.cloudApi.connectedModels.firstOrNull { it.id == modelId }?.kind ?: "CHAT"
+                    },
+                    onSelectCloudChat = onSelectCloudChat,
+                    onSelectCloudImage = onSelectCloudImage,
+                    onDeleteCloudModel = onDeleteCloudModel,
+                    modifier = Modifier.fillMaxSize()
+                )
+                ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
+                    state = state,
+                    onShowFiles = { model ->
+                        section = ModelHubSection.FILES
+                        onShowRecommendedFiles(model)
+                    },
+                    onDownload = onDownloadRecommended,
+                    onDownloadVariant = onDownloadRecommendedVariant,
+                    onOpenPage = onOpenModelPage,
+                    onOpenLocalModel = { modelId ->
+                        section = ModelHubSection.LOCAL
+                        onOpenLocalModel(modelId)
+                    },
+                    onVerifyLocalModel = onVerifyLocalModel,
+                    onImportLocalImageModel = onImportLocalImageModel,
+                    onLoadLocalChatModel = { model ->
+                        section = ModelHubSection.LOCAL
+                        onLoad(model)
+                    },
+                    onVerifyLocalChatModel = onVerify,
+                    modifier = Modifier.fillMaxSize()
+                )
+                ModelHubSection.MARKET -> MarketSection(
+                    state = state,
+                    onHubQueryChange = onHubQueryChange,
+                    onSearchHubModels = onSearchHubModels,
+                    onShowFiles = { model ->
+                        section = ModelHubSection.FILES
+                        onFetchHubModelFiles(model)
+                    },
+                    onOpenPage = onOpenModelPage,
+                    modifier = Modifier.fillMaxSize()
+                )
+                ModelHubSection.FILES -> RemoteFilesSection(
+                    state = state,
+                    onImportClick = onImportClick,
+                    onPauseImport = onPauseImport,
+                    onResumeImport = onResumeImport,
+                    onRepoInputChange = onRepoInputChange,
+                    onFetchRemoteFiles = onFetchRemoteFiles,
+                    onDownload = onDownload,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         Column(
@@ -227,10 +332,8 @@ fun ModelHubScreen(
             ModelHubHeader(
                 state = state,
                 selected = section,
-                onSection = {
-                    if (section != it) haptics.tick()
-                    section = it
-                },
+                onSection = selectSection,
+                showSectionStrip = !adaptiveLayout.twoPane,
                 onBack = onBack,
                 onRefreshLocal = onRefreshLocal,
                 onPauseDownloads = onPauseDownloads,
@@ -240,92 +343,13 @@ fun ModelHubScreen(
             if (startInRecommended && section == ModelHubSection.RECOMMENDED) {
                 Text("下载完成后自动加入本地模型；是否可加载以完整性、兼容性和首次真实执行状态为准。", style = MaterialTheme.typography.bodySmall)
             }
-            AnimatedContent(
-                targetState = section,
-                transitionSpec = {
-                    fadeIn(McaMotion.fade(150)) togetherWith fadeOut(McaMotion.fade(100))
-                },
-                label = "modelHubSectionContent",
+            ModelHubPanedBody(
+                layout = adaptiveLayout,
+                selected = section,
+                onSection = selectSection,
+                body = sectionBody,
                 modifier = Modifier.weight(1f)
-            ) { targetSection ->
-                when (targetSection) {
-                    ModelHubSection.LOCAL -> LocalModelsSection(
-                        state = state,
-                        onImportClick = onImportClick,
-                        onPauseImport = onPauseImport,
-                        onResumeImport = onResumeImport,
-                        onLoad = onLoad,
-                        onUnload = onUnload,
-                        onVerify = onVerify,
-                        onDelete = onDelete,
-                        onAttachVisionProjector = onAttachVisionProjector,
-                        onImportLocalImageModel = onImportLocalImageModel,
-                        onSelectLocalImageModel = onSelectLocalImageModel,
-                        onVerifyLocalImageModel = onVerifyLocalImageModel,
-                        onDeleteLocalImageModel = onDeleteLocalImageModel,
-                        onRemoveLocalImageModelRecord = onRemoveLocalImageModelRecord,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    ModelHubSection.CLOUD -> CloudModelsSection(
-                        state = state,
-                        onBeginAddCloudModel = { kind ->
-                            onBeginAddCloudModel(kind)
-                            cloudEditorKind = kind
-                        },
-                        onEditCloudModel = { modelId ->
-                            onEditCloudModel(modelId)
-                            cloudEditorKind = state.cloudApi.connectedModels.firstOrNull { it.id == modelId }?.kind ?: "CHAT"
-                        },
-                        onSelectCloudChat = onSelectCloudChat,
-                        onSelectCloudImage = onSelectCloudImage,
-                        onDeleteCloudModel = onDeleteCloudModel,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    ModelHubSection.RECOMMENDED -> RecommendedModelsSection(
-                        state = state,
-                        onShowFiles = { model ->
-                            section = ModelHubSection.FILES
-                            onShowRecommendedFiles(model)
-                        },
-                        onDownload = onDownloadRecommended,
-                        onDownloadVariant = onDownloadRecommendedVariant,
-                        onOpenPage = onOpenModelPage,
-                        onOpenLocalModel = { modelId ->
-                            section = ModelHubSection.LOCAL
-                            onOpenLocalModel(modelId)
-                        },
-                        onVerifyLocalModel = onVerifyLocalModel,
-                        onImportLocalImageModel = onImportLocalImageModel,
-                        onLoadLocalChatModel = { model ->
-                            section = ModelHubSection.LOCAL
-                            onLoad(model)
-                        },
-                        onVerifyLocalChatModel = onVerify,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    ModelHubSection.MARKET -> MarketSection(
-                        state = state,
-                        onHubQueryChange = onHubQueryChange,
-                        onSearchHubModels = onSearchHubModels,
-                        onShowFiles = { model ->
-                            section = ModelHubSection.FILES
-                            onFetchHubModelFiles(model)
-                        },
-                        onOpenPage = onOpenModelPage,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                    ModelHubSection.FILES -> RemoteFilesSection(
-                        state = state,
-                        onImportClick = onImportClick,
-                        onPauseImport = onPauseImport,
-                        onResumeImport = onResumeImport,
-                        onRepoInputChange = onRepoInputChange,
-                        onFetchRemoteFiles = onFetchRemoteFiles,
-                        onDownload = onDownload,
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-            }
+            )
         }
 
         SmoothRightToLeftPage(
@@ -369,11 +393,89 @@ fun ModelHubScreen(
     }
 }
 
+/**
+ * Places the section body for the current window class.
+ *
+ * COMPACT keeps the phone layout literally unchanged: the body receives the caller's modifier (the
+ * page column's `weight(1f)`) and no extra container is composed around it. MEDIUM/EXPANDED turn
+ * the five sections into a permanent rail through the shared [McaAdaptiveTwoPane] and cap the
+ * reading width of the section column with the shared [McaContentWidth] — the rail never eats the
+ * content column below the component's own 420dp reservation.
+ */
+@Composable
+private fun ModelHubPanedBody(
+    layout: ModelHubAdaptiveLayout,
+    selected: ModelHubSection,
+    onSection: (ModelHubSection) -> Unit,
+    body: @Composable (Modifier) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    if (!layout.twoPane) {
+        body(modifier)
+        return
+    }
+    McaAdaptiveTwoPane(
+        modifier = modifier,
+        twoPane = layout.twoPane,
+        railMaxWidth = layout.railMaxWidth,
+        rail = {
+            ModelHubSectionRail(selected = selected, onSection = onSection)
+        },
+        content = {
+            McaContentWidth(maxWidth = layout.contentMaxWidth) {
+                body(Modifier.fillMaxSize())
+            }
+        }
+    )
+}
+
+/**
+ * The five sections as a permanent left rail (MEDIUM/EXPANDED only).
+ *
+ * Same labels, same tap target, same active/inactive colours and the same haptic tick as the phone
+ * strip — only the arrangement changes, so a foldable user does not have to relearn the page.
+ */
+@Composable
+private fun ModelHubSectionRail(
+    selected: ModelHubSection,
+    onSection: (ModelHubSection) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("modelhub.section_rail"),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        // Scrolls only if a very short wide window (split screen + 2.0x font) cannot fit five rows;
+        // the rail is otherwise exactly as tall as its five items.
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(2.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            ModelHubSection.entries.forEach { item ->
+                ModelHubTab(
+                    item = item,
+                    active = selected == item,
+                    onSection = onSection,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun ModelHubHeader(
     state: ModelHubUiState,
     selected: ModelHubSection,
     onSection: (ModelHubSection) -> Unit,
+    showSectionStrip: Boolean,
     onBack: () -> Unit,
     onRefreshLocal: () -> Unit,
     onPauseDownloads: () -> Unit,
@@ -492,15 +594,25 @@ private fun ModelHubHeader(
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
 
-        ModelHubSegmentedTabs(selected = selected, onSection = onSection)
+        ModelHubSegmentedTabs(
+            selected = selected,
+            onSection = onSection,
+            visible = showSectionStrip
+        )
     }
 }
 
 @Composable
 private fun ModelHubSegmentedTabs(
     selected: ModelHubSection,
-    onSection: (ModelHubSection) -> Unit
+    onSection: (ModelHubSection) -> Unit,
+    /**
+     * COMPACT only. On MEDIUM/EXPANDED the same five destinations live in the permanent rail, so
+     * the strip is not composed at all (no hidden/zero-height duplicate row).
+     */
+    visible: Boolean = true
 ) {
+    if (!visible) return
     val compactForLargeText = LocalDensity.current.fontScale >= 1.5f
     Surface(
         modifier = Modifier.fillMaxWidth(),
