@@ -62,7 +62,17 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.3.2` (`versionCode 11`) is the current release line. It fixes the
+- `v0.3.3` (`versionCode 12`) is the current release line. It fixes the
+  `Row too big to fit into CursorWindow` failure that made every send fail on
+  a conversation once a single stored row (character card, message body,
+  memory turn) exceeded the 2 MB cursor window, fixes preset names showing a
+  SAF document id, adds three zero-side-effect role-play tools (device clock,
+  arithmetic, dice), enables provider-side prompt caching with a reuse
+  hit-rate panel, and reworks the preset, video and image-translation
+  surfaces. Foldables and tablets keep the same layout as phones. See the
+  [v0.3.3 release notes](docs/releases/v0.3.3.md) for verification and
+  limitations.
+- `v0.3.2` (`versionCode 11`) is the previous release. It fixes the
   cloud-send crash (a missing active session killed the process) and six other
   crash shapes, adds batch import for world books and generation presets, and
   brings a managed Tavern generation-preset library with model bindings,
