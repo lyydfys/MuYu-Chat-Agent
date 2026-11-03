@@ -75,6 +75,7 @@ class GitHubReleaseUpdateTest {
                 {
                   "name": "mca-arm64-v8a.apk",
                   "browser_download_url": "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/mca-arm64-v8a.apk",
+                  "url": "https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases/assets/123",
                   "size": 1234,
                   "digest": "sha256:$digest"
                 },
@@ -98,9 +99,13 @@ class GitHubReleaseUpdateTest {
             release.htmlUrl
         )
         assertEquals(
-            GITHUB_DOMESTIC_PROXY +
+            GITHUB_ASSET_DOMESTIC_PROXY +
                 "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/mca-arm64-v8a.apk",
             release.assets[0].downloadUrl
+        )
+        assertEquals(
+            "https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases/assets/123",
+            release.assets[0].apiUrl
         )
         assertEquals("https://objects.githubusercontent.com/assets/checksum", release.assets[1].downloadUrl)
         assertEquals(2, release.assets.size)
@@ -219,6 +224,11 @@ class GitHubReleaseUpdateTest {
                 "https://gh-proxy.com/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/app.apk"
             )
         )
+        assertTrue(
+            isTrustedGitHubDownloadUrl(
+                "https://ghproxy.net/https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/app.apk"
+            )
+        )
         assertFalse(isTrustedGitHubDownloadUrl("https://gh-proxy.com/https://example.com/app.apk"))
         assertFalse(
             isTrustedGitHubDownloadUrl(
@@ -236,13 +246,14 @@ class GitHubReleaseUpdateTest {
     fun domesticGithubUrlsOnlyRewriteThisRepositoryAndNeverDoublePrefix() {
         val releasePage =
             "https://github.com/lyydfys/MuYu-Chat-Agent/releases/tag/v0.3.0"
-        assertEquals(GITHUB_DOMESTIC_PROXY + releasePage, domesticGitHubUrl(releasePage))
+        assertEquals(GITHUB_ASSET_DOMESTIC_PROXY + releasePage, domesticGitHubUrl(releasePage))
         assertEquals(
-            GITHUB_DOMESTIC_PROXY + releasePage,
-            domesticGitHubUrl(GITHUB_DOMESTIC_PROXY + releasePage)
+            GITHUB_ASSET_DOMESTIC_PROXY + releasePage,
+            domesticGitHubUrl(GITHUB_ASSET_DOMESTIC_PROXY + releasePage)
         )
         assertEquals("https://example.com/asset.apk", domesticGitHubUrl("https://example.com/asset.apk"))
         assertTrue(isDomesticGitHubProxyUrl(GITHUB_RELEASE_API_DOMESTIC_URL))
+        assertTrue(isDomesticGitHubProxyUrl(GITHUB_ASSET_DOMESTIC_PROXY + releasePage))
         assertFalse(isDomesticGitHubProxyUrl("https://gh-proxy.com/https://example.com/x"))
         assertFalse(isDomesticGitHubProxyUrl(GITHUB_RELEASE_API_URL))
     }
@@ -369,6 +380,64 @@ class GitHubReleaseUpdateTest {
         assertTrue(error.message.orEmpty().contains("official repository"))
     }
 
+    @Test
+    fun assetCdnResolverFollowsOnlyTrustedApiRedirects() {
+        val cdn = "https://release-assets.githubusercontent.com/github-production-release-asset/1?a=b"
+        val client = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(302)
+                    .message("Found")
+                    .header("Location", cdn)
+                    .body("".toResponseBody())
+                    .build()
+            })
+            .build()
+        val asset = asset(
+            "mca-arm64-v8a.apk",
+            apiUrl = "https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases/assets/123"
+        )
+
+        assertEquals(cdn, GitHubAssetCdnResolver(client).resolve(asset))
+        assertNull(
+            GitHubAssetCdnResolver(client).resolve(
+                asset.copy(apiUrl = "https://example.com/releases/assets/123")
+            )
+        )
+        assertNull(
+            GitHubAssetCdnResolver(client).resolve(
+                asset.copy(apiUrl = "https://api.github.com/repos/other/repo/releases/assets/123")
+            )
+        )
+    }
+
+    @Test
+    fun assetCdnResolverRejectsAnUntrustedRedirectTarget() {
+        val client = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(302)
+                    .message("Found")
+                    .header("Location", "https://example.com/apk")
+                    .body("".toResponseBody())
+                    .build()
+            })
+            .build()
+
+        assertNull(
+            GitHubAssetCdnResolver(client).resolve(
+                asset(
+                    "mca-arm64-v8a.apk",
+                    apiUrl = "https://api.github.com/repos/lyydfys/MuYu-Chat-Agent/releases/assets/123"
+                )
+            )
+        )
+    }
+
     private fun release(
         tag: String,
         draft: Boolean = false,
@@ -389,11 +458,13 @@ class GitHubReleaseUpdateTest {
         name: String,
         url: String = "https://github.com/lyydfys/MuYu-Chat-Agent/releases/download/v0.3.0/$name",
         digest: String? = null,
-        size: Long = 1L
+        size: Long = 1L,
+        apiUrl: String? = null
     ) = GitHubReleaseAsset(
         name = name,
         downloadUrl = url,
         sizeBytes = size,
-        digest = digest
+        digest = digest,
+        apiUrl = apiUrl
     )
 }

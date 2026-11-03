@@ -258,7 +258,7 @@ internal class AppUpdateOwner(
         if (appUpdateDownloadJob?.isActive == true) return
         val job = scope.launch(Dispatchers.IO) {
             port.updateUiState { state ->
-                state.copy(appUpdate = state.appUpdate.copy(status = AppUpdateStatus.DOWNLOADING, message = null, downloadedBytes = 0L, downloadTotalBytes = asset.sizeBytes))
+                state.copy(appUpdate = state.appUpdate.copy(status = AppUpdateStatus.DOWNLOADING, message = null, downloadedBytes = 0L, downloadTotalBytes = asset.sizeBytes, downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null))
             }
             try {
                 val expectedSha = candidate.expectedSha256
@@ -277,6 +277,8 @@ internal class AppUpdateOwner(
                             status = if (snapshot.status == DownloadStatus.DONE) AppUpdateStatus.READY_TO_INSTALL else AppUpdateStatus.DOWNLOADING,
                             downloadedBytes = snapshot.downloadedBytes,
                             downloadTotalBytes = snapshot.expectedLength.takeIf { it > 0L } ?: asset.sizeBytes,
+                            downloadSpeedBytesPerSecond = snapshot.speedBytesPerSecond,
+                            downloadRemainingSeconds = snapshot.remainingSeconds,
                             message = snapshot.errorMessage
                         ))
                     }
@@ -294,6 +296,8 @@ internal class AppUpdateOwner(
                         status = AppUpdateStatus.READY_TO_INSTALL,
                         downloadedBytes = file.length(),
                         downloadTotalBytes = file.length(),
+                        downloadSpeedBytesPerSecond = 0L,
+                        downloadRemainingSeconds = null,
                         apkSha256 = expectedSha,
                         message = "下载完成，已通过 SHA-256、包名和版本号校验。"
                     ))
@@ -306,7 +310,7 @@ internal class AppUpdateOwner(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
-                port.updateUiState { state -> state.copy(appUpdate = state.appUpdate.copy(status = AppUpdateStatus.ERROR, message = error.message ?: "更新下载失败。")) }
+                port.updateUiState { state -> state.copy(appUpdate = state.appUpdate.copy(status = AppUpdateStatus.ERROR, message = error.message ?: "更新下载失败。", downloadSpeedBytesPerSecond = 0L, downloadRemainingSeconds = null)) }
             }
         }
         appUpdateDownloadJob = job

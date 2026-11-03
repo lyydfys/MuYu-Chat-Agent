@@ -27,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -393,6 +394,30 @@ private fun AboutUpdateCard(
             update.apkSizeText.takeIf { it.isNotBlank() }?.let { size ->
                 Text(
                     "安装包：$size",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (update.downloadedBytes > 0L && update.downloadTotalBytes > 0L) {
+                LinearProgressIndicator(
+                    progress = {
+                        (update.downloadedBytes.toDouble() / update.downloadTotalBytes.toDouble())
+                            .toFloat()
+                            .coerceIn(0f, 1f)
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    buildString {
+                        append("已下载 ${formatUpdateBytes(update.downloadedBytes)} / ")
+                        append(formatUpdateBytes(update.downloadTotalBytes))
+                        update.downloadSpeedBytesPerSecond.takeIf { it > 0L }?.let {
+                            append(" · ${formatUpdateSpeed(it)}")
+                        }
+                        update.downloadRemainingSeconds?.let {
+                            append(" · 预计剩余 ${formatUpdateEta(it)}")
+                        }
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -888,6 +913,30 @@ private fun AboutReleaseNotesDialog(
             }
         }
     )
+}
+
+private fun formatUpdateBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L ->
+        String.format(java.util.Locale.US, "%.2f GB", bytes / 1024.0 / 1024.0 / 1024.0)
+    bytes >= 1024L * 1024L ->
+        String.format(java.util.Locale.US, "%.1f MB", bytes / 1024.0 / 1024.0)
+    bytes >= 1024L ->
+        String.format(java.util.Locale.US, "%.0f KB", bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+private fun formatUpdateSpeed(bytesPerSecond: Long): String =
+    formatUpdateBytes(bytesPerSecond) + "/s"
+
+private fun formatUpdateEta(seconds: Long): String {
+    val safe = seconds.coerceAtLeast(0L)
+    val hours = safe / 3600L
+    val minutes = (safe % 3600L) / 60L
+    return when {
+        hours > 0L -> "${hours}小时${minutes}分"
+        minutes > 0L -> "${minutes}分"
+        else -> "${safe.coerceAtLeast(1L)}秒"
+    }
 }
 
 private fun aboutHasUpdate(status: String): Boolean =

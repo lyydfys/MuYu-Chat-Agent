@@ -90,6 +90,8 @@ data class AppUpdateSettingsUiState(
     val canDownload: Boolean = false,
     val downloadedBytes: Long = 0L,
     val downloadTotalBytes: Long = 0L,
+    val downloadSpeedBytesPerSecond: Long = 0L,
+    val downloadRemainingSeconds: Long? = null,
     val lastCheckedText: String = "",
     val message: String? = null
 )

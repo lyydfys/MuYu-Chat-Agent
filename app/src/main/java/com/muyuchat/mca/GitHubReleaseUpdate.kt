@@ -10,6 +10,7 @@ import com.muyuchat.core.download.ModelRepositoryProvider
 import com.muyuchat.core.download.RemoteModelFile
 import com.muyuchat.core.download.ResumableDownloader
 import com.muyuchat.core.download.DownloadTaskSnapshot
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -30,6 +31,7 @@ internal const val GITHUB_RELEASE_PAGE_URL =
     "https://github.com/lyydfys/MuYu-Chat-Agent/releases/latest"
 internal const val GITHUB_RELEASE_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
 internal const val GITHUB_DOMESTIC_PROXY = "https://gh-proxy.com/"
+internal const val GITHUB_ASSET_DOMESTIC_PROXY = "https://ghproxy.net/"
 internal const val GITHUB_RELEASE_API_DOMESTIC_URL = GITHUB_DOMESTIC_PROXY + GITHUB_RELEASE_API_URL
 private const val GITHUB_REPOSITORY_WEB_PREFIX = "https://github.com/$GITHUB_RELEASE_REPOSITORY"
 private const val GITHUB_REPOSITORY_API_PREFIX = "https://api.github.com/repos/$GITHUB_RELEASE_REPOSITORY"
@@ -44,16 +46,30 @@ private fun isTrustedRepositoryTarget(target: String): Boolean =
 /** Routes only this repository's GitHub URLs through the domestic mirror; other URLs stay intact. */
 internal fun domesticGitHubUrl(raw: String): String {
     val value = raw.trim()
-    if (value.startsWith(GITHUB_DOMESTIC_PROXY)) return value
-    return if (isTrustedRepositoryTarget(value)) GITHUB_DOMESTIC_PROXY + value else value
+    if (value.startsWith(GITHUB_DOMESTIC_PROXY) || value.startsWith(GITHUB_ASSET_DOMESTIC_PROXY)) return value
+    return if (isTrustedRepositoryTarget(value)) GITHUB_ASSET_DOMESTIC_PROXY + value else value
 }
 
-internal fun isDomesticGitHubProxyUrl(raw: String): Boolean =
-    raw.startsWith(GITHUB_DOMESTIC_PROXY) &&
-        isTrustedRepositoryTarget(raw.removePrefix(GITHUB_DOMESTIC_PROXY))
+internal fun isDomesticGitHubProxyUrl(raw: String): Boolean {
+    val proxy = when {
+        raw.startsWith(GITHUB_DOMESTIC_PROXY) -> GITHUB_DOMESTIC_PROXY
+        raw.startsWith(GITHUB_ASSET_DOMESTIC_PROXY) -> GITHUB_ASSET_DOMESTIC_PROXY
+        else -> return false
+    }
+    return isTrustedRepositoryTarget(raw.removePrefix(proxy))
+}
 
 private fun isSupportedReleaseEndpoint(value: String): Boolean =
     value == GITHUB_RELEASE_API_URL || value == GITHUB_RELEASE_API_DOMESTIC_URL
+
+private val GITHUB_ASSET_API_PREFIX =
+    "https://api.github.com/repos/$GITHUB_RELEASE_REPOSITORY/releases/assets/"
+
+internal fun isTrustedGitHubAssetApiUrl(raw: String): Boolean {
+    if (!raw.startsWith(GITHUB_ASSET_API_PREFIX)) return false
+    val assetId = raw.removePrefix(GITHUB_ASSET_API_PREFIX)
+    return assetId.isNotEmpty() && assetId.all(Char::isDigit)
+}
 
 internal data class CurrentAppVersion(
     val versionName: String,
@@ -64,7 +80,8 @@ internal data class GitHubReleaseAsset(
     val name: String,
     val downloadUrl: String,
     val sizeBytes: Long,
-    val digest: String?
+    val digest: String?,
+    val apiUrl: String? = null
 )
 
 internal data class GitHubRelease(
@@ -114,6 +131,8 @@ data class AppUpdateState(
     val canDownload: Boolean = false,
     val downloadedBytes: Long = 0L,
     val downloadTotalBytes: Long = 0L,
+    val downloadSpeedBytesPerSecond: Long = 0L,
+    val downloadRemainingSeconds: Long? = null,
     val lastCheckedAtMillis: Long = 0L,
     val message: String? = null
 )
@@ -202,7 +221,8 @@ internal fun parseGitHubReleaseJson(raw: String): GitHubRelease {
                     name = name,
                     downloadUrl = domesticGitHubUrl(url),
                     sizeBytes = asset.optLong("size", 0L).coerceAtLeast(0L),
-                    digest = normalizeSha256OrNull(asset.optString("digest").takeIf { it.isNotBlank() })
+                    digest = normalizeSha256OrNull(asset.optString("digest").takeIf { it.isNotBlank() }),
+                    apiUrl = asset.optString("url").trim().takeIf(::isTrustedGitHubAssetApiUrl)
                 )
             )
         }
@@ -232,7 +252,9 @@ internal fun isTrustedGitHubDownloadUrl(raw: String): Boolean {
 }
 
 private fun isTrustedGitHubReleaseNetworkUrl(raw: String): Boolean =
-    raw == GITHUB_RELEASE_API_URL || raw == GITHUB_RELEASE_API_DOMESTIC_URL
+    raw == GITHUB_RELEASE_API_URL ||
+        raw == GITHUB_RELEASE_API_DOMESTIC_URL ||
+        isTrustedGitHubDownloadUrl(raw)
 
 private val SAFE_ASSET_NAME = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$")
 private val EXPLICIT_ABI_MARKER = Regex(
@@ -409,8 +431,43 @@ internal class GitHubReleaseClient(
     }
 }
 
+internal class GitHubAssetCdnResolver(
+    private val client: OkHttpClient = defaultGitHubAssetResolverClient()
+) {
+    /**
+     * GitHub's artifact API redirects to the release-assets CDN.  Direct API access is
+     * commonly available in networks where github.com itself is slow or blocked, and the
+     * CDN serves ranges much faster than the text/API proxies.
+     */
+    fun resolve(asset: GitHubReleaseAsset): String? {
+        val apiUrl = asset.apiUrl?.takeIf(::isTrustedGitHubAssetApiUrl) ?: return null
+        val request = Request.Builder()
+            .url(apiUrl)
+            .header("Accept", "application/octet-stream")
+            .header("User-Agent", "MCA-App-Update")
+            .get()
+            .build()
+        return client.newCall(request).execute().use { response ->
+            if (response.code !in 300..399) return@use null
+            response.header("Location")
+                ?.trim()
+                ?.takeIf(::isTrustedGitHubDownloadUrl)
+        }
+    }
+}
+
+private fun defaultGitHubAssetResolverClient(): OkHttpClient = OkHttpClient.Builder()
+    .followRedirects(false)
+    .followSslRedirects(false)
+    .connectTimeout(10, TimeUnit.SECONDS)
+    .readTimeout(10, TimeUnit.SECONDS)
+    .callTimeout(15, TimeUnit.SECONDS)
+    .build()
+
 internal class AppUpdateDownloader(
-    private val downloader: ResumableDownloader = ResumableDownloader(defaultGitHubAssetHttpClient())
+    private val downloader: ResumableDownloader = ResumableDownloader(defaultGitHubAssetHttpClient()),
+    private val cdnResolver: GitHubAssetCdnResolver = GitHubAssetCdnResolver(),
+    private val parallelDownloader: AppUpdateParallelDownloader = AppUpdateParallelDownloader()
 ) {
     suspend fun download(
         candidate: AppUpdateCandidate,
@@ -429,6 +486,10 @@ internal class AppUpdateDownloader(
             return@withContext finalFile
         }
         val tempFile = File(updatesDirectory, ".${asset.name}.part").canonicalFile
+        val downloadUrl = runCatching { cdnResolver.resolve(asset) }
+            .getOrNull()
+            ?: asset.downloadUrl
+        require(isTrustedGitHubDownloadUrl(downloadUrl)) { "更新 APK 地址不是受信任的 GitHub 地址。" }
         val remote = RemoteModelFile(
             repoId = GITHUB_RELEASE_REPOSITORY,
             revision = candidate.release.tagName,
@@ -436,12 +497,69 @@ internal class AppUpdateDownloader(
             name = asset.name,
             sizeBytes = asset.sizeBytes.takeIf { it > 0L },
             sha256 = sha256,
-            downloadUrl = asset.downloadUrl,
+            downloadUrl = downloadUrl,
             provider = ModelRepositoryProvider.HUGGING_FACE
         )
-        downloader.download(remote, tempFile, finalFile, onProgress)
+        downloadAppUpdateFile(
+            asset = asset,
+            remote = remote,
+            tempFile = tempFile,
+            finalFile = finalFile,
+            onProgress = onProgress
+        )
         require(finalFile.isFile && sha256File(finalFile) == sha256) { "更新 APK 校验失败。" }
         finalFile
+    }
+
+    private suspend fun downloadAppUpdateFile(
+        asset: GitHubReleaseAsset,
+        remote: RemoteModelFile,
+        tempFile: File,
+        finalFile: File,
+        onProgress: (DownloadTaskSnapshot) -> Unit
+    ) {
+        val urls = buildList {
+            add(remote.downloadUrl)
+            if (asset.downloadUrl != remote.downloadUrl) add(asset.downloadUrl)
+        }
+        var lastError: Throwable? = null
+        for (url in urls) {
+            if (asset.sizeBytes >= PARALLEL_DOWNLOAD_MIN_BYTES) {
+                try {
+                    parallelDownloader.download(
+                        url = url,
+                        expectedBytes = asset.sizeBytes,
+                        tempFile = tempFile,
+                        finalFile = finalFile,
+                        onProgress = onProgress
+                    )
+                    return
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    lastError = error
+                    parallelDownloader.discard(tempFile)
+                }
+            }
+            try {
+                downloader.download(
+                    remote.copy(downloadUrl = url),
+                    tempFile,
+                    finalFile,
+                    onProgress
+                )
+                return
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                lastError = error
+            }
+        }
+        throw lastError ?: IllegalStateException("更新 APK 下载失败。")
+    }
+
+    private companion object {
+        private const val PARALLEL_DOWNLOAD_MIN_BYTES = 32L * 1024L * 1024L
     }
 }
 

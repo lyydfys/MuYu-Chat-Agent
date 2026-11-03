@@ -68,6 +68,8 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
         canDownload = appUpdate.canDownload,
         downloadedBytes = appUpdate.downloadedBytes,
         downloadTotalBytes = appUpdate.downloadTotalBytes,
+        downloadSpeedBytesPerSecond = appUpdate.downloadSpeedBytesPerSecond,
+        downloadRemainingSeconds = appUpdate.downloadRemainingSeconds,
         lastCheckedText = appUpdate.lastCheckedAtMillis.takeIf { it > 0L }?.let {
             java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
                 .format(java.util.Date(it))
