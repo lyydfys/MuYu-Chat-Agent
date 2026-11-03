@@ -62,12 +62,15 @@ its first real native load and graph execution determine compatibility.
 
 Current release status:
 
-- `v0.3.2` (`versionCode 11`) is the current release line. It adds a managed
-  Tavern generation-preset library with model bindings, image-model discovery
-  for cloud image engines, a rebuilt settings dashboard with single-flight
-  cleanup controls, and a ranged parallel downloader with speed/ETA for app
-  updates. See the [v0.3.2 release notes](docs/releases/v0.3.2.md) for
-  verification and limitations.
+- `v0.3.2` (`versionCode 11`) is the current release line. It fixes the
+  cloud-send crash (a missing active session killed the process) and six other
+  crash shapes, adds batch import for world books and generation presets, and
+  brings a managed Tavern generation-preset library with model bindings,
+  image-model discovery for cloud image engines, a rebuilt settings dashboard
+  with single-flight cleanup controls, and a ranged parallel downloader with
+  speed/ETA for app updates. See the
+  [v0.3.2 release notes](docs/releases/v0.3.2.md) for verification and
+  limitations.
 - `v0.3.1` (`versionCode 10`) is the previous release. It fixes Tavern
   preset import and the chat-history deletion boundary, moves generation
   presets to model ownership with role-card field overrides, and switches the
