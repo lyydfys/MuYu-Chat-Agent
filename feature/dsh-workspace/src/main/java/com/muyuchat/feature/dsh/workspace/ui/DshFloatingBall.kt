@@ -86,6 +86,12 @@ internal fun DshFloatingBall(
     onExit: () -> Unit,
     onOpenConsole: () -> Unit,
     modelSwitch: DshModelSwitchPort? = null,
+    /** Current state of the app-outside display switch, mirrored in the ball menu. */
+    overlayEnabled: Boolean = false,
+    /** Toggles the app-outside display; null when this host has no overlay owner. */
+    onToggleOverlay: ((Boolean) -> Unit)? = null,
+    /** Opens the appearance panel; null when this host has no overlay owner. */
+    onOpenOverlayPanel: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current.applicationContext
@@ -150,7 +156,13 @@ internal fun DshFloatingBall(
         val ballX = edge + horizontalTravel * horizontalFraction
         val ballY = edge + verticalTravel * verticalFraction
         val panelWidth = 168.dp
-        val panelHeight = if (modelSwitch != null) 156.dp else 104.dp
+        // One 52 dp row per action; the count decides the panel height the placement logic needs.
+        val actionRowCount = 1 +
+            (if (modelSwitch != null) 1 else 0) +
+            (if (showConsole) 1 else 0) +
+            (if (onToggleOverlay != null) 1 else 0) +
+            (if (onOpenOverlayPanel != null) 1 else 0)
+        val panelHeight = 52.dp * actionRowCount
         val panelBelow = ballY + ballSize + edge + panelHeight <= maxHeight
         val panelX = (ballX + ballSize - panelWidth)
             .coerceIn(edge, (maxWidth - panelWidth - edge).coerceAtLeast(edge))
@@ -203,6 +215,28 @@ internal fun DshFloatingBall(
                             onClick = {
                                 expanded = false
                                 onOpenConsole()
+                            }
+                        )
+                    }
+                    if (onToggleOverlay != null) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        BallActionRow(
+                            label = if (overlayEnabled) "App 外显示：已开启" else "App 外显示：已关闭",
+                            icon = McaIcons.Visibility,
+                            onClick = {
+                                expanded = false
+                                onToggleOverlay(!overlayEnabled)
+                            }
+                        )
+                    }
+                    if (onOpenOverlayPanel != null) {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f))
+                        BallActionRow(
+                            label = "悬浮窗外观",
+                            icon = McaIcons.Tune,
+                            onClick = {
+                                expanded = false
+                                onOpenOverlayPanel()
                             }
                         )
                     }

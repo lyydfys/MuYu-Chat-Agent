@@ -38,6 +38,8 @@ import com.muyuchat.core.dsh.contract.console.DshPopupRequest
 import com.muyuchat.core.dsh.contract.console.DshPopupUnavailable
 import com.muyuchat.feature.dsh.workspace.ui.DshConsoleRoute
 import com.muyuchat.feature.dsh.workspace.ui.DshFloatingBall
+import com.muyuchat.feature.dsh.workspace.ui.DshOverlayPanel
+import com.muyuchat.feature.dsh.workspace.ui.DshOverlayUiPort
 import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceActions
 import com.muyuchat.feature.dsh.workspace.ui.DshWorkspaceScreen
 import com.muyuchat.feature.dsh.workspace.web.DshWebStorage
@@ -87,7 +89,13 @@ fun DshWorkspaceRoute(
     accountPopupHoldMillis: Long = DEFAULT_ACCOUNT_POPUP_HOLD_MILLIS,
     accountLogin: DshAccountLoginPort? = null,
     /** Optional MCA model panel exposed from the floating ball. Null keeps the ball two-action. */
-    modelSwitch: DshModelSwitchPort? = null
+    modelSwitch: DshModelSwitchPort? = null,
+    /**
+     * Optional app-outside display owner. The workspace only renders the switch, the appearance panel
+     * and the notices; the window service, the background keep-alive and the persistence stay in the
+     * app module. Null keeps the ball without the two overlay entries.
+     */
+    overlayPort: DshOverlayUiPort? = null
 ) {
     val context = LocalContext.current
     val applicationContext = context.applicationContext
@@ -112,6 +120,10 @@ fun DshWorkspaceRoute(
     val latestAccountAuthMatcher = rememberUpdatedState(accountAuthUrlMatcher)
     val latestAccountLogin = rememberUpdatedState(accountLogin)
     var destination by rememberSaveable { mutableStateOf(DshWorkspaceDestination.WEB) }
+    var overlayPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var overlayEnabled by rememberSaveable {
+        mutableStateOf(overlayPort?.snapshot()?.enabled == true)
+    }
 
     fun handlePopupRequest(request: DshPopupRequest) {
         val browserPort = latestExternalBrowserPort.value
@@ -288,7 +300,25 @@ fun DshWorkspaceRoute(
                 showConsole = consolePort != null,
                 onExit = { actions.onExit() },
                 onOpenConsole = { destination = DshWorkspaceDestination.CONSOLE },
-                modelSwitch = modelSwitch
+                modelSwitch = modelSwitch,
+                overlayEnabled = overlayEnabled,
+                onToggleOverlay = overlayPort?.let { port ->
+                    { enabled: Boolean ->
+                        port.setEnabled(enabled)?.let(viewModel::postNotice)
+                        overlayEnabled = port.snapshot().enabled
+                    }
+                },
+                onOpenOverlayPanel = overlayPort?.let { { overlayPanelOpen = true } }
+            )
+        }
+        if (overlayPort != null && overlayPanelOpen) {
+            DshOverlayPanel(
+                port = overlayPort,
+                onDismiss = {
+                    overlayPanelOpen = false
+                    overlayEnabled = overlayPort.snapshot().enabled
+                },
+                onNotice = viewModel::postNotice
             )
         }
         if (consolePort != null && destination == DshWorkspaceDestination.CONSOLE) {
