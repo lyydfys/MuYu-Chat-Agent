@@ -51,6 +51,7 @@ import com.muyuchat.core.dsh.vscreen.DshVscreenProof
 import com.muyuchat.core.dsh.vscreen.DshVscreenRoutes
 import com.muyuchat.core.dsh.vscreen.VirtualScreenOwner
 import com.muyuchat.mca.dsh.overlay.DshOverlayController
+import com.muyuchat.mca.dsh.overlay.DshOverlayHost
 import com.muyuchat.mca.dsh.overlay.DshOverlayStatusProvider
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -90,7 +91,7 @@ import kotlinx.coroutines.sync.withLock
 internal class DshCapabilityAssembly(
     context: Context,
     private val consent: DshCapabilityConsentPort = DshCapabilityConsentBroker.port,
-    overlayStatus: DshOverlayStatusProvider = DshOverlayStatusProvider.Unavailable,
+    private val overlayStatus: DshOverlayStatusProvider = DshOverlayStatusProvider.Unavailable,
     /**
      * Typed projection of the one app screen-capture request/consent.
      *
@@ -177,10 +178,14 @@ internal class DshCapabilityAssembly(
      * D16 floating-window owner. The official `android_overlay` tool shows/hides the DSH whale
      * mark; the controller starts/stops its own service and reports the real window state. Without
      * the SYSTEM_ALERT_WINDOW grant it reports not running instead of pretending to show a window.
+     *
+     * The controller is the process-wide one owned by [DshOverlayHost], shared with the workspace
+     * "App 外显示" switch: the controller holds the single window-bus slot, so a second instance
+     * would silently steal the first one's callbacks. This assembly only lends its live runtime
+     * projection (the panel's two lines) to that shared instance.
      */
-    private val overlayController: DshOverlayController by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        DshOverlayController(appContext, statusProvider = overlayStatus)
-    }
+    private val overlayController: DshOverlayController
+        get() = DshOverlayHost.of(appContext).also { it.statusProvider = overlayStatus }.controller
 
     /** One terminal lane per capability generation; see [createDshTerminalLane]. */
     private val terminalLane: DshTerminalLane = createDshTerminalLane(

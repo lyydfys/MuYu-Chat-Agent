@@ -106,10 +106,6 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val installationScopeId = startupContext.installationScopeId
     internal val runtimeAssembly = startupContext.runtimeRoot.assembly
     /**
-     * Single app-facing client of the independent official-DSH mode. The workspace page only
-     * observes/requests this client; it never constructs or caches a runtime itself.
-     */
-    /**
      * Single app-facing port of the native video workflow (V1-02a). Pages send intents and
      * observe projections only; the process-level owner behind this port is created once per
      * process by the runtime assembly and outlives every page.
@@ -118,13 +114,6 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val videoImportPort get() = runtimeAssembly.videoHost.importPort
     internal val videoRemoteProbePort get() = runtimeAssembly.videoHost.remoteProbePort
     internal val videoModelAssetPort get() = runtimeAssembly.videoHost.modelAssetPort
-    internal val dshRuntimeClient get() = runtimeAssembly.dshHost.runtimeClient
-    internal val dshFirstFrameReporter get() = runtimeAssembly.dshHost.firstFrameReporter
-    internal val dshConsolePort get() = runtimeAssembly.dshHost.console
-    internal val dshMaintenanceConsolePort get() = runtimeAssembly.dshHost.maintenanceConsolePort
-    internal val dshExternalBrowserPort get() = runtimeAssembly.dshHost.externalBrowserPort
-    internal val dshAccountAuthUrlMatcher get() = runtimeAssembly.dshHost.accountAuthUrlMatcher
-    internal val dshAccountLoginPort get() = runtimeAssembly.dshHost.accountLoginPort
 
     /**
      * The one guarded call site that reconciles a changed model catalog with a running DSH host.

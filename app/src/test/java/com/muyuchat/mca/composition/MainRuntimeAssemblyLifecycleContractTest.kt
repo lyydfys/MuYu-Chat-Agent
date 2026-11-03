@@ -1,4 +1,4 @@
-﻿package com.muyuchat.mca.composition
+package com.muyuchat.mca.composition
 
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -28,6 +28,10 @@ class MainRuntimeAssemblyLifecycleContractTest {
     private val host = source("app/src/main/java/com/muyuchat/mca/composition/DshHostAssembly.kt")
     private val agent = source("app/src/main/java/com/muyuchat/mca/composition/AgentHostAssembly.kt")
     private val viewModel = source("app/src/main/java/com/muyuchat/mca/MainViewModel.kt")
+    // The DSH port accessors moved to this delegate when MainViewModel hit its 1000-line ceiling.
+    // The assertions below are unchanged; only the files they read.
+    private val viewModelDshPorts =
+        source("app/src/main/java/com/muyuchat/mca/MainViewModelDshOverlayDelegates.kt")
     private val processRoot = source("app/src/main/java/com/muyuchat/mca/composition/McaProcessRuntimeRoot.kt")
     private val accountComposition = source("app/src/main/java/com/muyuchat/mca/account/DshAccountLoginComposition.kt")
 
@@ -78,7 +82,11 @@ class MainRuntimeAssemblyLifecycleContractTest {
         )
         assertTrue(accountComposition.contains("DshAccountLoginOwner("))
         // The shell must reach the lane through the typed host entry, never by building a second one.
-        assertTrue(viewModel.contains("runtimeAssembly.dshHost.accountLoginPort"))
+        assertTrue(
+            "the shell must reach the lane through the typed host entry",
+            viewModel.contains("runtimeAssembly.dshHost.accountLoginPort") ||
+                viewModelDshPorts.contains("runtimeAssembly.dshHost.accountLoginPort")
+        )
     }
 
     @Test

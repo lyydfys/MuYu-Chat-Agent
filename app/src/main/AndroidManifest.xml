@@ -57,11 +57,25 @@
             android:exported="false" />
 
         <!-- D16: the official android_overlay tool's floating window owner (SYSTEM_ALERT_WINDOW).
-             Started only from an authenticated /overlay action; it never pulls the app forward. -->
+             Started only from an authenticated /overlay action or the user's "App 外显示" switch;
+             it never pulls the app forward. -->
         <service
             android:name=".dsh.overlay.DshOverlayService"
             android:exported="false"
             android:stopWithTask="true" />
+
+        <!-- "App 外显示" keep-alive. Protects the UI process (overlay window + app-local DSH
+             gateway/bridge wiring) while the mascot is on screen; the :dsh host keeps its own
+             foreground service and is never duplicated here. -->
+        <service
+            android:name=".dsh.overlay.DshBackgroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="dsh_app_outside_floating_display" />
+        </service>
 
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

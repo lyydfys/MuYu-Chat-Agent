@@ -3,6 +3,7 @@
 # A line disappearing means user data stored under that file would be orphaned.
 chat_device_status_overlay
 content_import_preview_v1
+dsh_overlay_display
 dsh_workspace_floating_ball
 dsh_workspace_tree_grant
 image_loras_v1

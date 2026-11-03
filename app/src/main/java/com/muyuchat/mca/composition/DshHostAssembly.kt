@@ -19,6 +19,7 @@ import com.muyuchat.core.dsh.runtime.config.DshShellSandboxStatusStore
 import com.muyuchat.core.dsh.runtime.state.DshInFlightChannel
 import com.muyuchat.core.dsh.runtime.state.DshInFlightEvidence
 import com.muyuchat.mca.account.createDshAccountLoginOwner
+import com.muyuchat.mca.dsh.overlay.DshOverlayHost
 import com.muyuchat.mca.dsh.overlay.DshOverlayStatus
 import com.muyuchat.mca.dsh.overlay.DshOverlayStatusProvider
 import java.io.File
@@ -70,7 +71,10 @@ internal class DshHostAssembly(
 
     private val gatewayAssembly: DshGatewayAssembly by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DshGatewayAssembly(
-            backend = gatewayBackend(),
+            // The app-outside display observes the replies of this same backend. The decorator only
+            // reads the assistant text of a turn boundary and forwards it to the overlay owner; it
+            // adds no runtime, no port and no second model path.
+            backend = DshOverlayHost.of(application).observeGateway(gatewayBackend()),
             toolEvidence = {
                 DshInFlightEvidence.Observed(
                     DshInFlightChannel.TOOL_EXECUTION,

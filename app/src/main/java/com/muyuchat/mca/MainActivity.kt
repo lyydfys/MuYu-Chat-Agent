@@ -3,6 +3,7 @@
 package com.muyuchat.mca
 
 import android.content.Context
+import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Bundle
@@ -37,6 +38,7 @@ import com.muyuchat.core.dsh.contract.console.DshScreenCaptureConsentCodes
 import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.modelstore.ChatModelRuntime
 import com.muyuchat.core.telemetry.SocFamily
+import com.muyuchat.mca.dsh.overlay.DshOverlayIntents
 import com.muyuchat.feature.agent.*
 import com.muyuchat.feature.agent.workspace.AgentWorkspaceRoute
 import com.muyuchat.feature.chat.*
@@ -219,6 +221,28 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // App 外显示: a mark/bubble tap starts this Activity on the DSH tab. The extra is consumed
+        // once, so a later recreation does not force the tab again.
+        openDshWorkspaceIfRequested(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // The overlay's Intent carries FLAG_ACTIVITY_SINGLE_TOP|CLEAR_TOP, so an already running app
+        // receives it here instead of starting a second Activity.
+        setIntent(intent)
+        openDshWorkspaceIfRequested(intent)
+    }
+
+    /**
+     * Switches to the DSH workspace when the overlay asked for it; the WebView itself restores the
+     * session path it persisted, so this is "back to the conversation", not a new navigation stack.
+     */
+    private fun openDshWorkspaceIfRequested(intent: Intent?) {
+        if (intent == null) return
+        if (!intent.getBooleanExtra(DshOverlayIntents.EXTRA_OPEN_WORKSPACE, false)) return
+        intent.removeExtra(DshOverlayIntents.EXTRA_OPEN_WORKSPACE)
+        startup.whenReady { model -> model.selectTab(AppTab.DSH_WORKSPACE) }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -475,6 +499,7 @@ private fun McaApp(
                     accountAuthUrlMatcher = viewModel.dshAccountAuthUrlMatcher,
                     accountLogin = viewModel.dshAccountLoginPort,
                     modelSwitch = viewModel.dshModelSwitch,
+                    overlayPort = viewModel.dshOverlayPort,
                     modifier = pageModifier,
                     onExit = closePage
                 )
