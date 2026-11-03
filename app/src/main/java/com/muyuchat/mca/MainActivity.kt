@@ -523,7 +523,6 @@ private fun McaApp(
                     startInRecommended = startModelsInRecommended,
                     state = ModelHubUiState(
                         localModels = state.models,
-                        generationPresets = generationPresetUiItems(state.generationPresets),
                         mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                         localImageModels = state.localImageModels.map { model ->
                             val prepared = preparedImageUi[model.path]
@@ -621,11 +620,7 @@ private fun McaApp(
                     onSelectCloudImage = viewModel::selectCloudImageModel, onDeleteCloudModel = viewModel::deleteCloudModel,
                     onRefreshLocal = viewModel::refreshLocalModels, onPauseDownloads = viewModel::pauseManagedDownloads,
                     onResumeDownloads = viewModel::resumeManagedDownloads, onPauseImport = viewModel::pauseManagedImport,
-                    onResumeImport = viewModel::resumeManagedImport, onBack = closePage, modifier = pageModifier,
-                    onImportGenerationPreset = viewModel::importGenerationPreset,
-                    onImportGenerationPresets = viewModel::importGenerationPresets,
-                    onDeleteGenerationPreset = viewModel::deleteGenerationPreset,
-                    onSaveGenerationPresetBindings = viewModel::saveGenerationPresetBindings
+                    onResumeImport = viewModel::resumeManagedImport, onBack = closePage, modifier = pageModifier
                 )
             }
 
@@ -682,6 +677,7 @@ private fun McaApp(
                     onClearImageLibrary = viewModel::clearImageLibrary, onClearFileLibrary = viewModel::clearFileLibrary,
                     onPersistentPrefixCacheEnabledChanged = viewModel::setPersistentPrefixCacheEnabled,
                     onClearPersistentPrefixCache = viewModel::clearPersistentPrefixCache,
+                    onChatLocalToolsEnabledChanged = viewModel::setChatLocalToolsEnabled,
                     offlineTranslationStatus = state.offlineTranslationStatus,
                     offlineTranslationInstalled = state.offlineTranslationInstalled,
                     offlineTranslationInstalling = state.offlineTranslationInstalling,

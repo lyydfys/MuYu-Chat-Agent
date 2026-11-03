@@ -38,7 +38,6 @@ data class GenerationPresetUiItem(
 @Immutable
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
-    val generationPresets: List<GenerationPresetUiItem> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,
     val localImageModels: List<LocalImageModelUiItem> = emptyList(),
     val remoteFiles: List<RemoteModelFile> = emptyList(),

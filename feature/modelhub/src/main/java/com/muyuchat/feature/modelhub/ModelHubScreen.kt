@@ -65,8 +65,7 @@ private enum class ModelHubSection(val title: String) {
     CLOUD("云端"),
     RECOMMENDED("推荐"),
     MARKET("广场"),
-    FILES("文件"),
-    PRESETS("预设")
+    FILES("文件")
 }
 
 internal data class ModelHubHeaderPresentation(
@@ -209,10 +208,6 @@ fun ModelHubScreen(
     onResumeDownloads: () -> Unit = {},
     onPauseImport: (String) -> Unit = {},
     onResumeImport: (String) -> Unit = {},
-    onImportGenerationPreset: (String) -> Unit = {},
-    onImportGenerationPresets: (List<String>) -> Unit = { uris -> uris.forEach(onImportGenerationPreset) },
-    onDeleteGenerationPreset: (String) -> Unit = {},
-    onSaveGenerationPresetBindings: (String, String, Set<String>, Set<String>) -> Unit = { _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val haptics = rememberMcaHaptics()
@@ -328,14 +323,6 @@ fun ModelHubScreen(
                         onFetchRemoteFiles = onFetchRemoteFiles,
                         onDownload = onDownload,
                         modifier = Modifier.fillMaxSize()
-                    )
-                    ModelHubSection.PRESETS -> GenerationPresetManagerSection(
-                        state = state,
-                        onImportPreset = onImportGenerationPreset,
-                        onDeletePreset = onDeleteGenerationPreset,
-                        onSaveBindings = onSaveGenerationPresetBindings,
-                        modifier = Modifier.fillMaxSize(),
-                        onImportPresets = onImportGenerationPresets
                     )
                 }
             }
