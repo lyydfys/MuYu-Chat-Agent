@@ -191,6 +191,11 @@ class DshRootChannel internal constructor(
             message = "root access has not been granted"
         )
 
+        DshDeviceChannelStatus.NEEDS_PAIRING -> DshDeviceCommandResult.failure(
+            DshDeviceCommandFailure.NOT_GRANTED,
+            message = "root access has not been granted"
+        )
+
         DshDeviceChannelStatus.ERROR -> DshDeviceCommandResult.failure(
             DshDeviceCommandFailure.EXEC_FAILED,
             message = "root probe returned an unusable su state"

@@ -1,24 +1,27 @@
 package com.muyuchat.feature.dsh.workspace.device
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
 
 /**
  * State of a wireless-ADB transport.
  *
- * `NOT_CONFIGURED` is the only state this generation can reach: no pairing implementation exists yet.
+ * `NOT_CONFIGURED` is the initial state (and the state after [AdbTransport.close]). `AWAITING_PAIRING`
+ * means the handshake completed far enough to publish this app's public key, but the device has not
+ * trusted it yet.
  */
 enum class DshAdbTransportState {
-    /** No transport/pairing at all. */
+    /** No socket session: never connected, or explicitly closed. */
     NOT_CONFIGURED,
 
-    /** The pairing flow started (pairing code / TLS-PSK handshake) but did not complete. */
+    /** The device asked for this app's key and has not authorised it yet (`adb_keys`). */
     AWAITING_PAIRING,
 
-    /** Paired and authenticated; `shell` may run. */
+    /** Authenticated (`CNXN` accepted); `shell` may run. */
     CONNECTED,
 
-    /** The transport exists but broke (handshake failure, socket error, key rejected). */
+    /** Connect/handshake/framing failed; `lastFailure` carries the stable reason. */
     FAILED
 }
 
@@ -34,22 +37,28 @@ data class DshAdbEndpoint(val host: String, val port: Int) {
 data class DshAdbShellResult(
     val exitCode: Int,
     val stdout: String,
-    val stderr: String
+    val stderr: String,
+    /** Non-null when the stream did not produce a normal close (framing/transport failure). */
+    val failure: DshDeviceCommandFailure? = null,
+    /** True when the transport cut the stream at [DSH_DEVICE_OUTPUT_LIMIT_BYTES]. */
+    val overflowed: Boolean = false
 )
 
 /**
  * Replaceable transport behind [DshAdbChannel].
  *
- * **This slice ships no implementation.** Wireless debugging is not a socket wrapper: it needs the
- * adb pairing protocol (SPAKE2 over the pairing port), the TLS 1.3 PSK handshake against the
- * `_adb-tls-connect` port, key/certificate storage and connection keep-alive. That is a separate
- * slice; until it lands, [DshAdbChannel] is constructed without a transport, reports
- * [DshDeviceChannelStatus.UNAVAILABLE] and returns `not_integrated` for every command. It must
- * never be reported as READY to the user or to an agent.
+ * [SocketAdbTransport] is the production implementation: a plain-text adb session on
+ * `host:port` with the standard CNXN/AUTH handshake. Wireless **pairing** with a pairing code
+ * (SPAKE2 + TLS-PSK on the pairing port) is still not implemented: the app can only authenticate with
+ * a key the device already trusts, so a fresh device answers NEEDS_PAIRING until the user registers
+ * the app key.
  */
 interface AdbTransport {
 
     fun state(): DshAdbTransportState
+
+    /** Stable reason of the last failed connect/shell, or null when nothing failed. */
+    fun lastFailure(): DshDeviceCommandFailure? = null
 
     /** Performs pairing/connect. Returns true only when the transport reached [DshAdbTransportState.CONNECTED]. */
     suspend fun connect(endpoint: DshAdbEndpoint): Boolean
@@ -62,7 +71,7 @@ interface AdbTransport {
 /** Pure mapping from transport state to the console-visible channel status. */
 fun dshAdbStatusFor(state: DshAdbTransportState): DshDeviceChannelStatus = when (state) {
     DshAdbTransportState.NOT_CONFIGURED -> DshDeviceChannelStatus.UNAVAILABLE
-    DshAdbTransportState.AWAITING_PAIRING -> DshDeviceChannelStatus.NEEDS_GRANT
+    DshAdbTransportState.AWAITING_PAIRING -> DshDeviceChannelStatus.NEEDS_PAIRING
     DshAdbTransportState.CONNECTED -> DshDeviceChannelStatus.READY
     DshAdbTransportState.FAILED -> DshDeviceChannelStatus.ERROR
 }
@@ -83,24 +92,64 @@ internal fun dshBoundOutput(
 }
 
 /**
- * ADB channel skeleton.
+ * ADB channel.
  *
- * What is real today: the channel contract, the shared policy gate, byte-bounded output, timeout
- * enforcement and truthful status projection. What is **not** implemented: pairing, the TLS-PSK
- * handshake, discovery and key storage. With no [transport] the channel is permanently
- * `UNAVAILABLE`/`not_integrated`, which is the honest state, not a placeholder success.
+ * Every command passes [DshDeviceCommandPolicy] first; the transport never sees a rejected command.
+ * The channel also enforces its own timeout and output ceiling, so a transport that blocks or floods
+ * can only produce a bounded, typed failure.
+ *
+ * With no [transport] (tests, or a host that deliberately keeps ADB off) the channel is permanently
+ * `UNAVAILABLE` and returns `not_integrated`; it never pretends to be READY.
  */
 class DshAdbChannel internal constructor(
     private val transport: AdbTransport?
 ) : DshDeviceChannel {
 
-    /** This generation: no transport, therefore no pairing and no READY. */
+    /** No transport: the honest "ADB not wired in this host" state. */
     constructor() : this(null)
 
     override val kind: DshDeviceChannelKind = DshDeviceChannelKind.ADB
 
     override fun status(): DshDeviceChannelStatus =
         transport?.let { dshAdbStatusFor(it.state()) } ?: DshDeviceChannelStatus.UNAVAILABLE
+
+    /**
+     * Connects to [endpoint] and reports the resulting channel status.
+     *
+     * A successful handshake is not enough to claim the channel works: the probe then runs one
+     * policy-gated read-only command, so READY always has a real result behind it.
+     */
+    suspend fun connect(endpoint: DshAdbEndpoint): DshDeviceProbe {
+        val active = transport ?: return DshDeviceProbe(
+            kind = kind,
+            status = DshDeviceChannelStatus.UNAVAILABLE,
+            result = notIntegratedResult()
+        )
+        val connected = try {
+            active.connect(endpoint)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            false
+        }
+        val status = dshAdbStatusFor(active.state())
+        if (connected && status == DshDeviceChannelStatus.READY) {
+            return probe()
+        }
+        val failure = active.lastFailure() ?: when (status) {
+            DshDeviceChannelStatus.NEEDS_PAIRING -> DshDeviceCommandFailure.PAIRING_REQUIRED
+            DshDeviceChannelStatus.UNAVAILABLE -> DshDeviceCommandFailure.NOT_INTEGRATED
+            else -> DshDeviceCommandFailure.HANDSHAKE_FAILED
+        }
+        return DshDeviceProbe(
+            kind = kind,
+            status = status,
+            result = DshDeviceCommandResult.failure(
+                failure = failure,
+                message = "adb connect did not complete"
+            )
+        )
+    }
 
     /**
      * Status probe. With no transport this returns `UNAVAILABLE` plus a `not_integrated` result, so
@@ -119,7 +168,7 @@ class DshAdbChannel internal constructor(
         val result = if (status == DshDeviceChannelStatus.READY) {
             exec(ADB_PROBE_COMMAND, DSH_DEVICE_PROBE_TIMEOUT_MS)
         } else {
-            notPairedResult()
+            notReadyResult(active.lastFailure())
         }
         return DshDeviceProbe(kind = kind, status = status, result = result)
     }
@@ -137,7 +186,7 @@ class DshAdbChannel internal constructor(
         val allowed = decision as DshDeviceCommandDecision.Allowed
         val active = transport ?: return notIntegratedResult()
         if (active.state() != DshAdbTransportState.CONNECTED) {
-            return notPairedResult()
+            return notReadyResult(active.lastFailure())
         }
         val effectiveTimeout = if (timeoutMs > 0) timeoutMs else DSH_DEVICE_COMMAND_TIMEOUT_MS
         val shellResult = try {
@@ -151,9 +200,17 @@ class DshAdbChannel internal constructor(
                 message = "adb shell did not finish inside ${effectiveTimeout}ms"
             )
         }
+        val transportFailure = shellResult.failure
+        if (transportFailure != null) {
+            return DshDeviceCommandResult.failure(
+                failure = transportFailure,
+                message = "adb shell failed",
+                stdout = shellResult.stdout
+            )
+        }
         val stdout = dshBoundOutput(shellResult.stdout)
         val stderr = dshBoundOutput(shellResult.stderr)
-        if (stdout.overflowed || stderr.overflowed) {
+        if (shellResult.overflowed || stdout.overflowed || stderr.overflowed) {
             return DshDeviceCommandResult.failure(
                 DshDeviceCommandFailure.OUTPUT_LIMIT,
                 message = "output exceeded $DSH_DEVICE_OUTPUT_LIMIT_BYTES bytes and was truncated",
@@ -168,24 +225,25 @@ class DshAdbChannel internal constructor(
         )
     }
 
-    /** Releases the transport (no-op while no transport is wired). */
+    /** Releases the transport; the transport itself makes `close` idempotent. */
     fun close() {
         runCatching { transport?.close() }
     }
 
     private fun notIntegratedResult(): DshDeviceCommandResult = DshDeviceCommandResult.failure(
         DshDeviceCommandFailure.NOT_INTEGRATED,
-        message = "wireless ADB pairing is not integrated in this generation"
+        message = "wireless ADB transport is not wired in this host"
     )
 
-    private fun notPairedResult(): DshDeviceCommandResult = DshDeviceCommandResult.failure(
-        DshDeviceCommandFailure.NOT_GRANTED,
-        message = "adb transport is not paired"
-    )
+    private fun notReadyResult(transportFailure: DshDeviceCommandFailure?): DshDeviceCommandResult =
+        DshDeviceCommandResult.failure(
+            failure = transportFailure ?: DshDeviceCommandFailure.NOT_GRANTED,
+            message = "adb transport is not authenticated"
+        )
 
     private companion object {
         /**
-         * Read-only probe for a future paired transport. It passes the same policy gate as any other
+         * Read-only probe for a connected transport. It passes the same policy gate as any other
          * command, which also demonstrates that the channel does not bypass its own guard.
          */
         const val ADB_PROBE_COMMAND = "getprop ro.product.model"

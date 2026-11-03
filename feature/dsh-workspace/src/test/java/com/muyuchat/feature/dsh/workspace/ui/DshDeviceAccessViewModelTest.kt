@@ -2,7 +2,11 @@ package com.muyuchat.feature.dsh.workspace.ui
 
 import androidx.lifecycle.viewModelScope
 import com.muyuchat.feature.dsh.workspace.DshConsoleTone
+import com.muyuchat.feature.dsh.workspace.device.AdbTransport
 import com.muyuchat.feature.dsh.workspace.device.DshAdbChannel
+import com.muyuchat.feature.dsh.workspace.device.DshAdbEndpoint
+import com.muyuchat.feature.dsh.workspace.device.DshAdbShellResult
+import com.muyuchat.feature.dsh.workspace.device.DshAdbTransportState
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelKind
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceChannelStatus
 import com.muyuchat.feature.dsh.workspace.device.DshDeviceCommandResult
@@ -23,6 +27,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -57,6 +62,7 @@ class DshDeviceAccessViewModelTest {
     fun `status labels are pinned`() {
         assertEquals("不可用", dshDeviceStatusLabel(DshDeviceChannelStatus.UNAVAILABLE))
         assertEquals("待授权", dshDeviceStatusLabel(DshDeviceChannelStatus.NEEDS_GRANT))
+        assertEquals("待配对", dshDeviceStatusLabel(DshDeviceChannelStatus.NEEDS_PAIRING))
         assertEquals("已就绪", dshDeviceStatusLabel(DshDeviceChannelStatus.READY))
         assertEquals("错误", dshDeviceStatusLabel(DshDeviceChannelStatus.ERROR))
     }
@@ -65,8 +71,24 @@ class DshDeviceAccessViewModelTest {
     fun `only ready is positive and only error is negative`() {
         assertEquals(DshConsoleTone.NEUTRAL, dshDeviceStatusTone(DshDeviceChannelStatus.UNAVAILABLE))
         assertEquals(DshConsoleTone.WARNING, dshDeviceStatusTone(DshDeviceChannelStatus.NEEDS_GRANT))
+        assertEquals(DshConsoleTone.WARNING, dshDeviceStatusTone(DshDeviceChannelStatus.NEEDS_PAIRING))
         assertEquals(DshConsoleTone.POSITIVE, dshDeviceStatusTone(DshDeviceChannelStatus.READY))
         assertEquals(DshConsoleTone.NEGATIVE, dshDeviceStatusTone(DshDeviceChannelStatus.ERROR))
+    }
+
+    @Test
+    fun `the adb endpoint text parses with a default port`() {
+        assertEquals(DshAdbEndpoint("127.0.0.1", 5555), dshAdbEndpointFrom("127.0.0.1"))
+        assertEquals(DshAdbEndpoint("127.0.0.1", 5555), dshAdbEndpointFrom(" 127.0.0.1:5555 "))
+        assertEquals(DshAdbEndpoint("192.168.1.7", 5037), dshAdbEndpointFrom("192.168.1.7:5037"))
+        assertEquals(DSH_ADB_DEFAULT_ENDPOINT, "127.0.0.1:5555")
+        assertNull(dshAdbEndpointFrom(""))
+        assertNull(dshAdbEndpointFrom("   "))
+        assertNull(dshAdbEndpointFrom(":5555"))
+        assertNull(dshAdbEndpointFrom("127.0.0.1:0"))
+        assertNull(dshAdbEndpointFrom("127.0.0.1:70000"))
+        assertNull(dshAdbEndpointFrom("127.0.0.1:abc"))
+        assertNull(dshAdbEndpointFrom("127.0 .0.1:5555"))
     }
 
     @Test
@@ -205,14 +227,79 @@ class DshDeviceAccessViewModelTest {
         assertEquals(1, launcher.invocations.size)
     }
 
+    @Test
+    fun `a malformed endpoint shows an inline error and opens no transport`() = runTest(dispatcher) {
+        val transport = FakeAdbTransport()
+        val viewModel = viewModel(transport = transport)
+
+        viewModel.updateAdbEndpoint("nope:port")
+        viewModel.connectAdb()
+        advanceUntilIdle()
+
+        assertNotNull(viewModel.state.value.adbEndpointError)
+        assertTrue(transport.endpoints.isEmpty())
+        assertFalse(viewModel.state.value.adb.probed)
+        assertNull(viewModel.state.value.busy)
+    }
+
+    @Test
+    fun `connecting adb uses the typed endpoint and projects the status`() = runTest(dispatcher) {
+        val transport = FakeAdbTransport(
+            connectState = DshAdbTransportState.CONNECTED,
+            stdout = "sdk_gphone64_arm64\n"
+        )
+        val viewModel = viewModel(transport = transport)
+
+        viewModel.updateAdbEndpoint("127.0.0.1:5555")
+        viewModel.connectAdb()
+        advanceUntilIdle()
+
+        assertEquals(listOf(DshAdbEndpoint("127.0.0.1", 5555)), transport.endpoints)
+        val adb = viewModel.state.value.adb
+        assertTrue(adb.probed)
+        assertEquals(DshDeviceChannelStatus.READY, adb.status)
+        assertEquals("已就绪", adb.statusLabel)
+        assertTrue(adb.resultSummary.startsWith("exit=0"))
+        assertNull(viewModel.state.value.adbEndpointError)
+        assertNull(viewModel.state.value.busy)
+    }
+
     // endregion
 
-    private fun viewModel(launcher: DshProcessLauncher): DshDeviceAccessViewModel {
+    private fun viewModel(
+        launcher: DshProcessLauncher = RecordingLauncher { _, _ -> FakeDshProcess() },
+        transport: AdbTransport? = null
+    ): DshDeviceAccessViewModel {
         val created = DshDeviceAccessViewModel(
             root = DshRootChannel(launcher, probeTimeoutMs = 50L, io = dispatcher),
-            adb = DshAdbChannel()
+            adb = if (transport == null) DshAdbChannel() else DshAdbChannel(transport)
         )
         viewModels += created
         return created
+    }
+}
+
+/** Minimal transport double for the page-state tests; no socket is opened. */
+private class FakeAdbTransport(
+    private var current: DshAdbTransportState = DshAdbTransportState.NOT_CONFIGURED,
+    private val connectState: DshAdbTransportState = DshAdbTransportState.CONNECTED,
+    private val stdout: String = ""
+) : AdbTransport {
+
+    val endpoints: MutableList<DshAdbEndpoint> = mutableListOf()
+
+    override fun state(): DshAdbTransportState = current
+
+    override suspend fun connect(endpoint: DshAdbEndpoint): Boolean {
+        endpoints += endpoint
+        current = connectState
+        return connectState == DshAdbTransportState.CONNECTED
+    }
+
+    override suspend fun shell(command: String): DshAdbShellResult =
+        DshAdbShellResult(exitCode = 0, stdout = stdout, stderr = "")
+
+    override fun close() {
+        current = DshAdbTransportState.NOT_CONFIGURED
     }
 }

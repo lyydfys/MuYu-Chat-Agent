@@ -26,8 +26,14 @@ enum class DshDeviceChannelStatus {
     /** No usable transport: no `su` binary, or no ADB transport/pairing at all. */
     UNAVAILABLE,
 
-    /** The transport exists but the user has not granted it (root prompt denied, awaiting pairing). */
+    /** The transport exists but the user has not granted it (root prompt denied). */
     NEEDS_GRANT,
+
+    /**
+     * The ADB handshake proved that the device does not trust this app's key yet: the public key must
+     * be registered (`/data/misc/adb/adb_keys` or the system wireless-debugging pair flow).
+     */
+    NEEDS_PAIRING,
 
     /** A probe proved the channel works; commands may run. */
     READY,
@@ -59,7 +65,19 @@ enum class DshDeviceCommandFailure(val code: String) {
     OUTPUT_LIMIT("output_limit"),
 
     /** The channel exists as a seam but the transport is not integrated yet. */
-    NOT_INTEGRATED("not_integrated")
+    NOT_INTEGRATED("not_integrated"),
+
+    /** The ADB socket could not be opened (refused, unreachable, no route). */
+    CONNECT_FAILED("connect_failed"),
+
+    /** The socket opened but the CNXN/AUTH handshake did not complete. */
+    HANDSHAKE_FAILED("handshake_failed"),
+
+    /** The peer sent a message that violates the ADB framing (bad magic/length/state). */
+    PROTOCOL_ERROR("protocol_error"),
+
+    /** The device refuses this app's ADB key until it is registered in `adb_keys`. */
+    PAIRING_REQUIRED("pairing_required")
 }
 
 /**
