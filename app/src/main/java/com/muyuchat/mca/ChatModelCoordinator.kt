@@ -88,6 +88,10 @@ internal class ChatModelCoordinator(
     suspend fun fetchCloudModelOptions(): Result<List<String>> =
         fetchCloudModelOptionsFor(cloudModelConfigPort)
 
+    /** The image editor's equivalent; separate protocol, so a separate catalog read. */
+    suspend fun fetchCloudImageModelOptions(): Result<List<String>> =
+        fetchCloudImageModelOptionsFor(cloudModelConfigPort)
+
     fun selectCloudImageModel(modelId: String) {
         if (rejectImageModelSwitchWhileGenerationIsActive()) return
         invalidatePendingChatImagePreparation()

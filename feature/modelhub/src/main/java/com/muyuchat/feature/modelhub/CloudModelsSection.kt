@@ -123,6 +123,9 @@ internal fun CloudModelEditorPage(
     onFetchModels: suspend () -> Result<List<String>> = {
         Result.failure(UnsupportedOperationException("获取模型列表未接入"))
     },
+    onFetchImageModels: suspend () -> Result<List<String>> = {
+        Result.failure(UnsupportedOperationException("获取图像模型列表未接入"))
+    },
     modifier: Modifier = Modifier
 ) {
     val isImage = kind == "IMAGE"
@@ -137,13 +140,17 @@ internal fun CloudModelEditorPage(
     var fetchModelsError by rememberSaveable { mutableStateOf<String?>(null) }
     var fetchedModels by remember { mutableStateOf<List<String>>(emptyList()) }
     var modelsDialogOpen by rememberSaveable { mutableStateOf(false) }
+    // Chat and image engines keep separate protocol fields, so the editor asks each one with its
+    // own callback but shares one in-progress flag, one error slot and one result dialog.
+    val fetchModelsFor: suspend () -> Result<List<String>> =
+        if (isImage) onFetchImageModels else onFetchModels
 
     fun fetchModels() {
         if (fetchingModels) return
         fetchingModels = true
         fetchModelsError = null
         fetchScope.launch {
-            onFetchModels()
+            fetchModelsFor()
                 .onSuccess { models ->
                     fetchedModels = models
                     modelsDialogOpen = true
@@ -267,6 +274,40 @@ internal fun CloudModelEditorPage(
                         fetchModelsError?.let { error ->
                             Text(
                                 "获取模型列表失败：$error",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    } else {
+                        // Image engines have their own protocol fields, so they ask the provider
+                        // through a separate callback; the button, spinner, error slot and picker
+                        // dialog are shared with the chat editor above.
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            McaButton(
+                                style = McaButtonStyle.Outlined,
+                                onClick = ::fetchModels,
+                                enabled = enabled && !fetchingModels && cloud.imageSupported,
+                                shape = RoundedCornerShape(999.dp)
+                            ) {
+                                if (fetchingModels) {
+                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(6.dp))
+                                }
+                                Text(if (fetchingModels) "获取中" else "获取图像模型列表")
+                            }
+                            Text(
+                                "用当前 Base URL 和 API Key 拉取可用图像模型。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                        fetchModelsError?.let { error ->
+                            Text(
+                                "获取图像模型列表失败：$error",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.error
                             )
@@ -508,21 +549,24 @@ Row(verticalAlignment = Alignment.CenterVertically) {
                 }
             }
         }
-        if (!isImage && modelsDialogOpen && fetchedModels.isNotEmpty()) {
+        if (modelsDialogOpen && fetchedModels.isNotEmpty()) {
             McaDialog(
                 onDismissRequest = { modelsDialogOpen = false },
-                title = { Text("选择推理模型", fontWeight = FontWeight.Bold) },
+                title = {
+                    Text(if (isImage) "选择图像模型" else "选择推理模型", fontWeight = FontWeight.Bold)
+                },
                 text = {
                     LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
                         items(fetchedModels) { modelId ->
+                            val currentModel = if (isImage) cloud.imageModel else cloud.chatModel
                             Text(
                                 modelId,
                                 style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (modelId == cloud.chatModel) FontWeight.Bold else FontWeight.Normal,
+                                fontWeight = if (modelId == currentModel) FontWeight.Bold else FontWeight.Normal,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable {
-                                        onChatModelChange(modelId)
+                                        if (isImage) onImageModelChange(modelId) else onChatModelChange(modelId)
                                         modelsDialogOpen = false
                                     }
                                     .padding(vertical = 10.dp, horizontal = 4.dp)

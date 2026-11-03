@@ -32,6 +32,7 @@ fun MainViewModel.saveCloudChatModel() = chatModelCoordinator.saveCloudChatModel
 fun MainViewModel.saveCloudImageModel() = chatModelCoordinator.saveCloudImageModel()
 fun MainViewModel.testCloudApiConfig() = chatModelCoordinator.testCloudApiConfig()
 suspend fun MainViewModel.fetchCloudModelOptions(): Result<List<String>> = chatModelCoordinator.fetchCloudModelOptions()
+suspend fun MainViewModel.fetchCloudImageModelOptions(): Result<List<String>> = chatModelCoordinator.fetchCloudImageModelOptions()
 fun MainViewModel.selectCloudImageModel(modelId: String) = chatModelCoordinator.selectCloudImageModel(modelId)
 
 fun MainViewModel.fetchRemoteFiles() = modelScopeHubCoordinator.fetchRemoteFiles()

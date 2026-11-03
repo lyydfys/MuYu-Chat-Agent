@@ -625,6 +625,7 @@ private fun McaApp(
                     onCloudDisplayNameChange = viewModel::updateCloudDisplayName, onSaveCloudChatModel = viewModel::saveCloudChatModel,
                     onSaveCloudImageModel = viewModel::saveCloudImageModel, onTestCloudApi = viewModel::testCloudApiConfig,
                     onFetchCloudModels = { viewModel.fetchCloudModelOptions() },
+                    onFetchCloudImageModels = { viewModel.fetchCloudImageModelOptions() },
                     onSelectCloudChat = { modelId -> viewModel.selectChatModel(MainViewModel.CLOUD_MODEL_CHOICE_PREFIX + modelId) },
                     onSelectCloudImage = viewModel::selectCloudImageModel, onDeleteCloudModel = viewModel::deleteCloudModel,
                     onRefreshLocal = viewModel::refreshLocalModels, onPauseDownloads = viewModel::pauseManagedDownloads,

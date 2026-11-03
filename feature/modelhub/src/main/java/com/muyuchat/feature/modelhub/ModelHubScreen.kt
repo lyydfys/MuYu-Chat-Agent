@@ -198,6 +198,7 @@ fun ModelHubScreen(
     onSaveCloudImageModel: () -> Unit,
     onTestCloudApi: () -> Unit,
     onFetchCloudModels: suspend () -> Result<List<String>> = { Result.failure(UnsupportedOperationException("获取模型列表未接入")) },
+    onFetchCloudImageModels: suspend () -> Result<List<String>> = { Result.failure(UnsupportedOperationException("获取图像模型列表未接入")) },
     onSelectCloudChat: (String) -> Unit,
     onSelectCloudImage: (String) -> Unit,
     onDeleteCloudModel: (String) -> Unit,
@@ -361,6 +362,7 @@ fun ModelHubScreen(
                 },
                 onTest = onTestCloudApi,
                 onFetchModels = onFetchCloudModels,
+                onFetchImageModels = onFetchCloudImageModels,
                 modifier = pageModifier
             )
         }

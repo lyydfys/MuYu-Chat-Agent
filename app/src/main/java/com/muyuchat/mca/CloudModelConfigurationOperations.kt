@@ -394,6 +394,17 @@ internal suspend fun fetchCloudModelOptionsFor(
 ): Result<List<String>> =
     port.cloudChatProvider.listModels(port.uiState().cloudApiConfig.normalized())
 
+/**
+ * Same action for the image editor: one Base URL + API Key, one model-id list.
+ *
+ * Image engines save a separate protocol (`imageApiFormat`), so the chat transport cannot answer
+ * for them; the caller again owns the in-progress flag and renders the result locally.
+ */
+internal suspend fun fetchCloudImageModelOptionsFor(
+    port: CloudModelConfigPort
+): Result<List<String>> =
+    listCloudImageModels(port.uiState().cloudApiConfig)
+
 internal fun applyCloudApiFormat(
     port: CloudModelConfigPort,
     value: String
