@@ -36,6 +36,7 @@ internal object GenerationPreferences {
 
     internal const val GENERATION_PARAMETERS_PREFERENCES = "mca_generation_params"
     internal const val PERSISTENT_PREFIX_CACHE_ENABLED_KEY = "persistent_prefix_cache_enabled"
+    internal const val CHAT_LOCAL_TOOLS_ENABLED_KEY = "chat_local_tools_enabled"
 
     private const val KEY_API_KEY = "api_key"
     private const val KEY_API_ENABLED = "api_enabled"
@@ -150,6 +151,21 @@ internal object GenerationPreferences {
         generationPreferences(context)
             .edit()
             .putBoolean(PERSISTENT_PREFIX_CACHE_ENABLED_KEY, enabled)
+            .apply()
+    }
+
+    /**
+     * The chat-page local tool toggle (device clock / arithmetic / dice); **defaults to true**.
+     * A stored false is honoured: a model that ignores the prompted protocol, or a user who does
+     * not want the extra system text, keeps a plain chat turn.
+     */
+    fun loadChatLocalToolsEnabled(context: Context): Boolean =
+        generationPreferences(context).getBoolean(CHAT_LOCAL_TOOLS_ENABLED_KEY, true)
+
+    fun persistChatLocalToolsEnabled(context: Context, enabled: Boolean) {
+        generationPreferences(context)
+            .edit()
+            .putBoolean(CHAT_LOCAL_TOOLS_ENABLED_KEY, enabled)
             .apply()
     }
 

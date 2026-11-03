@@ -321,6 +321,14 @@ internal fun formatBytes(bytes: Long): String {
     }
 }
 
+/** Token counts are read at a glance, so keep them short instead of printing every digit. */
+internal fun formatTokenCount(tokens: Long): String = when {
+    tokens <= 0L -> "0"
+    tokens >= 1_000_000L -> "%.1fM".format(tokens / 1_000_000.0)
+    tokens >= 1_000L -> "%.1fk".format(tokens / 1_000.0)
+    else -> tokens.toString()
+}
+
 internal fun shortName(value: String): String =
     value.substringAfterLast('/')
         .substringAfterLast('\\')

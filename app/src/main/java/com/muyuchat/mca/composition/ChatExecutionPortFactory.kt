@@ -1,6 +1,7 @@
 package com.muyuchat.mca.composition
 
 import com.muyuchat.core.engine.McaInferenceService
+import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.mca.*
 import kotlinx.coroutines.Job
 
@@ -23,6 +24,7 @@ internal fun assembleChatExecutionPort(
     assistantImageContinuationCoordinator: AssistantImageToolContinuationCoordinator,
     assistantProfileCoordinator: AssistantProfileCoordinator,
     contextCompressionCoordinator: ContextCompressionCoordinator,
+    recordPrefixCacheTelemetry: (RuntimeStats) -> Unit,
 ): ChatGenerationExecutionPort = container.createChatGenerationExecutionPort(
     store = store,
     engine = engine,
@@ -57,5 +59,6 @@ internal fun assembleChatExecutionPort(
     loadContextCompressionThresholdRef = contextCompressionCoordinator::loadContextCompressionThreshold,
     handleAssistantImageToolCallsRef = assistantImageContinuationCoordinator::handleAssistantImageToolCalls,
     finishAssistantImageContinuationRef = assistantImageContinuationCoordinator::finishAssistantImageContinuation,
+    recordPrefixCacheTelemetryRef = recordPrefixCacheTelemetry,
 )
 

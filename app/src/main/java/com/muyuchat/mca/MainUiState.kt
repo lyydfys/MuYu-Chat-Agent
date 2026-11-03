@@ -129,6 +129,17 @@ data class MainUiState(
     val persistentPrefixCacheEnabled: Boolean = true,
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
+    /**
+     * Aggregate reuse evidence for the persisted prefix cache and provider-side prompt caching.
+     * Counters only include turns that actually reported cache information.
+     */
+    val prefixCacheTelemetry: PrefixCacheTelemetryState = PrefixCacheTelemetryState(),
+    /**
+     * Whether a chat turn may offer the three zero-side-effect local tools (device clock,
+     * arithmetic, dice). Defaults on: they are the only way a cloud model can read the real clock,
+     * and an unusable or ignored offer degrades to a plain answer.
+     */
+    val chatLocalToolsEnabled: Boolean = true,
     val models: List<ModelManifest> = emptyList(),
     val generationPresets: List<GenerationPresetRecord> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,

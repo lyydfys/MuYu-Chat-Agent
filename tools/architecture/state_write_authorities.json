@@ -89,6 +89,7 @@
     "persistentPrefixCacheEnabled",
     "persistentPrefixCacheEntryCount",
     "persistentPrefixCacheBytes",
+    "prefixCacheTelemetry",
     "statusMessage"
   ],
   "AppUpdateFields": [
@@ -532,6 +533,10 @@
   "GenerationPresetFields": [
     "generationPresets",
     "params",
+    "statusMessage"
+  ],
+  "ChatToolSettingsFields": [
+    "chatLocalToolsEnabled",
     "statusMessage"
   ]
 }

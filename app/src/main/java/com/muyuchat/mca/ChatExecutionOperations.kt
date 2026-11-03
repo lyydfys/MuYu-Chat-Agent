@@ -22,6 +22,8 @@ import java.util.UUID
 import com.muyuchat.mca.presentation.ChatContextOperations
 import com.muyuchat.mca.presentation.ChatGenerationUiPublisher
 import com.muyuchat.mca.presentation.afterGenerationTerminated
+import com.muyuchat.mca.dsh.DshPromptedToolStreamGate
+import com.muyuchat.mca.dsh.protocolAttemptStart
 
 internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     requestMessages: List<ChatMessage>,
@@ -173,6 +175,13 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     if (!generationStillOwnsUi()) return
     val summaryTurn = selectTurnSummaryFor(requestMessages, requestParams, assistantSnapshot, summaryRecords, compression, allowSummaryCandidate, generationUiPublisher)
     val imageModelBindingForToolTurn = chatImageModelBinding(initialState)
+    // Light local tools (clock / arithmetic / dice) ride the prompted protocol, which is the only
+    // tool channel every backend can actually carry: the OpenAI-compatible and Anthropic
+    // transports never serialize `ChatRequest.tools`, and the local llama.cpp runner ignores them.
+    // Vision turns stay excluded because the assistant image tool already owns that lane.
+    val chatLocalToolsEnabled = initialState.chatLocalToolsEnabled &&
+        toolExchanges.isEmpty() &&
+        summaryTurn.effectiveMessages.none { it.imageAttachments.isNotEmpty() }
     val configuredPersonaForTurn = assistantSnapshot
         ?.systemPrompt
         ?.trim()
@@ -200,7 +209,10 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     val runtimeSystemContextForTurn = listOf(
         runtimeContextPlan.runtimeSystemContext,
         characterMemoryContextForTurn,
-        webSearchTurn.promptContext
+        webSearchTurn.promptContext,
+        // Request-scoped by design: the persisted prefix cache excludes this text, so offering
+        // tools never invalidates the on-disk role prefix.
+        if (chatLocalToolsEnabled) ChatLocalToolCatalog.instruction() else ""
     )
         .filter { it.isNotBlank() }
         .distinct()
@@ -234,11 +246,78 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
     attachTurnContextAssemblyTraceFor(runtimeContextPlan, generationRunId, initialState)
     val state = uiState.value
     val hasImageAttachments = admittedRequestMessages.any { it.imageAttachments.isNotEmpty() }
-    var localUiRequestId: String? = null
     var cloudModelIdForToolTurn: String? = chatModelIdOverride
     var chatModelIdentityForToolTurn: String? = null
     var chatConfigForToolTurn: CloudApiConfig? = null
-    val stream = if (effectiveChatBackend == ChatBackend.CLOUD) {
+    // P03: register the exact engine request before it is admitted or dispatched. It is frozen
+    // here, before the run becomes stoppable, so the user stop never has to infer its target from
+    // whichever token the engine happens to own later. The id encodes this run id and a fresh
+    // UUID, so it can never name another run's attempt. A prompted tool turn streams twice under
+    // the same attempt id: both rounds belong to this one user-visible run.
+    val localRequestId: String? = if (effectiveChatBackend == ChatBackend.LOCAL) {
+        val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
+        val registered = chatRuns.markLocalAttempt(
+            generationRunId,
+            selfJob,
+            ChatAttemptIdentity(generationRunId, uiRequestId)
+        )
+        if (!registered) return
+        uiRequestId
+    } else {
+        null
+    }
+    val streamRuntimePhase = if (effectiveChatBackend == ChatBackend.LOCAL) {
+        UiGenerationRuntimePhase.LOCAL_ACTIVE
+    } else {
+        UiGenerationRuntimePhase.CLOUD_ACTIVE
+    }
+    if (!chatRuns.markPhase(
+            generationRunId,
+            selfJob,
+            streamRuntimePhase
+        )
+    ) {
+        return
+    }
+    var turnMessages = admittedRequestMessages
+    var promptedToolRounds = 0
+    var promptedToolContext = ""
+    // A prompted tool round is one more stream over the same user turn plus the executed tool
+    // results. MAX_ROUNDS is a single continuation, so this loop always terminates and a model can
+    // never keep a turn alive by asking for tools forever.
+    while (true) {
+        if (promptedToolRounds > 0) {
+            // Tool results are request-scoped text. Re-admit so a nearly full context window is
+            // reported here instead of failing mid-stream after the user already waited.
+            val toolAdmission = admitTurnContextFor(
+                summaryTurn.effectiveMessages,
+                requestParams,
+                requestMessages,
+                listOf(runtimeSystemContextForTurn, promptedToolContext)
+                    .filter { it.isNotBlank() }
+                    .joinToString("\n\n")
+            )
+            if (!toolAdmission.isAccepted) break
+            turnMessages = toolAdmission.request.messages
+        }
+        val turnSystemContext = listOf(runtimeSystemContextForTurn, promptedToolContext)
+            .filter { it.isNotBlank() }
+            .distinct()
+            .joinToString("\n\n")
+        // The gate keeps a possible tool-call envelope out of the transcript: text is released as
+        // soon as it cannot be part of the start marker, and the envelope is parsed at the end.
+        val promptedToolGate = if (chatLocalToolsEnabled) {
+            DshPromptedToolStreamGate(
+                offeredNames = ChatLocalToolCatalog.offeredNames,
+                callId = "$generationRunId-${promptedToolRounds + 1}",
+                limits = ChatLocalToolCatalog.limits
+            )
+        } else {
+            null
+        }
+        var promptedToolAdvance = false
+        val turnText = StringBuilder()
+        val stream = if (effectiveChatBackend == ChatBackend.CLOUD) {
         val cloudConfig = (chatModelIdOverride?.let { modelId ->
             state.cloudModels.firstOrNull {
                 it.id == modelId && it.kind == CloudModelKind.CHAT && it.configured
@@ -269,7 +348,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             return
         }
         val cloudMessages = runCatching {
-            withInlineImageDataForCloud(admittedRequestMessages)
+            withInlineImageDataForCloud(turnMessages)
         }.getOrElse { error ->
             appendAssistant(
                 "\n图片读取失败：无法读取或压缩这张图片。请换一张本地图片，或检查文件权限。${error.message?.let { "\n原因：$it" } ?: ""}",
@@ -284,7 +363,11 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             ChatRequest(
                 messages = cloudMessages,
                 params = requestParams,
-                runtimeSystemContext = runtimeSystemContextForTurn,
+                runtimeSystemContext = turnSystemContext,
+                // Stable conversation identity. The local engine uses it as the disk KV key; the
+                // cloud transports use it only to derive an opaque provider prompt-cache key, and
+                // the raw id is never put on the wire.
+                persistentSessionId = frozenSession.id,
                 tools = if (offerAssistantImageTool && toolExchanges.isEmpty() &&
                     cloudConfig.apiFormat == CloudApiFormat.OPENAI_RESPONSES &&
                     cloudConfig.supportsTools &&
@@ -308,7 +391,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             return
         }
         val localMessages = if (hasImageAttachments) {
-            runCatching { withLocalImageFilesForVision(admittedRequestMessages, preparedUiVisionFiles) }
+            runCatching { withLocalImageFilesForVision(turnMessages, preparedUiVisionFiles) }
                 .getOrElse { error ->
                     appendAssistant(
                         "\n本地图片预处理失败：图片压缩或缓存失败，请换一张本地图片后重试。${error.message?.let { "\n原因：$it" } ?: ""}",
@@ -319,20 +402,11 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                     return
                 }
         } else {
-            admittedRequestMessages
+            turnMessages
         }
-        val uiRequestId = "ui-$generationRunId-${UUID.randomUUID().toString().replace("-", "")}"
-        localUiRequestId = uiRequestId
-        // P03: register the exact engine request before it is admitted or dispatched. It is frozen
-        // here, before the run becomes stoppable, so the user stop never has to infer its target
-        // from whichever token the engine happens to own later. The id encodes this run id and a
-        // fresh UUID, so it can never name another run's attempt.
-        val registered = chatRuns.markLocalAttempt(
-            generationRunId,
-            selfJob,
-            ChatAttemptIdentity(generationRunId, uiRequestId)
-        )
-        if (!registered) return
+        // Registered once per run above: both prompted tool rounds stream under one attempt id, so a
+        // user stop still targets exactly this run.
+        val uiRequestId = localRequestId ?: return
         val executionContext = LocalChatExecutionContext(requestId = uiRequestId)
         // The editor may contain a not-yet-applied load-bound value.
         // Ordinary chat must continue with the committed profile until
@@ -344,7 +418,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             ChatRequest(
                 messages = localMessages,
                 params = activeRequestParams,
-                runtimeSystemContext = runtimeSystemContextForTurn,
+                runtimeSystemContext = turnSystemContext,
                 persistentPrefixSystemPrompt = persistentLlamaPrefix,
                 persistentSessionId = frozenSession.id,
                 persistentRoleId = frozenAssistantId,
@@ -355,19 +429,6 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             ),
             executionContext
         ) ?: error("The single chat execution facade is not attached to LocalApiRuntime")
-    }
-    val runtimePhase = if (effectiveChatBackend == ChatBackend.LOCAL) {
-        UiGenerationRuntimePhase.LOCAL_ACTIVE
-    } else {
-        UiGenerationRuntimePhase.CLOUD_ACTIVE
-    }
-    if (!chatRuns.markPhase(
-            generationRunId,
-            selfJob,
-            runtimePhase
-        )
-    ) {
-        return
     }
     stream.collect { event ->
         // Flow cancellation is cooperative. A transport can therefore
@@ -387,12 +448,20 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             is GenerateEvent.Chunk -> {
                 if (!generationStillOwnsUi()) return@collect
                 replyMetrics.record(event.stats)
-                appendAssistant(
-                    delta = event.text,
-                    reasoningDelta = event.reasoning,
-                    reasoningDurationMs = event.reasoningDurationMs,
-                    generationRunId = generationRunId
-                )
+                turnText.append(event.text)
+                // Anything that could begin a tool-call envelope is withheld here, so the raw
+                // protocol marker never reaches the transcript even while the answer streams.
+                val visibleText = promptedToolGate?.feed(event.text) ?: event.text
+                if (visibleText.isNotEmpty() || event.reasoning.isNotEmpty() ||
+                    event.reasoningDurationMs > 0L
+                ) {
+                    appendAssistant(
+                        delta = visibleText,
+                        reasoningDelta = event.reasoning,
+                        reasoningDurationMs = event.reasoningDurationMs,
+                        generationRunId = generationRunId
+                    )
+                }
                 generationUiPublisher.publishStreamChunkStats(event.stats)
             }
             is GenerateEvent.Persist -> {
@@ -402,6 +471,33 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
             is GenerateEvent.Done -> {
                 if (!generationStillOwnsUi()) return@collect
                 replyMetrics.record(event.stats)
+                if (promptedToolGate != null) {
+                    val toolTurn = resolveChatLocalToolTurn(promptedToolGate.finish())
+                    if (toolTurn is ChatLocalToolTurn.Continue &&
+                        promptedToolRounds < ChatLocalToolCatalog.MAX_ROUNDS
+                    ) {
+                        // A tool round is not the answer: nothing is settled here, so the
+                        // generation surface keeps its spinner while the tools run locally.
+                        val results = withContext(Dispatchers.IO) {
+                            toolTurn.calls.map { call -> ChatLocalToolExecutor.execute(call) }
+                        }
+                        // Only the prose the user already saw is echoed back; the envelope itself
+                        // must never be quoted to the model or to the transcript.
+                        val said = turnText.toString().let { raw ->
+                            val start = protocolAttemptStart(raw)
+                            if (start >= 0) raw.substring(0, start) else raw
+                        }
+                        promptedToolContext = ChatLocalToolCatalog.continuationContext(results, said)
+                        promptedToolAdvance = true
+                        return@collect
+                    }
+                    if (toolTurn is ChatLocalToolTurn.Plain && toolTurn.tail.isNotEmpty()) {
+                        appendAssistant(delta = toolTurn.tail, generationRunId = generationRunId)
+                    }
+                }
+                // One aggregate per finished turn: a prompted tool round returned above, so a turn
+                // that needed tools is counted once, on its final answer.
+                recordPrefixCacheTelemetry(event.stats)
                 chatRuns.markPhase(
                     generationRunId,
                     selfJob,
@@ -438,7 +534,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                             return@collect
                         }
                     }
-                    val requestId = localUiRequestId
+                    val requestId = localRequestId
                     val sequence = if (requestId == null) {
                         null
                     } else {
@@ -496,7 +592,7 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                 try {
                     flushPendingAssistantOutput(generationRunId)
                     if (!generationStillOwnsUi()) return@collect
-                    val requestId = localUiRequestId
+                    val requestId = localRequestId
                     val sequence = if (requestId == null) {
                         null
                     } else {
@@ -523,6 +619,11 @@ internal suspend fun ChatGenerationExecutionPort.runChatGeneration(
                 }
             }
         }
+    }   // end of stream.collect
+        // The loop tail runs after this round's stream ended: a prompted tool round continues the
+        // same user turn, and anything else is the answer, so the loop stops.
+        if (!promptedToolAdvance) break
+        promptedToolRounds += 1
     }
     } catch (error: CancellationException) {
         throw error

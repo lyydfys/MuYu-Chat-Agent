@@ -33,6 +33,7 @@ data class CacheSettingsFields(
     val persistentPrefixCacheEnabled: Boolean = snapshot.persistentPrefixCacheEnabled,
     val persistentPrefixCacheEntryCount: Int = snapshot.persistentPrefixCacheEntryCount,
     val persistentPrefixCacheBytes: Long = snapshot.persistentPrefixCacheBytes,
+    val prefixCacheTelemetry: PrefixCacheTelemetryState = snapshot.prefixCacheTelemetry,
     val statusMessage: String? = snapshot.statusMessage,
 ) : UiStateFields
 
@@ -42,5 +43,6 @@ fun CacheSettingsFields.mergeInto(current: MainUiState): MainUiState = current.c
     persistentPrefixCacheEnabled = persistentPrefixCacheEnabled,
     persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
     persistentPrefixCacheBytes = persistentPrefixCacheBytes,
+    prefixCacheTelemetry = prefixCacheTelemetry,
     statusMessage = statusMessage,
 )

@@ -58,6 +58,7 @@ import com.muyuchat.core.engine.ContextCompressionResult
 import com.muyuchat.core.engine.ContextCompressionThreshold
 import com.muyuchat.core.engine.ContextWindowAdmission
 import com.muyuchat.core.engine.PromptContextUsage
+import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.engine.ChatToolCall
 import com.muyuchat.core.engine.ChatSourceReference
 import com.muyuchat.core.engine.ChatWebSearchTrace
@@ -177,6 +178,7 @@ internal fun McaAppContainer.createChatGenerationExecutionPort(
         loadContextCompressionThresholdRef: () -> ContextCompressionThreshold,
         handleAssistantImageToolCallsRef: suspend (List<ChatToolCall>, List<ChatMessage>, GenerationParams, String?, String?, String?, AssistantImageModelBinding?, CloudApiConfig?) -> Boolean,
         finishAssistantImageContinuationRef: (String, Boolean, String) -> Unit,
+        recordPrefixCacheTelemetryRef: (RuntimeStats) -> Unit,
     ): ChatGenerationExecutionPort =
         ChatGenerationExecutionPortAdapter(
             application = application,
@@ -210,6 +212,7 @@ internal fun McaAppContainer.createChatGenerationExecutionPort(
             loadContextCompressionThresholdRef = loadContextCompressionThresholdRef,
             handleAssistantImageToolCallsRef = handleAssistantImageToolCallsRef,
             finishAssistantImageContinuationRef = finishAssistantImageContinuationRef,
+            recordPrefixCacheTelemetryRef = recordPrefixCacheTelemetryRef,
         )
 
 internal fun McaAppContainer.createChatImagePromptBridgePort(

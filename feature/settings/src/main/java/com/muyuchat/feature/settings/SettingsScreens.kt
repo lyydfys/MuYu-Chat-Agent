@@ -114,6 +114,15 @@ data class SettingsUiState(
     val fileAssetCount: Int = 0,
     val fileAssetBytes: Long = 0L,
     val persistentPrefixCacheEnabled: Boolean = true,
+    /** Chat turns may offer the prompted local tools (device clock / arithmetic / dice). */
+    val chatLocalToolsEnabled: Boolean = true,
+    /** Whole-percent reuse rate across observed turns; null when nothing was observed yet. */
+    val prefixCacheHitRatePercent: Int? = null,
+    val prefixCacheAttempts: Long = 0L,
+    val prefixCacheHits: Long = 0L,
+    val prefixCacheReusedTokens: Long = 0L,
+    /** Pre-formatted top miss causes, biggest first, e.g. "前缀内容变化 × 3". */
+    val prefixCacheTopMissReasons: List<String> = emptyList(),
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
     val cleanupBusy: SettingsCleanupBusyUiState = SettingsCleanupBusyUiState(),
@@ -275,6 +284,7 @@ fun SettingsHubScreen(
     onClearFileLibrary: () -> Unit,
     onPersistentPrefixCacheEnabledChanged: (Boolean) -> Unit,
     onClearPersistentPrefixCache: () -> Unit,
+    onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
     offlineTranslationStatus: String = "未安装",
     offlineTranslationInstalled: Boolean = false,
     offlineTranslationInstalling: Boolean = false,
@@ -392,6 +402,7 @@ fun SettingsHubScreen(
                         )
                         SettingsSection.EXPERIMENTS -> ExperimentsScreen(
                             state = state,
+                            onChatLocalToolsEnabledChanged = onChatLocalToolsEnabledChanged,
                             modifier = Modifier.fillMaxSize()
                         )
                         SettingsSection.ABOUT -> SettingsAboutScreen(

@@ -49,6 +49,14 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
     persistentPrefixCacheEnabled = persistentPrefixCacheEnabled,
     persistentPrefixCacheEntryCount = persistentPrefixCacheEntryCount,
     persistentPrefixCacheBytes = persistentPrefixCacheBytes,
+    chatLocalToolsEnabled = chatLocalToolsEnabled,
+    prefixCacheHitRatePercent = prefixCacheTelemetry.hitRatePercent,
+    prefixCacheAttempts = prefixCacheTelemetry.attempts,
+    prefixCacheHits = prefixCacheTelemetry.hits,
+    prefixCacheReusedTokens = prefixCacheTelemetry.reusedTokens,
+    prefixCacheTopMissReasons = prefixCacheTelemetry.topMissReasons().map { (reason, count) ->
+        "${prefixCacheMissReasonLabel(reason)} × $count"
+    },
     cleanupBusy = SettingsCleanupBusyUiState(
         chatHistory = settingsOperations.cleanup == SettingsCleanupOperation.CHAT_HISTORY,
         imageLibrary = settingsOperations.cleanup == SettingsCleanupOperation.IMAGE_LIBRARY,
@@ -147,3 +155,24 @@ internal fun MainUiState.settingsUiState(): SettingsUiState = SettingsUiState(
         }
     )
 )
+
+/**
+ * Turns the engine's stable machine reasons into the one line a user can act on. Unknown codes are
+ * passed through unchanged rather than hidden, so a new engine reason is still visible in the UI
+ * instead of silently disappearing from the aggregate.
+ */
+internal fun prefixCacheMissReasonLabel(reason: String): String = when (reason) {
+    "state_token_mismatch" -> "前缀 token 不一致"
+    "state_prefix_mismatch" -> "前缀内容变化"
+    "state_load_failed" -> "缓存文件读取失败"
+    "state_restore_failed" -> "缓存恢复失败"
+    "managed_prefix_commit_failed" -> "缓存落盘失败"
+    "session_state_load_failed" -> "会话快照读取失败"
+    "session_state_token_mismatch" -> "会话快照 token 不一致"
+    "session_state_trim_failed" -> "上下文裁剪后快照失效"
+    "session_state_save_failed" -> "会话快照保存失败"
+    "session_state_unavailable" -> "会话快照不可用"
+    PROVIDER_PROMPT_CACHE_MISS -> "服务端未命中"
+    "kv_miss" -> "内存 KV 未命中"
+    else -> reason
+}

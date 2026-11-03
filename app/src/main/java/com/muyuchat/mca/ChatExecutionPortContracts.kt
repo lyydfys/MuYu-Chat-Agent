@@ -16,6 +16,7 @@ import com.muyuchat.core.engine.GenerationParams
 import com.muyuchat.core.engine.McaInferenceService
 import com.muyuchat.core.engine.ModelExecutionProfile
 import com.muyuchat.core.engine.PromptContextUsage
+import com.muyuchat.core.engine.RuntimeStats
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
@@ -101,6 +102,12 @@ internal interface ChatGenerationExecutionPort {
     suspend fun handleAssistantImageToolCalls(calls: List<ChatToolCall>, originalRequestMessages: List<ChatMessage>, paramsBeforeAssistant: GenerationParams, chatSessionId: String?, cloudModelId: String?, chatModelIdentity: String?, imageModelBinding: AssistantImageModelBinding?, chatConfig: CloudApiConfig?): Boolean
 
     fun finishAssistantImageContinuation(requestId: String, completed: Boolean, failureMessage: String)
+
+    /**
+     * Folds one finished turn's cache evidence into the app-private aggregate. Fire-and-forget and
+     * crash-tolerant: accounting must never fail or slow a chat turn.
+     */
+    fun recordPrefixCacheTelemetry(stats: RuntimeStats)
 
     fun chatImageToolChatModelIdentity(modelId: String?, config: CloudApiConfig?): String?
 

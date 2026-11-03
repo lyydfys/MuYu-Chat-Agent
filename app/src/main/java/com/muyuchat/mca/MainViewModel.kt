@@ -10,6 +10,7 @@ import com.muyuchat.core.advisor.AgentDecisionLogger
 import com.muyuchat.core.engine.ChatMessage
 import com.muyuchat.core.engine.ChatToolExchange
 import com.muyuchat.core.engine.GenerationParams
+import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.core.tuning.UserPreference
 import com.muyuchat.feature.chat.ChatMessageIdentity
 import com.muyuchat.feature.chat.ChatMessageIntent
@@ -31,6 +32,8 @@ import com.muyuchat.mca.composition.statusWriter
 import com.muyuchat.mca.composition.chatLoraSelectionWriter
 import com.muyuchat.mca.composition.generationLifecycleWriter
 import com.muyuchat.mca.composition.generationPresetWriter
+import com.muyuchat.mca.composition.chatToolSettingsWriter
+import com.muyuchat.mca.composition.cacheSettingsWriter
 import com.muyuchat.mca.composition.assembleModelImportAndDownloadCoordinator
 import com.muyuchat.mca.composition.assembleLocalImageLibraryAndModelCoordinator
 import com.muyuchat.mca.composition.assembleAssistantImageContinuationCoordinator
@@ -218,6 +221,9 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val localApiIdempotencyJournalLock = Any()
     internal val uiStateStore = UiStateStore(bootstrapResult.uiState)
     internal val generationPresetWriter = uiStateStore.generationPresetWriter()
+    internal val chatToolSettingsWriter = uiStateStore.chatToolSettingsWriter()
+    internal val cacheSettingsWriter = uiStateStore.cacheSettingsWriter()
+    private val prefixCacheTelemetryStore by lazy { PrefixCacheTelemetryStore(getApplication()) }
 
     /**
      * DSH ball model panel: a read projection of the same model list/loaded id the chat screen
@@ -583,6 +589,7 @@ class MainViewModel @JvmOverloads internal constructor(
             assistantImageContinuationCoordinator = assistantImageContinuationCoordinator,
             assistantProfileCoordinator = assistantProfileCoordinator,
             contextCompressionCoordinator = contextCompressionCoordinator,
+            recordPrefixCacheTelemetry = ::recordPrefixCacheTelemetry,
         )
 
         MainCoordinatorAssembly(
@@ -775,6 +782,39 @@ class MainViewModel @JvmOverloads internal constructor(
         if (rejectWhileConversationMutationInProgress()) return
         launchSettingsCleanup(SettingsCleanupOperation.CHAT_HISTORY) {
             clearChatHistoryFor(store = uiStateStore.conversationSessionWriter(), scope = viewModelScope, rejectWhileConversationMutationInProgress = ::rejectWhileConversationMutationInProgress, showStatus = ::showStatus, hasActiveAssistantImageExecution = { hasActiveAssistantImageExecutionIn(uiStateStore.current, it) }, manualContextCompressionRequests = manualContextCompressionRequests, queueWorldBookCleanup = assistantProfileCoordinator::queueWorldBookCleanup, pendingAssistantImageToolTurns = container.runtimeAdmission.pendingAssistantImageToolTurns, persistConversationMutation = { sessions, rollback, onCommitted, onCommitFailed -> persistConversationMutation(sessions, rollback, onCommitted = onCommitted, onCommitFailed = onCommitFailed) }, chatImageToolAuthorizationStore = container.chatImageToolAuthorizationStore)
+        }
+    }
+
+    /**
+     * Persists and applies the chat-page local tool toggle. It only changes what the next request
+     * offers; a turn already streaming is never mutated underneath the user.
+     */
+    fun setChatLocalToolsEnabled(enabled: Boolean) {        if (uiStateStore.current.chatLocalToolsEnabled == enabled) return
+        GenerationPreferences.persistChatLocalToolsEnabled(getApplication(), enabled)
+        chatToolSettingsWriter.update {
+            it.copy(
+                chatLocalToolsEnabled = enabled,
+                statusMessage = if (enabled) {
+                    "已开启本地工具：时间、计算与掷骰"
+                } else {
+                    "已关闭本地工具"
+                }
+            )
+        }
+    }
+
+    /**
+     * Records one finished turn's cache evidence off the main thread, then publishes the aggregate.
+     *
+     * Accounting is best effort by design: a failure here must never surface as a chat error, and
+     * the write happens on IO because it touches the app-private telemetry file.
+     */
+    internal fun recordPrefixCacheTelemetry(stats: RuntimeStats) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val updated = prefixCacheTelemetryStore.record(stats)
+                cacheSettingsWriter.update { it.copy(prefixCacheTelemetry = updated) }
+            }
         }
     }
 

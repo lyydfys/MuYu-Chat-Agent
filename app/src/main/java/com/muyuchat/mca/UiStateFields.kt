@@ -258,6 +258,12 @@ val UiStateFields.persistentPrefixCacheEntryCount: Int
 val UiStateFields.persistentPrefixCacheBytes: Long
     get() = snapshot.persistentPrefixCacheBytes
 
+val UiStateFields.prefixCacheTelemetry: PrefixCacheTelemetryState
+    get() = snapshot.prefixCacheTelemetry
+
+val UiStateFields.chatLocalToolsEnabled: Boolean
+    get() = snapshot.chatLocalToolsEnabled
+
 val UiStateFields.models: List<ModelManifest>
     get() = snapshot.models
 

@@ -90,6 +90,7 @@ http://本机局域网IP:11435/v1
 内存不足，建议换小模型或降低上下文。
 冲突/不确定性: ${researchConflictWarnings.joinToString(
 刷新
+前缀内容变化 × 3
 加载中
 协议自检
 协议自检、研究闭环、清空记录
@@ -107,6 +108,7 @@ http://本机局域网IP:11435/v1
 同设备连接
 后续扩展
 启用联网检索
+命中率 $hitRatePercent% · 命中 $hits / 尝试 $attempts 次 · 复用 ${formatTokenCount(reusedTokens)} tokens
 命中调研、评测、方案、对比等问题时启用多源研究
 图片占用 ${formatBytes(state.imageAssetBytes)} · 文件索引 ${formatBytes(state.fileAssetBytes)}。使用云端模型时，发送的消息、图片和启用的上下文会按所选服务商接口规则传输。
 图片清理会移除 MCA 管理的本地图片副本；文件库清理只移除 MCA 保存的文本索引，不会删除外部原文件。
@@ -167,6 +169,7 @@ http://本机局域网IP:11435/v1
 已生成，可复制或导出
 已生成，复制后填入客户端 Key/Token
 已索引 ${state.fileAssetCount} 个文件
+已记录 $attempts 次缓存尝试。
 已输出 ${state.stats.completionTokens} 个片段，输入约 ${state.stats.promptTokens} 个 token。
 已配置
 已配置真实搜索：${state.realSearchProviderLabel.ifBlank { state.providerLabel }}
@@ -236,6 +239,7 @@ http://本机局域网IP:11435/v1
 日志/诊断
 日志与诊断
 时间: $createdAtText
+时间、算式和骰子全部在设备本地执行，不联网、不读写文件、不改动聊天记录；只把结果回填给当轮回复。
 普通
 智能
 智能调参
@@ -258,6 +262,7 @@ http://本机局域网IP:11435/v1
 服务端异常
 未加载
 未加载模型时，聊天接口会返回 503；开放端口只建议在可信 Wi-Fi 或热点环境中临时开启。
+未命中主要因：${topMissReasons.joinToString(
 未安装
 未完成
 未开启
@@ -276,6 +281,7 @@ http://本机局域网IP:11435/v1
 本地智能，一处掌控
 本地模型
 本地模型不会直接联网，MCA 只把搜索摘要注入当前轮对话。
+本地模型和云端模型都可用。模型不支持时不会调用，会像平常一样回复。
 本地生图
 本地生图速度取决于设备、模型包和分辨率；生成任务应在图片页显示状态、耗时、取消和失败重试。
 本机
@@ -381,6 +387,7 @@ http://本机局域网IP:11435/v1
 耗时: ${elapsedMs}ms
 聊天 ${state.chatSessionCount} 条 · 图片 ${state.imageAssetCount} 张 · 文件 ${state.fileAssetCount} 个
 聊天接口已连接，但流式响应缺少 [DONE] 终止帧，请检查本地 API 服务状态。
+聊天本地工具
 联网检索
 自动
 自定义
@@ -390,6 +397,7 @@ http://本机局域网IP:11435/v1
 覆盖范围提示
 视觉
 视觉 runner 已就绪
+角色可以读取设备当前时间、做算术计算、掷骰，回答时不再靠猜。
 角色设定
 触发
 触发: $triggerModeLabel
@@ -430,6 +438,7 @@ http://本机局域网IP:11435/v1
 返回
 返回聊天
 返回设置中心
+还没有可统计的缓存复用记录；先进行几次本地对话即可看到命中率。
 这可以兼容通用第三方 OpenAI-compatible 客户端的角色卡，同时避免模型重载后丢失 MCA 当前助手。
 进入
 连接前准备

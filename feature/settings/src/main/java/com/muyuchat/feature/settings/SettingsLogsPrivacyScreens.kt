@@ -230,6 +230,11 @@ fun PrivacyDataScreen(
                 enabled = state.persistentPrefixCacheEnabled,
                 entryCount = state.persistentPrefixCacheEntryCount,
                 bytes = state.persistentPrefixCacheBytes,
+                hitRatePercent = state.prefixCacheHitRatePercent,
+                attempts = state.prefixCacheAttempts,
+                hits = state.prefixCacheHits,
+                reusedTokens = state.prefixCacheReusedTokens,
+                topMissReasons = state.prefixCacheTopMissReasons,
                 busy = state.cleanupBusy.persistentPrefixCache,
                 // Clearing the prefix cache is itself a cleanup: it holds the shared single-flight
                 // slot, so the switch must not offer an opt-out it cannot honor right now.
@@ -298,6 +303,11 @@ private fun PersistentPrefixCacheCard(
     enabled: Boolean,
     entryCount: Int,
     bytes: Long,
+    hitRatePercent: Int?,
+    attempts: Long,
+    hits: Long,
+    reusedTokens: Long,
+    topMissReasons: List<String>,
     busy: Boolean,
     blockedByCleanup: Boolean,
     confirmClear: Boolean,
@@ -308,6 +318,15 @@ private fun PersistentPrefixCacheCard(
     val interactive = !busy && !blockedByCleanup
     val usageText = remember(entryCount, bytes) {
         "缓存项 $entryCount 个 · 占用 ${formatBytes(bytes)}"
+    }
+    // The engine already reported these numbers per turn; showing the aggregate is what makes the
+    // "is this cache worth its disk space" question answerable at all.
+    val reuseText = remember(hitRatePercent, attempts, hits, reusedTokens) {
+        when {
+            attempts <= 0L -> "还没有可统计的缓存复用记录；先进行几次本地对话即可看到命中率。"
+            hitRatePercent == null -> "已记录 $attempts 次缓存尝试。"
+            else -> "命中率 $hitRatePercent% · 命中 $hits / 尝试 $attempts 次 · 复用 ${formatTokenCount(reusedTokens)} tokens"
+        }
     }
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -341,6 +360,18 @@ private fun PersistentPrefixCacheCard(
                 usageText,
                 style = MaterialTheme.typography.bodyMedium
             )
+            Text(
+                reuseText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (topMissReasons.isNotEmpty()) {
+                Text(
+                    "未命中主要因：${topMissReasons.joinToString("、")}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
             Text(
                 "仅缓存固定的系统提示词和角色设定前缀，且只保存在本机；每次请求中的消息、附件和其他请求范围内容不会写入缓存。",
                 style = MaterialTheme.typography.bodySmall,
@@ -428,6 +459,7 @@ private fun PrivacyCleanupCard(
 @Composable
 fun ExperimentsScreen(
     state: SettingsUiState,
+    onChatLocalToolsEnabledChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // W9-1: the vision-readiness flag is a scan over the whole native stats JSON. Cache it by the
@@ -465,10 +497,67 @@ fun ExperimentsScreen(
             )
         }
         item {
+            ChatLocalToolsCard(
+                enabled = state.chatLocalToolsEnabled,
+                onEnabledChanged = onChatLocalToolsEnabledChanged
+            )
+        }
+        item {
             InfoCard(
                 title = "工具 / MCP",
                 primary = "后续扩展",
                 secondary = "当前优先保持 MCA 本地模型、API 服务和助手角色卡主线稳定。"
+            )
+        }
+    }
+}
+
+/**
+ * The chat local tool switch. All three tools are local, read-only and side-effect free, so the
+ * only real tradeoff is a small amount of extra system text per turn plus the chance that a small
+ * model prints a protocol marker it cannot use.
+ */
+@Composable
+private fun ChatLocalToolsCard(
+    enabled: Boolean,
+    onEnabledChanged: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("聊天本地工具", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(12.dp))
+                    McaSwitch(
+                        checked = enabled,
+                        onCheckedChange = onEnabledChanged,
+                        enabled = true,
+                        contentDescription = "聊天本地工具"
+                    )
+                }
+                Text(
+                    "角色可以读取设备当前时间、做算术计算、掷骰，回答时不再靠猜。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                "时间、算式和骰子全部在设备本地执行，不联网、不读写文件、不改动聊天记录；只把结果回填给当轮回复。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                "本地模型和云端模型都可用。模型不支持时不会调用，会像平常一样回复。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }

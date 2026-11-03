@@ -29,6 +29,7 @@ import com.muyuchat.core.engine.ContextCompressionTrigger
 import com.muyuchat.core.engine.ContextWindowAdmission
 import com.muyuchat.core.engine.PromptContextUsage
 import com.muyuchat.core.engine.ChatRequest
+import com.muyuchat.core.engine.RuntimeStats
 import com.muyuchat.mca.presentation.ChatContextSnapshot
 import com.muyuchat.mca.presentation.chatContextSnapshot
 import com.muyuchat.mca.presentation.lifecycleAfterGeneration
@@ -92,6 +93,7 @@ internal class ChatGenerationExecutionPortAdapter(
     private val loadContextCompressionThresholdRef: () -> ContextCompressionThreshold,
     private val handleAssistantImageToolCallsRef: suspend (List<ChatToolCall>, List<ChatMessage>, GenerationParams, String?, String?, String?, AssistantImageModelBinding?, CloudApiConfig?) -> Boolean,
     private val finishAssistantImageContinuationRef: (String, Boolean, String) -> Unit,
+    private val recordPrefixCacheTelemetryRef: (RuntimeStats) -> Unit,
 ) : ChatGenerationExecutionPort {
     override val uiState: StateFlow<MainUiState>
         get() = store.state
@@ -245,6 +247,10 @@ internal class ChatGenerationExecutionPortAdapter(
         failureMessage: String
     ) {
         finishAssistantImageContinuationRef(requestId, completed, failureMessage)
+    }
+
+    override fun recordPrefixCacheTelemetry(stats: RuntimeStats) {
+        recordPrefixCacheTelemetryRef(stats)
     }
 
     override fun chatImageToolChatModelIdentity(
