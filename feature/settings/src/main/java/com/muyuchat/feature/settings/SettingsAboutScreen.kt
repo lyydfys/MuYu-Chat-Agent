@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -52,6 +51,7 @@ import com.muyuchat.core.designsystem.McaButtonStyle
 import com.muyuchat.core.designsystem.McaDialog
 import com.muyuchat.core.designsystem.McaIconButton
 import com.muyuchat.core.designsystem.McaIcons
+import com.muyuchat.core.designsystem.rememberMcaNotify
 
 private const val ABOUT_AUTHOR = "lyydfys"
 private const val ABOUT_REPOSITORY = "lyydfys/MuYu-Chat-Agent"
@@ -624,6 +624,9 @@ private fun AboutSponsorDialog(
 ) {
     val context = LocalContext.current
     var showQr by rememberSaveable { mutableStateOf(false) }
+    // In-app feedback instead of a platform Toast: the design-system ratchet keeps the workspace
+    // at zero Toast calls, and the app already installs one McaFeedbackLayer for every surface.
+    val notify = rememberMcaNotify()
 
     fun shareProject() {
         val url = ABOUT_REPOSITORY_URL
@@ -637,7 +640,7 @@ private fun AboutSponsorDialog(
         runCatching { context.startActivity(chooser) }.onFailure {
             val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
             clipboard?.setPrimaryClip(ClipData.newPlainText("MCA", url))
-            Toast.makeText(context, "链接已复制", Toast.LENGTH_SHORT).show()
+            notify("链接已复制")
         }
     }
 
@@ -750,11 +753,12 @@ private fun AboutStarGuideDialog(
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    val notify = rememberMcaNotify()
 
     fun copyRepositoryLink() {
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         clipboard?.setPrimaryClip(ClipData.newPlainText("MCA GitHub", ABOUT_REPOSITORY_URL))
-        Toast.makeText(context, "仓库链接已复制", Toast.LENGTH_SHORT).show()
+        notify("仓库链接已复制")
     }
 
     McaDialog(
