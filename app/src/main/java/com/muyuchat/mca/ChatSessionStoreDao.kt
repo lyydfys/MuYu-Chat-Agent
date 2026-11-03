@@ -113,13 +113,17 @@ interface ChatSessionDao : ChatSessionKnowledgeDao, ChatSessionMemoryDao {
                     projectId = session.projectId,
                     assistantId = session.assistantId,
                     assistantSnapshot = AssistantConversationSnapshot.fromJsonOrNull(
-                        session.assistantSnapshotJson
+                        SessionJsonOffload.resolve(session.assistantSnapshotJson)
                     ),
                     mixedAssistantHistory = session.mixedAssistantHistory,
                     modelMode = session.modelMode,
                     modelId = session.modelId,
-                    appearanceOverride = ChatAppearance.fromJsonOrNull(session.appearanceJson),
-                    contextSummaries = contextSummariesFromJson(session.contextSummariesJson)
+                    appearanceOverride = ChatAppearance.fromJsonOrNull(
+                        SessionJsonOffload.resolve(session.appearanceJson)
+                    ),
+                    contextSummaries = contextSummariesFromJson(
+                        SessionJsonOffload.resolve(session.contextSummariesJson)
+                    )
                 )
             }.onFailure { error ->
                 // One malformed row must not hide every readable conversation. The row remains

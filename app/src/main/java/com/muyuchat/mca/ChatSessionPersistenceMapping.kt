@@ -206,11 +206,13 @@ internal fun ChatSessionRecord.toEntity(): ChatSessionEntity =
         updatedAt = updatedAt,
         projectId = projectId,
         assistantId = assistantId,
-        assistantSnapshotJson = assistantSnapshot?.toJsonString(),
+        // Oversized JSON is offloaded to an app-private file so one big character card can never
+        // push a `chat_sessions` row past the 2 MB CursorWindow and break every session read.
+        assistantSnapshotJson = SessionJsonOffload.offload(id, assistantSnapshot?.toJsonString()),
         modelMode = modelMode,
         modelId = modelId,
-        appearanceJson = appearanceOverride?.toJsonString(),
-        contextSummariesJson = contextSummariesToJson(contextSummaries),
+        appearanceJson = SessionJsonOffload.offload(id, appearanceOverride?.toJsonString()),
+        contextSummariesJson = SessionJsonOffload.offload(id, contextSummariesToJson(contextSummaries)),
         mixedAssistantHistory = mixedAssistantHistory
     )
 

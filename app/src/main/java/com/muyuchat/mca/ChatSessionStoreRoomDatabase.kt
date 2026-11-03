@@ -2,6 +2,7 @@ package com.muyuchat.mca
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.util.Log
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -161,6 +162,7 @@ abstract class McaRoomDatabase : RoomDatabase() {
             instance ?: synchronized(this) {
                 val appContext = context.applicationContext
                 repairLegacySchemaIfNeeded(appContext)
+                repairOversizedSessionJsonIfNeeded(appContext)
                 instance ?: Room.databaseBuilder(
                     appContext,
                     McaRoomDatabase::class.java,
@@ -208,6 +210,35 @@ abstract class McaRoomDatabase : RoomDatabase() {
                     .build()
                     .also { instance = it }
             }
+
+        /**
+         * Moves oversized `chat_sessions` JSON out of SQLite *before* Room opens a reader.
+         *
+         * One oversized row (a character card with an embedded lorebook, for example) exceeds the
+         * ~2 MB `CursorWindow`, so `SELECT * FROM chat_sessions` fails for every caller — including
+         * the chat send path. The repair must therefore run on the raw database, where bounded
+         * `substr` slices can still be read. Failures are logged and never block start-up.
+         */
+        private fun repairOversizedSessionJsonIfNeeded(context: Context) {
+            // Configured for every open, not just repair: the entity mappers use the same store.
+            SessionJsonOffload.configure(java.io.File(context.filesDir, "session_json"))
+            val databaseFile = context.getDatabasePath("mca.db")
+            if (!databaseFile.exists()) return
+            runCatching {
+                SQLiteDatabase.openDatabase(databaseFile.path, null, SQLiteDatabase.OPEN_READWRITE).use { db ->
+                    val outcome = SessionJsonRepair.repairOversizedSessionJson(db)
+                    if (outcome.changed || outcome.failedRows > 0 || outcome.failureMessage != null) {
+                        Log.w(
+                            "MCA-ChatHistory",
+                            "session_json_offload repaired=${outcome.repairedRows} " +
+                                "failed=${outcome.failedRows} reason=${outcome.failureMessage}"
+                        )
+                    }
+                }
+            }.onFailure { error ->
+                Log.e("MCA-ChatHistory", "session_json_offload_failed", error)
+            }
+        }
 
         private fun repairLegacySchemaIfNeeded(context: Context) {
             val databaseFile = context.getDatabasePath("mca.db")
