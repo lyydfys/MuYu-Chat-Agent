@@ -14,11 +14,9 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -27,7 +25,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
@@ -345,28 +342,15 @@ internal fun ImagePromptBar(
         mutableStateOf(TextFieldValue(prompt, TextRange(prompt.length)))
     }
     var focused by remember { mutableStateOf(false) }
-    var translationSource by remember { mutableStateOf<String?>(null) }
-    var translationPreview by remember { mutableStateOf<String?>(null) }
-    var translationError by remember { mutableStateOf<String?>(null) }
+    // 译文（草稿、状态、取消）由同包的 ImagePromptTranslationPanel.kt 自己持有：这里只保留
+    // 一个"翻译进行中"标志，供发送按钮与负面提示词翻译动作判断并发状态。
     var translationBusy by remember { mutableStateOf(false) }
     var negativeTranslationBusy by remember { mutableStateOf(false) }
-    var translationJob by remember { mutableStateOf<Job?>(null) }
-    val scope = rememberCoroutineScope()
-
-    fun clearStaleTranslation(nextText: String) {
-        if (translationSource != nextText) {
-            translationJob?.cancel()
-            translationSource = null
-            translationPreview = null
-            translationError = null
-        }
-    }
 
     LaunchedEffect(prompt) {
         if (prompt != fieldValue.text) {
             fieldValue = TextFieldValue(prompt, TextRange(prompt.length))
             editHistory.replace()
-            clearStaleTranslation(prompt)
         }
     }
 
@@ -374,7 +358,6 @@ internal fun ImagePromptBar(
     val tokenOverflow = tokenState.measurementOrNull?.overflows == true
 
     fun commitFieldValue(next: TextFieldValue) {
-        if (next.text != fieldValue.text) clearStaleTranslation(next.text)
         fieldValue = next
         if (next.text != prompt) onPromptChange(next.text)
     }
@@ -495,65 +478,8 @@ internal fun ImagePromptBar(
                         }
                     }
                 }
-                if (fieldValue.text.containsHanScriptForTranslationUi() && onTranslatePrompt != null) {
-                    McaButton(style = McaButtonStyle.Text,
-                        hapticsEnabled = false,
-                        onClick = {
-                            if (isGenerating) return@McaButton
-                            haptics.tick()
-                            if (translationBusy) {
-                                translationJob?.cancel()
-                                return@McaButton
-                            }
-                            val source = fieldValue.text
-                            val translate = onTranslatePrompt
-                            translationSource = source
-                            translationJob = scope.launch {
-                                translationBusy = true
-                                translationError = null
-                                try {
-                                    val translated = translate(source)
-                                    if (fieldValue.text == source) {
-                                        translationSource = source
-                                        translationPreview = translated
-                                    }
-                                } catch (cancelled: CancellationException) {
-                                    throw cancelled
-                                } catch (error: Exception) {
-                                    if (fieldValue.text == source) {
-                                        translationError = error.message ?: "Hy-MT2 翻译失败，请重试。"
-                                    }
-                                } finally {
-                                    translationBusy = false
-                                    translationJob = null
-                                }
-                            }
-                        },
-                        enabled = !isGenerating && !negativeTranslationBusy,
-                        modifier = Modifier
-                            .height(40.dp)
-                            .testTag("image.prompt.translate")
-                            .semantics { contentDescription = if (translationBusy) "取消翻译" else "翻译为英文" },
-                        contentPadding = PaddingValues(horizontal = 4.dp)
-                    ) {
-                        if (translationBusy) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp
-                            )
-                            Spacer(Modifier.width(2.dp))
-                            Text("取消", style = MaterialTheme.typography.labelMedium)
-                        } else {
-                            Icon(
-                                McaIcons.Translate,
-                                contentDescription = null,
-                                modifier = Modifier.size(McaIconSize.Optical.Inline)
-                            )
-                            Spacer(Modifier.width(2.dp))
-                            Text("译成英文", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
+                // 翻译动作不再占据输入框宽度：提示词输入区始终是完整的可编辑宽度，
+                // 翻译入口与译文结果区都排在输入框下方（见 ImagePromptTranslationPanel.kt）。
                 Spacer(modifier = Modifier.width(10.dp))
                 val submitInteraction = remember { MutableInteractionSource() }
                 FloatingActionButton(
@@ -611,52 +537,22 @@ internal fun ImagePromptBar(
                 }
             }
         }
-        translationError?.let { error ->
-            Text(
-                error,
+        // 译文结果区：独立于输入框卡片，标题行给出「译文已就绪 / EN / 撤销 / 使用英文」，
+        // 正文最多 3 行且可编辑；原文一直留在上面的输入框里，直到用户主动使用译文。
+        if (fieldValue.text.containsHanScriptForTranslationUi() && onTranslatePrompt != null) {
+            ImagePromptTranslationBarSection(
+                source = fieldValue.text,
+                enabled = !isGenerating,
+                otherFieldTranslating = negativeTranslationBusy,
+                onTranslate = onTranslatePrompt,
+                onApply = { translated ->
+                    applyDiscreteFieldValue(TextFieldValue(translated, TextRange(translated.length)))
+                },
+                onBusyChange = { translationBusy = it },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = 2.dp)
-                    .testTag("image.prompt.translation.error"),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error
+                    .padding(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 2.dp),
             )
-        }
-        if (translationSource == fieldValue.text && translationPreview != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 24.dp, end = 18.dp, bottom = 4.dp)
-                    .testTag("image.prompt.translation.preview"),
-                verticalAlignment = Alignment.Top
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "英文译文",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = McaPrimaryBlue
-                    )
-                    BasicTextField(
-                        value = translationPreview.orEmpty(),
-                        onValueChange = { translationPreview = it },
-                        modifier = Modifier.fillMaxWidth().testTag("image.prompt.translation.draft"),
-                        textStyle = MaterialTheme.typography.bodySmall.copy(
-                            color = if (darkTheme) MaterialTheme.colorScheme.onSurface else McaInputText
-                        ),
-                        cursorBrush = SolidColor(McaPrimaryBlue),
-                        maxLines = 4
-                    )
-                }
-                McaButton(style = McaButtonStyle.Text,
-                    onClick = {
-                        val translated = translationPreview.orEmpty()
-                        applyDiscreteFieldValue(TextFieldValue(translated, TextRange(translated.length)))
-                    },
-                    modifier = Modifier.testTag("image.prompt.translation.apply")
-                ) {
-                    Text("使用英文")
-                }
-            }
         }
         if (negativePrompt.containsHanScriptForTranslationUi() && onTranslateNegativePrompt != null) {
             ImagePromptTranslationDraft(
