@@ -261,6 +261,9 @@ val UiStateFields.persistentPrefixCacheBytes: Long
 val UiStateFields.models: List<ModelManifest>
     get() = snapshot.models
 
+val UiStateFields.generationPresets: List<GenerationPresetRecord>
+    get() = snapshot.generationPresets
+
 val UiStateFields.mnnRuntimeAvailable: Boolean
     get() = snapshot.mnnRuntimeAvailable
 

@@ -316,6 +316,8 @@ class ChatViewModel(
 
     fun openModels() = capabilities.shell.onOpenModels()
 
+    fun openPresets() = capabilities.shell.onOpenPresets()
+
     fun openRecommendedModels() = capabilities.shell.onOpenRecommendedModels()
 
     fun openSettings() = capabilities.shell.onOpenSettings()
@@ -453,6 +455,7 @@ class ChatViewModel(
             onAppMenuOpenChange = ::changeAppMenuOpen,
             onDismissStatusMessage = ::dismissStatusMessage,
             onOpenModels = ::openModels,
+            onOpenPresets = ::openPresets,
             onOpenRecommendedModels = ::openRecommendedModels,
             onOpenSettings = ::openSettings,
             onOpenAgent = ::openAgent,

@@ -248,6 +248,7 @@ internal fun mainChatScreenActions(
             onAppMenuOpenChange = { open -> host.setAppMenuOpen(open) },
             onDismissStatusMessage = viewModel::clearStatusMessage,
             onOpenModels = { host.setStartModelsInRecommended(false); host.onTab(AppTab.MODELS) },
+            onOpenPresets = { host.onTab(AppTab.PRESETS) },
             onOpenRecommendedModels = {
                     host.setStartModelsInRecommended(true)
                     host.onTab(AppTab.MODELS)

@@ -77,6 +77,7 @@ internal fun McaAppMenuPage(
     state: ChatUiState,
     onClose: () -> Unit,
     onOpenModels: () -> Unit,
+    onOpenPresets: () -> Unit,
     onOpenAgent: () -> Unit,
     onOpenApi: () -> Unit,
     onOpenSettings: () -> Unit,
@@ -147,6 +148,7 @@ internal fun McaAppMenuPage(
                     onClick = onOpenAssistants
                 )
                 AppMenuRow(icon = { Icon(McaIcons.Folder, null) }, title = "模型管理", subtitle = "本地高速/兼容引擎与魔塔下载", onClick = onOpenModels)
+                AppMenuRow(icon = { Icon(McaIcons.Tune, null) }, title = "预设管理", subtitle = "酒馆预设导入与本地/云端对话模型绑定", onClick = onOpenPresets)
                 AppMenuRow(icon = { McaLogoMark(size = 22.dp, cornerRadius = 7.dp) }, title = "智能调参", subtitle = "测速、推荐与高级参数", onClick = onOpenAgent)
                 AppMenuRow(icon = { Icon(McaIcons.NetworkWifi, null) }, title = "本地 API", subtitle = "接口地址、Key、API 使用文档", onClick = onOpenApi)
                  AppMenuRow(icon = { Icon(McaIcons.Settings, null) }, title = "系统设置", subtitle = "运行、日志、诊断与高级设置", onClick = onOpenSettings)

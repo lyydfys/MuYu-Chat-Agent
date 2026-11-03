@@ -154,6 +154,7 @@ fun ChatScreen(
     val onAppMenuOpenChange = actions.shell.onAppMenuOpenChange
     val onDismissStatusMessage = actions.shell.onDismissStatusMessage
     val onOpenModels = actions.shell.onOpenModels
+    val onOpenPresets = actions.shell.onOpenPresets
     val onOpenRecommendedModels = actions.shell.onOpenRecommendedModels
     val onOpenSettings = actions.shell.onOpenSettings
     val onOpenAgent = actions.shell.onOpenAgent
@@ -603,6 +604,7 @@ fun ChatScreen(
                 state = state,
                 onOpenQuickStart = { showQuickStart = true },
                 onOpenModels = onOpenModels,
+                onOpenPresets = onOpenPresets,
                 onOpenAgent = onOpenAgent,
                 onOpenApi = onOpenApi,
                 onOpenSettings = onOpenSettings,

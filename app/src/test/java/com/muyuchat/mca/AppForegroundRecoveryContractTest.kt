@@ -285,7 +285,8 @@ class AppForegroundRecoveryContractTest {
     @Test
     fun cloudChoicesPreferTheUserFacingNameOverTheProviderModelId() {
         val activity = sourceFile("app/src/main/java/com/muyuchat/mca/MainActivity.kt") +
-            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt")
+            sourceFile("app/src/main/java/com/muyuchat/mca/ChatUiStateMapping.kt") +
+            sourceFile("app/src/main/java/com/muyuchat/mca/CloudModelUiMapping.kt")
 
         assertTrue(
             activity.split("displayName = model.displayName.ifBlank { model.modelName }").size - 1 >= 2

@@ -20,6 +20,7 @@ mca_context_compression_v1
 mca_download_receipts
 mca_download_requests
 mca_generation_params
+mca_generation_presets_v1
 mca_image_generation_ui_parameters
 mca_import_receipts
 mca_local_api_idempotency_journal

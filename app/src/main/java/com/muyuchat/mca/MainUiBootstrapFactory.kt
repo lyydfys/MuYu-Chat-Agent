@@ -37,6 +37,7 @@ internal object MainUiBootstrapFactory {
         localImageLoraStore: LocalImageLoraStore,
         imageUpscalerPreferences: SharedPreferences,
         modelGenerationProfileStore: ModelGenerationProfileStore,
+        generationPresetStore: GenerationPresetStore,
         contextCompressionPreferences: SharedPreferences,
         apiKey: String,
         currentOpenApiAddress: String,
@@ -151,6 +152,7 @@ internal object MainUiBootstrapFactory {
                 ChatBackend.LOCAL
             },
             models = emptyList(),
+            generationPresets = generationPresetStore.load(),
             mnnRuntimeAvailable = isRuntimeAvailable(LocalChatRuntime.MNN_CPU),
             recommendedRemoteModels = sortRecommendedModels(
                 modelScopeClient.userFacingRecommendedModels(),

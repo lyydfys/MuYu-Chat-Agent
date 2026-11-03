@@ -30,6 +30,7 @@ import com.muyuchat.mca.composition.conversationResetWriter
 import com.muyuchat.mca.composition.statusWriter
 import com.muyuchat.mca.composition.chatLoraSelectionWriter
 import com.muyuchat.mca.composition.generationLifecycleWriter
+import com.muyuchat.mca.composition.generationPresetWriter
 import com.muyuchat.mca.composition.assembleModelImportAndDownloadCoordinator
 import com.muyuchat.mca.composition.assembleLocalImageLibraryAndModelCoordinator
 import com.muyuchat.mca.composition.assembleAssistantImageContinuationCoordinator
@@ -98,6 +99,7 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val container = startupContext.container
     internal val modelIdentityReferenceMigration = ModelIdentityReferenceMigration(application)
     internal val modelGenerationProfileStore = container.modelGenerationProfileStore
+    internal val generationPresetStore = container.generationPresetStore
     internal val installationScopeId = startupContext.installationScopeId
     internal val runtimeAssembly = startupContext.runtimeRoot.assembly
     /**
@@ -204,6 +206,7 @@ class MainViewModel @JvmOverloads internal constructor(
         benchmarkHistoryLogger = container.benchmarkHistoryLogger, deviceProfileReader = container.deviceProfileReader, chatSessionStore = chatSessionStore,
         worldBookStore = container.worldBookStore, knowledgeBaseStore = container.knowledgeBaseStore, cloudApiStore = container.cloudApiStore, localImageModelStore = container.localImageModelStore,
         localImageLoraStore = container.localImageLoraStore, imageUpscalerPreferences = container.imageUpscalerPreferences, modelGenerationProfileStore = modelGenerationProfileStore,
+        generationPresetStore = container.generationPresetStore,
         contextCompressionPreferences = contextCompressionPreferences, apiKey = apiKey, currentOpenApiAddress = currentOpenApiAddress(), apiUrl = ::apiUrl,
         skipInitialModelDiscovery = skipInitialModelDiscovery, initialAppUpdateState = initialAppUpdateState, initialParams = initialParams, initialAssistants = initialAssistants,
         initialStoredSelectedAssistantId = initialStoredSelectedAssistantId, initialChatSessions = initialChatSessions
@@ -214,6 +217,7 @@ class MainViewModel @JvmOverloads internal constructor(
     internal val chatRuns: ChatRunOwnership get() = container.chatRuns
     internal val localApiIdempotencyJournalLock = Any()
     internal val uiStateStore = UiStateStore(bootstrapResult.uiState)
+    internal val generationPresetWriter = uiStateStore.generationPresetWriter()
 
     /**
      * DSH ball model panel: a read projection of the same model list/loaded id the chat screen

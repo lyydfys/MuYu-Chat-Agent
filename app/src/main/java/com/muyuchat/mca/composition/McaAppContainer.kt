@@ -123,6 +123,7 @@ import com.muyuchat.mca.LocalImageModelStore
 import com.muyuchat.mca.installImageFileDigestStore
 import com.muyuchat.mca.LocalImageUpscalerStore
 import com.muyuchat.mca.ModelGenerationProfileStore
+import com.muyuchat.mca.GenerationPresetStore
 import com.muyuchat.mca.ModelRuntimeProfileStore
 import com.muyuchat.mca.OfflinePromptTranslationBundleDownloader
 import com.muyuchat.mca.OfflinePromptTranslationBundleInstaller
@@ -171,6 +172,7 @@ internal class McaAppContainer(internal val application: Application) {
     val runtimeProfileStore = ModelRuntimeProfileStore(application)
 
     val modelGenerationProfileStore = ModelGenerationProfileStore(application)
+    val generationPresetStore = GenerationPresetStore(application)
 
     val chatSessionStore = ChatSessionStore(application)
 

@@ -27,7 +27,14 @@ enum class AppTab(val title: String) {
      * renamed or shifted. The video page owns templates/node editing/run views only; execution
      * belongs to the process-level video owner and is injected via the video contract port.
      */
-    VIDEO_WORKSPACE("视频")
+    VIDEO_WORKSPACE("视频"),
+
+    /**
+     * Standalone tavern preset manager (import, rename, model bindings). Appended last on purpose:
+     * no existing enum ordinal, persistence mapping or tab key is renamed or shifted. The page
+     * shares the same preset records and binding writes as the model-hub presets tab.
+     */
+    PRESETS("预设管理")
 }
 
 /**

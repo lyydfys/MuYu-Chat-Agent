@@ -22,7 +22,7 @@ class MainShellMotionContractTest {
     fun tabOverlaysAllUseTheSharedCrossfadeAndMcaMotionFade() {
         assertEquals(
             "every overlay tab (chat stays the base layer) must go through the one crossfade wrapper",
-            7,
+            8,
             countMatches("\\n            CrossfadeTabPage\\(")
         )
         assertEquals(
@@ -34,7 +34,7 @@ class MainShellMotionContractTest {
         // added or renamed without also keeping its rememberSaveable state across the fade.
         assertEquals(
             "each tab's visibility must stay paired with its saveable-state key",
-            7,
+            8,
             countMatches(
                 "CrossfadeTabPage\\(\\n" +
                     "                visible = state\\.tab == AppTab\\.(\\w+),\\n" +
@@ -106,7 +106,7 @@ class MainShellMotionContractTest {
             "overlay tab state must be restored through the saveable holder",
             shell.contains("stateHolder.SaveableStateProvider(tabKey)")
         )
-        listOf("AgentScreen(", "ModelHubScreen(", "LocalApiToolScreen(", "SettingsHubScreen(", "AgentWorkspaceRoute(", "DshWorkspaceRoute(", "VideoWorkspaceRoute(").forEach { screen ->
+        listOf("AgentScreen(", "ModelHubScreen(", "PresetManagerScreen(", "LocalApiToolScreen(", "SettingsHubScreen(", "AgentWorkspaceRoute(", "DshWorkspaceRoute(", "VideoWorkspaceRoute(").forEach { screen ->
             assertTrue("$screen must still be the tab's visible content", shell.contains(screen))
         }
     }

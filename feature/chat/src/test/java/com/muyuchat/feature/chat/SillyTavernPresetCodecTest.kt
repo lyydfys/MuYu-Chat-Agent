@@ -107,7 +107,8 @@ class SillyTavernPresetCodecTest {
             """{"prompts":[{"content":"第一行\r\n{{char}} 对 {{user}} 说\r\n第二行"}]}"""
         )
 
-        val appendix = requireNotNull(preset.promptAppendix)        assertTrue(appendix.contains("第一行"))
+        val appendix = requireNotNull(preset.promptAppendix)
+        assertTrue(appendix.contains("第一行"))
         assertTrue(appendix.contains("第二行"))
         assertTrue(!appendix.contains("{{char}}"))
         assertTrue(!appendix.contains("{{user}}"))

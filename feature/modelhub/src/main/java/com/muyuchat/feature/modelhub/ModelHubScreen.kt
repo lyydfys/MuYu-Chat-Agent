@@ -65,7 +65,8 @@ private enum class ModelHubSection(val title: String) {
     CLOUD("云端"),
     RECOMMENDED("推荐"),
     MARKET("广场"),
-    FILES("文件")
+    FILES("文件"),
+    PRESETS("预设")
 }
 
 internal data class ModelHubHeaderPresentation(
@@ -208,6 +209,9 @@ fun ModelHubScreen(
     onResumeDownloads: () -> Unit = {},
     onPauseImport: (String) -> Unit = {},
     onResumeImport: (String) -> Unit = {},
+    onImportGenerationPreset: (String) -> Unit = {},
+    onDeleteGenerationPreset: (String) -> Unit = {},
+    onSaveGenerationPresetBindings: (String, String, Set<String>, Set<String>) -> Unit = { _, _, _, _ -> },
     modifier: Modifier = Modifier
 ) {
     val haptics = rememberMcaHaptics()
@@ -324,6 +328,13 @@ fun ModelHubScreen(
                         onDownload = onDownload,
                         modifier = Modifier.fillMaxSize()
                     )
+                    ModelHubSection.PRESETS -> GenerationPresetManagerSection(
+                        state = state,
+                        onImportPreset = onImportGenerationPreset,
+                        onDeletePreset = onDeleteGenerationPreset,
+                        onSaveBindings = onSaveGenerationPresetBindings,
+                        modifier = Modifier.fillMaxSize()
+                    )
                 }
             }
         }
@@ -401,7 +412,7 @@ private fun ModelHubHeader(
                 Column(modifier = Modifier.weight(1f)) {
                     Text("模型管理", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                     Text(
-                        "本地 / 云端 / 推荐 / 广场 / 文件",
+                        "本地 / 云端 / 推荐 / 广场 / 文件 / 预设",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

@@ -121,6 +121,8 @@ data class ChatShellActions(
     val onDismissStatusMessage: () -> Unit = {},
     val onOpenModels: () -> Unit,
     val onOpenRecommendedModels: () -> Unit,
+    /** Opens the standalone tavern preset manager page from the app menu. */
+    val onOpenPresets: () -> Unit = {},
     val onOpenSettings: () -> Unit,
     val onOpenAgent: () -> Unit,
     /** Opens the independent Agent workspace; [onOpenAgent] keeps opening smart tuning. */

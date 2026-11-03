@@ -520,6 +520,7 @@ private fun McaApp(
                     startInRecommended = startModelsInRecommended,
                     state = ModelHubUiState(
                         localModels = state.models,
+                        generationPresets = generationPresetUiItems(state.generationPresets),
                         mnnRuntimeAvailable = state.mnnRuntimeAvailable,
                         localImageModels = state.localImageModels.map { model ->
                             val prepared = preparedImageUi[model.path]
@@ -569,20 +570,7 @@ private fun McaApp(
                             imageModel = state.cloudApiConfig.imageModel, imageSize = state.cloudApiConfig.imageSize,
                             imageEndpointPath = state.cloudApiConfig.imageEndpointPath, imageModelPresets = imageModelPresetsFor(state.cloudApiConfig.imageApiFormat),
                             imageSizePresets = imageSizePresetsFor(state.cloudApiConfig.imageApiFormat), providerPresets = cloudProviderPresets(),
-                            connectedModels = state.cloudModels.map { model ->
-                                CloudModelUiItem(
-                                    id = model.id, kind = model.kind.name,
-                                    displayName = model.displayName.ifBlank { model.modelName },
-                                    providerName = model.providerName, protocolLabel = model.protocolLabel,
-                                    modelName = model.modelName, baseUrl = model.baseUrl,
-                                    supportsVision = model.supportsVision, supportsTools = model.supportsTools,
-                                    imageSize = if (model.kind == CloudModelKind.IMAGE) model.imageSize else "",
-                                    selected = when (model.kind) {
-                                        CloudModelKind.CHAT -> state.selectedChatBackend == ChatBackend.CLOUD && model.id == state.selectedCloudChatModelId
-                                        CloudModelKind.IMAGE -> state.selectedImageBackend == ImageBackend.CLOUD && model.id == state.selectedCloudImageModelId
-                                    }
-                                )
-                            },
+                            connectedModels = state.cloudModelUiItems(),
                             selected = state.selectedChatBackend == ChatBackend.CLOUD,
                             configured = state.cloudApiConfig.configured,
                             imageConfigured = state.cloudApiConfig.imageConfigured,
@@ -630,7 +618,30 @@ private fun McaApp(
                     onSelectCloudImage = viewModel::selectCloudImageModel, onDeleteCloudModel = viewModel::deleteCloudModel,
                     onRefreshLocal = viewModel::refreshLocalModels, onPauseDownloads = viewModel::pauseManagedDownloads,
                     onResumeDownloads = viewModel::resumeManagedDownloads, onPauseImport = viewModel::pauseManagedImport,
-                    onResumeImport = viewModel::resumeManagedImport, onBack = closePage, modifier = pageModifier
+                    onResumeImport = viewModel::resumeManagedImport, onBack = closePage, modifier = pageModifier,
+                    onImportGenerationPreset = viewModel::importGenerationPreset,
+                    onDeleteGenerationPreset = viewModel::deleteGenerationPreset,
+                    onSaveGenerationPresetBindings = viewModel::saveGenerationPresetBindings
+                )
+            }
+
+            CrossfadeTabPage(
+                visible = state.tab == AppTab.PRESETS,
+                stateHolder = tabStateHolder,
+                tabKey = AppTab.PRESETS.name,
+                label = "tab-presets",
+                onDismissStart = { if (appMenuOpen) appMenuOpen = true },
+                onDismiss = { onTab(AppTab.CHAT) }
+            ) { pageModifier, closePage ->
+                PresetManagerScreen(
+                    presets = generationPresetUiItems(state.generationPresets),
+                    localModels = state.models,
+                    cloudChatModels = state.cloudChatModelUiItems(),
+                    onImportPreset = viewModel::importGenerationPreset,
+                    onDeletePreset = viewModel::deleteGenerationPreset,
+                    onSaveBindings = viewModel::saveGenerationPresetBindings,
+                    onBack = closePage,
+                    modifier = pageModifier
                 )
             }
 

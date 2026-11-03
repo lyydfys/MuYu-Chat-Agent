@@ -311,3 +311,8 @@ internal fun UiStateStore.chatStreamWriter(): UiStateWriter<ChatStreamFields> = 
     project = { it.toChatStreamFields() },
     merge = { current, fields -> fields.mergeInto(current) },
 )
+
+internal fun UiStateStore.generationPresetWriter(): UiStateWriter<GenerationPresetFields> = writer(
+    project = { it.toGenerationPresetFields() },
+    merge = { current, fields -> fields.mergeInto(current) },
+)

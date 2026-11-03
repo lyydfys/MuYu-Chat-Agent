@@ -528,5 +528,10 @@
     "messages",
     "activeChatSessionId",
     "chatSessions"
+  ],
+  "GenerationPresetFields": [
+    "generationPresets",
+    "params",
+    "statusMessage"
   ]
 }

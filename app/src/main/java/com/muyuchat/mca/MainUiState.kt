@@ -130,6 +130,7 @@ data class MainUiState(
     val persistentPrefixCacheEntryCount: Int = 0,
     val persistentPrefixCacheBytes: Long = 0L,
     val models: List<ModelManifest> = emptyList(),
+    val generationPresets: List<GenerationPresetRecord> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,
     val remoteFiles: List<RemoteModelFile> = emptyList(),
     val recommendedRemoteModels: List<ModelScopeRecommendedModel> = emptyList(),

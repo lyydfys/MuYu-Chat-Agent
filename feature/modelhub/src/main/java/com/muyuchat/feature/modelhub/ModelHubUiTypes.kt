@@ -26,8 +26,19 @@ enum class ModelHubDownloadFailureSource(val label: String) {
 }
 
 @Immutable
+data class GenerationPresetUiItem(
+    val id: String,
+    val name: String,
+    val summary: String,
+    val boundLocalModelIds: Set<String> = emptySet(),
+    val boundCloudModelIds: Set<String> = emptySet(),
+    val updatedAt: Long = 0L
+)
+
+@Immutable
 data class ModelHubUiState(
     val localModels: List<ModelManifest> = emptyList(),
+    val generationPresets: List<GenerationPresetUiItem> = emptyList(),
     val mnnRuntimeAvailable: Boolean = false,
     val localImageModels: List<LocalImageModelUiItem> = emptyList(),
     val remoteFiles: List<RemoteModelFile> = emptyList(),
