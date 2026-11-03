@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import com.muyuchat.feature.dsh.workspace.DshModelSwitchState
 
 /**
@@ -29,6 +31,9 @@ import com.muyuchat.feature.dsh.workspace.DshModelSwitchState
  * one explicit "restart DSH" action because the official provider freezes its model list per host
  * generation. Nothing here invents a loaded state: the active id and the loading stage come from the
  * host projection.
+ *
+ * Large screens: the dialog keeps the platform default width on COMPACT and is capped at
+ * 560dp (MEDIUM) / 640dp (EXPANDED) so it does not stretch across an unfolded foldable.
  */
 @Composable
 internal fun DshModelSwitchDialog(
@@ -38,8 +43,20 @@ internal fun DshModelSwitchDialog(
     onDismiss: () -> Unit
 ) {
     val pendingLoaded = pendingModelId != null && state.activeModelId == pendingModelId
+    val maxWidthDp = dshDialogMaxWidthFor(dshWindowWidth())
     McaDialog(
         onDismissRequest = onDismiss,
+        // COMPACT passes the untouched default: no modifier, no DialogProperties override.
+        modifier = if (maxWidthDp != null) {
+            Modifier.widthIn(max = maxWidthDp.dp).fillMaxWidth()
+        } else {
+            Modifier
+        },
+        properties = if (maxWidthDp != null) {
+            DialogProperties(usePlatformDefaultWidth = false)
+        } else {
+            DialogProperties()
+        },
         title = { Text("选择 MCA 模型") },
         text = {
             Column(

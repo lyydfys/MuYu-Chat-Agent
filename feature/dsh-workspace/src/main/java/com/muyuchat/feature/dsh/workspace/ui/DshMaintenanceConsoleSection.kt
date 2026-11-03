@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -21,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.muyuchat.core.dsh.contract.console.DshMaintenanceConsoleIntent
@@ -164,6 +166,7 @@ fun DshMaintenanceConsoleSection(
             title = confirmation.title,
             detail = confirmation.detail,
             confirmLabel = confirmation.confirmLabel,
+            maxWidthDp = dshDialogMaxWidthFor(dshWindowWidth()),
             onConfirm = {
                 pendingConfirmation = null
                 val confirmed = DshMaintenanceConsolePolicy.confirmed(confirmationTarget)
@@ -439,11 +442,23 @@ private fun DshMaintenanceConfirmationDialog(
     title: String,
     detail: String,
     confirmLabel: String,
+    maxWidthDp: Int?,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
     McaDialog(
         onDismissRequest = onDismiss,
+        // COMPACT keeps the platform default dialog width untouched; wide windows cap it.
+        modifier = if (maxWidthDp != null) {
+            Modifier.widthIn(max = maxWidthDp.dp).fillMaxWidth()
+        } else {
+            Modifier
+        },
+        properties = if (maxWidthDp != null) {
+            DialogProperties(usePlatformDefaultWidth = false)
+        } else {
+            DialogProperties()
+        },
         title = { Text(title) },
         text = { Text(detail) },
         confirmButton = {
